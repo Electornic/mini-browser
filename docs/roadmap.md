@@ -148,7 +148,7 @@
 
 ## Next Concrete Step
 
-다음 구현은 `Simple Network Loader`다. 현재 정적 입력 기반 DOM -> CSS -> Style -> Layout -> Render -> Window 파이프라인이 닫혔으므로, 이제 URL에서 문서를 내려받는 단계로 넘어간다.
+다음 구현은 `Basic Resource Loader`다. 현재 `http://` URL에서 main document HTML을 내려받을 수 있으므로, 이제 `<link rel="stylesheet">`를 읽어 CSS를 추가 로드하는 단계로 넘어간다.
 
 ## Related Documents
 

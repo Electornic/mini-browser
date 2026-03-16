@@ -41,8 +41,9 @@ URL
 - Block Layout Engine
 - Basic Renderer (Display List: Rect + Text)
 - Window / Event Loop
+- Simple Network Loader
 
-아직 network/resource loader는 구현 전이다.
+현재는 `http://` 기반 HTML 문서 다운로드를 지원한다. CSS/이미지 resource loader는 아직 구현 전이다.
 
 ## Documents
 
@@ -55,6 +56,12 @@ URL
 
 ```bash
 cargo run
+```
+
+원격 HTML을 불러오려면:
+
+```bash
+cargo run -- http://example.com
 ```
 
 ## Notes
