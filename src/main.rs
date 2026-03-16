@@ -633,17 +633,18 @@ fn load_remote_document(
     String,
 > {
     let url = net::Url::parse(raw_url).map_err(|error| format!("url error: {error:?}"))?;
-    let html = net::load_html(&url).map_err(|error| format!("network error: {error:?}"))?;
+    let (html, final_url) =
+        net::load_html_document(&url).map_err(|error| format!("network error: {error:?}"))?;
     let nodes = html::parse(&html)
         .map_err(|error| format!("html parse error at {}: {}", error.position, error.message))?;
-    let stylesheets = resource::load_stylesheets(&nodes, &url)
+    let stylesheets = resource::load_stylesheets(&nodes, &final_url)
         .map_err(|error| format!("resource error: {error:?}"))?;
-    let images = resource::load_images(&nodes, &url)
+    let images = resource::load_images(&nodes, &final_url)
         .map_err(|error| format!("resource error: {error:?}"))?
         .into_iter()
         .map(|image| (image.url.to_string(), image))
         .collect();
-    Ok((html, stylesheets.join("\n"), images, url))
+    Ok((html, stylesheets.join("\n"), images, final_url))
 }
 
 fn load_initial_state() -> BrowserState {

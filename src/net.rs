@@ -24,12 +24,20 @@ pub struct HttpResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchResult {
+    pub final_url: Url,
+    pub response: HttpResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkError {
     UnsupportedScheme(String),
     InvalidUrl(String),
     Io(String),
     Tls(String),
     InvalidResponse(String),
+    MissingLocationHeader,
+    RedirectLimitExceeded,
     HttpStatus(u16, String),
     InvalidBodyEncoding,
     UnexpectedContentType(String),
@@ -119,7 +127,13 @@ impl fmt::Display for Url {
 }
 
 pub fn load_html(url: &Url) -> Result<String, NetworkError> {
-    let response = http_get(url)?;
+    let (document, _) = load_html_document(url)?;
+    Ok(document)
+}
+
+pub fn load_html_document(url: &Url) -> Result<(String, Url), NetworkError> {
+    let fetch_result = fetch(url)?;
+    let response = fetch_result.response;
 
     if response.status_code != 200 {
         return Err(NetworkError::HttpStatus(
@@ -136,11 +150,13 @@ pub fn load_html(url: &Url) -> Result<String, NetworkError> {
         }
     }
 
-    String::from_utf8(response.body).map_err(|_| NetworkError::InvalidBodyEncoding)
+    let document =
+        String::from_utf8(response.body).map_err(|_| NetworkError::InvalidBodyEncoding)?;
+    Ok((document, fetch_result.final_url))
 }
 
 pub fn load_css(url: &Url) -> Result<String, NetworkError> {
-    let response = http_get(url)?;
+    let response = fetch(url)?.response;
 
     if response.status_code != 200 {
         return Err(NetworkError::HttpStatus(
@@ -161,7 +177,7 @@ pub fn load_css(url: &Url) -> Result<String, NetworkError> {
 }
 
 pub fn load_image(url: &Url) -> Result<Vec<u8>, NetworkError> {
-    let response = http_get(url)?;
+    let response = fetch(url)?.response;
 
     if response.status_code != 200 {
         return Err(NetworkError::HttpStatus(
@@ -179,6 +195,28 @@ pub fn load_image(url: &Url) -> Result<Vec<u8>, NetworkError> {
     }
 
     Ok(response.body)
+}
+
+pub fn fetch(url: &Url) -> Result<FetchResult, NetworkError> {
+    let mut current_url = url.clone();
+
+    for _ in 0..10 {
+        let response = http_get(&current_url)?;
+
+        if is_redirect_status(response.status_code) {
+            let location =
+                header(&response, "location").ok_or(NetworkError::MissingLocationHeader)?;
+            current_url = current_url.resolve(location)?;
+            continue;
+        }
+
+        return Ok(FetchResult {
+            final_url: current_url,
+            response,
+        });
+    }
+
+    Err(NetworkError::RedirectLimitExceeded)
 }
 
 pub fn http_get(url: &Url) -> Result<HttpResponse, NetworkError> {
@@ -276,6 +314,10 @@ fn header<'a>(response: &'a HttpResponse, name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
+fn is_redirect_status(status_code: u16) -> bool {
+    matches!(status_code, 301 | 302 | 303 | 307 | 308)
+}
+
 fn normalize_path(path: &str) -> String {
     let mut segments = Vec::new();
 
@@ -300,7 +342,9 @@ mod tests {
         thread,
     };
 
-    use super::{NetworkError, Url, http_get, load_css, load_html, load_image};
+    use super::{
+        NetworkError, Url, fetch, http_get, load_css, load_html, load_html_document, load_image,
+    };
 
     #[test]
     fn parses_default_http_port_and_root_path() {
@@ -398,6 +442,114 @@ mod tests {
 
         server.join().unwrap();
         assert_eq!(html, "<html><body>Hello</body></html>");
+    }
+
+    #[test]
+    fn follows_redirect_and_returns_final_url() {
+        let first = TcpListener::bind("127.0.0.1:0").unwrap();
+        let second = TcpListener::bind("127.0.0.1:0").unwrap();
+        let first_port = first.local_addr().unwrap().port();
+        let second_port = second.local_addr().unwrap().port();
+
+        let redirect_server = thread::spawn(move || {
+            let (mut stream, _) = first.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{second_port}/final.html\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let target_server = thread::spawn(move || {
+            let (mut stream, _) = second.accept().unwrap();
+            let mut request = [0; 1024];
+            let bytes_read = stream.read(&mut request).unwrap();
+            let request_text = String::from_utf8_lossy(&request[..bytes_read]);
+            assert!(request_text.starts_with("GET /final.html HTTP/1.1"));
+
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: text/html\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+                "<html>done</html>"
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let result =
+            fetch(&Url::parse(&format!("http://127.0.0.1:{first_port}/start")).unwrap()).unwrap();
+
+        redirect_server.join().unwrap();
+        target_server.join().unwrap();
+        assert_eq!(
+            result.final_url,
+            Url::parse(&format!("http://127.0.0.1:{second_port}/final.html")).unwrap()
+        );
+        assert_eq!(result.response.body, b"<html>done</html>");
+    }
+
+    #[test]
+    fn html_loader_reports_final_redirect_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            for request_index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                let bytes_read = stream.read(&mut request).unwrap();
+                let request_text = String::from_utf8_lossy(&request[..bytes_read]);
+
+                if request_index == 0 {
+                    assert!(request_text.starts_with("GET /start HTTP/1.1"));
+                    let response = "HTTP/1.1 301 Moved Permanently\r\nLocation: /final.html\r\nConnection: close\r\n\r\n";
+                    stream.write_all(response.as_bytes()).unwrap();
+                } else {
+                    assert!(request_text.starts_with("GET /final.html HTTP/1.1"));
+                    let response = concat!(
+                        "HTTP/1.1 200 OK\r\n",
+                        "Content-Type: text/html\r\n",
+                        "Connection: close\r\n",
+                        "\r\n",
+                        "<html>final</html>"
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            }
+        });
+
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/start")).unwrap();
+        let (html, final_url) = load_html_document(&url).unwrap();
+
+        server.join().unwrap();
+        assert_eq!(html, "<html>final</html>");
+        assert_eq!(
+            final_url,
+            Url::parse(&format!("http://127.0.0.1:{port}/final.html")).unwrap()
+        );
+    }
+
+    #[test]
+    fn errors_when_redirect_has_no_location() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+
+            let response = "HTTP/1.1 302 Found\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let error = fetch(&Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap()).unwrap_err();
+
+        server.join().unwrap();
+        assert_eq!(error, NetworkError::MissingLocationHeader);
     }
 
     #[test]
