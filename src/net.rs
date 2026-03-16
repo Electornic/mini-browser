@@ -156,6 +156,27 @@ pub fn load_css(url: &Url) -> Result<String, NetworkError> {
     String::from_utf8(response.body).map_err(|_| NetworkError::InvalidBodyEncoding)
 }
 
+pub fn load_image(url: &Url) -> Result<Vec<u8>, NetworkError> {
+    let response = http_get(url)?;
+
+    if response.status_code != 200 {
+        return Err(NetworkError::HttpStatus(
+            response.status_code,
+            response.reason_phrase,
+        ));
+    }
+
+    if let Some(content_type) = header(&response, "content-type") {
+        if !content_type.starts_with("image/") {
+            return Err(NetworkError::UnexpectedContentType(
+                content_type.to_string(),
+            ));
+        }
+    }
+
+    Ok(response.body)
+}
+
 pub fn http_get(url: &Url) -> Result<HttpResponse, NetworkError> {
     let mut stream = TcpStream::connect((url.host.as_str(), url.port))
         .map_err(|error| NetworkError::Io(error.to_string()))?;
@@ -256,7 +277,7 @@ mod tests {
         thread,
     };
 
-    use super::{NetworkError, Url, http_get, load_css, load_html};
+    use super::{NetworkError, Url, http_get, load_css, load_html, load_image};
 
     #[test]
     fn parses_default_http_port_and_root_path() {
@@ -391,5 +412,38 @@ mod tests {
 
         server.join().unwrap();
         assert_eq!(css, "body { margin-top: 8px; }");
+    }
+
+    #[test]
+    fn downloads_image_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+
+            let png: &[u8] = &[
+                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+                0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+                0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+                0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0xF0, 0x1F, 0x00, 0x05, 0x00, 0x01, 0xFF, 0x89, 0x99,
+                0x3D, 0x1D, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+            ];
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                png.len()
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(png).unwrap();
+        });
+
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/pixel.png")).unwrap();
+        let bytes = load_image(&url).unwrap();
+
+        server.join().unwrap();
+        assert!(!bytes.is_empty());
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     }
 }

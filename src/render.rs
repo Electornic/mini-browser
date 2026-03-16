@@ -8,6 +8,7 @@ use crate::{
 pub enum DisplayCommand {
     SolidRect(Color, Rect),
     Text(TextCommand),
+    Image(ImageCommand),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -17,6 +18,17 @@ pub struct TextCommand {
     pub y: f32,
     pub color: Color,
     pub font_size: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageCommand {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub source_width: usize,
+    pub source_height: usize,
+    pub pixels: Vec<u32>,
 }
 
 pub fn build_display_list(layout_root: &LayoutBox) -> Vec<DisplayCommand> {
@@ -36,6 +48,10 @@ pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<Dis
                 text.x += dx;
                 text.y += dy;
             }
+            DisplayCommand::Image(image) => {
+                image.x += dx;
+                image.y += dy;
+            }
         }
     }
 
@@ -51,6 +67,7 @@ pub fn rasterize(commands: &[DisplayCommand], width: usize, height: usize) -> Ve
                 fill_rect(&mut buffer, width, height, *color, *rect)
             }
             DisplayCommand::Text(text) => draw_text(&mut buffer, width, height, text),
+            DisplayCommand::Image(image) => draw_image(&mut buffer, width, height, image),
         }
     }
 
@@ -206,6 +223,35 @@ fn draw_text(buffer: &mut [u32], width: usize, height: usize, text: &TextCommand
     }
 }
 
+fn draw_image(buffer: &mut [u32], width: usize, height: usize, image: &ImageCommand) {
+    let x_start = image.x.max(0.0).floor() as usize;
+    let y_start = image.y.max(0.0).floor() as usize;
+    let x_end = (image.x + image.width).ceil().max(0.0) as usize;
+    let y_end = (image.y + image.height).ceil().max(0.0) as usize;
+    let x_end = x_end.min(width);
+    let y_end = y_end.min(height);
+
+    if image.source_width == 0 || image.source_height == 0 {
+        return;
+    }
+
+    for y in y_start..y_end {
+        let source_y = (((y as f32 - image.y) / image.height.max(1.0)) * image.source_height as f32)
+            .floor()
+            .clamp(0.0, (image.source_height - 1) as f32) as usize;
+        let row = y * width;
+
+        for x in x_start..x_end {
+            let source_x = (((x as f32 - image.x) / image.width.max(1.0))
+                * image.source_width as f32)
+                .floor()
+                .clamp(0.0, (image.source_width - 1) as f32) as usize;
+            let pixel = image.pixels[source_y * image.source_width + source_x];
+            buffer[row + x] = pixel;
+        }
+    }
+}
+
 fn rgb_u32(color: Color) -> u32 {
     (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
 }
@@ -348,7 +394,7 @@ fn glyph_pattern(ch: char) -> [&'static str; 7] {
 mod tests {
     use crate::{css, html, layout, render, style};
 
-    use super::{Color, DisplayCommand, TextCommand, rasterize, translate};
+    use super::{Color, DisplayCommand, ImageCommand, TextCommand, rasterize, translate};
 
     fn display_list(html_source: &str, css_source: &str) -> Vec<DisplayCommand> {
         let node = html::parse(html_source)
@@ -492,6 +538,15 @@ mod tests {
                     color: Color::BLACK,
                     font_size: 8.0,
                 }),
+                DisplayCommand::Image(ImageCommand {
+                    x: 7.0,
+                    y: 8.0,
+                    width: 9.0,
+                    height: 10.0,
+                    source_width: 1,
+                    source_height: 1,
+                    pixels: vec![0x112233],
+                }),
             ],
             10.0,
             20.0,
@@ -519,5 +574,36 @@ mod tests {
                 font_size: 8.0,
             })
         );
+        assert_eq!(
+            commands[2],
+            DisplayCommand::Image(ImageCommand {
+                x: 17.0,
+                y: 28.0,
+                width: 9.0,
+                height: 10.0,
+                source_width: 1,
+                source_height: 1,
+                pixels: vec![0x112233],
+            })
+        );
+    }
+
+    #[test]
+    fn rasterizes_image_pixels() {
+        let pixels = rasterize(
+            &[DisplayCommand::Image(ImageCommand {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+                source_width: 2,
+                source_height: 2,
+                pixels: vec![0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF],
+            })],
+            2,
+            2,
+        );
+
+        assert_eq!(pixels, vec![0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF]);
     }
 }

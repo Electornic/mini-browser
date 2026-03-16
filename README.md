@@ -43,8 +43,9 @@ URL
 - Window / Event Loop
 - Simple Network Loader
 - Basic Resource Loader
+- Basic Image Loader
 
-현재는 `http://` 기반 HTML 문서 다운로드와 `<link rel="stylesheet">` CSS 로드를 지원한다. 이미지 resource loader는 아직 구현 전이다.
+현재는 `http://` 기반 HTML 문서 다운로드, `<link rel="stylesheet">` CSS 로드, `<img src>` 이미지 다운로드 및 기본 렌더링을 지원한다.
 
 ## Documents
 
@@ -66,6 +67,7 @@ cargo run -- http://example.com
 ```
 
 원격 문서의 외부 stylesheet는 `<link rel="stylesheet" href="...">`에 한해 자동 로드된다.
+원격 문서의 `<img src="...">` 이미지는 자동 로드되어 기본 박스로 렌더된다.
 
 앱 안에서는 상단 주소창을 클릭하거나 `Cmd+L`/`Ctrl+L`로 포커스한 뒤 URL을 입력하고 `Enter`로 이동할 수 있다. `Up/Down`, `PageUp/PageDown`, 마우스 휠로 스크롤할 수 있고, 문서 안의 `<a href>` 링크는 클릭으로 이동할 수 있다. `Esc`를 누르면 종료된다.
 

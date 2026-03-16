@@ -1,4 +1,4 @@
-use std::env;
+use std::{collections::HashMap, env};
 
 use mini_browser::{css, dom::NodeType, html, layout, net, render, resource, style, window};
 
@@ -19,6 +19,7 @@ struct BrowserState {
     frame_index: usize,
     document_html: String,
     stylesheet: String,
+    images: HashMap<String, resource::LoadedImage>,
     current_url: Option<net::Url>,
     status_text: String,
     status_color: css::Color,
@@ -42,6 +43,7 @@ impl BrowserState {
         address_input: String,
         document_html: String,
         stylesheet: String,
+        images: HashMap<String, resource::LoadedImage>,
         current_url: Option<net::Url>,
         status_text: impl Into<String>,
     ) -> Self {
@@ -52,6 +54,7 @@ impl BrowserState {
             frame_index: 0,
             document_html,
             stylesheet,
+            images,
             current_url,
             status_text: status_text.into(),
             status_color: css::Color::BLACK,
@@ -68,24 +71,29 @@ impl BrowserState {
         self.frame_index = self.frame_index.wrapping_add(1);
         self.apply_input(input, viewport_width, viewport_height);
 
-        let document_view =
-            build_document_view(&self.document_html, &self.stylesheet, viewport_width)
-                .unwrap_or_else(|build_error| {
-                    eprintln!("{build_error}");
-                    self.set_status(
-                        "render failed",
-                        css::Color {
-                            r: 180,
-                            g: 60,
-                            b: 60,
-                            a: 255,
-                        },
-                    );
-                    DocumentView {
-                        commands: Vec::new(),
-                        links: Vec::new(),
-                    }
-                });
+        let document_view = build_document_view(
+            &self.document_html,
+            &self.stylesheet,
+            viewport_width,
+            self.current_url.as_ref(),
+            &self.images,
+        )
+        .unwrap_or_else(|build_error| {
+            eprintln!("{build_error}");
+            self.set_status(
+                "render failed",
+                css::Color {
+                    r: 180,
+                    g: 60,
+                    b: 60,
+                    a: 255,
+                },
+            );
+            DocumentView {
+                commands: Vec::new(),
+                links: Vec::new(),
+            }
+        });
 
         if let Some(link_target) = self.clicked_link(input, &document_view.links) {
             self.navigate_to_link(link_target);
@@ -191,9 +199,10 @@ impl BrowserState {
         }
 
         match load_remote_document(&target) {
-            Ok((document_html, stylesheet, resolved_url)) => {
+            Ok((document_html, stylesheet, images, resolved_url)) => {
                 self.document_html = document_html;
                 self.stylesheet = stylesheet;
+                self.images = images;
                 self.current_url = Some(resolved_url);
                 self.scroll_offset = 0.0;
                 self.set_status(
@@ -243,9 +252,10 @@ impl BrowserState {
         self.address_bar_selected = false;
         self.address_bar_focused = false;
         match load_remote_document(&resolved.to_string()) {
-            Ok((document_html, stylesheet, resolved_url)) => {
+            Ok((document_html, stylesheet, images, resolved_url)) => {
                 self.document_html = document_html;
                 self.stylesheet = stylesheet;
+                self.images = images;
                 self.current_url = Some(resolved_url);
                 self.scroll_offset = 0.0;
                 self.set_status(
@@ -328,6 +338,8 @@ fn build_document_view(
     document_html: &str,
     stylesheet_source: &str,
     viewport_width: usize,
+    current_url: Option<&net::Url>,
+    images: &HashMap<String, resource::LoadedImage>,
 ) -> Result<DocumentView, String> {
     let mut nodes = html::parse(document_html)
         .map_err(|error| format!("html parse error at {}: {}", error.position, error.message))?;
@@ -338,8 +350,10 @@ fn build_document_view(
         .ok_or_else(|| "document did not produce a root node".to_string())?;
     let styled = style::style_tree(&root, &[stylesheet]);
     let layout = layout::layout_tree(&styled, viewport_width as f32);
+    let mut commands = render::build_display_list(&layout);
+    commands.extend(collect_image_commands(&layout, current_url, images));
     Ok(DocumentView {
-        commands: render::build_display_list(&layout),
+        commands,
         links: collect_link_targets(&layout, None),
     })
 }
@@ -474,6 +488,7 @@ fn document_height(commands: &[render::DisplayCommand]) -> f32 {
         let bottom = match command {
             render::DisplayCommand::SolidRect(_, rect) => rect.y + rect.height,
             render::DisplayCommand::Text(text) => text.y + text.font_size,
+            render::DisplayCommand::Image(image) => image.y + image.height,
         };
         max_bottom.max(bottom)
     })
@@ -501,6 +516,24 @@ fn collect_link_targets(
     targets
 }
 
+fn collect_image_commands(
+    layout_box: &layout::LayoutBox,
+    base_url: Option<&net::Url>,
+    images: &HashMap<String, resource::LoadedImage>,
+) -> Vec<render::DisplayCommand> {
+    let mut commands = Vec::new();
+
+    if let Some(command) = image_command_for_layout_box(layout_box, base_url, images) {
+        commands.push(command);
+    }
+
+    for child in &layout_box.children {
+        commands.extend(collect_image_commands(child, base_url, images));
+    }
+
+    commands
+}
+
 fn should_collect_link_target(layout_box: &layout::LayoutBox, own_href: Option<&str>) -> bool {
     if own_href.is_some() {
         return true;
@@ -520,6 +553,42 @@ fn href_for_layout_box(layout_box: &layout::LayoutBox) -> Option<&str> {
         },
         layout::BoxType::AnonymousBlock => None,
     }
+}
+
+fn src_for_layout_box(layout_box: &layout::LayoutBox) -> Option<&str> {
+    match &layout_box.box_type {
+        layout::BoxType::BlockNode(styled_node) => match &styled_node.node.node_type {
+            NodeType::Element(element) if element.tag_name == "img" => {
+                element.attributes.get("src").map(String::as_str)
+            }
+            _ => None,
+        },
+        layout::BoxType::AnonymousBlock => None,
+    }
+}
+
+fn image_command_for_layout_box(
+    layout_box: &layout::LayoutBox,
+    base_url: Option<&net::Url>,
+    images: &HashMap<String, resource::LoadedImage>,
+) -> Option<render::DisplayCommand> {
+    let src = src_for_layout_box(layout_box)?;
+    let image_key = if src.contains("://") {
+        src.to_string()
+    } else {
+        base_url?.resolve(src).ok()?.to_string()
+    };
+    let image = images.get(&image_key)?;
+
+    Some(render::DisplayCommand::Image(render::ImageCommand {
+        x: layout_box.dimensions.content.x,
+        y: layout_box.dimensions.content.y,
+        width: layout_box.dimensions.content.width,
+        height: layout_box.dimensions.content.height,
+        source_width: image.width,
+        source_height: image.height,
+        pixels: image.pixels.clone(),
+    }))
 }
 
 fn point_in_rect(x: f32, y: f32, rect: layout::Rect) -> bool {
@@ -552,23 +621,39 @@ fn sample_css() -> &'static str {
     "#
 }
 
-fn load_remote_document(raw_url: &str) -> Result<(String, String, net::Url), String> {
+fn load_remote_document(
+    raw_url: &str,
+) -> Result<
+    (
+        String,
+        String,
+        HashMap<String, resource::LoadedImage>,
+        net::Url,
+    ),
+    String,
+> {
     let url = net::Url::parse(raw_url).map_err(|error| format!("url error: {error:?}"))?;
     let html = net::load_html(&url).map_err(|error| format!("network error: {error:?}"))?;
     let nodes = html::parse(&html)
         .map_err(|error| format!("html parse error at {}: {}", error.position, error.message))?;
     let stylesheets = resource::load_stylesheets(&nodes, &url)
         .map_err(|error| format!("resource error: {error:?}"))?;
-    Ok((html, stylesheets.join("\n"), url))
+    let images = resource::load_images(&nodes, &url)
+        .map_err(|error| format!("resource error: {error:?}"))?
+        .into_iter()
+        .map(|image| (image.url.to_string(), image))
+        .collect();
+    Ok((html, stylesheets.join("\n"), images, url))
 }
 
 fn load_initial_state() -> BrowserState {
     match env::args().nth(1) {
         Some(raw_url) => match load_remote_document(&raw_url) {
-            Ok((document_html, stylesheet, current_url)) => BrowserState::new(
+            Ok((document_html, stylesheet, images, current_url)) => BrowserState::new(
                 raw_url,
                 document_html,
                 stylesheet,
+                images,
                 Some(current_url),
                 "loaded",
             ),
@@ -578,6 +663,7 @@ fn load_initial_state() -> BrowserState {
                     raw_url,
                     sample_html().to_string(),
                     sample_css().to_string(),
+                    HashMap::new(),
                     None,
                     "load failed",
                 );
@@ -594,6 +680,7 @@ fn load_initial_state() -> BrowserState {
             "http://example.com".into(),
             sample_html().to_string(),
             sample_css().to_string(),
+            HashMap::new(),
             None,
             "type url and press enter",
         ),
@@ -612,11 +699,13 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{
         ADDRESS_BOX_HEIGHT, ADDRESS_BOX_X, ADDRESS_BOX_Y, CHROME_HEIGHT, address_bar_rect,
-        collect_link_targets, document_height, page_step, point_in_rect,
+        collect_image_commands, collect_link_targets, document_height, page_step, point_in_rect,
     };
-    use mini_browser::{css, html, layout, render, style};
+    use mini_browser::{css, html, layout, render, resource, style};
 
     #[test]
     fn computes_document_height_from_commands() {
@@ -696,5 +785,45 @@ mod tests {
         assert_eq!(rect.y, ADDRESS_BOX_Y);
         assert_eq!(rect.height, ADDRESS_BOX_HEIGHT);
         assert_eq!(rect.width, 776.0);
+    }
+
+    #[test]
+    fn collects_image_commands_from_layout_tree() {
+        let node = html::parse(r#"<img src="/pixel.png" width="12" height="8" />"#)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let styled = style::style_tree(&node, &[]);
+        let layout_tree = layout::layout_tree(&styled, 300.0);
+        let mut images = HashMap::new();
+        images.insert(
+            "http://example.com/pixel.png".into(),
+            resource::LoadedImage {
+                url: mini_browser::net::Url::parse("http://example.com/pixel.png").unwrap(),
+                width: 1,
+                height: 1,
+                pixels: vec![0xFF0000],
+            },
+        );
+
+        let commands = collect_image_commands(
+            &layout_tree,
+            Some(&mini_browser::net::Url::parse("http://example.com/index.html").unwrap()),
+            &images,
+        );
+
+        assert_eq!(
+            commands,
+            vec![render::DisplayCommand::Image(render::ImageCommand {
+                x: 0.0,
+                y: 0.0,
+                width: 12.0,
+                height: 8.0,
+                source_width: 1,
+                source_height: 1,
+                pixels: vec![0xFF0000],
+            })]
+        );
     }
 }

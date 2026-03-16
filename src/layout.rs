@@ -1,6 +1,6 @@
 use crate::{
     css::{Unit, Value},
-    dom::NodeType,
+    dom::{ElementData, NodeType},
     style::StyledNode,
 };
 
@@ -58,8 +58,9 @@ fn layout_node(
 
     let horizontal_non_content =
         margin.left + margin.right + padding.left + padding.right + border.left + border.right;
-    let content_width =
-        length_value(node, "width").unwrap_or((parent_width - horizontal_non_content).max(0.0));
+    let content_width = length_value(node, "width")
+        .or_else(|| intrinsic_width(node))
+        .unwrap_or((parent_width - horizontal_non_content).max(0.0));
     let content_x = parent_x + margin.left + border.left + padding.left;
     let content_y = *cursor_y + margin.top + border.top + padding.top;
 
@@ -71,7 +72,7 @@ fn layout_node(
         .collect::<Vec<_>>();
 
     let content_height = length_value(node, "height").unwrap_or_else(|| {
-        child_height(node, content_y, child_cursor_y).max(intrinsic_text_height(node))
+        child_height(node, content_y, child_cursor_y).max(intrinsic_height(node))
     });
 
     let dimensions = Dimensions {
@@ -103,9 +104,21 @@ fn child_height(node: &StyledNode, content_y: f32, child_cursor_y: f32) -> f32 {
     }
 }
 
-fn intrinsic_text_height(node: &StyledNode) -> f32 {
-    match node.node.node_type {
+fn intrinsic_width(node: &StyledNode) -> Option<f32> {
+    match &node.node.node_type {
+        NodeType::Element(element) if element.tag_name == "img" => {
+            attribute_length(element, "width").or(Some(200.0))
+        }
+        _ => None,
+    }
+}
+
+fn intrinsic_height(node: &StyledNode) -> f32 {
+    match &node.node.node_type {
         NodeType::Text(_) => length_value(node, "font-size").unwrap_or(16.0),
+        NodeType::Element(element) if element.tag_name == "img" => {
+            attribute_length(element, "height").unwrap_or(150.0)
+        }
         NodeType::Element(_) => 0.0,
     }
 }
@@ -124,6 +137,13 @@ fn length_value(node: &StyledNode, name: &str) -> Option<f32> {
         Some(Value::Length(value, Unit::Px)) => Some(*value),
         _ => None,
     }
+}
+
+fn attribute_length(element: &ElementData, name: &str) -> Option<f32> {
+    element
+        .attributes
+        .get(name)
+        .and_then(|value| value.parse::<f32>().ok())
 }
 
 #[cfg(test)]
@@ -196,5 +216,19 @@ mod tests {
         let text = &layout.children[0];
 
         assert_eq!(text.dimensions.content.height, 18.0);
+    }
+
+    #[test]
+    fn img_uses_attribute_size_or_defaults() {
+        let styled = styled_root(r#"<img src="/photo.png" width="64" height="48" />"#, "");
+        let layout = layout_tree(&styled, 400.0);
+
+        assert_eq!(layout.dimensions.content.width, 64.0);
+        assert_eq!(layout.dimensions.content.height, 48.0);
+
+        let fallback = styled_root(r#"<img src="/photo.png" />"#, "");
+        let fallback_layout = layout_tree(&fallback, 400.0);
+        assert_eq!(fallback_layout.dimensions.content.width, 200.0);
+        assert_eq!(fallback_layout.dimensions.content.height, 150.0);
     }
 }
