@@ -71,6 +71,36 @@ impl Url {
             path,
         })
     }
+
+    pub fn resolve(&self, href: &str) -> Result<Self, NetworkError> {
+        if href.contains("://") {
+            return Self::parse(href);
+        }
+
+        let path = if href.starts_with('/') {
+            href.to_string()
+        } else {
+            let base_dir = self
+                .path
+                .rsplit_once('/')
+                .map(|(prefix, _)| {
+                    if prefix.is_empty() {
+                        "/".to_string()
+                    } else {
+                        format!("{prefix}/")
+                    }
+                })
+                .unwrap_or_else(|| "/".to_string());
+            format!("{base_dir}{href}")
+        };
+
+        Ok(Self {
+            scheme: self.scheme.clone(),
+            host: self.host.clone(),
+            port: self.port,
+            path: normalize_path(&path),
+        })
+    }
 }
 
 pub fn load_html(url: &Url) -> Result<String, NetworkError> {
@@ -85,6 +115,27 @@ pub fn load_html(url: &Url) -> Result<String, NetworkError> {
 
     if let Some(content_type) = header(&response, "content-type") {
         if !content_type.starts_with("text/html") {
+            return Err(NetworkError::UnexpectedContentType(
+                content_type.to_string(),
+            ));
+        }
+    }
+
+    String::from_utf8(response.body).map_err(|_| NetworkError::InvalidBodyEncoding)
+}
+
+pub fn load_css(url: &Url) -> Result<String, NetworkError> {
+    let response = http_get(url)?;
+
+    if response.status_code != 200 {
+        return Err(NetworkError::HttpStatus(
+            response.status_code,
+            response.reason_phrase,
+        ));
+    }
+
+    if let Some(content_type) = header(&response, "content-type") {
+        if !content_type.starts_with("text/css") {
             return Err(NetworkError::UnexpectedContentType(
                 content_type.to_string(),
             ));
@@ -170,6 +221,22 @@ fn header<'a>(response: &'a HttpResponse, name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
+fn normalize_path(path: &str) -> String {
+    let mut segments = Vec::new();
+
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            value => segments.push(value),
+        }
+    }
+
+    format!("/{}", segments.join("/"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -178,7 +245,7 @@ mod tests {
         thread,
     };
 
-    use super::{NetworkError, Url, http_get, load_html};
+    use super::{NetworkError, Url, http_get, load_css, load_html};
 
     #[test]
     fn parses_default_http_port_and_root_path() {
@@ -204,6 +271,30 @@ mod tests {
         let error = Url::parse("https://example.com").unwrap_err();
 
         assert_eq!(error, NetworkError::UnsupportedScheme("https".into()));
+    }
+
+    #[test]
+    fn resolves_relative_paths_against_base_url() {
+        let base = Url::parse("http://example.com/articles/intro/index.html").unwrap();
+
+        assert_eq!(
+            base.resolve("../styles/site.css").unwrap(),
+            Url {
+                scheme: "http".into(),
+                host: "example.com".into(),
+                port: 80,
+                path: "/articles/styles/site.css".into(),
+            }
+        );
+        assert_eq!(
+            base.resolve("/reset.css").unwrap(),
+            Url {
+                scheme: "http".into(),
+                host: "example.com".into(),
+                port: 80,
+                path: "/reset.css".into(),
+            }
+        );
     }
 
     #[test]
@@ -262,5 +353,32 @@ mod tests {
         assert_eq!(response.status_code, 404);
         assert_eq!(response.reason_phrase, "Not Found");
         assert_eq!(response.body, b"missing");
+    }
+
+    #[test]
+    fn downloads_css_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: text/css\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+                "body { margin-top: 8px; }"
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/styles.css")).unwrap();
+        let css = load_css(&url).unwrap();
+
+        server.join().unwrap();
+        assert_eq!(css, "body { margin-top: 8px; }");
     }
 }

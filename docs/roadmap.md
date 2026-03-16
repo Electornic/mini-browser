@@ -148,7 +148,7 @@
 
 ## Next Concrete Step
 
-다음 구현은 `Basic Resource Loader`다. 현재 `http://` URL에서 main document HTML을 내려받을 수 있으므로, 이제 `<link rel="stylesheet">`를 읽어 CSS를 추가 로드하는 단계로 넘어간다.
+다음 구현은 `이미지 다운로드` 또는 `간단한 이미지 박스 처리`다. 현재 HTML과 external CSS까지 로드할 수 있으므로, 이제 선택 범위였던 이미지 리소스를 붙이거나 렌더 품질을 보강하는 단계로 넘어갈 수 있다.
 
 ## Related Documents
 

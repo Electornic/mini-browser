@@ -42,8 +42,9 @@ URL
 - Basic Renderer (Display List: Rect + Text)
 - Window / Event Loop
 - Simple Network Loader
+- Basic Resource Loader
 
-현재는 `http://` 기반 HTML 문서 다운로드를 지원한다. CSS/이미지 resource loader는 아직 구현 전이다.
+현재는 `http://` 기반 HTML 문서 다운로드와 `<link rel="stylesheet">` CSS 로드를 지원한다. 이미지 resource loader는 아직 구현 전이다.
 
 ## Documents
 
@@ -63,6 +64,8 @@ cargo run
 ```bash
 cargo run -- http://example.com
 ```
+
+원격 문서의 외부 stylesheet는 `<link rel="stylesheet" href="...">`에 한해 자동 로드된다.
 
 ## Notes
 

@@ -1,6 +1,6 @@
 use std::env;
 
-use mini_browser::{css, html, layout, net, render, style, window};
+use mini_browser::{css, html, layout, net, render, resource, style, window};
 
 fn build_display_list(
     document_html: &str,
@@ -46,7 +46,12 @@ fn load_document_from_args() -> Result<(String, String), String> {
         Some(raw_url) => {
             let url = net::Url::parse(&raw_url).map_err(|error| format!("url error: {error:?}"))?;
             let html = net::load_html(&url).map_err(|error| format!("network error: {error:?}"))?;
-            Ok((html, String::new()))
+            let nodes = html::parse(&html).map_err(|error| {
+                format!("html parse error at {}: {}", error.position, error.message)
+            })?;
+            let stylesheets = resource::load_stylesheets(&nodes, &url)
+                .map_err(|error| format!("resource error: {error:?}"))?;
+            Ok((html, stylesheets.join("\n")))
         }
         None => Ok((sample_html().to_string(), sample_css().to_string())),
     }

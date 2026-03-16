@@ -53,6 +53,7 @@ Window/Event Loop
 비고:
 - 처음에는 `http://` 중심으로 시작하고 `https://`는 라이브러리 위임 여부를 별도로 결정한다.
 - 현재는 `TcpStream` 기반 단순 HTTP GET으로 main document HTML만 읽는다.
+- stylesheet resource는 DOM에서 `<link rel="stylesheet">`를 추출한 뒤 같은 계층에서 추가 다운로드한다.
 
 ### `html`
 
