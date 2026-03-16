@@ -1,4 +1,4 @@
-use mini_browser::{css, html, layout, style};
+use mini_browser::{css, html, layout, render, style};
 
 fn main() {
     let sample_html = r#"
@@ -8,8 +8,13 @@ fn main() {
         </div>
     "#;
     let sample_css = r#"
-        #app { width: 320px; padding-top: 12px; }
-        h1 { font-size: 28px; margin-bottom: 8px; }
+        #app {
+            width: 320px;
+            padding-top: 12px;
+            padding-left: 8px;
+            background-color: #f0f4f8;
+        }
+        h1 { font-size: 28px; margin-bottom: 8px; color: #222222; }
         p { color: #0066cc; font-size: 18px; margin-top: 4px; }
     "#;
 
@@ -18,7 +23,8 @@ fn main() {
             if let Some(root) = nodes.pop() {
                 let styled = style::style_tree(&root, &[stylesheet]);
                 let layout = layout::layout_tree(&styled, 800.0);
-                println!("{layout:#?}");
+                let display_list = render::build_display_list(&layout);
+                println!("{display_list:#?}");
             }
         }
         (Err(error), _) => eprintln!("html parse error at {}: {}", error.position, error.message),

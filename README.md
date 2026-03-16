@@ -39,8 +39,9 @@ URL
 - CSS parser
 - Style Engine
 - Block Layout Engine
+- Basic Renderer (Display List: Rect + Text)
 
-아직 렌더러, window/event loop, network/resource loader는 구현 전이다.
+아직 window/event loop, network/resource loader는 구현 전이다.
 
 ## Documents
 

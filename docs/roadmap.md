@@ -148,7 +148,7 @@
 
 ## Next Concrete Step
 
-다음 구현은 `DisplayCommand 기반 Basic Renderer`다. 현재 DOM -> CSS -> Style -> Layout 파이프라인이 정적 입력 기준으로 닫혔으므로, 이제 layout tree를 rect/text primitive로 변환하는 단계로 넘어간다.
+다음 구현은 `Window / Event Loop`다. 현재 DOM -> CSS -> Style -> Layout -> Render 파이프라인이 정적 입력 기준으로 닫혔으므로, 이제 display list를 실제 창 lifecycle과 연결하는 단계로 넘어간다.
 
 ## Related Documents
 
