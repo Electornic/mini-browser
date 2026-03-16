@@ -13,6 +13,7 @@ struct BrowserState {
     stylesheet: String,
     status_text: String,
     status_color: css::Color,
+    scroll_offset: f32,
 }
 
 impl BrowserState {
@@ -28,15 +29,17 @@ impl BrowserState {
             stylesheet,
             status_text: status_text.into(),
             status_color: css::Color::BLACK,
+            scroll_offset: 0.0,
         }
     }
 
     fn display_list(
         &mut self,
         viewport_width: usize,
+        viewport_height: usize,
         input: &window::WindowInput,
     ) -> Vec<render::DisplayCommand> {
-        self.apply_input(input);
+        self.apply_input(input, viewport_height);
 
         let page_commands =
             build_document_display_list(&self.document_html, &self.stylesheet, viewport_width)
@@ -54,17 +57,23 @@ impl BrowserState {
                     Vec::new()
                 });
 
+        self.clamp_scroll(viewport_height, document_height(&page_commands));
+
         let mut commands = chrome_commands(
             viewport_width,
             &self.address_input,
             &self.status_text,
             self.status_color,
         );
-        commands.extend(render::translate(page_commands, 0.0, CHROME_HEIGHT));
+        commands.extend(render::translate(
+            page_commands,
+            0.0,
+            CHROME_HEIGHT - self.scroll_offset,
+        ));
         commands
     }
 
-    fn apply_input(&mut self, input: &window::WindowInput) {
+    fn apply_input(&mut self, input: &window::WindowInput, viewport_height: usize) {
         for ch in input.typed.chars() {
             if !ch.is_control() {
                 self.address_input.push(ch);
@@ -77,6 +86,20 @@ impl BrowserState {
 
         if input.enter_pressed {
             self.navigate();
+        }
+
+        self.scroll_offset -= input.scroll_y * 24.0;
+        if input.move_up {
+            self.scroll_offset -= 24.0;
+        }
+        if input.move_down {
+            self.scroll_offset += 24.0;
+        }
+        if input.page_up_pressed {
+            self.scroll_offset -= page_step(viewport_height);
+        }
+        if input.page_down_pressed {
+            self.scroll_offset += page_step(viewport_height);
         }
     }
 
@@ -99,6 +122,7 @@ impl BrowserState {
             Ok((document_html, stylesheet)) => {
                 self.document_html = document_html;
                 self.stylesheet = stylesheet;
+                self.scroll_offset = 0.0;
                 self.set_status(
                     "loaded",
                     css::Color {
@@ -127,6 +151,12 @@ impl BrowserState {
     fn set_status(&mut self, text: impl Into<String>, color: css::Color) {
         self.status_text = text.into();
         self.status_color = color;
+    }
+
+    fn clamp_scroll(&mut self, viewport_height: usize, document_height: f32) {
+        let visible_height = (viewport_height as f32 - CHROME_HEIGHT).max(0.0);
+        let max_scroll = (document_height - visible_height).max(0.0);
+        self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll);
     }
 }
 
@@ -206,6 +236,20 @@ fn chrome_commands(
     ]
 }
 
+fn document_height(commands: &[render::DisplayCommand]) -> f32 {
+    commands.iter().fold(0.0, |max_bottom, command| {
+        let bottom = match command {
+            render::DisplayCommand::SolidRect(_, rect) => rect.y + rect.height,
+            render::DisplayCommand::Text(text) => text.y + text.font_size,
+        };
+        max_bottom.max(bottom)
+    })
+}
+
+fn page_step(viewport_height: usize) -> f32 {
+    (viewport_height as f32 - CHROME_HEIGHT - 24.0).max(24.0)
+}
+
 fn sample_html() -> &'static str {
     r#"
         <div id="app" class="page">
@@ -273,9 +317,46 @@ fn load_initial_state() -> BrowserState {
 fn main() {
     let mut browser = load_initial_state();
 
-    if let Err(error) = window::run("mini-browser", 800, 600, |width, _height, input| {
-        browser.display_list(width, input)
+    if let Err(error) = window::run("mini-browser", 800, 600, |width, height, input| {
+        browser.display_list(width, height, input)
     }) {
         eprintln!("window error: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CHROME_HEIGHT, document_height, page_step};
+    use mini_browser::{css, layout, render};
+
+    #[test]
+    fn computes_document_height_from_commands() {
+        let commands = vec![
+            render::DisplayCommand::SolidRect(
+                css::Color::BLACK,
+                layout::Rect {
+                    x: 0.0,
+                    y: 10.0,
+                    width: 20.0,
+                    height: 30.0,
+                },
+            ),
+            render::DisplayCommand::Text(render::TextCommand {
+                text: "hello".into(),
+                x: 0.0,
+                y: 60.0,
+                color: css::Color::BLACK,
+                font_size: 8.0,
+            }),
+        ];
+
+        assert_eq!(document_height(&commands), 68.0);
+    }
+
+    #[test]
+    fn page_step_uses_visible_height() {
+        let expected = 400.0 - CHROME_HEIGHT - 24.0;
+        assert_eq!(page_step(400), expected);
+        assert_eq!(page_step(40), 24.0);
     }
 }

@@ -67,7 +67,7 @@ cargo run -- http://example.com
 
 원격 문서의 외부 stylesheet는 `<link rel="stylesheet" href="...">`에 한해 자동 로드된다.
 
-앱 안에서는 상단 주소창에 URL을 입력하고 `Enter`로 이동할 수 있다. `Esc`를 누르면 종료된다.
+앱 안에서는 상단 주소창에 URL을 입력하고 `Enter`로 이동할 수 있다. `Up/Down`, `PageUp/PageDown`, 마우스 휠로 스크롤할 수 있고 `Esc`를 누르면 종료된다.
 
 ## Package macOS
 

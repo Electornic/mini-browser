@@ -9,6 +9,11 @@ pub struct WindowInput {
     pub typed: String,
     pub enter_pressed: bool,
     pub backspace_pressed: bool,
+    pub scroll_y: f32,
+    pub move_up: bool,
+    pub move_down: bool,
+    pub page_up_pressed: bool,
+    pub page_down_pressed: bool,
 }
 
 struct TextCollector {
@@ -50,6 +55,14 @@ where
             typed: std::mem::take(&mut *typed_chars.borrow_mut()),
             enter_pressed: window.is_key_pressed(Key::Enter, KeyRepeat::No),
             backspace_pressed: window.is_key_pressed(Key::Backspace, KeyRepeat::Yes),
+            scroll_y: window
+                .get_scroll_wheel()
+                .map(|scroll| scroll.1)
+                .unwrap_or(0.0),
+            move_up: window.is_key_pressed(Key::Up, KeyRepeat::Yes),
+            move_down: window.is_key_pressed(Key::Down, KeyRepeat::Yes),
+            page_up_pressed: window.is_key_pressed(Key::PageUp, KeyRepeat::No),
+            page_down_pressed: window.is_key_pressed(Key::PageDown, KeyRepeat::No),
         };
         let commands = build_scene(size.0, size.1, &input);
         let buffer = render::rasterize(&commands, size.0, size.1);
