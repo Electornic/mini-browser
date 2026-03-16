@@ -25,6 +25,23 @@ pub fn build_display_list(layout_root: &LayoutBox) -> Vec<DisplayCommand> {
     commands
 }
 
+pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<DisplayCommand> {
+    for command in &mut commands {
+        match command {
+            DisplayCommand::SolidRect(_, rect) => {
+                rect.x += dx;
+                rect.y += dy;
+            }
+            DisplayCommand::Text(text) => {
+                text.x += dx;
+                text.y += dy;
+            }
+        }
+    }
+
+    commands
+}
+
 pub fn rasterize(commands: &[DisplayCommand], width: usize, height: usize) -> Vec<u32> {
     let mut buffer = vec![rgb_u32(Color::WHITE); width * height];
 
@@ -195,6 +212,36 @@ fn rgb_u32(color: Color) -> u32 {
 
 fn glyph_pattern(ch: char) -> [&'static str; 7] {
     match ch.to_ascii_lowercase() {
+        '0' => [
+            " ### ", "#   #", "#  ##", "# # #", "##  #", "#   #", " ### ",
+        ],
+        '1' => [
+            "  #  ", " ##  ", "# #  ", "  #  ", "  #  ", "  #  ", "#####",
+        ],
+        '2' => [
+            " ### ", "#   #", "    #", "   # ", "  #  ", " #   ", "#####",
+        ],
+        '3' => [
+            " ### ", "#   #", "    #", " ### ", "    #", "#   #", " ### ",
+        ],
+        '4' => [
+            "   # ", "  ## ", " # # ", "#  # ", "#####", "   # ", "   # ",
+        ],
+        '5' => [
+            "#####", "#    ", "#    ", "#### ", "    #", "#   #", " ### ",
+        ],
+        '6' => [
+            " ### ", "#   #", "#    ", "#### ", "#   #", "#   #", " ### ",
+        ],
+        '7' => [
+            "#####", "    #", "   # ", "  #  ", " #   ", " #   ", " #   ",
+        ],
+        '8' => [
+            " ### ", "#   #", "#   #", " ### ", "#   #", "#   #", " ### ",
+        ],
+        '9' => [
+            " ### ", "#   #", "#   #", " ####", "    #", "#   #", " ### ",
+        ],
         'a' => [
             " ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #",
         ],
@@ -276,6 +323,9 @@ fn glyph_pattern(ch: char) -> [&'static str; 7] {
         '.' => [
             "     ", "     ", "     ", "     ", "     ", " ### ", " ### ",
         ],
+        ':' => [
+            "     ", " ### ", " ### ", "     ", " ### ", " ### ", "     ",
+        ],
         '!' => [
             " ### ", " ### ", " ### ", " ### ", " ### ", "     ", " ### ",
         ],
@@ -284,6 +334,9 @@ fn glyph_pattern(ch: char) -> [&'static str; 7] {
         ],
         '-' => [
             "     ", "     ", "     ", "#####", "     ", "     ", "     ",
+        ],
+        '/' => [
+            "    #", "   # ", "   # ", "  #  ", " #   ", " #   ", "#    ",
         ],
         _ => [
             "#####", "#   #", "   # ", "  #  ", "  #  ", "     ", "  #  ",
@@ -295,7 +348,7 @@ fn glyph_pattern(ch: char) -> [&'static str; 7] {
 mod tests {
     use crate::{css, html, layout, render, style};
 
-    use super::{Color, DisplayCommand, TextCommand, rasterize};
+    use super::{Color, DisplayCommand, TextCommand, rasterize, translate};
 
     fn display_list(html_source: &str, css_source: &str) -> Vec<DisplayCommand> {
         let node = html::parse(html_source)
@@ -417,5 +470,54 @@ mod tests {
         assert_eq!(pixels[5], 0xFF0000);
         assert_eq!(pixels[10], 0xFF0000);
         assert_eq!(pixels[0], 0xFFFFFF);
+    }
+
+    #[test]
+    fn translates_display_commands() {
+        let commands = translate(
+            vec![
+                DisplayCommand::SolidRect(
+                    Color::BLACK,
+                    crate::layout::Rect {
+                        x: 1.0,
+                        y: 2.0,
+                        width: 3.0,
+                        height: 4.0,
+                    },
+                ),
+                DisplayCommand::Text(TextCommand {
+                    text: "hello".into(),
+                    x: 5.0,
+                    y: 6.0,
+                    color: Color::BLACK,
+                    font_size: 8.0,
+                }),
+            ],
+            10.0,
+            20.0,
+        );
+
+        assert_eq!(
+            commands[0],
+            DisplayCommand::SolidRect(
+                Color::BLACK,
+                crate::layout::Rect {
+                    x: 11.0,
+                    y: 22.0,
+                    width: 3.0,
+                    height: 4.0,
+                },
+            )
+        );
+        assert_eq!(
+            commands[1],
+            DisplayCommand::Text(TextCommand {
+                text: "hello".into(),
+                x: 15.0,
+                y: 26.0,
+                color: Color::BLACK,
+                font_size: 8.0,
+            })
+        );
     }
 }
