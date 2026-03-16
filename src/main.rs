@@ -5,10 +5,18 @@ use mini_browser::{css, dom::NodeType, html, layout, net, render, resource, styl
 const CHROME_HEIGHT: f32 = 56.0;
 const ADDRESS_TEXT_Y: f32 = 12.0;
 const STATUS_TEXT_Y: f32 = 34.0;
+const ADDRESS_BOX_X: f32 = 12.0;
+const ADDRESS_BOX_Y: f32 = 8.0;
+const ADDRESS_BOX_HEIGHT: f32 = 18.0;
+const ADDRESS_TEXT_X: f32 = 16.0;
+const ADDRESS_CHAR_WIDTH: f32 = 6.0;
 
 #[derive(Debug, Clone)]
 struct BrowserState {
     address_input: String,
+    address_bar_focused: bool,
+    address_bar_selected: bool,
+    frame_index: usize,
     document_html: String,
     stylesheet: String,
     current_url: Option<net::Url>,
@@ -39,6 +47,9 @@ impl BrowserState {
     ) -> Self {
         Self {
             address_input,
+            address_bar_focused: true,
+            address_bar_selected: false,
+            frame_index: 0,
             document_html,
             stylesheet,
             current_url,
@@ -54,7 +65,8 @@ impl BrowserState {
         viewport_height: usize,
         input: &window::WindowInput,
     ) -> Vec<render::DisplayCommand> {
-        self.apply_input(input, viewport_height);
+        self.frame_index = self.frame_index.wrapping_add(1);
+        self.apply_input(input, viewport_width, viewport_height);
 
         let document_view =
             build_document_view(&self.document_html, &self.stylesheet, viewport_width)
@@ -86,6 +98,9 @@ impl BrowserState {
             &self.address_input,
             &self.status_text,
             self.status_color,
+            self.address_bar_focused,
+            self.address_bar_selected,
+            self.show_caret(),
         );
         commands.extend(render::translate(
             document_view.commands,
@@ -95,19 +110,54 @@ impl BrowserState {
         commands
     }
 
-    fn apply_input(&mut self, input: &window::WindowInput, viewport_height: usize) {
-        for ch in input.typed.chars() {
-            if !ch.is_control() {
-                self.address_input.push(ch);
+    fn apply_input(
+        &mut self,
+        input: &window::WindowInput,
+        viewport_width: usize,
+        viewport_height: usize,
+    ) {
+        if input.focus_address_bar {
+            self.address_bar_focused = true;
+            self.address_bar_selected = true;
+        }
+
+        if input.left_mouse_pressed {
+            if let Some((mouse_x, mouse_y)) = input.mouse_position {
+                if point_in_rect(mouse_x, mouse_y, address_bar_rect(viewport_width as f32)) {
+                    self.address_bar_focused = true;
+                    self.address_bar_selected = true;
+                } else {
+                    self.address_bar_focused = false;
+                    self.address_bar_selected = false;
+                }
             }
         }
 
-        if input.backspace_pressed {
-            self.address_input.pop();
-        }
+        if self.address_bar_focused {
+            for ch in input.typed.chars() {
+                if !ch.is_control() {
+                    if self.address_bar_selected {
+                        self.address_input.clear();
+                        self.address_bar_selected = false;
+                    }
+                    self.address_input.push(ch);
+                }
+            }
 
-        if input.enter_pressed {
-            self.navigate();
+            if input.backspace_pressed {
+                if self.address_bar_selected {
+                    self.address_input.clear();
+                    self.address_bar_selected = false;
+                } else {
+                    self.address_input.pop();
+                }
+            }
+
+            if input.enter_pressed {
+                self.address_bar_selected = false;
+                self.navigate();
+                self.address_bar_focused = false;
+            }
         }
 
         self.scroll_offset -= input.scroll_y * 24.0;
@@ -190,6 +240,8 @@ impl BrowserState {
         };
 
         self.address_input = resolved.to_string();
+        self.address_bar_selected = false;
+        self.address_bar_focused = false;
         match load_remote_document(&resolved.to_string()) {
             Ok((document_html, stylesheet, resolved_url)) => {
                 self.document_html = document_html;
@@ -224,6 +276,12 @@ impl BrowserState {
     fn set_status(&mut self, text: impl Into<String>, color: css::Color) {
         self.status_text = text.into();
         self.status_color = color;
+    }
+
+    fn show_caret(&self) -> bool {
+        self.address_bar_focused
+            && !self.address_bar_selected
+            && (self.frame_index / 30).is_multiple_of(2)
     }
 
     fn clamp_scroll(&mut self, viewport_height: usize, document_height: f32) {
@@ -291,6 +349,9 @@ fn chrome_commands(
     address_input: &str,
     status_text: &str,
     status_color: css::Color,
+    address_bar_focused: bool,
+    address_bar_selected: bool,
+    show_caret: bool,
 ) -> Vec<render::DisplayCommand> {
     let width = viewport_width as f32;
     let address_display = if address_input.is_empty() {
@@ -298,8 +359,24 @@ fn chrome_commands(
     } else {
         address_input.to_string()
     };
+    let address_box = address_bar_rect(width);
+    let border_color = if address_bar_focused {
+        css::Color {
+            r: 54,
+            g: 116,
+            b: 217,
+            a: 255,
+        }
+    } else {
+        css::Color {
+            r: 170,
+            g: 178,
+            b: 190,
+            a: 255,
+        }
+    };
 
-    vec![
+    let mut commands = vec![
         render::DisplayCommand::SolidRect(
             css::Color {
                 r: 236,
@@ -314,6 +391,7 @@ fn chrome_commands(
                 height: CHROME_HEIGHT,
             },
         ),
+        render::DisplayCommand::SolidRect(border_color, address_box),
         render::DisplayCommand::SolidRect(
             css::Color {
                 r: 255,
@@ -322,15 +400,15 @@ fn chrome_commands(
                 a: 255,
             },
             layout::Rect {
-                x: 12.0,
-                y: 8.0,
-                width: (width - 24.0).max(0.0),
-                height: 18.0,
+                x: address_box.x + 1.0,
+                y: address_box.y + 1.0,
+                width: (address_box.width - 2.0).max(0.0),
+                height: (address_box.height - 2.0).max(0.0),
             },
         ),
         render::DisplayCommand::Text(render::TextCommand {
-            text: address_display,
-            x: 16.0,
+            text: address_display.clone(),
+            x: ADDRESS_TEXT_X,
             y: ADDRESS_TEXT_Y,
             color: css::Color::BLACK,
             font_size: 8.0,
@@ -342,7 +420,53 @@ fn chrome_commands(
             color: status_color,
             font_size: 8.0,
         }),
-    ]
+    ];
+
+    if address_bar_selected {
+        commands.push(render::DisplayCommand::SolidRect(
+            css::Color {
+                r: 214,
+                g: 229,
+                b: 255,
+                a: 255,
+            },
+            layout::Rect {
+                x: ADDRESS_TEXT_X - 2.0,
+                y: ADDRESS_BOX_Y + 4.0,
+                width: (address_display.len() as f32 * ADDRESS_CHAR_WIDTH + 4.0)
+                    .min((address_box.width - 8.0).max(0.0)),
+                height: 10.0,
+            },
+        ));
+        commands.push(render::DisplayCommand::Text(render::TextCommand {
+            text: address_display,
+            x: ADDRESS_TEXT_X,
+            y: ADDRESS_TEXT_Y,
+            color: css::Color::BLACK,
+            font_size: 8.0,
+        }));
+    } else if show_caret {
+        commands.push(render::DisplayCommand::SolidRect(
+            css::Color::BLACK,
+            layout::Rect {
+                x: ADDRESS_TEXT_X + address_display.len() as f32 * ADDRESS_CHAR_WIDTH,
+                y: ADDRESS_BOX_Y + 4.0,
+                width: 1.0,
+                height: 10.0,
+            },
+        ));
+    }
+
+    commands
+}
+
+fn address_bar_rect(viewport_width: f32) -> layout::Rect {
+    layout::Rect {
+        x: ADDRESS_BOX_X,
+        y: ADDRESS_BOX_Y,
+        width: (viewport_width - 24.0).max(0.0),
+        height: ADDRESS_BOX_HEIGHT,
+    }
 }
 
 fn document_height(commands: &[render::DisplayCommand]) -> f32 {
@@ -488,7 +612,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{CHROME_HEIGHT, collect_link_targets, document_height, page_step, point_in_rect};
+    use super::{
+        ADDRESS_BOX_HEIGHT, ADDRESS_BOX_X, ADDRESS_BOX_Y, CHROME_HEIGHT, address_bar_rect,
+        collect_link_targets, document_height, page_step, point_in_rect,
+    };
     use mini_browser::{css, html, layout, render, style};
 
     #[test]
@@ -560,5 +687,14 @@ mod tests {
                 height: 20.0,
             },
         ));
+    }
+
+    #[test]
+    fn address_bar_rect_matches_chrome_layout() {
+        let rect = address_bar_rect(800.0);
+        assert_eq!(rect.x, ADDRESS_BOX_X);
+        assert_eq!(rect.y, ADDRESS_BOX_Y);
+        assert_eq!(rect.height, ADDRESS_BOX_HEIGHT);
+        assert_eq!(rect.width, 776.0);
     }
 }

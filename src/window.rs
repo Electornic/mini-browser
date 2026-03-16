@@ -9,6 +9,7 @@ pub struct WindowInput {
     pub typed: String,
     pub enter_pressed: bool,
     pub backspace_pressed: bool,
+    pub focus_address_bar: bool,
     pub scroll_y: f32,
     pub move_up: bool,
     pub move_down: bool,
@@ -55,10 +56,15 @@ where
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let size = window.get_size();
         let left_down = window.get_mouse_down(MouseButton::Left);
+        let command_or_ctrl = window.is_key_down(Key::LeftSuper)
+            || window.is_key_down(Key::RightSuper)
+            || window.is_key_down(Key::LeftCtrl)
+            || window.is_key_down(Key::RightCtrl);
         let input = WindowInput {
             typed: std::mem::take(&mut *typed_chars.borrow_mut()),
             enter_pressed: window.is_key_pressed(Key::Enter, KeyRepeat::No),
             backspace_pressed: window.is_key_pressed(Key::Backspace, KeyRepeat::Yes),
+            focus_address_bar: command_or_ctrl && window.is_key_pressed(Key::L, KeyRepeat::No),
             scroll_y: window
                 .get_scroll_wheel()
                 .map(|scroll| scroll.1)
