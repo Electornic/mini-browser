@@ -1,6 +1,6 @@
-use mini_browser::{css, html, layout, render, style};
+use mini_browser::{css, html, layout, render, style, window};
 
-fn main() {
+fn build_sample_display_list(viewport_width: usize) -> Result<Vec<render::DisplayCommand>, String> {
     let sample_html = r#"
         <div id="app" class="page">
             <h1>Mini Browser</h1>
@@ -18,16 +18,25 @@ fn main() {
         p { color: #0066cc; font-size: 18px; margin-top: 4px; }
     "#;
 
-    match (html::parse(sample_html), css::parse(sample_css)) {
-        (Ok(mut nodes), Ok(stylesheet)) => {
-            if let Some(root) = nodes.pop() {
-                let styled = style::style_tree(&root, &[stylesheet]);
-                let layout = layout::layout_tree(&styled, 800.0);
-                let display_list = render::build_display_list(&layout);
-                println!("{display_list:#?}");
-            }
-        }
-        (Err(error), _) => eprintln!("html parse error at {}: {}", error.position, error.message),
-        (_, Err(error)) => eprintln!("css parse error at {}: {}", error.position, error.message),
+    let mut nodes = html::parse(sample_html)
+        .map_err(|error| format!("html parse error at {}: {}", error.position, error.message))?;
+    let stylesheet = css::parse(sample_css)
+        .map_err(|error| format!("css parse error at {}: {}", error.position, error.message))?;
+    let root = nodes
+        .pop()
+        .ok_or_else(|| "document did not produce a root node".to_string())?;
+    let styled = style::style_tree(&root, &[stylesheet]);
+    let layout = layout::layout_tree(&styled, viewport_width as f32);
+    Ok(render::build_display_list(&layout))
+}
+
+fn main() {
+    if let Err(error) = window::run("mini-browser", 800, 600, |width, _height| {
+        build_sample_display_list(width).unwrap_or_else(|build_error| {
+            eprintln!("{build_error}");
+            Vec::new()
+        })
+    }) {
+        eprintln!("window error: {error}");
     }
 }

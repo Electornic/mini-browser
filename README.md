@@ -40,8 +40,9 @@ URL
 - Style Engine
 - Block Layout Engine
 - Basic Renderer (Display List: Rect + Text)
+- Window / Event Loop
 
-아직 window/event loop, network/resource loader는 구현 전이다.
+아직 network/resource loader는 구현 전이다.
 
 ## Documents
 
