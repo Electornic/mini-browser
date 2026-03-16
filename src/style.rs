@@ -1,0 +1,220 @@
+use std::collections::BTreeMap;
+
+use crate::{
+    css::{Declaration, Selector, Stylesheet, Value},
+    dom::{ElementData, Node, NodeType},
+};
+
+pub type PropertyMap = BTreeMap<String, Value>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyledNode {
+    pub node: Node,
+    pub specified_values: PropertyMap,
+    pub children: Vec<StyledNode>,
+}
+
+impl StyledNode {
+    pub fn value(&self, name: &str) -> Option<&Value> {
+        self.specified_values.get(name)
+    }
+}
+
+pub fn style_tree(root: &Node, stylesheets: &[Stylesheet]) -> StyledNode {
+    style_tree_with_parent(root, stylesheets, None)
+}
+
+fn style_tree_with_parent(
+    node: &Node,
+    stylesheets: &[Stylesheet],
+    parent_values: Option<&PropertyMap>,
+) -> StyledNode {
+    let mut specified_values = specified_values(node, stylesheets);
+
+    for property in ["color", "font-size"] {
+        if !specified_values.contains_key(property) {
+            if let Some(value) = parent_values.and_then(|values| values.get(property)) {
+                specified_values.insert(property.to_string(), value.clone());
+            }
+        }
+    }
+
+    let children = node
+        .children
+        .iter()
+        .map(|child| style_tree_with_parent(child, stylesheets, Some(&specified_values)))
+        .collect();
+
+    StyledNode {
+        node: node.clone(),
+        specified_values,
+        children,
+    }
+}
+
+fn specified_values(node: &Node, stylesheets: &[Stylesheet]) -> PropertyMap {
+    let mut matched = Vec::new();
+
+    for (rule_order, rule) in stylesheets
+        .iter()
+        .flat_map(|sheet| sheet.rules.iter())
+        .enumerate()
+    {
+        if let Some(specificity) = matching_specificity(node, &rule.selectors) {
+            matched.push((specificity, rule_order, &rule.declarations));
+        }
+    }
+
+    matched.sort_by_key(|(specificity, rule_order, _)| (*specificity, *rule_order));
+
+    let mut values = PropertyMap::new();
+    for (_, _, declarations) in matched {
+        apply_declarations(&mut values, declarations);
+    }
+
+    values
+}
+
+fn apply_declarations(values: &mut PropertyMap, declarations: &[Declaration]) {
+    for declaration in declarations {
+        values.insert(declaration.name.clone(), declaration.value.clone());
+    }
+}
+
+fn matching_specificity(node: &Node, selectors: &[Selector]) -> Option<u32> {
+    selectors
+        .iter()
+        .filter(|selector| matches_selector(node, selector))
+        .map(selector_specificity)
+        .max()
+}
+
+fn selector_specificity(selector: &Selector) -> u32 {
+    match selector {
+        Selector::Tag(_) => 1,
+        Selector::Class(_) => 10,
+        Selector::Id(_) => 100,
+    }
+}
+
+fn matches_selector(node: &Node, selector: &Selector) -> bool {
+    let element = match &node.node_type {
+        NodeType::Element(element) => element,
+        NodeType::Text(_) => return false,
+    };
+
+    match selector {
+        Selector::Tag(tag_name) => element.tag_name == *tag_name,
+        Selector::Class(class_name) => has_class(element, class_name),
+        Selector::Id(id) => element
+            .attributes
+            .get("id")
+            .is_some_and(|value| value == id),
+    }
+}
+
+fn has_class(element: &ElementData, class_name: &str) -> bool {
+    element
+        .attributes
+        .get("class")
+        .is_some_and(|value| value.split_whitespace().any(|class| class == class_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        css::{Color, Unit, Value},
+        html, style,
+    };
+
+    fn parse_html(source: &str) -> crate::dom::Node {
+        html::parse(source).unwrap().into_iter().next().unwrap()
+    }
+
+    fn parse_css(source: &str) -> crate::css::Stylesheet {
+        crate::css::parse(source).unwrap()
+    }
+
+    #[test]
+    fn applies_rule_specificity_in_tag_class_id_order() {
+        let root = parse_html(r#"<div id="hero" class="card promo">Hello</div>"#);
+        let stylesheet = parse_css(
+            r#"
+                div { color: #111111; display: block; }
+                .promo { color: #222222; }
+                #hero { color: #333333; }
+            "#,
+        );
+
+        let styled = style::style_tree(&root, &[stylesheet]);
+
+        assert_eq!(
+            styled.value("color"),
+            Some(&Value::Color(Color {
+                r: 51,
+                g: 51,
+                b: 51,
+                a: 255,
+            }))
+        );
+        assert_eq!(
+            styled.value("display"),
+            Some(&Value::Keyword("block".into()))
+        );
+    }
+
+    #[test]
+    fn inherits_color_and_font_size_from_parent() {
+        let root = parse_html(r#"<div id="app"><span>Text</span></div>"#);
+        let stylesheet = parse_css(
+            r#"
+                #app {
+                    color: #ff0000;
+                    font-size: 18px;
+                }
+            "#,
+        );
+
+        let styled = style::style_tree(&root, &[stylesheet]);
+        let child = &styled.children[0];
+
+        assert_eq!(
+            child.value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }))
+        );
+        assert_eq!(
+            child.value("font-size"),
+            Some(&Value::Length(18.0, Unit::Px))
+        );
+    }
+
+    #[test]
+    fn text_nodes_inherit_parent_style() {
+        let root = parse_html(r#"<p class="copy">Hello</p>"#);
+        let stylesheet = parse_css(
+            r#"
+                .copy {
+                    color: #0f0;
+                }
+            "#,
+        );
+
+        let styled = style::style_tree(&root, &[stylesheet]);
+        let text = &styled.children[0];
+
+        assert_eq!(
+            text.value("color"),
+            Some(&Value::Color(Color {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+}
