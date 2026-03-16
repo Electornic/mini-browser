@@ -32,7 +32,15 @@ URL
 
 ## Project Status
 
-현재는 Rust 프로젝트 초기 상태이며, 브라우저 구현을 위한 설계 문서를 먼저 정리한 단계다.
+현재는 아래 기반 모듈이 구현된 상태다.
+
+- DOM 자료구조
+- HTML parser
+- CSS parser
+- Style Engine
+- Block Layout Engine
+
+아직 렌더러, window/event loop, network/resource loader는 구현 전이다.
 
 ## Documents
 

@@ -148,7 +148,7 @@
 
 ## Next Concrete Step
 
-가장 먼저 시작할 구현은 `DOM 자료구조 + HTML parser`다. 이 둘이 고정되면 이후 CSS, style, layout 문서를 코드에 안정적으로 매핑할 수 있다.
+다음 구현은 `DisplayCommand 기반 Basic Renderer`다. 현재 DOM -> CSS -> Style -> Layout 파이프라인이 정적 입력 기준으로 닫혔으므로, 이제 layout tree를 rect/text primitive로 변환하는 단계로 넘어간다.
 
 ## Related Documents
 

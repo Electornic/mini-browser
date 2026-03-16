@@ -1,4 +1,4 @@
-use mini_browser::{css, html, style};
+use mini_browser::{css, html, layout, style};
 
 fn main() {
     let sample_html = r#"
@@ -8,15 +8,17 @@ fn main() {
         </div>
     "#;
     let sample_css = r#"
-        #app { color: #222222; font-size: 18px; }
-        p { color: #0066cc; }
+        #app { width: 320px; padding-top: 12px; }
+        h1 { font-size: 28px; margin-bottom: 8px; }
+        p { color: #0066cc; font-size: 18px; margin-top: 4px; }
     "#;
 
     match (html::parse(sample_html), css::parse(sample_css)) {
         (Ok(mut nodes), Ok(stylesheet)) => {
             if let Some(root) = nodes.pop() {
                 let styled = style::style_tree(&root, &[stylesheet]);
-                println!("{styled:#?}");
+                let layout = layout::layout_tree(&styled, 800.0);
+                println!("{layout:#?}");
             }
         }
         (Err(error), _) => eprintln!("html parse error at {}: {}", error.position, error.message),
