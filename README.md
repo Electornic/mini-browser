@@ -67,6 +67,21 @@ cargo run -- http://example.com
 
 원격 문서의 외부 stylesheet는 `<link rel="stylesheet" href="...">`에 한해 자동 로드된다.
 
+## Package macOS
+
+macOS용 `.app` 및 `.dmg`를 만들려면:
+
+```bash
+./scripts/package-macos.sh
+```
+
+산출물:
+
+- `dist/mini-browser.app`
+- `dist/mini-browser.dmg`
+
+현재 스크립트는 unsigned app을 생성한다. 외부 배포용이면 이후 `codesign`과 notarization을 추가해야 한다.
+
 ## Notes
 
 - 초기 구현은 최소 기능 우선이다.
