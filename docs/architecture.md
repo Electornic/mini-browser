@@ -53,6 +53,7 @@ Window/Event Loop
 비고:
 - 처음에는 `http://` 중심으로 시작하고 `https://`는 라이브러리 위임 여부를 별도로 결정한다.
 - 현재는 `TcpStream` 기반 단순 HTTP GET으로 main document HTML만 읽는다.
+- `https://`는 TLS connector를 통해 같은 요청/응답 파싱 경로로 연결한다.
 - stylesheet resource는 DOM에서 `<link rel="stylesheet">`를 추출한 뒤 같은 계층에서 추가 다운로드한다.
 - image resource는 DOM에서 `<img src>`를 추출한 뒤 추가 다운로드하고 렌더 단계에서 박스에 매핑한다.
 

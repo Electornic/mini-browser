@@ -148,7 +148,7 @@
 
 ## Next Concrete Step
 
-다음 구현은 `HTTPS 지원` 또는 `렌더 품질 보강`이다. 현재 HTML, external CSS, 이미지 리소스까지 로드할 수 있으므로, 이제 네트워크 현실화나 레이아웃/텍스트 렌더 품질 개선 단계로 넘어갈 수 있다.
+다음 구현은 `렌더 품질 보강` 또는 `redirect/content-type 처리 보강`이다. 현재 HTTP와 HTTPS 기반 문서, CSS, 이미지 리소스까지 로드할 수 있으므로, 이제 네트워크 현실화의 남은 부분이나 레이아웃/텍스트 렌더 품질 개선 단계로 넘어갈 수 있다.
 
 ## Related Documents
 

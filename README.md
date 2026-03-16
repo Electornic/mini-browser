@@ -45,7 +45,7 @@ URL
 - Basic Resource Loader
 - Basic Image Loader
 
-현재는 `http://` 기반 HTML 문서 다운로드, `<link rel="stylesheet">` CSS 로드, `<img src>` 이미지 다운로드 및 기본 렌더링을 지원한다.
+현재는 `http://`와 `https://` 기반 HTML 문서 다운로드, `<link rel="stylesheet">` CSS 로드, `<img src>` 이미지 다운로드 및 기본 렌더링을 지원한다.
 
 ## Documents
 
@@ -64,6 +64,12 @@ cargo run
 
 ```bash
 cargo run -- http://example.com
+```
+
+또는:
+
+```bash
+cargo run -- https://example.com
 ```
 
 원격 문서의 외부 stylesheet는 `<link rel="stylesheet" href="...">`에 한해 자동 로드된다.

@@ -5,6 +5,8 @@ use std::{
     time::Duration,
 };
 
+use native_tls::TlsConnector;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Url {
     pub scheme: String,
@@ -26,6 +28,7 @@ pub enum NetworkError {
     UnsupportedScheme(String),
     InvalidUrl(String),
     Io(String),
+    Tls(String),
     InvalidResponse(String),
     HttpStatus(u16, String),
     InvalidBodyEncoding,
@@ -38,7 +41,7 @@ impl Url {
             .split_once("://")
             .ok_or_else(|| NetworkError::InvalidUrl("missing scheme separator".into()))?;
 
-        if scheme != "http" {
+        if scheme != "http" && scheme != "https" {
             return Err(NetworkError::UnsupportedScheme(scheme.into()));
         }
 
@@ -58,7 +61,7 @@ impl Url {
                     .map_err(|_| NetworkError::InvalidUrl("invalid port".into()))?;
                 (host, port)
             }
-            None => (authority, 80),
+            None => (authority, if scheme == "https" { 443 } else { 80 }),
         };
 
         if host.is_empty() {
@@ -107,7 +110,8 @@ impl Url {
 impl fmt::Display for Url {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}://{}", self.scheme, self.host)?;
-        if self.port != 80 {
+        let default_port = if self.scheme == "https" { 443 } else { 80 };
+        if self.port != default_port {
             write!(f, ":{}", self.port)?;
         }
         write!(f, "{}", self.path)
@@ -178,12 +182,12 @@ pub fn load_image(url: &Url) -> Result<Vec<u8>, NetworkError> {
 }
 
 pub fn http_get(url: &Url) -> Result<HttpResponse, NetworkError> {
-    let mut stream = TcpStream::connect((url.host.as_str(), url.port))
+    let mut tcp_stream = TcpStream::connect((url.host.as_str(), url.port))
         .map_err(|error| NetworkError::Io(error.to_string()))?;
-    stream
+    tcp_stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|error| NetworkError::Io(error.to_string()))?;
-    stream
+    tcp_stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|error| NetworkError::Io(error.to_string()))?;
 
@@ -192,14 +196,33 @@ pub fn http_get(url: &Url) -> Result<HttpResponse, NetworkError> {
         url.path, url.host
     );
 
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|error| NetworkError::Io(error.to_string()))?;
-
     let mut response_bytes = Vec::new();
-    stream
-        .read_to_end(&mut response_bytes)
-        .map_err(|error| NetworkError::Io(error.to_string()))?;
+    match url.scheme.as_str() {
+        "http" => {
+            tcp_stream
+                .write_all(request.as_bytes())
+                .map_err(|error| NetworkError::Io(error.to_string()))?;
+            tcp_stream
+                .read_to_end(&mut response_bytes)
+                .map_err(|error| NetworkError::Io(error.to_string()))?;
+        }
+        "https" => {
+            let connector =
+                TlsConnector::new().map_err(|error| NetworkError::Tls(error.to_string()))?;
+            let mut tls_stream = connector
+                .connect(url.host.as_str(), tcp_stream)
+                .map_err(|error| NetworkError::Tls(error.to_string()))?;
+            tls_stream
+                .write_all(request.as_bytes())
+                .map_err(|error| NetworkError::Io(error.to_string()))?;
+            tls_stream
+                .read_to_end(&mut response_bytes)
+                .map_err(|error| NetworkError::Io(error.to_string()))?;
+        }
+        scheme => {
+            return Err(NetworkError::UnsupportedScheme(scheme.into()));
+        }
+    }
 
     parse_response(&response_bytes)
 }
@@ -290,6 +313,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_default_https_port_and_root_path() {
+        let url = Url::parse("https://example.com").unwrap();
+
+        assert_eq!(url.scheme, "https");
+        assert_eq!(url.host, "example.com");
+        assert_eq!(url.port, 443);
+        assert_eq!(url.path, "/");
+    }
+
+    #[test]
     fn parses_explicit_port_and_path() {
         let url = Url::parse("http://localhost:8080/index.html").unwrap();
 
@@ -300,9 +333,9 @@ mod tests {
 
     #[test]
     fn rejects_non_http_scheme() {
-        let error = Url::parse("https://example.com").unwrap_err();
+        let error = Url::parse("ftp://example.com").unwrap_err();
 
-        assert_eq!(error, NetworkError::UnsupportedScheme("https".into()));
+        assert_eq!(error, NetworkError::UnsupportedScheme("ftp".into()));
     }
 
     #[test]
@@ -327,6 +360,15 @@ mod tests {
                 path: "/reset.css".into(),
             }
         );
+    }
+
+    #[test]
+    fn display_omits_default_https_port() {
+        let url = Url::parse("https://example.com/secure").unwrap();
+        assert_eq!(url.to_string(), "https://example.com/secure");
+
+        let custom = Url::parse("https://example.com:8443/secure").unwrap();
+        assert_eq!(custom.to_string(), "https://example.com:8443/secure");
     }
 
     #[test]
