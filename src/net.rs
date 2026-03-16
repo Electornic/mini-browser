@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     io::{Read, Write},
     net::TcpStream,
     time::Duration,
@@ -100,6 +101,16 @@ impl Url {
             port: self.port,
             path: normalize_path(&path),
         })
+    }
+}
+
+impl fmt::Display for Url {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}://{}", self.scheme, self.host)?;
+        if self.port != 80 {
+            write!(f, ":{}", self.port)?;
+        }
+        write!(f, "{}", self.path)
     }
 }
 
