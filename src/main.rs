@@ -1016,12 +1016,12 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        ADDRESS_BOX_HEIGHT, ADDRESS_BOX_X, ADDRESS_BOX_Y, BrowserState, CHROME_HEIGHT,
-        HistoryEntry, LinkTarget, address_bar_rect, collect_image_commands, collect_link_targets,
-        describe_network_error, document_height, error_document, link_decoration_commands,
-        page_step, point_in_rect,
+        ADDRESS_BOX_HEIGHT, ADDRESS_BOX_X, ADDRESS_BOX_Y, BACK_BUTTON_X, BrowserState,
+        CHROME_HEIGHT, HistoryEntry, LinkTarget, NAV_BUTTON_Y, address_bar_rect, back_button_rect,
+        collect_image_commands, collect_link_targets, describe_network_error, document_height,
+        error_document, link_decoration_commands, page_step, point_in_rect,
     };
-    use mini_browser::{css, html, layout, render, resource, style};
+    use mini_browser::{css, html, layout, render, resource, style, window};
 
     #[test]
     fn computes_document_height_from_commands() {
@@ -1239,5 +1239,30 @@ mod tests {
         browser.go_forward();
         assert_eq!(browser.address_input, "http://second.test");
         assert_eq!(browser.document_html, "<div>second</div>");
+    }
+
+    #[test]
+    fn back_button_hover_requires_history() {
+        let mut browser = BrowserState::new(
+            "http://first.test".into(),
+            "<div>first</div>".into(),
+            String::new(),
+            HashMap::new(),
+            None,
+            "loaded",
+        );
+
+        let hover = browser.hovered_chrome_action(&window::WindowInput {
+            mouse_position: Some((BACK_BUTTON_X + 2.0, NAV_BUTTON_Y + 2.0)),
+            ..window::WindowInput::default()
+        });
+        assert_eq!(hover, None);
+
+        browser.back_stack.push(browser.snapshot());
+        let hover = browser.hovered_chrome_action(&window::WindowInput {
+            mouse_position: Some((back_button_rect().x + 2.0, back_button_rect().y + 2.0)),
+            ..window::WindowInput::default()
+        });
+        assert_eq!(hover, Some(super::ChromeAction::Back));
     }
 }
