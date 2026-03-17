@@ -5,11 +5,16 @@ use mini_browser::{css, dom::NodeType, html, layout, net, render, resource, styl
 const CHROME_HEIGHT: f32 = 56.0;
 const ADDRESS_TEXT_Y: f32 = 12.0;
 const STATUS_TEXT_Y: f32 = 34.0;
-const ADDRESS_BOX_X: f32 = 12.0;
+const ADDRESS_BOX_X: f32 = 68.0;
 const ADDRESS_BOX_Y: f32 = 8.0;
 const ADDRESS_BOX_HEIGHT: f32 = 18.0;
-const ADDRESS_TEXT_X: f32 = 16.0;
+const ADDRESS_TEXT_X: f32 = 72.0;
 const ADDRESS_CHAR_WIDTH: f32 = 6.0;
+const NAV_BUTTON_Y: f32 = 8.0;
+const NAV_BUTTON_WIDTH: f32 = 20.0;
+const NAV_BUTTON_HEIGHT: f32 = 18.0;
+const BACK_BUTTON_X: f32 = 12.0;
+const FORWARD_BUTTON_X: f32 = 36.0;
 
 #[derive(Debug, Clone)]
 struct BrowserState {
@@ -39,6 +44,26 @@ struct LinkTarget {
 struct DocumentView {
     commands: Vec<render::DisplayCommand>,
     links: Vec<LinkTarget>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChromeState<'a> {
+    viewport_width: usize,
+    address_input: &'a str,
+    status_text: &'a str,
+    status_color: css::Color,
+    address_bar_focused: bool,
+    address_bar_selected: bool,
+    show_caret: bool,
+    can_go_back: bool,
+    can_go_forward: bool,
+    hovered_action: Option<ChromeAction>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChromeAction {
+    Back,
+    Forward,
 }
 
 #[derive(Debug, Clone)]
@@ -119,16 +144,20 @@ impl BrowserState {
         let hovered_href = self
             .hovered_link(input, &document_view.links)
             .map(|link| link.href.as_str());
+        let hovered_action = self.hovered_chrome_action(input);
 
-        let mut commands = chrome_commands(
+        let mut commands = chrome_commands(ChromeState {
             viewport_width,
-            &self.address_input,
-            &self.status_text,
-            self.status_color,
-            self.address_bar_focused,
-            self.address_bar_selected,
-            self.show_caret(),
-        );
+            address_input: &self.address_input,
+            status_text: &self.status_text,
+            status_color: self.status_color,
+            address_bar_focused: self.address_bar_focused,
+            address_bar_selected: self.address_bar_selected,
+            show_caret: self.show_caret(),
+            can_go_back: self.can_go_back(),
+            can_go_forward: self.can_go_forward(),
+            hovered_action,
+        });
         commands.extend(render::translate(
             document_view.commands,
             0.0,
@@ -154,6 +183,16 @@ impl BrowserState {
         }
 
         if input.left_mouse_pressed {
+            if let Some(action) = self.hovered_chrome_action(input) {
+                match action {
+                    ChromeAction::Back => self.go_back(),
+                    ChromeAction::Forward => self.go_forward(),
+                }
+                self.address_bar_focused = false;
+                self.address_bar_selected = false;
+                return;
+            }
+
             if let Some((mouse_x, mouse_y)) = input.mouse_position {
                 if point_in_rect(mouse_x, mouse_y, address_bar_rect(viewport_width as f32)) {
                     self.address_bar_focused = true;
@@ -391,6 +430,27 @@ impl BrowserState {
         }
     }
 
+    fn can_go_back(&self) -> bool {
+        !self.back_stack.is_empty()
+    }
+
+    fn can_go_forward(&self) -> bool {
+        !self.forward_stack.is_empty()
+    }
+
+    fn hovered_chrome_action(&self, input: &window::WindowInput) -> Option<ChromeAction> {
+        let (mouse_x, mouse_y) = input.mouse_position?;
+
+        if point_in_rect(mouse_x, mouse_y, back_button_rect()) && self.can_go_back() {
+            return Some(ChromeAction::Back);
+        }
+        if point_in_rect(mouse_x, mouse_y, forward_button_rect()) && self.can_go_forward() {
+            return Some(ChromeAction::Forward);
+        }
+
+        None
+    }
+
     fn error_entry(&self, title: &str, message: &str) -> HistoryEntry {
         let (document_html, stylesheet) = error_document(title, message, self.address_input.trim());
         HistoryEntry {
@@ -434,23 +494,15 @@ fn build_document_view(
     })
 }
 
-fn chrome_commands(
-    viewport_width: usize,
-    address_input: &str,
-    status_text: &str,
-    status_color: css::Color,
-    address_bar_focused: bool,
-    address_bar_selected: bool,
-    show_caret: bool,
-) -> Vec<render::DisplayCommand> {
-    let width = viewport_width as f32;
-    let address_display = if address_input.is_empty() {
+fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
+    let width = chrome.viewport_width as f32;
+    let address_display = if chrome.address_input.is_empty() {
         "http://example.com".to_string()
     } else {
-        address_input.to_string()
+        chrome.address_input.to_string()
     };
     let address_box = address_bar_rect(width);
-    let border_color = if address_bar_focused {
+    let border_color = if chrome.address_bar_focused {
         css::Color {
             r: 54,
             g: 116,
@@ -504,15 +556,27 @@ fn chrome_commands(
             font_size: 8.0,
         }),
         render::DisplayCommand::Text(render::TextCommand {
-            text: status_text.to_string(),
+            text: chrome.status_text.to_string(),
             x: 16.0,
             y: STATUS_TEXT_Y,
-            color: status_color,
+            color: chrome.status_color,
             font_size: 8.0,
         }),
     ];
+    commands.extend(nav_button_commands(
+        back_button_rect(),
+        "<",
+        chrome.can_go_back,
+        chrome.hovered_action == Some(ChromeAction::Back),
+    ));
+    commands.extend(nav_button_commands(
+        forward_button_rect(),
+        ">",
+        chrome.can_go_forward,
+        chrome.hovered_action == Some(ChromeAction::Forward),
+    ));
 
-    if address_bar_selected {
+    if chrome.address_bar_selected {
         commands.push(render::DisplayCommand::SolidRect(
             css::Color {
                 r: 214,
@@ -535,7 +599,7 @@ fn chrome_commands(
             color: css::Color::BLACK,
             font_size: 8.0,
         }));
-    } else if show_caret {
+    } else if chrome.show_caret {
         commands.push(render::DisplayCommand::SolidRect(
             css::Color::BLACK,
             layout::Rect {
@@ -550,12 +614,81 @@ fn chrome_commands(
     commands
 }
 
+fn nav_button_commands(
+    rect: layout::Rect,
+    label: &str,
+    enabled: bool,
+    hovered: bool,
+) -> [render::DisplayCommand; 2] {
+    [
+        render::DisplayCommand::SolidRect(
+            if !enabled {
+                css::Color {
+                    r: 235,
+                    g: 235,
+                    b: 235,
+                    a: 255,
+                }
+            } else if hovered {
+                css::Color {
+                    r: 210,
+                    g: 223,
+                    b: 246,
+                    a: 255,
+                }
+            } else {
+                css::Color {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                    a: 255,
+                }
+            },
+            rect,
+        ),
+        render::DisplayCommand::Text(render::TextCommand {
+            text: label.to_string(),
+            x: rect.x + 7.0,
+            y: rect.y + 5.0,
+            color: if enabled {
+                css::Color::BLACK
+            } else {
+                css::Color {
+                    r: 150,
+                    g: 150,
+                    b: 150,
+                    a: 255,
+                }
+            },
+            font_size: 8.0,
+        }),
+    ]
+}
+
 fn address_bar_rect(viewport_width: f32) -> layout::Rect {
     layout::Rect {
         x: ADDRESS_BOX_X,
         y: ADDRESS_BOX_Y,
-        width: (viewport_width - 24.0).max(0.0),
+        width: (viewport_width - ADDRESS_BOX_X - 12.0).max(0.0),
         height: ADDRESS_BOX_HEIGHT,
+    }
+}
+
+fn back_button_rect() -> layout::Rect {
+    layout::Rect {
+        x: BACK_BUTTON_X,
+        y: NAV_BUTTON_Y,
+        width: NAV_BUTTON_WIDTH,
+        height: NAV_BUTTON_HEIGHT,
+    }
+}
+
+fn forward_button_rect() -> layout::Rect {
+    layout::Rect {
+        x: FORWARD_BUTTON_X,
+        y: NAV_BUTTON_Y,
+        width: NAV_BUTTON_WIDTH,
+        height: NAV_BUTTON_HEIGHT,
     }
 }
 
@@ -884,9 +1017,9 @@ mod tests {
 
     use super::{
         ADDRESS_BOX_HEIGHT, ADDRESS_BOX_X, ADDRESS_BOX_Y, BrowserState, CHROME_HEIGHT,
-        HistoryEntry, LinkTarget, address_bar_rect, collect_image_commands,
-        collect_link_targets, describe_network_error, document_height, error_document,
-        link_decoration_commands, page_step, point_in_rect,
+        HistoryEntry, LinkTarget, address_bar_rect, collect_image_commands, collect_link_targets,
+        describe_network_error, document_height, error_document, link_decoration_commands,
+        page_step, point_in_rect,
     };
     use mini_browser::{css, html, layout, render, resource, style};
 
@@ -969,7 +1102,7 @@ mod tests {
         assert_eq!(rect.x, ADDRESS_BOX_X);
         assert_eq!(rect.y, ADDRESS_BOX_Y);
         assert_eq!(rect.height, ADDRESS_BOX_HEIGHT);
-        assert_eq!(rect.width, 776.0);
+        assert_eq!(rect.width, 720.0);
     }
 
     #[test]
