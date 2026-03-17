@@ -186,15 +186,7 @@ impl BrowserState {
     fn navigate(&mut self) {
         let target = self.address_input.trim().to_string();
         if target.is_empty() {
-            self.set_status(
-                "enter url then press enter",
-                css::Color {
-                    r: 180,
-                    g: 60,
-                    b: 60,
-                    a: 255,
-                },
-            );
+            self.show_error_page("enter url", "enter url then press enter");
             return;
         }
 
@@ -217,15 +209,7 @@ impl BrowserState {
             }
             Err(error) => {
                 eprintln!("{error}");
-                self.set_status(
-                    "load failed",
-                    css::Color {
-                        r: 180,
-                        g: 60,
-                        b: 60,
-                        a: 255,
-                    },
-                );
+                self.show_error_page("load failed", &error);
             }
         }
     }
@@ -235,15 +219,7 @@ impl BrowserState {
             Ok(url) => url,
             Err(error) => {
                 eprintln!("{error}");
-                self.set_status(
-                    "link failed",
-                    css::Color {
-                        r: 180,
-                        g: 60,
-                        b: 60,
-                        a: 255,
-                    },
-                );
+                self.show_error_page("link failed", &error);
                 return;
             }
         };
@@ -270,15 +246,7 @@ impl BrowserState {
             }
             Err(error) => {
                 eprintln!("{error}");
-                self.set_status(
-                    "link failed",
-                    css::Color {
-                        r: 180,
-                        g: 60,
-                        b: 60,
-                        a: 255,
-                    },
-                );
+                self.show_error_page("link failed", &error);
             }
         }
     }
@@ -286,6 +254,22 @@ impl BrowserState {
     fn set_status(&mut self, text: impl Into<String>, color: css::Color) {
         self.status_text = text.into();
         self.status_color = color;
+    }
+
+    fn show_error_page(&mut self, title: &str, message: &str) {
+        let (document_html, stylesheet) = error_document(title, message, self.address_input.trim());
+        self.document_html = document_html;
+        self.stylesheet = stylesheet;
+        self.images.clear();
+        self.current_url = None;
+        self.scroll_offset = 0.0;
+        self.status_text = title.to_string();
+        self.status_color = css::Color {
+            r: 180,
+            g: 60,
+            b: 60,
+            a: 255,
+        };
     }
 
     fn show_caret(&self) -> bool {
@@ -621,6 +605,51 @@ fn sample_css() -> &'static str {
     "#
 }
 
+fn error_document(title: &str, message: &str, target: &str) -> (String, String) {
+    let escaped_title = escape_html(title);
+    let escaped_message = escape_html(message);
+    let escaped_target = escape_html(target);
+
+    let detail = if escaped_target.is_empty() {
+        String::new()
+    } else {
+        format!("<p>{escaped_target}</p>")
+    };
+
+    let html = format!(
+        r#"
+        <div id="app" class="error">
+            <h1>{escaped_title}</h1>
+            <p>{escaped_message}</p>
+            {detail}
+        </div>
+    "#
+    );
+
+    let css = r#"
+        #app {
+            width: 520px;
+            padding-top: 16px;
+            padding-left: 12px;
+            background-color: #fff3f0;
+        }
+        h1 { font-size: 24px; margin-bottom: 8px; color: #8a1c1c; }
+        p { font-size: 14px; margin-top: 6px; color: #4a2d2d; }
+    "#
+    .to_string();
+
+    (html, css)
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 fn load_remote_document(
     raw_url: &str,
 ) -> Result<
@@ -634,17 +663,43 @@ fn load_remote_document(
 > {
     let url = net::Url::parse(raw_url).map_err(|error| format!("url error: {error:?}"))?;
     let (html, final_url) =
-        net::load_html_document(&url).map_err(|error| format!("network error: {error:?}"))?;
-    let nodes = html::parse(&html)
-        .map_err(|error| format!("html parse error at {}: {}", error.position, error.message))?;
+        net::load_html_document(&url).map_err(|error| describe_network_error(&error))?;
+    let nodes =
+        html::parse(&html).map_err(|error| format!("html parse error {}", error.position))?;
     let stylesheets = resource::load_stylesheets(&nodes, &final_url)
-        .map_err(|error| format!("resource error: {error:?}"))?;
+        .map_err(|error| describe_resource_error(&error))?;
     let images = resource::load_images(&nodes, &final_url)
-        .map_err(|error| format!("resource error: {error:?}"))?
+        .map_err(|error| describe_resource_error(&error))?
         .into_iter()
         .map(|image| (image.url.to_string(), image))
         .collect();
     Ok((html, stylesheets.join("\n"), images, final_url))
+}
+
+fn describe_network_error(error: &net::NetworkError) -> String {
+    match error {
+        net::NetworkError::UnsupportedScheme(_) => "unsupported scheme".into(),
+        net::NetworkError::InvalidUrl(_) => "invalid url".into(),
+        net::NetworkError::Io(_) => "network connection failed".into(),
+        net::NetworkError::Tls(_) => "tls connection failed".into(),
+        net::NetworkError::InvalidResponse(_) => "invalid server response".into(),
+        net::NetworkError::MissingLocationHeader => "redirect missing location".into(),
+        net::NetworkError::RedirectLimitExceeded => "too many redirects".into(),
+        net::NetworkError::HttpStatus(code, _) => format!("http status {code}"),
+        net::NetworkError::InvalidBodyEncoding => "invalid response body encoding".into(),
+        net::NetworkError::UnexpectedContentType(content_type) => {
+            format!("unsupported content type {content_type}")
+        }
+    }
+}
+
+fn describe_resource_error(error: &resource::ResourceError) -> String {
+    match error {
+        resource::ResourceError::MissingHref => "stylesheet missing href".into(),
+        resource::ResourceError::MissingSrc => "image missing src".into(),
+        resource::ResourceError::DecodeImage(_) => "image decode failed".into(),
+        resource::ResourceError::Network(network_error) => describe_network_error(network_error),
+    }
 }
 
 fn load_initial_state() -> BrowserState {
@@ -662,18 +717,13 @@ fn load_initial_state() -> BrowserState {
                 eprintln!("{error}");
                 let mut state = BrowserState::new(
                     raw_url,
-                    sample_html().to_string(),
-                    sample_css().to_string(),
+                    String::new(),
+                    String::new(),
                     HashMap::new(),
                     None,
                     "load failed",
                 );
-                state.status_color = css::Color {
-                    r: 180,
-                    g: 60,
-                    b: 60,
-                    a: 255,
-                };
+                state.show_error_page("load failed", &error);
                 state
             }
         },
@@ -704,7 +754,8 @@ mod tests {
 
     use super::{
         ADDRESS_BOX_HEIGHT, ADDRESS_BOX_X, ADDRESS_BOX_Y, CHROME_HEIGHT, address_bar_rect,
-        collect_image_commands, collect_link_targets, document_height, page_step, point_in_rect,
+        collect_image_commands, collect_link_targets, describe_network_error, document_height,
+        error_document, page_step, point_in_rect,
     };
     use mini_browser::{css, html, layout, render, resource, style};
 
@@ -825,6 +876,27 @@ mod tests {
                 source_height: 1,
                 pixels: vec![0xFF0000],
             })]
+        );
+    }
+
+    #[test]
+    fn error_document_escapes_html() {
+        let (html, _) = error_document("load failed", "<bad>", "http://a.com?q=<x>");
+        assert!(html.contains("&lt;bad&gt;"));
+        assert!(html.contains("&lt;x&gt;"));
+    }
+
+    #[test]
+    fn network_error_messages_are_human_readable() {
+        assert_eq!(
+            describe_network_error(&mini_browser::net::NetworkError::MissingLocationHeader),
+            "redirect missing location"
+        );
+        assert_eq!(
+            describe_network_error(&mini_browser::net::NetworkError::UnexpectedContentType(
+                "application/pdf".into()
+            )),
+            "unsupported content type application/pdf"
         );
     }
 }
