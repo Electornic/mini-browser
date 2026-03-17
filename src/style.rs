@@ -67,12 +67,73 @@ fn specified_values(node: &Node, stylesheets: &[Stylesheet]) -> PropertyMap {
 
     matched.sort_by_key(|(specificity, rule_order, _)| (*specificity, *rule_order));
 
-    let mut values = PropertyMap::new();
+    let mut values = default_values(node);
     for (_, _, declarations) in matched {
         apply_declarations(&mut values, declarations);
     }
 
     values
+}
+
+fn default_values(node: &Node) -> PropertyMap {
+    let mut values = PropertyMap::new();
+    let element = match &node.node_type {
+        NodeType::Element(element) => element,
+        NodeType::Text(_) => return values,
+    };
+
+    match element.tag_name.as_str() {
+        "body" => {
+            edge_defaults(&mut values, "margin", 8.0);
+        }
+        "p" => {
+            values.insert(
+                "margin-top".into(),
+                Value::Length(12.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "margin-bottom".into(),
+                Value::Length(12.0, crate::css::Unit::Px),
+            );
+        }
+        "h1" => {
+            values.insert(
+                "font-size".into(),
+                Value::Length(32.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "margin-top".into(),
+                Value::Length(12.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "margin-bottom".into(),
+                Value::Length(16.0, crate::css::Unit::Px),
+            );
+        }
+        "a" => {
+            values.insert(
+                "color".into(),
+                Value::Color(crate::css::Color {
+                    r: 0,
+                    g: 102,
+                    b: 204,
+                    a: 255,
+                }),
+            );
+        }
+        _ => {}
+    }
+
+    values
+}
+
+fn edge_defaults(values: &mut PropertyMap, prefix: &str, amount: f32) {
+    for side in ["top", "right", "bottom", "left"] {
+        values.insert(
+            format!("{prefix}-{side}"),
+            Value::Length(amount, crate::css::Unit::Px),
+        );
+    }
 }
 
 fn apply_declarations(values: &mut PropertyMap, declarations: &[Declaration]) {
@@ -212,6 +273,60 @@ mod tests {
             Some(&Value::Color(Color {
                 r: 0,
                 g: 255,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn applies_basic_user_agent_defaults() {
+        let root = parse_html(r#"<body><h1>Title</h1><p>Copy</p><a href="/next">Next</a></body>"#);
+        let styled = style::style_tree(&root, &[]);
+
+        assert_eq!(
+            styled.value("margin-top"),
+            Some(&Value::Length(8.0, Unit::Px))
+        );
+        assert_eq!(
+            styled.children[0].value("font-size"),
+            Some(&Value::Length(32.0, Unit::Px))
+        );
+        assert_eq!(
+            styled.children[1].value("margin-bottom"),
+            Some(&Value::Length(12.0, Unit::Px))
+        );
+        assert_eq!(
+            styled.children[2].value("color"),
+            Some(&Value::Color(Color {
+                r: 0,
+                g: 102,
+                b: 204,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn author_styles_override_user_agent_defaults() {
+        let root = parse_html(r#"<body><a href="/next">Next</a></body>"#);
+        let stylesheet = parse_css(
+            r#"
+                body { margin-top: 20px; }
+                a { color: #ff0000; }
+            "#,
+        );
+        let styled = style::style_tree(&root, &[stylesheet]);
+
+        assert_eq!(
+            styled.value("margin-top"),
+            Some(&Value::Length(20.0, Unit::Px))
+        );
+        assert_eq!(
+            styled.children[0].value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
                 b: 0,
                 a: 255,
             }))

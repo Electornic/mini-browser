@@ -34,6 +34,7 @@ URL
 - 단순 selector 지원
 - `tag`, `.class`, `#id`
 - 기본 declaration parsing
+- 일부 기본 태그 스타일 제공 (`body`, `p`, `h1`, `a`)
 - 최소 property set:
   - `display`
   - `width`

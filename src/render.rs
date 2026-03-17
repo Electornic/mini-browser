@@ -541,7 +541,7 @@ mod tests {
             vec![DisplayCommand::Text(TextCommand {
                 text: "Hello".into(),
                 x: 0.0,
-                y: 0.0,
+                y: 12.0,
                 color: Color {
                     r: 0,
                     g: 255,
