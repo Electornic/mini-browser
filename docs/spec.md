@@ -40,6 +40,8 @@ URL
   - `height`
   - `margin-*`
   - `padding-*`
+  - `border-*`
+  - `border-color`
   - `background-color`
   - `color`
   - `font-size`

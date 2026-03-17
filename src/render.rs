@@ -79,6 +79,8 @@ fn paint_layout_box(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>) 
         commands.push(command);
     }
 
+    commands.extend(border_commands(layout_box));
+
     if let Some(command) = text_command(layout_box) {
         commands.push(command);
     }
@@ -117,6 +119,74 @@ fn text_command(layout_box: &LayoutBox) -> Option<DisplayCommand> {
     }))
 }
 
+fn border_commands(layout_box: &LayoutBox) -> Vec<DisplayCommand> {
+    let node = match layout_box.styled_node() {
+        Some(node) => node,
+        None => return Vec::new(),
+    };
+    let color = match node.value("border-color") {
+        Some(Value::Color(color)) => *color,
+        _ => return Vec::new(),
+    };
+    let border = layout_box.dimensions.border;
+    if border.left == 0.0 && border.right == 0.0 && border.top == 0.0 && border.bottom == 0.0 {
+        return Vec::new();
+    }
+
+    let border_box = layout_box.dimensions.border_box();
+    let mut commands = Vec::new();
+
+    if border.top > 0.0 {
+        commands.push(DisplayCommand::SolidRect(
+            color,
+            Rect {
+                x: border_box.x,
+                y: border_box.y,
+                width: border_box.width,
+                height: border.top,
+            },
+        ));
+    }
+
+    if border.bottom > 0.0 {
+        commands.push(DisplayCommand::SolidRect(
+            color,
+            Rect {
+                x: border_box.x,
+                y: border_box.y + border_box.height - border.bottom,
+                width: border_box.width,
+                height: border.bottom,
+            },
+        ));
+    }
+
+    if border.left > 0.0 {
+        commands.push(DisplayCommand::SolidRect(
+            color,
+            Rect {
+                x: border_box.x,
+                y: border_box.y,
+                width: border.left,
+                height: border_box.height,
+            },
+        ));
+    }
+
+    if border.right > 0.0 {
+        commands.push(DisplayCommand::SolidRect(
+            color,
+            Rect {
+                x: border_box.x + border_box.width - border.right,
+                y: border_box.y,
+                width: border.right,
+                height: border_box.height,
+            },
+        ));
+    }
+
+    commands
+}
+
 fn text_color(node: &crate::style::StyledNode) -> Color {
     match node.value("color") {
         Some(Value::Color(color)) => *color,
@@ -147,6 +217,16 @@ impl Dimensions {
             y: self.content.y - self.padding.top,
             width: self.content.width + self.padding.left + self.padding.right,
             height: self.content.height + self.padding.top + self.padding.bottom,
+        }
+    }
+
+    fn border_box(&self) -> Rect {
+        let padding_box = self.padding_box();
+        Rect {
+            x: padding_box.x - self.border.left,
+            y: padding_box.y - self.border.top,
+            width: padding_box.width + self.border.left + self.border.right,
+            height: padding_box.height + self.border.top + self.border.bottom,
         }
     }
 }
@@ -605,5 +685,85 @@ mod tests {
         );
 
         assert_eq!(pixels, vec![0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF]);
+    }
+
+    #[test]
+    fn paints_borders_when_color_and_width_are_present() {
+        let commands = display_list(
+            r#"<div class="panel"></div>"#,
+            r#"
+                .panel {
+                    width: 20px;
+                    height: 10px;
+                    border-left: 2px;
+                    border-right: 2px;
+                    border-top: 1px;
+                    border-bottom: 3px;
+                    border-color: #112233;
+                }
+            "#,
+        );
+
+        assert_eq!(
+            commands,
+            vec![
+                DisplayCommand::SolidRect(
+                    Color {
+                        r: 17,
+                        g: 34,
+                        b: 51,
+                        a: 255,
+                    },
+                    crate::layout::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 24.0,
+                        height: 1.0,
+                    },
+                ),
+                DisplayCommand::SolidRect(
+                    Color {
+                        r: 17,
+                        g: 34,
+                        b: 51,
+                        a: 255,
+                    },
+                    crate::layout::Rect {
+                        x: 0.0,
+                        y: 11.0,
+                        width: 24.0,
+                        height: 3.0,
+                    },
+                ),
+                DisplayCommand::SolidRect(
+                    Color {
+                        r: 17,
+                        g: 34,
+                        b: 51,
+                        a: 255,
+                    },
+                    crate::layout::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 2.0,
+                        height: 14.0,
+                    },
+                ),
+                DisplayCommand::SolidRect(
+                    Color {
+                        r: 17,
+                        g: 34,
+                        b: 51,
+                        a: 255,
+                    },
+                    crate::layout::Rect {
+                        x: 22.0,
+                        y: 0.0,
+                        width: 2.0,
+                        height: 14.0,
+                    },
+                ),
+            ]
+        );
     }
 }

@@ -46,6 +46,7 @@ URL
 - Basic Image Loader
 
 현재는 `http://`와 `https://` 기반 HTML 문서 다운로드, 기본 redirect 추적, `<link rel="stylesheet">` CSS 로드, `<img src>` 이미지 다운로드 및 기본 렌더링을 지원한다.
+기본 박스 렌더링에는 `background-color`, `border-*`, `border-color`가 반영된다.
 
 ## Documents
 

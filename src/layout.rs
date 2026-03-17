@@ -54,7 +54,7 @@ fn layout_node(
 ) -> LayoutBox {
     let margin = edge_sizes(node, "margin");
     let padding = edge_sizes(node, "padding");
-    let border = EdgeSizes::default();
+    let border = edge_sizes(node, "border");
 
     let horizontal_non_content =
         margin.left + margin.right + padding.left + padding.right + border.left + border.right;
@@ -230,5 +230,30 @@ mod tests {
         let fallback_layout = layout_tree(&fallback, 400.0);
         assert_eq!(fallback_layout.dimensions.content.width, 200.0);
         assert_eq!(fallback_layout.dimensions.content.height, 150.0);
+    }
+
+    #[test]
+    fn border_widths_reduce_available_content_width() {
+        let styled = styled_root(
+            r#"<div class="panel"></div>"#,
+            r#"
+                .panel {
+                    width: 100px;
+                    border-left: 4px;
+                    border-right: 6px;
+                    border-top: 2px;
+                    border-bottom: 3px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 400.0);
+
+        assert_eq!(layout.dimensions.border.left, 4.0);
+        assert_eq!(layout.dimensions.border.right, 6.0);
+        assert_eq!(layout.dimensions.border.top, 2.0);
+        assert_eq!(layout.dimensions.border.bottom, 3.0);
+        assert_eq!(layout.dimensions.content.width, 100.0);
+        assert_eq!(layout.dimensions.content.x, 4.0);
+        assert_eq!(layout.dimensions.content.y, 2.0);
     }
 }
