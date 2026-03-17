@@ -48,6 +48,7 @@ URL
 현재는 `http://`와 `https://` 기반 HTML 문서 다운로드, 기본 redirect 추적, `<link rel="stylesheet">` CSS 로드, `<img src>` 이미지 다운로드 및 기본 렌더링을 지원한다.
 기본 박스 렌더링에는 `background-color`, `border-*`, `border-color`가 반영된다.
 또한 `body`, `p`, `h1`, `a`에는 최소 기본 스타일이 적용된다.
+`a`, `span`, text node는 기본적인 inline 흐름으로 한 줄에 배치된다.
 
 ## Documents
 

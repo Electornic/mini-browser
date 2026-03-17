@@ -808,8 +808,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        ADDRESS_BOX_HEIGHT, ADDRESS_BOX_X, ADDRESS_BOX_Y, CHROME_HEIGHT, address_bar_rect,
-        LinkTarget, collect_image_commands, collect_link_targets, describe_network_error,
+        ADDRESS_BOX_HEIGHT, ADDRESS_BOX_X, ADDRESS_BOX_Y, CHROME_HEIGHT, LinkTarget,
+        address_bar_rect, collect_image_commands, collect_link_targets, describe_network_error,
         document_height, error_document, link_decoration_commands, page_step, point_in_rect,
     };
     use mini_browser::{css, html, layout, render, resource, style};

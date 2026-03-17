@@ -63,17 +63,20 @@ fn layout_node(
         .unwrap_or((parent_width - horizontal_non_content).max(0.0));
     let content_x = parent_x + margin.left + border.left + padding.left;
     let content_y = *cursor_y + margin.top + border.top + padding.top;
+    let (children, auto_content_height) = if uses_inline_flow(node) {
+        layout_inline_children(&node.children, content_x, content_y, content_width)
+    } else {
+        let mut child_cursor_y = content_y;
+        let children = node
+            .children
+            .iter()
+            .map(|child| layout_node(child, content_x, &mut child_cursor_y, content_width))
+            .collect::<Vec<_>>();
+        (children, child_height(node, content_y, child_cursor_y))
+    };
 
-    let mut child_cursor_y = content_y;
-    let children = node
-        .children
-        .iter()
-        .map(|child| layout_node(child, content_x, &mut child_cursor_y, content_width))
-        .collect::<Vec<_>>();
-
-    let content_height = length_value(node, "height").unwrap_or_else(|| {
-        child_height(node, content_y, child_cursor_y).max(intrinsic_height(node))
-    });
+    let content_height = length_value(node, "height")
+        .unwrap_or_else(|| auto_content_height.max(intrinsic_height(node)));
 
     let dimensions = Dimensions {
         content: Rect {
@@ -94,6 +97,161 @@ fn layout_node(
         dimensions,
         children,
     }
+}
+
+fn layout_inline_children(
+    children: &[StyledNode],
+    content_x: f32,
+    content_y: f32,
+    content_width: f32,
+) -> (Vec<LayoutBox>, f32) {
+    let mut line_x = content_x;
+    let mut line_y = content_y;
+    let mut line_height = 0.0;
+    let mut max_bottom = content_y;
+    let mut boxes = Vec::new();
+
+    for child in children {
+        let child_size = inline_total_size(child);
+        if line_x > content_x && line_x + child_size.width > content_x + content_width {
+            line_x = content_x;
+            line_y += line_height;
+            line_height = 0.0;
+        }
+
+        let child_box = layout_inline_node(child, line_x, line_y);
+        line_x += child_size.width;
+        line_height = line_height.max(child_size.height);
+        max_bottom = max_bottom.max(line_y + line_height);
+        boxes.push(child_box);
+    }
+
+    (boxes, max_bottom - content_y)
+}
+
+fn layout_inline_node(node: &StyledNode, x: f32, y: f32) -> LayoutBox {
+    let margin = edge_sizes(node, "margin");
+    let padding = edge_sizes(node, "padding");
+    let border = edge_sizes(node, "border");
+    let content_width = inline_content_width(node);
+    let content_height = inline_content_height(node);
+    let content_x = x + margin.left + border.left + padding.left;
+    let content_y = y + margin.top + border.top + padding.top;
+
+    let children = if matches!(&node.node.node_type, NodeType::Element(element) if element.tag_name != "img")
+    {
+        layout_inline_sequence_no_wrap(&node.children, content_x, content_y)
+    } else {
+        Vec::new()
+    };
+
+    LayoutBox {
+        box_type: BoxType::BlockNode(node.clone()),
+        dimensions: Dimensions {
+            content: Rect {
+                x: content_x,
+                y: content_y,
+                width: content_width,
+                height: content_height,
+            },
+            padding,
+            border,
+            margin,
+        },
+        children,
+    }
+}
+
+fn layout_inline_sequence_no_wrap(children: &[StyledNode], x: f32, y: f32) -> Vec<LayoutBox> {
+    let mut cursor_x = x;
+    let mut boxes = Vec::new();
+
+    for child in children {
+        let child_box = layout_inline_node(child, cursor_x, y);
+        cursor_x += inline_total_size(child).width;
+        boxes.push(child_box);
+    }
+
+    boxes
+}
+
+fn uses_inline_flow(node: &StyledNode) -> bool {
+    !node.children.is_empty() && node.children.iter().all(is_inline_node)
+}
+
+fn is_inline_node(node: &StyledNode) -> bool {
+    match node.value("display") {
+        Some(Value::Keyword(keyword)) if keyword == "block" => return false,
+        Some(Value::Keyword(keyword)) if keyword == "inline" => return true,
+        _ => {}
+    }
+
+    match &node.node.node_type {
+        NodeType::Text(_) => true,
+        NodeType::Element(element) => matches!(element.tag_name.as_str(), "a" | "span" | "img"),
+    }
+}
+
+fn inline_total_size(node: &StyledNode) -> Rect {
+    let margin = edge_sizes(node, "margin");
+    let padding = edge_sizes(node, "padding");
+    let border = edge_sizes(node, "border");
+    let width = margin.left
+        + border.left
+        + padding.left
+        + inline_content_width(node)
+        + padding.right
+        + border.right
+        + margin.right;
+    let height = margin.top
+        + border.top
+        + padding.top
+        + inline_content_height(node)
+        + padding.bottom
+        + border.bottom
+        + margin.bottom;
+
+    Rect {
+        x: 0.0,
+        y: 0.0,
+        width,
+        height,
+    }
+}
+
+fn inline_content_width(node: &StyledNode) -> f32 {
+    length_value(node, "width")
+        .or_else(|| intrinsic_width(node))
+        .unwrap_or_else(|| match &node.node.node_type {
+            NodeType::Text(text) => text.chars().count() as f32 * inline_char_width(node),
+            NodeType::Element(element) if element.tag_name == "img" => 200.0,
+            NodeType::Element(_) => node
+                .children
+                .iter()
+                .map(|child| inline_total_size(child).width)
+                .sum(),
+        })
+}
+
+fn inline_content_height(node: &StyledNode) -> f32 {
+    length_value(node, "height").unwrap_or_else(|| match &node.node.node_type {
+        NodeType::Text(_) => inline_font_size(node),
+        NodeType::Element(element) if element.tag_name == "img" => intrinsic_height(node),
+        NodeType::Element(_) => node
+            .children
+            .iter()
+            .map(|child| inline_total_size(child).height)
+            .fold(0.0, f32::max)
+            .max(intrinsic_height(node)),
+    })
+}
+
+fn inline_font_size(node: &StyledNode) -> f32 {
+    length_value(node, "font-size").unwrap_or(16.0)
+}
+
+fn inline_char_width(node: &StyledNode) -> f32 {
+    inline_font_size(node) * 0.75
 }
 
 fn child_height(node: &StyledNode, content_y: f32, child_cursor_y: f32) -> f32 {
@@ -255,5 +413,17 @@ mod tests {
         assert_eq!(layout.dimensions.content.width, 100.0);
         assert_eq!(layout.dimensions.content.x, 4.0);
         assert_eq!(layout.dimensions.content.y, 2.0);
+    }
+
+    #[test]
+    fn inline_children_flow_horizontally() {
+        let styled = styled_root(r#"<p><a href="/next">Go</a><span>Now</span></p>"#, "");
+        let layout = layout_tree(&styled, 400.0);
+        let link = &layout.children[0];
+        let span = &layout.children[1];
+
+        assert_eq!(link.dimensions.content.x, 0.0);
+        assert!(span.dimensions.content.x > link.dimensions.content.x);
+        assert_eq!(link.dimensions.content.y, span.dimensions.content.y);
     }
 }

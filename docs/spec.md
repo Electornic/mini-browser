@@ -52,6 +52,7 @@ URL
 - block formatting flow only
 - 부모 너비를 기준으로 자식 block 박스를 위에서 아래로 배치
 - margin/padding 반영
+- text, `a`, `span`, `img`에 대한 기본 inline 흐름 지원
 
 ### Rendering
 
