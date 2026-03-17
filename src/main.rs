@@ -24,6 +24,8 @@ struct BrowserState {
     status_text: String,
     status_color: css::Color,
     scroll_offset: f32,
+    back_stack: Vec<HistoryEntry>,
+    forward_stack: Vec<HistoryEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +39,17 @@ struct LinkTarget {
 struct DocumentView {
     commands: Vec<render::DisplayCommand>,
     links: Vec<LinkTarget>,
+}
+
+#[derive(Debug, Clone)]
+struct HistoryEntry {
+    address_input: String,
+    document_html: String,
+    stylesheet: String,
+    images: HashMap<String, resource::LoadedImage>,
+    current_url: Option<net::Url>,
+    status_text: String,
+    status_color: css::Color,
 }
 
 impl BrowserState {
@@ -60,6 +73,8 @@ impl BrowserState {
             status_text: status_text.into(),
             status_color: css::Color::BLACK,
             scroll_offset: 0.0,
+            back_stack: Vec::new(),
+            forward_stack: Vec::new(),
         }
     }
 
@@ -177,6 +192,14 @@ impl BrowserState {
             }
         }
 
+        if input.back_pressed {
+            self.go_back();
+        }
+
+        if input.forward_pressed {
+            self.go_forward();
+        }
+
         self.scroll_offset -= input.scroll_y * 24.0;
         if input.move_up {
             self.scroll_offset -= 24.0;
@@ -201,24 +224,25 @@ impl BrowserState {
 
         match load_remote_document(&target) {
             Ok((document_html, stylesheet, images, resolved_url)) => {
-                self.document_html = document_html;
-                self.stylesheet = stylesheet;
-                self.images = images;
-                self.current_url = Some(resolved_url);
-                self.scroll_offset = 0.0;
-                self.set_status(
-                    "loaded",
-                    css::Color {
+                let next_entry = HistoryEntry {
+                    address_input: resolved_url.to_string(),
+                    document_html,
+                    stylesheet,
+                    images,
+                    current_url: Some(resolved_url),
+                    status_text: "loaded".into(),
+                    status_color: css::Color {
                         r: 40,
                         g: 120,
                         b: 40,
                         a: 255,
                     },
-                );
+                };
+                self.commit_navigation(next_entry);
             }
             Err(error) => {
                 eprintln!("{error}");
-                self.show_error_page("load failed", &error);
+                self.commit_navigation(self.error_entry("load failed", &error));
             }
         }
     }
@@ -238,24 +262,25 @@ impl BrowserState {
         self.address_bar_focused = false;
         match load_remote_document(&resolved.to_string()) {
             Ok((document_html, stylesheet, images, resolved_url)) => {
-                self.document_html = document_html;
-                self.stylesheet = stylesheet;
-                self.images = images;
-                self.current_url = Some(resolved_url);
-                self.scroll_offset = 0.0;
-                self.set_status(
-                    "loaded",
-                    css::Color {
+                let next_entry = HistoryEntry {
+                    address_input: resolved_url.to_string(),
+                    document_html,
+                    stylesheet,
+                    images,
+                    current_url: Some(resolved_url),
+                    status_text: "loaded".into(),
+                    status_color: css::Color {
                         r: 40,
                         g: 120,
                         b: 40,
                         a: 255,
                     },
-                );
+                };
+                self.commit_navigation(next_entry);
             }
             Err(error) => {
                 eprintln!("{error}");
-                self.show_error_page("link failed", &error);
+                self.commit_navigation(self.error_entry("link failed", &error));
             }
         }
     }
@@ -266,19 +291,7 @@ impl BrowserState {
     }
 
     fn show_error_page(&mut self, title: &str, message: &str) {
-        let (document_html, stylesheet) = error_document(title, message, self.address_input.trim());
-        self.document_html = document_html;
-        self.stylesheet = stylesheet;
-        self.images.clear();
-        self.current_url = None;
-        self.scroll_offset = 0.0;
-        self.status_text = title.to_string();
-        self.status_color = css::Color {
-            r: 180,
-            g: 60,
-            b: 60,
-            a: 255,
-        };
+        self.restore_entry(self.error_entry(title, message));
     }
 
     fn show_caret(&self) -> bool {
@@ -331,6 +344,68 @@ impl BrowserState {
                 .map_err(|error| format!("url error: {error:?}"))
         } else {
             Err("relative link requires a loaded base url".into())
+        }
+    }
+
+    fn snapshot(&self) -> HistoryEntry {
+        HistoryEntry {
+            address_input: self.address_input.clone(),
+            document_html: self.document_html.clone(),
+            stylesheet: self.stylesheet.clone(),
+            images: self.images.clone(),
+            current_url: self.current_url.clone(),
+            status_text: self.status_text.clone(),
+            status_color: self.status_color,
+        }
+    }
+
+    fn restore_entry(&mut self, entry: HistoryEntry) {
+        self.address_input = entry.address_input;
+        self.document_html = entry.document_html;
+        self.stylesheet = entry.stylesheet;
+        self.images = entry.images;
+        self.current_url = entry.current_url;
+        self.status_text = entry.status_text;
+        self.status_color = entry.status_color;
+        self.scroll_offset = 0.0;
+        self.address_bar_selected = false;
+    }
+
+    fn commit_navigation(&mut self, entry: HistoryEntry) {
+        self.back_stack.push(self.snapshot());
+        self.forward_stack.clear();
+        self.restore_entry(entry);
+    }
+
+    fn go_back(&mut self) {
+        if let Some(previous) = self.back_stack.pop() {
+            self.forward_stack.push(self.snapshot());
+            self.restore_entry(previous);
+        }
+    }
+
+    fn go_forward(&mut self) {
+        if let Some(next) = self.forward_stack.pop() {
+            self.back_stack.push(self.snapshot());
+            self.restore_entry(next);
+        }
+    }
+
+    fn error_entry(&self, title: &str, message: &str) -> HistoryEntry {
+        let (document_html, stylesheet) = error_document(title, message, self.address_input.trim());
+        HistoryEntry {
+            address_input: self.address_input.clone(),
+            document_html,
+            stylesheet,
+            images: HashMap::new(),
+            current_url: None,
+            status_text: title.into(),
+            status_color: css::Color {
+                r: 180,
+                g: 60,
+                b: 60,
+                a: 255,
+            },
         }
     }
 }
@@ -808,9 +883,10 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        ADDRESS_BOX_HEIGHT, ADDRESS_BOX_X, ADDRESS_BOX_Y, CHROME_HEIGHT, LinkTarget,
-        address_bar_rect, collect_image_commands, collect_link_targets, describe_network_error,
-        document_height, error_document, link_decoration_commands, page_step, point_in_rect,
+        ADDRESS_BOX_HEIGHT, ADDRESS_BOX_X, ADDRESS_BOX_Y, BrowserState, CHROME_HEIGHT,
+        HistoryEntry, LinkTarget, address_bar_rect, collect_image_commands,
+        collect_link_targets, describe_network_error, document_height, error_document,
+        link_decoration_commands, page_step, point_in_rect,
     };
     use mini_browser::{css, html, layout, render, resource, style};
 
@@ -1000,5 +1076,35 @@ mod tests {
                 },
             )]
         );
+    }
+
+    #[test]
+    fn history_navigation_restores_previous_entries() {
+        let mut browser = BrowserState::new(
+            "http://first.test".into(),
+            "<div>first</div>".into(),
+            String::new(),
+            HashMap::new(),
+            None,
+            "loaded",
+        );
+
+        browser.commit_navigation(HistoryEntry {
+            address_input: "http://second.test".into(),
+            document_html: "<div>second</div>".into(),
+            stylesheet: String::new(),
+            images: HashMap::new(),
+            current_url: None,
+            status_text: "loaded".into(),
+            status_color: css::Color::BLACK,
+        });
+
+        browser.go_back();
+        assert_eq!(browser.address_input, "http://first.test");
+        assert_eq!(browser.document_html, "<div>first</div>");
+
+        browser.go_forward();
+        assert_eq!(browser.address_input, "http://second.test");
+        assert_eq!(browser.document_html, "<div>second</div>");
     }
 }

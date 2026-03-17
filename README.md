@@ -79,7 +79,7 @@ cargo run -- https://example.com
 원격 문서의 `<img src="...">` 이미지는 자동 로드되어 기본 박스로 렌더된다.
 로드 실패나 unsupported content type은 간단한 에러 페이지로 렌더된다.
 
-앱 안에서는 상단 주소창을 클릭하거나 `Cmd+L`/`Ctrl+L`로 포커스한 뒤 URL을 입력하고 `Enter`로 이동할 수 있다. `Up/Down`, `PageUp/PageDown`, 마우스 휠로 스크롤할 수 있고, 문서 안의 `<a href>` 링크는 밑줄로 표시되며 hover 시 강조되고 클릭으로 이동할 수 있다. `Esc`를 누르면 종료된다.
+앱 안에서는 상단 주소창을 클릭하거나 `Cmd+L`/`Ctrl+L`로 포커스한 뒤 URL을 입력하고 `Enter`로 이동할 수 있다. `Alt+Left/Right` 또는 `Cmd/Ctrl+[ ]`로 뒤로/앞으로 이동할 수 있다. `Up/Down`, `PageUp/PageDown`, 마우스 휠로 스크롤할 수 있고, 문서 안의 `<a href>` 링크는 밑줄로 표시되며 hover 시 강조되고 클릭으로 이동할 수 있다. `Esc`를 누르면 종료된다.
 
 ## Package macOS
 

@@ -10,6 +10,8 @@ pub struct WindowInput {
     pub enter_pressed: bool,
     pub backspace_pressed: bool,
     pub focus_address_bar: bool,
+    pub back_pressed: bool,
+    pub forward_pressed: bool,
     pub scroll_y: f32,
     pub move_up: bool,
     pub move_down: bool,
@@ -60,11 +62,16 @@ where
             || window.is_key_down(Key::RightSuper)
             || window.is_key_down(Key::LeftCtrl)
             || window.is_key_down(Key::RightCtrl);
+        let alt = window.is_key_down(Key::LeftAlt) || window.is_key_down(Key::RightAlt);
         let input = WindowInput {
             typed: std::mem::take(&mut *typed_chars.borrow_mut()),
             enter_pressed: window.is_key_pressed(Key::Enter, KeyRepeat::No),
             backspace_pressed: window.is_key_pressed(Key::Backspace, KeyRepeat::Yes),
             focus_address_bar: command_or_ctrl && window.is_key_pressed(Key::L, KeyRepeat::No),
+            back_pressed: (alt && window.is_key_pressed(Key::Left, KeyRepeat::No))
+                || (command_or_ctrl && window.is_key_pressed(Key::LeftBracket, KeyRepeat::No)),
+            forward_pressed: (alt && window.is_key_pressed(Key::Right, KeyRepeat::No))
+                || (command_or_ctrl && window.is_key_pressed(Key::RightBracket, KeyRepeat::No)),
             scroll_y: window
                 .get_scroll_wheel()
                 .map(|scroll| scroll.1)
