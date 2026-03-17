@@ -30,6 +30,7 @@ struct BrowserState {
 struct LinkTarget {
     href: String,
     rect: layout::Rect,
+    underline: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +101,9 @@ impl BrowserState {
         }
 
         self.clamp_scroll(viewport_height, document_height(&document_view.commands));
+        let hovered_href = self
+            .hovered_link(input, &document_view.links)
+            .map(|link| link.href.as_str());
 
         let mut commands = chrome_commands(
             viewport_width,
@@ -112,6 +116,11 @@ impl BrowserState {
         );
         commands.extend(render::translate(
             document_view.commands,
+            0.0,
+            CHROME_HEIGHT - self.scroll_offset,
+        ));
+        commands.extend(render::translate(
+            link_decoration_commands(&document_view.links, hovered_href),
             0.0,
             CHROME_HEIGHT - self.scroll_offset,
         ));
@@ -293,6 +302,14 @@ impl BrowserState {
             return None;
         }
 
+        self.hovered_link(input, links)
+    }
+
+    fn hovered_link<'a>(
+        &self,
+        input: &window::WindowInput,
+        links: &'a [LinkTarget],
+    ) -> Option<&'a LinkTarget> {
         let (mouse_x, mouse_y) = input.mouse_position?;
         if mouse_y < CHROME_HEIGHT {
             return None;
@@ -490,6 +507,7 @@ fn collect_link_targets(
         targets.push(LinkTarget {
             href: href.to_string(),
             rect: layout_box.dimensions.content,
+            underline: own_href.is_none(),
         });
     }
 
@@ -577,6 +595,43 @@ fn image_command_for_layout_box(
 
 fn point_in_rect(x: f32, y: f32, rect: layout::Rect) -> bool {
     x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height
+}
+
+fn link_decoration_commands(
+    links: &[LinkTarget],
+    hovered_href: Option<&str>,
+) -> Vec<render::DisplayCommand> {
+    links
+        .iter()
+        .filter(|link| link.underline)
+        .map(|link| {
+            let color = if hovered_href == Some(link.href.as_str()) {
+                css::Color {
+                    r: 180,
+                    g: 60,
+                    b: 140,
+                    a: 255,
+                }
+            } else {
+                css::Color {
+                    r: 0,
+                    g: 102,
+                    b: 204,
+                    a: 255,
+                }
+            };
+
+            render::DisplayCommand::SolidRect(
+                color,
+                layout::Rect {
+                    x: link.rect.x,
+                    y: link.rect.y + link.rect.height.max(1.0) - 1.0,
+                    width: link.rect.width.max(1.0),
+                    height: 1.0,
+                },
+            )
+        })
+        .collect()
 }
 
 fn page_step(viewport_height: usize) -> f32 {
@@ -754,8 +809,8 @@ mod tests {
 
     use super::{
         ADDRESS_BOX_HEIGHT, ADDRESS_BOX_X, ADDRESS_BOX_Y, CHROME_HEIGHT, address_bar_rect,
-        collect_image_commands, collect_link_targets, describe_network_error, document_height,
-        error_document, page_step, point_in_rect,
+        LinkTarget, collect_image_commands, collect_link_targets, describe_network_error,
+        document_height, error_document, link_decoration_commands, page_step, point_in_rect,
     };
     use mini_browser::{css, html, layout, render, resource, style};
 
@@ -804,6 +859,8 @@ mod tests {
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].href, "/next");
         assert_eq!(links[1].href, "/next");
+        assert!(!links[0].underline);
+        assert!(links[1].underline);
     }
 
     #[test]
@@ -897,6 +954,51 @@ mod tests {
                 "application/pdf".into()
             )),
             "unsupported content type application/pdf"
+        );
+    }
+
+    #[test]
+    fn link_decoration_underlines_text_targets_and_highlights_hover() {
+        let links = vec![
+            LinkTarget {
+                href: "/a".into(),
+                rect: layout::Rect {
+                    x: 10.0,
+                    y: 20.0,
+                    width: 30.0,
+                    height: 12.0,
+                },
+                underline: false,
+            },
+            LinkTarget {
+                href: "/a".into(),
+                rect: layout::Rect {
+                    x: 12.0,
+                    y: 20.0,
+                    width: 28.0,
+                    height: 12.0,
+                },
+                underline: true,
+            },
+        ];
+
+        let commands = link_decoration_commands(&links, Some("/a"));
+        assert_eq!(
+            commands,
+            vec![render::DisplayCommand::SolidRect(
+                css::Color {
+                    r: 180,
+                    g: 60,
+                    b: 140,
+                    a: 255,
+                },
+                layout::Rect {
+                    x: 12.0,
+                    y: 31.0,
+                    width: 28.0,
+                    height: 1.0,
+                },
+            )]
         );
     }
 }
