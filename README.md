@@ -56,6 +56,7 @@ URL
 - [Architecture](docs/architecture.md)
 - [Data Model](docs/data-model.md)
 - [Roadmap](docs/roadmap.md)
+- [Understanding Guide](docs/understanding-guide.md)
 
 ## Run
 
