@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+// Attributes are stored in a deterministic map so debug output and tests stay stable.
 pub type AttrMap = BTreeMap<String, String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,8 @@ impl Node {
         }
     }
 
+    // Element nodes own their children directly because this browser keeps the DOM immutable
+    // after parsing instead of exposing mutation APIs.
     pub fn element(tag_name: impl Into<String>, attributes: AttrMap, children: Vec<Node>) -> Self {
         Self {
             children,

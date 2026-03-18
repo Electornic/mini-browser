@@ -1,3 +1,4 @@
+// Core modules are split by browser pipeline stage so each step can stay small and testable.
 pub mod css;
 pub mod dom;
 pub mod html;

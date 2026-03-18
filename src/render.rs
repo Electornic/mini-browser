@@ -4,6 +4,7 @@ use crate::{
     layout::{Dimensions, LayoutBox, Rect},
 };
 
+// Rendering is two-stage: layout boxes become display commands, then commands rasterize to pixels.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisplayCommand {
     SolidRect(Color, Rect),
@@ -37,6 +38,7 @@ pub fn build_display_list(layout_root: &LayoutBox) -> Vec<DisplayCommand> {
     commands
 }
 
+// Chrome UI and scrolling both reuse this helper to move already-built commands around.
 pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<DisplayCommand> {
     for command in &mut commands {
         match command {
@@ -75,6 +77,7 @@ pub fn rasterize(commands: &[DisplayCommand], width: usize, height: usize) -> Ve
 }
 
 fn paint_layout_box(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>) {
+    // The paint order is background -> border -> content so children appear on top.
     if let Some(command) = background_command(layout_box) {
         commands.push(command);
     }
@@ -315,6 +318,7 @@ fn draw_image(buffer: &mut [u32], width: usize, height: usize, image: &ImageComm
         return;
     }
 
+    // Images are scaled with nearest-neighbor sampling to keep the implementation small.
     for y in y_start..y_end {
         let source_y = (((y as f32 - image.y) / image.height.max(1.0)) * image.source_height as f32)
             .floor()

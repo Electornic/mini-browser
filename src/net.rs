@@ -7,6 +7,7 @@ use std::{
 
 use native_tls::TlsConnector;
 
+// The network layer keeps requests tiny: GET only, synchronous, and close-after-response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Url {
     pub scheme: String,
@@ -54,6 +55,7 @@ pub enum NetworkError {
 
 impl Url {
     pub fn parse(input: &str) -> Result<Self, NetworkError> {
+        // Relative pieces are handled later; parse only fully qualified URLs here.
         let (scheme, rest) = input
             .split_once("://")
             .ok_or_else(|| NetworkError::InvalidUrl("missing scheme separator".into()))?;
@@ -98,6 +100,7 @@ impl Url {
             return Self::parse(href);
         }
 
+        // Relative resources resolve against the current document path, not the process cwd.
         let path = if href.starts_with('/') {
             href.to_string()
         } else {
@@ -209,6 +212,7 @@ pub fn load_image(url: &Url) -> Result<Vec<u8>, NetworkError> {
 pub fn fetch(url: &Url) -> Result<FetchResult, NetworkError> {
     let mut current_url = url.clone();
 
+    // Redirects are followed in-place so callers always see the final document URL.
     for _ in 0..10 {
         let response = http_get(&current_url)?;
 
@@ -245,6 +249,7 @@ pub fn http_get(url: &Url) -> Result<HttpResponse, NetworkError> {
     );
 
     let mut response_bytes = Vec::new();
+    // TLS only changes how bytes move over the socket; HTTP parsing stays exactly the same.
     match url.scheme.as_str() {
         "http" => {
             tcp_stream

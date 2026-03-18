@@ -4,6 +4,7 @@ use minifb::{InputCallback, Key, KeyRepeat, MouseButton, MouseMode, Window, Wind
 
 use crate::{render, render::DisplayCommand};
 
+// WindowInput is the per-frame snapshot that the browser UI consumes.
 #[derive(Debug, Clone, Default)]
 pub struct WindowInput {
     pub typed: String,
@@ -55,6 +56,7 @@ where
     window.set_target_fps(60);
     let mut last_left_down = false;
 
+    // minifb pushes typed characters via callback, while special keys are polled each frame.
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let size = window.get_size();
         let left_down = window.get_mouse_down(MouseButton::Left);

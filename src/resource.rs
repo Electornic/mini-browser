@@ -3,6 +3,7 @@ use crate::{
     net::{self, NetworkError, Url},
 };
 
+// Resource loading stays separate from HTML parsing so the app can decide when to fetch extras.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceError {
     MissingHref,
@@ -71,6 +72,7 @@ fn collect_stylesheet_urls(
     urls: &mut Vec<Url>,
 ) -> Result<(), ResourceError> {
     if let NodeType::Element(element) = &node.node_type {
+        // Only explicit stylesheet links are treated as CSS resources.
         if element.tag_name == "link"
             && element
                 .attributes
@@ -98,6 +100,7 @@ fn collect_image_urls(
     urls: &mut Vec<Url>,
 ) -> Result<(), ResourceError> {
     if let NodeType::Element(element) = &node.node_type {
+        // Images are fetched lazily from DOM attributes after the main document is parsed.
         if element.tag_name == "img" {
             let src = element
                 .attributes
@@ -115,6 +118,7 @@ fn collect_image_urls(
 }
 
 fn decode_image(url: Url, bytes: &[u8]) -> Result<LoadedImage, ResourceError> {
+    // Decode to a simple RGB pixel buffer so rendering does not depend on image crate types.
     let decoded = image::load_from_memory(bytes)
         .map_err(|error| ResourceError::DecodeImage(error.to_string()))?
         .to_rgba8();

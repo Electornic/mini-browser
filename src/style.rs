@@ -7,6 +7,7 @@ use crate::{
 
 pub type PropertyMap = BTreeMap<String, Value>;
 
+// StyledNode mirrors the DOM tree but replaces raw attributes with resolved CSS properties.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StyledNode {
     pub node: Node,
@@ -31,6 +32,7 @@ fn style_tree_with_parent(
 ) -> StyledNode {
     let mut specified_values = specified_values(node, stylesheets);
 
+    // A few inherited properties are enough to make text-heavy documents readable.
     for property in ["color", "font-size"] {
         if !specified_values.contains_key(property) {
             if let Some(value) = parent_values.and_then(|values| values.get(property)) {
@@ -65,6 +67,7 @@ fn specified_values(node: &Node, stylesheets: &[Stylesheet]) -> PropertyMap {
         }
     }
 
+    // Lower-priority rules are applied first so later, more specific matches overwrite them.
     matched.sort_by_key(|(specificity, rule_order, _)| (*specificity, *rule_order));
 
     let mut values = default_values(node);
@@ -82,6 +85,7 @@ fn default_values(node: &Node) -> PropertyMap {
         NodeType::Text(_) => return values,
     };
 
+    // These defaults act like a tiny user-agent stylesheet so unstyled pages remain legible.
     match element.tag_name.as_str() {
         "body" => {
             edge_defaults(&mut values, "margin", 8.0);

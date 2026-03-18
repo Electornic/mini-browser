@@ -1,3 +1,4 @@
+// CSS support is intentionally narrow: simple selectors and a handful of value types.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
@@ -119,6 +120,7 @@ impl<'a> Parser<'a> {
             selectors.push(self.parse_selector()?);
             self.consume_whitespace();
 
+            // A single rule can target multiple simple selectors separated by commas.
             if self.next_char() == Some(',') {
                 self.consume_char();
                 continue;
@@ -183,6 +185,7 @@ impl<'a> Parser<'a> {
         match self.next_char() {
             Some('#') => self.parse_hex_color(),
             Some(ch) if ch.is_ascii_digit() => self.parse_length_or_number(),
+            // Everything else is treated as a keyword to keep the engine permissive.
             Some(_) => Ok(Value::Keyword(self.parse_identifier()?)),
             None => Err(ParseError::new(
                 self.pos,

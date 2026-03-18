@@ -4,6 +4,7 @@ use crate::{
     style::StyledNode,
 };
 
+// Layout uses a single rectangular box model for both block and simple inline flow.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
     pub x: f32,
@@ -63,6 +64,8 @@ fn layout_node(
         .unwrap_or((parent_width - horizontal_non_content).max(0.0));
     let content_x = parent_x + margin.left + border.left + padding.left;
     let content_y = *cursor_y + margin.top + border.top + padding.top;
+
+    // Parents with only inline children lay them out left-to-right; everything else stays block.
     let (children, auto_content_height) = if uses_inline_flow(node) {
         layout_inline_children(&node.children, content_x, content_y, content_width)
     } else {
@@ -111,6 +114,7 @@ fn layout_inline_children(
     let mut max_bottom = content_y;
     let mut boxes = Vec::new();
 
+    // Inline layout here is intentionally simple: one line box with wrapping when width runs out.
     for child in children {
         let child_size = inline_total_size(child);
         if line_x > content_x && line_x + child_size.width > content_x + content_width {
@@ -138,6 +142,7 @@ fn layout_inline_node(node: &StyledNode, x: f32, y: f32) -> LayoutBox {
     let content_x = x + margin.left + border.left + padding.left;
     let content_y = y + margin.top + border.top + padding.top;
 
+    // Nested inline children are positioned relative to their inline parent's content box.
     let children = if matches!(&node.node.node_type, NodeType::Element(element) if element.tag_name != "img")
     {
         layout_inline_sequence_no_wrap(&node.children, content_x, content_y)
@@ -188,6 +193,7 @@ fn is_inline_node(node: &StyledNode) -> bool {
 
     match &node.node.node_type {
         NodeType::Text(_) => true,
+        // Keep the inline set small and predictable instead of trying to emulate full HTML layout.
         NodeType::Element(element) => matches!(element.tag_name.as_str(), "a" | "span" | "img"),
     }
 }

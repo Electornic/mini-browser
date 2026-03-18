@@ -1,5 +1,6 @@
 use crate::dom::{AttrMap, Node};
 
+// The HTML parser accepts a deliberately small, well-formed subset of HTML.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub position: usize,
@@ -50,6 +51,7 @@ impl<'a> Parser<'a> {
                 break;
             }
 
+            // Parsing returns sibling nodes until a closing tag or end-of-input stops the loop.
             let node = self.parse_node()?;
             if !matches!(node.node_type, crate::dom::NodeType::Text(ref text) if text.is_empty()) {
                 nodes.push(node);
@@ -80,6 +82,7 @@ impl<'a> Parser<'a> {
         self.expect_char('>')?;
         let children = self.parse_nodes()?;
 
+        // This parser keeps tag balancing strict instead of trying to recover like a real browser.
         self.expect_char('<')?;
         self.expect_char('/')?;
         let closing_tag = self.parse_tag_name()?;
@@ -96,6 +99,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_text(&mut self) -> Node {
+        // Text is everything up to the next tag boundary.
         let text = self.consume_while(|ch| ch != '<');
         Node::text(text)
     }
