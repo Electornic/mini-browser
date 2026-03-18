@@ -23,6 +23,15 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
+impl HttpResponse {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(header_name, _)| header_name == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchResult {
     pub final_url: Url,
@@ -142,7 +151,7 @@ pub fn load_html_document(url: &Url) -> Result<(String, Url), NetworkError> {
         ));
     }
 
-    if let Some(content_type) = header(&response, "content-type") {
+    if let Some(content_type) = response.header("content-type") {
         if !content_type.starts_with("text/html") {
             return Err(NetworkError::UnexpectedContentType(
                 content_type.to_string(),
@@ -165,7 +174,7 @@ pub fn load_css(url: &Url) -> Result<String, NetworkError> {
         ));
     }
 
-    if let Some(content_type) = header(&response, "content-type") {
+    if let Some(content_type) = response.header("content-type") {
         if !content_type.starts_with("text/css") {
             return Err(NetworkError::UnexpectedContentType(
                 content_type.to_string(),
@@ -186,7 +195,7 @@ pub fn load_image(url: &Url) -> Result<Vec<u8>, NetworkError> {
         ));
     }
 
-    if let Some(content_type) = header(&response, "content-type") {
+    if let Some(content_type) = response.header("content-type") {
         if !content_type.starts_with("image/") {
             return Err(NetworkError::UnexpectedContentType(
                 content_type.to_string(),
@@ -204,8 +213,9 @@ pub fn fetch(url: &Url) -> Result<FetchResult, NetworkError> {
         let response = http_get(&current_url)?;
 
         if is_redirect_status(response.status_code) {
-            let location =
-                header(&response, "location").ok_or(NetworkError::MissingLocationHeader)?;
+            let location = response
+                .header("location")
+                .ok_or(NetworkError::MissingLocationHeader)?;
             current_url = current_url.resolve(location)?;
             continue;
         }
@@ -304,14 +314,6 @@ fn parse_response(bytes: &[u8]) -> Result<HttpResponse, NetworkError> {
         headers,
         body,
     })
-}
-
-fn header<'a>(response: &'a HttpResponse, name: &str) -> Option<&'a str> {
-    response
-        .headers
-        .iter()
-        .find(|(header_name, _)| header_name == name)
-        .map(|(_, value)| value.as_str())
 }
 
 fn is_redirect_status(status_code: u16) -> bool {

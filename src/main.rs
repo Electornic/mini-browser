@@ -904,6 +904,44 @@ fn error_document(title: &str, message: &str, target: &str) -> (String, String) 
     (html, css)
 }
 
+fn text_document(body: &str, target: &str) -> (String, String) {
+    let escaped_body = escape_html(body);
+    let escaped_target = escape_html(target);
+    let detail = if escaped_target.is_empty() {
+        String::new()
+    } else {
+        format!("<p>{escaped_target}</p>")
+    };
+
+    let html = format!(
+        r#"
+        <div id="app" class="plain-text">
+            <h1>text document</h1>
+            {detail}
+            <pre>{escaped_body}</pre>
+        </div>
+    "#
+    );
+
+    let css = r#"
+        #app {
+            width: 680px;
+            padding-top: 16px;
+            padding-left: 12px;
+            background-color: #f7f4ee;
+        }
+        h1 { font-size: 22px; margin-bottom: 8px; color: #433526; }
+        p { font-size: 14px; margin-top: 6px; color: #6b5947; }
+        pre {
+            margin-top: 10px;
+            color: #2f2a24;
+        }
+    "#
+    .to_string();
+
+    (html, css)
+}
+
 fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -925,8 +963,31 @@ fn load_remote_document(
     String,
 > {
     let url = net::Url::parse(raw_url).map_err(|error| format!("url error: {error:?}"))?;
-    let (html, final_url) =
-        net::load_html_document(&url).map_err(|error| describe_network_error(&error))?;
+    let fetch_result = net::fetch(&url).map_err(|error| describe_network_error(&error))?;
+    let response = fetch_result.response;
+    let final_url = fetch_result.final_url;
+
+    if response.status_code != 200 {
+        return Err(describe_network_error(&net::NetworkError::HttpStatus(
+            response.status_code,
+            response.reason_phrase,
+        )));
+    }
+
+    let content_type = response.header("content-type").unwrap_or("text/html");
+    if content_type.starts_with("text/plain") {
+        let body = String::from_utf8(response.body)
+            .map_err(|_| describe_network_error(&net::NetworkError::InvalidBodyEncoding))?;
+        let (document_html, stylesheet) = text_document(&body, &final_url.to_string());
+        return Ok((document_html, stylesheet, HashMap::new(), final_url));
+    }
+
+    if !content_type.starts_with("text/html") {
+        return Err(format!("unsupported content type {content_type}"));
+    }
+
+    let html = String::from_utf8(response.body)
+        .map_err(|_| describe_network_error(&net::NetworkError::InvalidBodyEncoding))?;
     let nodes =
         html::parse(&html).map_err(|error| format!("html parse error {}", error.position))?;
     let stylesheets = resource::load_stylesheets(&nodes, &final_url)
@@ -1019,7 +1080,7 @@ mod tests {
         ADDRESS_BOX_HEIGHT, ADDRESS_BOX_X, ADDRESS_BOX_Y, BACK_BUTTON_X, BrowserState,
         CHROME_HEIGHT, HistoryEntry, LinkTarget, NAV_BUTTON_Y, address_bar_rect, back_button_rect,
         collect_image_commands, collect_link_targets, describe_network_error, document_height,
-        error_document, link_decoration_commands, page_step, point_in_rect,
+        error_document, link_decoration_commands, page_step, point_in_rect, text_document,
     };
     use mini_browser::{css, html, layout, render, resource, style, window};
 
@@ -1164,6 +1225,13 @@ mod tests {
             )),
             "unsupported content type application/pdf"
         );
+    }
+
+    #[test]
+    fn text_document_escapes_plain_text() {
+        let (html, _) = text_document("a < b", "http://example.com/file.txt");
+        assert!(html.contains("a &lt; b"));
+        assert!(html.contains("text document"));
     }
 
     #[test]
