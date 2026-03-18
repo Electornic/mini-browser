@@ -5,6 +5,7 @@ use crate::{
 };
 
 // Layout uses a single rectangular box model for both block and simple inline flow.
+// Every node becomes a box with a content rect plus margin/padding/border around it.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
     pub x: f32,
@@ -114,7 +115,7 @@ fn layout_inline_children(
     let mut max_bottom = content_y;
     let mut boxes = Vec::new();
 
-    // Inline layout here is intentionally simple: one line box with wrapping when width runs out.
+    // Inline layout here is intentionally simple: a single line that wraps when width runs out.
     for child in children {
         let child_size = inline_total_size(child);
         if line_x > content_x && line_x + child_size.width > content_x + content_width {
@@ -181,6 +182,8 @@ fn layout_inline_sequence_no_wrap(children: &[StyledNode], x: f32, y: f32) -> Ve
 }
 
 fn uses_inline_flow(node: &StyledNode) -> bool {
+    // Inline flow only kicks in when all children are inline-ish.
+    // Mixed block/inline trees still fall back to the simpler vertical block algorithm.
     !node.children.is_empty() && node.children.iter().all(is_inline_node)
 }
 
@@ -226,6 +229,8 @@ fn inline_total_size(node: &StyledNode) -> Rect {
 }
 
 fn inline_content_width(node: &StyledNode) -> f32 {
+    // Text width is approximated from character count because this toy renderer does not do
+    // real font shaping or glyph measurement.
     length_value(node, "width")
         .or_else(|| intrinsic_width(node))
         .unwrap_or_else(|| match &node.node.node_type {
@@ -270,6 +275,7 @@ fn child_height(node: &StyledNode, content_y: f32, child_cursor_y: f32) -> f32 {
 
 fn intrinsic_width(node: &StyledNode) -> Option<f32> {
     match &node.node.node_type {
+        // Images need a visible box even when no author CSS width is provided.
         NodeType::Element(element) if element.tag_name == "img" => {
             attribute_length(element, "width").or(Some(200.0))
         }
@@ -280,6 +286,7 @@ fn intrinsic_width(node: &StyledNode) -> Option<f32> {
 fn intrinsic_height(node: &StyledNode) -> f32 {
     match &node.node.node_type {
         NodeType::Text(_) => length_value(node, "font-size").unwrap_or(16.0),
+        // Images also get a default height so the renderer has an area to paint into.
         NodeType::Element(element) if element.tag_name == "img" => {
             attribute_length(element, "height").unwrap_or(150.0)
         }

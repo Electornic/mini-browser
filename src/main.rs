@@ -2,6 +2,8 @@ use std::{collections::HashMap, env};
 
 use mini_browser::{css, dom::NodeType, html, layout, net, render, resource, style, window};
 
+// These constants define the browser chrome at the top of the window.
+// Everything below `CHROME_HEIGHT` is treated as page content.
 const CHROME_HEIGHT: f32 = 56.0;
 const ADDRESS_TEXT_Y: f32 = 12.0;
 const STATUS_TEXT_Y: f32 = 34.0;
@@ -18,17 +20,24 @@ const FORWARD_BUTTON_X: f32 = 36.0;
 
 #[derive(Debug, Clone)]
 struct BrowserState {
+    // Address bar and focus state for the tiny browser chrome.
     address_input: String,
     address_bar_focused: bool,
     address_bar_selected: bool,
     frame_index: usize,
+
+    // The currently displayed document snapshot.
     document_html: String,
     stylesheet: String,
     images: HashMap<String, resource::LoadedImage>,
     current_url: Option<net::Url>,
+
+    // UI state that is shown in the chrome.
     status_text: String,
     status_color: css::Color,
     scroll_offset: f32,
+
+    // History stores whole snapshots so back/forward can restore instantly without refetching.
     back_stack: Vec<HistoryEntry>,
     forward_stack: Vec<HistoryEntry>,
 }
@@ -42,6 +51,7 @@ struct LinkTarget {
 
 #[derive(Debug, Clone)]
 struct DocumentView {
+    // `commands` are what get painted, `links` are the separately tracked clickable regions.
     commands: Vec<render::DisplayCommand>,
     links: Vec<LinkTarget>,
 }
@@ -109,6 +119,7 @@ impl BrowserState {
         viewport_height: usize,
         input: &window::WindowInput,
     ) -> Vec<render::DisplayCommand> {
+        // The browser re-builds its visible scene every frame from current state + fresh input.
         self.frame_index = self.frame_index.wrapping_add(1);
         self.apply_input(input, viewport_width, viewport_height);
 
@@ -136,6 +147,7 @@ impl BrowserState {
             }
         });
 
+        // Page clicks are handled after layout exists so hit testing can use real rectangles.
         if let Some(link_target) = self.clicked_link(input, &document_view.links) {
             self.navigate_to_link(link_target);
         }
@@ -158,6 +170,7 @@ impl BrowserState {
             can_go_forward: self.can_go_forward(),
             hovered_action,
         });
+        // Page commands are translated below the fixed chrome and then decorated with link underlines.
         commands.extend(render::translate(
             document_view.commands,
             0.0,
@@ -177,6 +190,7 @@ impl BrowserState {
         viewport_width: usize,
         viewport_height: usize,
     ) {
+        // Chrome buttons get first chance at a click so they do not fall through to page links.
         if input.focus_address_bar {
             self.address_bar_focused = true;
             self.address_bar_selected = true;
@@ -204,6 +218,7 @@ impl BrowserState {
             }
         }
 
+        // Keyboard text entry only edits the address bar when it is focused.
         if self.address_bar_focused {
             for ch in input.typed.chars() {
                 if !ch.is_control() {
@@ -239,6 +254,7 @@ impl BrowserState {
             self.go_forward();
         }
 
+        // Scrolling is applied after navigation shortcuts so the restored page starts at offset 0.
         self.scroll_offset -= input.scroll_y * 24.0;
         if input.move_up {
             self.scroll_offset -= 24.0;
@@ -261,6 +277,7 @@ impl BrowserState {
             return;
         }
 
+        // Successful navigation replaces the visible page and pushes the old snapshot to history.
         match load_remote_document(&target) {
             Ok((document_html, stylesheet, images, resolved_url)) => {
                 let next_entry = HistoryEntry {
@@ -299,6 +316,7 @@ impl BrowserState {
         self.address_input = resolved.to_string();
         self.address_bar_selected = false;
         self.address_bar_focused = false;
+        // Link navigation reuses the same loader path as manual URL entry.
         match load_remote_document(&resolved.to_string()) {
             Ok((document_html, stylesheet, images, resolved_url)) => {
                 let next_entry = HistoryEntry {
@@ -387,6 +405,7 @@ impl BrowserState {
     }
 
     fn snapshot(&self) -> HistoryEntry {
+        // History snapshots include the decoded image cache so back/forward feels immediate.
         HistoryEntry {
             address_input: self.address_input.clone(),
             document_html: self.document_html.clone(),
@@ -477,6 +496,8 @@ fn build_document_view(
     current_url: Option<&net::Url>,
     images: &HashMap<String, resource::LoadedImage>,
 ) -> Result<DocumentView, String> {
+    // This is the full browser pipeline in one place:
+    // HTML/CSS text -> styled tree -> layout tree -> display commands + clickable metadata.
     let mut nodes = html::parse(document_html)
         .map_err(|error| format!("html parse error at {}: {}", error.position, error.message))?;
     let stylesheet = css::parse(stylesheet_source)
@@ -495,6 +516,7 @@ fn build_document_view(
 }
 
 fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
+    // Chrome rendering is intentionally separate from page rendering so scrolling never moves it.
     let width = chrome.viewport_width as f32;
     let address_display = if chrome.address_input.is_empty() {
         "http://example.com".to_string()
@@ -620,6 +642,7 @@ fn nav_button_commands(
     enabled: bool,
     hovered: bool,
 ) -> [render::DisplayCommand; 2] {
+    // Buttons are just a background rect plus a text glyph. There is no separate widget system.
     [
         render::DisplayCommand::SolidRect(
             if !enabled {
@@ -711,6 +734,8 @@ fn collect_link_targets(
     let current_href = own_href.or(inherited_href);
     let mut targets = Vec::new();
 
+    // Link targets are collected separately from display commands because clicking needs rectangles,
+    // not just painted pixels.
     if let Some(href) = current_href.filter(|_| should_collect_link_target(layout_box, own_href)) {
         targets.push(LinkTarget {
             href: href.to_string(),
@@ -782,6 +807,7 @@ fn image_command_for_layout_box(
     base_url: Option<&net::Url>,
     images: &HashMap<String, resource::LoadedImage>,
 ) -> Option<render::DisplayCommand> {
+    // Layout decides *where* an image box goes; the image cache supplies *what* pixels fill it.
     let src = src_for_layout_box(layout_box)?;
     let image_key = if src.contains("://") {
         src.to_string()
@@ -809,6 +835,7 @@ fn link_decoration_commands(
     links: &[LinkTarget],
     hovered_href: Option<&str>,
 ) -> Vec<render::DisplayCommand> {
+    // Link underlines are drawn as separate commands so hover state can change them cheaply.
     links
         .iter()
         .filter(|link| link.underline)
@@ -869,6 +896,7 @@ fn sample_css() -> &'static str {
 }
 
 fn error_document(title: &str, message: &str, target: &str) -> (String, String) {
+    // Error pages are rendered with the same browser pipeline as normal documents.
     let escaped_title = escape_html(title);
     let escaped_message = escape_html(message);
     let escaped_target = escape_html(target);
@@ -905,6 +933,8 @@ fn error_document(title: &str, message: &str, target: &str) -> (String, String) 
 }
 
 fn text_document(body: &str, target: &str) -> (String, String) {
+    // `text/plain` is wrapped in a simple HTML shell so the browser can display it without a
+    // separate rendering path.
     let escaped_body = escape_html(body);
     let escaped_target = escape_html(target);
     let detail = if escaped_target.is_empty() {
@@ -962,6 +992,8 @@ fn load_remote_document(
     ),
     String,
 > {
+    // This function is the app-facing loader. It translates low-level fetch/content-type details
+    // into "what document should the browser show?".
     let url = net::Url::parse(raw_url).map_err(|error| format!("url error: {error:?}"))?;
     let fetch_result = net::fetch(&url).map_err(|error| describe_network_error(&error))?;
     let response = fetch_result.response;

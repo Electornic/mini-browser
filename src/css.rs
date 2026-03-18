@@ -1,4 +1,5 @@
 // CSS support is intentionally narrow: simple selectors and a handful of value types.
+// That keeps the parser small while still giving the rest of the browser realistic input.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
@@ -63,6 +64,7 @@ pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
     let stylesheet = parser.parse_stylesheet()?;
     parser.consume_whitespace();
 
+    // Just like the HTML parser, leftover input means the stylesheet was not fully understood.
     if parser.eof() {
         Ok(stylesheet)
     } else {
@@ -93,6 +95,7 @@ impl<'a> Parser<'a> {
                 break;
             }
 
+            // A stylesheet is just a flat sequence of rules at this stage.
             rules.push(self.parse_rule()?);
         }
 
@@ -160,6 +163,7 @@ impl<'a> Parser<'a> {
                 break;
             }
 
+            // Declarations stay in source order so later properties can overwrite earlier ones.
             declarations.push(self.parse_declaration()?);
             self.consume_whitespace();
 
@@ -235,6 +239,7 @@ impl<'a> Parser<'a> {
         let unit = self.parse_identifier()?;
         match unit.as_str() {
             "px" => Ok(Value::Length(value, Unit::Px)),
+            // Unsupported units fall back to plain keywords instead of hard-failing.
             _ => Ok(Value::Keyword(format!("{value}{unit}"))),
         }
     }

@@ -1,4 +1,6 @@
-// Core modules are split by browser pipeline stage so each step can stay small and testable.
+// This crate is organized by browser pipeline stage.
+// Reading the files in roughly this order makes the code easiest to follow:
+// DOM -> HTML/CSS parse -> style -> layout -> render -> window/app.
 pub mod css;
 pub mod dom;
 pub mod html;

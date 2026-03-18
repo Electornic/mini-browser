@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
-// Attributes are stored in a deterministic map so debug output and tests stay stable.
+// Attributes live in a deterministic map so debug output and snapshot-like tests stay stable.
 pub type AttrMap = BTreeMap<String, String>;
 
+// Node is the basic tree unit used everywhere after HTML parsing.
+// Later stages never go back to the original HTML string; they only look at this tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Node {
     pub children: Vec<Node>,
@@ -22,6 +24,7 @@ pub struct ElementData {
 }
 
 impl Node {
+    // Text nodes are leaves in this toy browser, so they never have children.
     pub fn text(data: impl Into<String>) -> Self {
         Self {
             children: Vec::new(),
@@ -29,8 +32,8 @@ impl Node {
         }
     }
 
-    // Element nodes own their children directly because this browser keeps the DOM immutable
-    // after parsing instead of exposing mutation APIs.
+    // Element nodes own their children directly because the parsed DOM stays immutable.
+    // That keeps later stages simple: style/layout/render can treat the tree as read-only data.
     pub fn element(tag_name: impl Into<String>, attributes: AttrMap, children: Vec<Node>) -> Self {
         Self {
             children,

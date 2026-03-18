@@ -8,6 +8,7 @@ use crate::{
 pub type PropertyMap = BTreeMap<String, Value>;
 
 // StyledNode mirrors the DOM tree but replaces raw attributes with resolved CSS properties.
+// If you want to know "what style does this node end up with?", this is the structure to inspect.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StyledNode {
     pub node: Node,
@@ -32,7 +33,8 @@ fn style_tree_with_parent(
 ) -> StyledNode {
     let mut specified_values = specified_values(node, stylesheets);
 
-    // A few inherited properties are enough to make text-heavy documents readable.
+    // Real browsers inherit many properties. Here we only inherit a few text-related ones
+    // because they make documents readable without making the style system much more complex.
     for property in ["color", "font-size"] {
         if !specified_values.contains_key(property) {
             if let Some(value) = parent_values.and_then(|values| values.get(property)) {
@@ -57,6 +59,7 @@ fn style_tree_with_parent(
 fn specified_values(node: &Node, stylesheets: &[Stylesheet]) -> PropertyMap {
     let mut matched = Vec::new();
 
+    // First collect every rule that matches this node together with its specificity and order.
     for (rule_order, rule) in stylesheets
         .iter()
         .flat_map(|sheet| sheet.rules.iter())
@@ -141,12 +144,14 @@ fn edge_defaults(values: &mut PropertyMap, prefix: &str, amount: f32) {
 }
 
 fn apply_declarations(values: &mut PropertyMap, declarations: &[Declaration]) {
+    // Later declarations with the same property name overwrite earlier ones.
     for declaration in declarations {
         values.insert(declaration.name.clone(), declaration.value.clone());
     }
 }
 
 fn matching_specificity(node: &Node, selectors: &[Selector]) -> Option<u32> {
+    // The highest matching selector wins within a rule group such as `h1, .title`.
     selectors
         .iter()
         .filter(|selector| matches_selector(node, selector))
@@ -165,6 +170,7 @@ fn selector_specificity(selector: &Selector) -> u32 {
 fn matches_selector(node: &Node, selector: &Selector) -> bool {
     let element = match &node.node_type {
         NodeType::Element(element) => element,
+        // Text nodes never match selectors directly; they only inherit style from parents.
         NodeType::Text(_) => return false,
     };
 

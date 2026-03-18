@@ -1,6 +1,7 @@
 use crate::dom::{AttrMap, Node};
 
-// The HTML parser accepts a deliberately small, well-formed subset of HTML.
+// This parser intentionally accepts only a small, well-formed subset of HTML.
+// The goal is to turn HTML text into a DOM tree, not to reproduce full browser recovery rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub position: usize,
@@ -21,6 +22,7 @@ pub fn parse(source: &str) -> Result<Vec<Node>, ParseError> {
     let nodes = parser.parse_nodes()?;
     parser.consume_whitespace();
 
+    // If anything is left after parsing sibling nodes, we treat it as malformed input.
     if parser.eof() {
         Ok(nodes)
     } else {
@@ -51,7 +53,7 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            // Parsing returns sibling nodes until a closing tag or end-of-input stops the loop.
+            // Repeatedly parse siblings until a closing tag or end-of-input ends this level.
             let node = self.parse_node()?;
             if !matches!(node.node_type, crate::dom::NodeType::Text(ref text) if text.is_empty()) {
                 nodes.push(node);
@@ -62,6 +64,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_node(&mut self) -> Result<Node, ParseError> {
+        // A leading '<' means element syntax; anything else is raw text content.
         if self.next_char() == Some('<') {
             self.parse_element()
         } else {
@@ -74,6 +77,7 @@ impl<'a> Parser<'a> {
         let tag_name = self.parse_tag_name()?;
         let attributes = self.parse_attributes()?;
 
+        // Self-closing elements stop immediately and never recurse into children.
         if self.starts_with("/>") {
             self.pos += 2;
             return Ok(Node::element(tag_name, attributes, Vec::new()));
@@ -82,7 +86,7 @@ impl<'a> Parser<'a> {
         self.expect_char('>')?;
         let children = self.parse_nodes()?;
 
-        // This parser keeps tag balancing strict instead of trying to recover like a real browser.
+        // Keep balancing strict instead of trying to recover like a real browser would.
         self.expect_char('<')?;
         self.expect_char('/')?;
         let closing_tag = self.parse_tag_name()?;
@@ -99,7 +103,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_text(&mut self) -> Node {
-        // Text is everything up to the next tag boundary.
+        // Text is everything until the next '<'.
         let text = self.consume_while(|ch| ch != '<');
         Node::text(text)
     }
@@ -114,6 +118,7 @@ impl<'a> Parser<'a> {
                 break;
             }
 
+            // Duplicate keys simply overwrite earlier values, which is good enough here.
             let (name, value) = self.parse_attr()?;
             attributes.insert(name, value);
         }
@@ -138,6 +143,7 @@ impl<'a> Parser<'a> {
                 self.expect_char(quote)?;
                 Ok(value)
             }
+            // Unquoted attributes are supported because they are easy to handle and common in demos.
             Some(_) => Ok(self.consume_while(|ch| !ch.is_whitespace() && ch != '>' && ch != '/')),
             None => Err(ParseError::new(
                 self.pos,
@@ -165,6 +171,7 @@ impl<'a> Parser<'a> {
     {
         let mut result = String::new();
 
+        // The parser is character-based, so every helper advances `pos` as it consumes input.
         while let Some(ch) = self.next_char() {
             if !test(ch) {
                 break;
