@@ -2,7 +2,6 @@ use std::{cell::RefCell, rc::Rc};
 
 use minifb::{InputCallback, Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 
-use crate::{render, render::DisplayCommand};
 
 // WindowInput is the per-frame snapshot that the browser UI consumes.
 #[derive(Debug, Clone, Default)]
@@ -41,7 +40,7 @@ pub fn run<F>(
     mut build_scene: F,
 ) -> Result<(), minifb::Error>
 where
-    F: FnMut(usize, usize, &WindowInput) -> Vec<DisplayCommand>,
+    F: FnMut(usize, usize, &WindowInput) -> Vec<u32>,
 {
     let mut window = Window::new(
         title,
@@ -85,8 +84,7 @@ where
             mouse_position: window.get_mouse_pos(MouseMode::Clamp),
             left_mouse_pressed: left_down && !last_left_down,
         };
-        let commands = build_scene(size.0, size.1, &input);
-        let buffer = render::rasterize(&commands, size.0, size.1);
+        let buffer = build_scene(size.0, size.1, &input);
 
         window.update_with_buffer(&buffer, size.0, size.1)?;
         last_left_down = left_down;

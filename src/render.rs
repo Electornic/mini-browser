@@ -60,7 +60,12 @@ pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<Dis
     commands
 }
 
-pub fn rasterize(commands: &[DisplayCommand], width: usize, height: usize) -> Vec<u32> {
+pub fn rasterize(
+    commands: &[DisplayCommand],
+    width: usize,
+    height: usize,
+    fonts: &[fontdue::Font],
+) -> Vec<u32> {
     let mut buffer = vec![rgb_u32(Color::WHITE); width * height];
 
     for command in commands {
@@ -68,7 +73,7 @@ pub fn rasterize(commands: &[DisplayCommand], width: usize, height: usize) -> Ve
             DisplayCommand::SolidRect(color, rect) => {
                 fill_rect(&mut buffer, width, height, *color, *rect)
             }
-            DisplayCommand::Text(text) => draw_text(&mut buffer, width, height, text),
+            DisplayCommand::Text(text) => draw_text(&mut buffer, width, height, text, fonts),
             DisplayCommand::Image(image) => draw_image(&mut buffer, width, height, image),
         }
     }
@@ -267,42 +272,124 @@ fn fill_rect(buffer: &mut [u32], width: usize, height: usize, color: Color, rect
     }
 }
 
-fn draw_text(buffer: &mut [u32], width: usize, height: usize, text: &TextCommand) {
-    let scale = (text.font_size / 8.0).max(1.0).round() as usize;
-    let mut cursor_x = text.x.round() as i32;
-    let baseline_y = text.y.round() as i32;
+fn draw_text(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    text: &TextCommand,
+    fonts: &[fontdue::Font],
+) {
+    if fonts.is_empty() {
+        draw_text_bitmap(buffer, width, height, text);
+        return;
+    }
+
+    let font_size = text.font_size.max(8.0);
+    let ascent = fonts[0]
+        .horizontal_line_metrics(font_size)
+        .map(|m| m.ascent)
+        .unwrap_or(font_size * 0.8);
+    let mut cursor_x = text.x;
 
     for ch in text.text.chars() {
-        if ch == ' ' {
-            cursor_x += (4 * scale) as i32;
-            continue;
-        }
+        // Find a font that contains this glyph.
+        let font_match = fonts
+            .iter()
+            .find(|f| f.lookup_glyph_index(ch) != 0 || ch == ' ');
 
-        let glyph = glyph_pattern(ch);
-        for (row_index, row) in glyph.iter().enumerate() {
-            for (column_index, pixel) in row.chars().enumerate() {
-                if pixel == ' ' {
+        let Some(font) = font_match else {
+            // No font has this glyph — use the bitmap fallback for this character.
+            draw_bitmap_char(buffer, width, height, ch, cursor_x, text.y, text.color, text.font_size);
+            cursor_x += text.font_size * 0.75;
+            continue;
+        };
+
+        let (metrics, bitmap) = font.rasterize(ch, font_size);
+        let glyph_y = text.y + ascent - metrics.height as f32 - metrics.ymin as f32;
+
+        for row in 0..metrics.height {
+            for col in 0..metrics.width {
+                let alpha = bitmap[row * metrics.width + col];
+                if alpha == 0 {
                     continue;
                 }
 
-                let x = cursor_x + (column_index * scale) as i32;
-                let y = baseline_y + (row_index * scale) as i32;
-                fill_rect(
-                    buffer,
-                    width,
-                    height,
-                    text.color,
-                    Rect {
-                        x: x as f32,
-                        y: y as f32,
-                        width: scale as f32,
-                        height: scale as f32,
-                    },
-                );
+                let px = (cursor_x + metrics.xmin as f32 + col as f32).round() as i32;
+                let py = (glyph_y + row as f32).round() as i32;
+
+                if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
+                    continue;
+                }
+
+                let idx = py as usize * width + px as usize;
+                if alpha >= 128 {
+                    buffer[idx] = rgb_u32(text.color);
+                } else if alpha >= 32 {
+                    // Simple alpha blend for anti-aliased edges.
+                    let bg = buffer[idx];
+                    let a = alpha as u32;
+                    let inv = 255 - a;
+                    let r = (a * text.color.r as u32 + inv * ((bg >> 16) & 0xFF)) / 255;
+                    let g = (a * text.color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
+                    let b = (a * text.color.b as u32 + inv * (bg & 0xFF)) / 255;
+                    buffer[idx] = (r << 16) | (g << 8) | b;
+                }
             }
         }
 
-        cursor_x += (6 * scale) as i32;
+        cursor_x += metrics.advance_width;
+    }
+}
+
+fn draw_text_bitmap(buffer: &mut [u32], width: usize, height: usize, text: &TextCommand) {
+    let mut cursor_x = text.x;
+
+    for ch in text.text.chars() {
+        draw_bitmap_char(buffer, width, height, ch, cursor_x, text.y, text.color, text.font_size);
+        let scale = (text.font_size / 8.0).max(1.0).round();
+        cursor_x += if ch == ' ' { 4.0 * scale } else { 6.0 * scale };
+    }
+}
+
+fn draw_bitmap_char(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    ch: char,
+    x: f32,
+    y: f32,
+    color: Color,
+    font_size: f32,
+) {
+    let scale = (font_size / 8.0).max(1.0).round() as usize;
+    let cursor_x = x.round() as i32;
+    let baseline_y = y.round() as i32;
+
+    if ch == ' ' {
+        return;
+    }
+
+    let glyph = glyph_pattern(ch);
+    for (row_index, row) in glyph.iter().enumerate() {
+        for (column_index, pixel) in row.chars().enumerate() {
+            if pixel == ' ' {
+                continue;
+            }
+            let px = cursor_x + (column_index * scale) as i32;
+            let py = baseline_y + (row_index * scale) as i32;
+            fill_rect(
+                buffer,
+                width,
+                height,
+                color,
+                Rect {
+                    x: px as f32,
+                    y: py as f32,
+                    width: scale as f32,
+                    height: scale as f32,
+                },
+            );
+        }
     }
 }
 
@@ -601,6 +688,7 @@ mod tests {
             )],
             4,
             4,
+            &[],
         );
 
         assert_eq!(pixels[5], 0xFF0000);
@@ -692,6 +780,7 @@ mod tests {
             })],
             2,
             2,
+            &[],
         );
 
         assert_eq!(pixels, vec![0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF]);

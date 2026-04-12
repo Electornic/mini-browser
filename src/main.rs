@@ -30,6 +30,7 @@ struct BrowserState {
     document_html: String,
     stylesheet: String,
     images: HashMap<String, resource::LoadedImage>,
+    font_data: Vec<Vec<u8>>,
     current_url: Option<net::Url>,
 
     // UI state that is shown in the chrome.
@@ -82,6 +83,7 @@ struct HistoryEntry {
     document_html: String,
     stylesheet: String,
     images: HashMap<String, resource::LoadedImage>,
+    font_data: Vec<Vec<u8>>,
     current_url: Option<net::Url>,
     status_text: String,
     status_color: css::Color,
@@ -93,6 +95,7 @@ impl BrowserState {
         document_html: String,
         stylesheet: String,
         images: HashMap<String, resource::LoadedImage>,
+        font_data: Vec<Vec<u8>>,
         current_url: Option<net::Url>,
         status_text: impl Into<String>,
     ) -> Self {
@@ -104,6 +107,7 @@ impl BrowserState {
             document_html,
             stylesheet,
             images,
+            font_data,
             current_url,
             status_text: status_text.into(),
             status_color: css::Color::BLACK,
@@ -279,12 +283,13 @@ impl BrowserState {
 
         // Successful navigation replaces the visible page and pushes the old snapshot to history.
         match load_remote_document(&target) {
-            Ok((document_html, stylesheet, images, resolved_url)) => {
+            Ok((document_html, stylesheet, images, font_data, resolved_url)) => {
                 let next_entry = HistoryEntry {
                     address_input: resolved_url.to_string(),
                     document_html,
                     stylesheet,
                     images,
+                    font_data,
                     current_url: Some(resolved_url),
                     status_text: "loaded".into(),
                     status_color: css::Color {
@@ -318,12 +323,13 @@ impl BrowserState {
         self.address_bar_focused = false;
         // Link navigation reuses the same loader path as manual URL entry.
         match load_remote_document(&resolved.to_string()) {
-            Ok((document_html, stylesheet, images, resolved_url)) => {
+            Ok((document_html, stylesheet, images, font_data, resolved_url)) => {
                 let next_entry = HistoryEntry {
                     address_input: resolved_url.to_string(),
                     document_html,
                     stylesheet,
                     images,
+                    font_data,
                     current_url: Some(resolved_url),
                     status_text: "loaded".into(),
                     status_color: css::Color {
@@ -411,6 +417,7 @@ impl BrowserState {
             document_html: self.document_html.clone(),
             stylesheet: self.stylesheet.clone(),
             images: self.images.clone(),
+            font_data: self.font_data.clone(),
             current_url: self.current_url.clone(),
             status_text: self.status_text.clone(),
             status_color: self.status_color,
@@ -422,6 +429,7 @@ impl BrowserState {
         self.document_html = entry.document_html;
         self.stylesheet = entry.stylesheet;
         self.images = entry.images;
+        self.font_data = entry.font_data;
         self.current_url = entry.current_url;
         self.status_text = entry.status_text;
         self.status_color = entry.status_color;
@@ -477,6 +485,7 @@ impl BrowserState {
             document_html,
             stylesheet,
             images: HashMap::new(),
+            font_data: Vec::new(),
             current_url: None,
             status_text: title.into(),
             status_color: css::Color {
@@ -988,6 +997,7 @@ fn load_remote_document(
         String,
         String,
         HashMap<String, resource::LoadedImage>,
+        Vec<Vec<u8>>,
         net::Url,
     ),
     String,
@@ -1011,7 +1021,7 @@ fn load_remote_document(
         let body = String::from_utf8(response.body)
             .map_err(|_| describe_network_error(&net::NetworkError::InvalidBodyEncoding))?;
         let (document_html, stylesheet) = text_document(&body, &final_url.to_string());
-        return Ok((document_html, stylesheet, HashMap::new(), final_url));
+        return Ok((document_html, stylesheet, HashMap::new(), Vec::new(), final_url));
     }
 
     if !content_type.starts_with("text/html") {
@@ -1024,12 +1034,13 @@ fn load_remote_document(
         html::parse(&html).map_err(|error| format!("html parse error {}", error.position))?;
     let stylesheets = resource::load_stylesheets(&nodes, &final_url)
         .map_err(|error| describe_resource_error(&error))?;
+    let font_data = resource::load_fonts(&stylesheets, &final_url);
     let images = resource::load_images(&nodes, &final_url)
         .map_err(|error| describe_resource_error(&error))?
         .into_iter()
         .map(|image| (image.url.to_string(), image))
         .collect();
-    Ok((html, stylesheets.join("\n"), images, final_url))
+    Ok((html, stylesheets.join("\n"), images, font_data, final_url))
 }
 
 fn describe_network_error(error: &net::NetworkError) -> String {
@@ -1061,11 +1072,12 @@ fn describe_resource_error(error: &resource::ResourceError) -> String {
 fn load_initial_state() -> BrowserState {
     match env::args().nth(1) {
         Some(raw_url) => match load_remote_document(&raw_url) {
-            Ok((document_html, stylesheet, images, current_url)) => BrowserState::new(
+            Ok((document_html, stylesheet, images, font_data, current_url)) => BrowserState::new(
                 raw_url,
                 document_html,
                 stylesheet,
                 images,
+                font_data,
                 Some(current_url),
                 "loaded",
             ),
@@ -1076,6 +1088,7 @@ fn load_initial_state() -> BrowserState {
                     String::new(),
                     String::new(),
                     HashMap::new(),
+                    Vec::new(),
                     None,
                     "load failed",
                 );
@@ -1088,17 +1101,52 @@ fn load_initial_state() -> BrowserState {
             sample_html().to_string(),
             sample_css().to_string(),
             HashMap::new(),
+            Vec::new(),
             None,
             "type url and press enter",
         ),
     }
 }
 
+fn build_font_cache(font_data: &[Vec<u8>]) -> Vec<fontdue::Font> {
+    let mut fonts: Vec<fontdue::Font> = font_data
+        .iter()
+        .filter_map(|data| {
+            fontdue::Font::from_bytes(data.as_slice(), fontdue::FontSettings::default()).ok()
+        })
+        .collect();
+
+    // Fall back to a macOS system font so pages without web fonts can still render Korean/CJK.
+    if let Ok(system_font_bytes) = std::fs::read("/System/Library/Fonts/AppleSDGothicNeo.ttc") {
+        if let Ok(font) = fontdue::Font::from_bytes(
+            system_font_bytes.as_slice(),
+            fontdue::FontSettings {
+                collection_index: 0,
+                ..fontdue::FontSettings::default()
+            },
+        ) {
+            fonts.push(font);
+        }
+    }
+
+    fonts
+}
+
 fn main() {
     let mut browser = load_initial_state();
+    let mut fonts = build_font_cache(&browser.font_data);
+    let mut last_font_count = browser.font_data.len();
 
     if let Err(error) = window::run("mini-browser", 800, 600, |width, height, input| {
-        browser.display_list(width, height, input)
+        let commands = browser.display_list(width, height, input);
+
+        // Rebuild font cache when navigation loads new fonts.
+        if browser.font_data.len() != last_font_count {
+            fonts = build_font_cache(&browser.font_data);
+            last_font_count = browser.font_data.len();
+        }
+
+        render::rasterize(&commands, width, height, &fonts)
     }) {
         eprintln!("window error: {error}");
     }
@@ -1318,6 +1366,7 @@ mod tests {
             "<div>first</div>".into(),
             String::new(),
             HashMap::new(),
+            Vec::new(),
             None,
             "loaded",
         );
@@ -1327,6 +1376,7 @@ mod tests {
             document_html: "<div>second</div>".into(),
             stylesheet: String::new(),
             images: HashMap::new(),
+            font_data: Vec::new(),
             current_url: None,
             status_text: "loaded".into(),
             status_color: css::Color::BLACK,
@@ -1348,6 +1398,7 @@ mod tests {
             "<div>first</div>".into(),
             String::new(),
             HashMap::new(),
+            Vec::new(),
             None,
             "loaded",
         );
