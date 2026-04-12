@@ -28,22 +28,23 @@ impl From<NetworkError> for ResourceError {
 
 pub fn load_stylesheets(document: &[Node], base_url: &Url) -> Result<Vec<String>, ResourceError> {
     let stylesheet_urls = stylesheet_urls(document, base_url)?;
-    stylesheet_urls
+    // Skip individual stylesheet failures so one broken link does not kill the whole page.
+    Ok(stylesheet_urls
         .iter()
-        .map(net::load_css)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ResourceError::from)
+        .filter_map(|url| net::load_css(url).ok())
+        .collect())
 }
 
 pub fn load_images(document: &[Node], base_url: &Url) -> Result<Vec<LoadedImage>, ResourceError> {
     let image_urls = image_urls(document, base_url)?;
-    image_urls
+    // Skip individual image failures so one broken image does not kill the whole page.
+    Ok(image_urls
         .iter()
-        .map(|url| {
-            let bytes = net::load_image(url)?;
-            decode_image(url.clone(), &bytes)
+        .filter_map(|url| {
+            let bytes = net::load_image(url).ok()?;
+            decode_image(url.clone(), &bytes).ok()
         })
-        .collect()
+        .collect())
 }
 
 fn stylesheet_urls(document: &[Node], base_url: &Url) -> Result<Vec<Url>, ResourceError> {
@@ -137,6 +138,115 @@ fn decode_image(url: Url, bytes: &[u8]) -> Result<LoadedImage, ResourceError> {
         height: height as usize,
         pixels,
     })
+}
+
+pub fn load_fonts(css_sources: &[String], base_url: &Url) -> Vec<Vec<u8>> {
+    let mut font_data = Vec::new();
+
+    for css in css_sources {
+        for url_str in extract_font_urls(css) {
+            let url = if url_str.contains("://") {
+                match Url::parse(&url_str) {
+                    Ok(url) => url,
+                    Err(_) => continue,
+                }
+            } else {
+                match base_url.resolve(&url_str) {
+                    Ok(url) => url,
+                    Err(_) => continue,
+                }
+            };
+            match net::fetch(&url) {
+                Ok(result) if result.response.status_code == 200 => {
+                    font_data.push(result.response.body);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    font_data
+}
+
+fn extract_font_urls(css: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let lower = css.to_ascii_lowercase();
+    let mut search_pos = 0;
+
+    while let Some(offset) = lower[search_pos..].find("@font-face") {
+        let abs_pos = search_pos + offset;
+        let after_keyword = abs_pos + "@font-face".len();
+
+        // Find the opening '{' of the @font-face block.
+        let brace_start = match css[after_keyword..].find('{') {
+            Some(pos) => after_keyword + pos + 1,
+            None => break,
+        };
+
+        // Find the matching '}'.
+        let mut depth = 1;
+        let mut block_end = brace_start;
+        for (i, ch) in css[brace_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        block_end = brace_start + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let block = &css[brace_start..block_end];
+        if let Some(url) = extract_url_value(block) {
+            urls.push(url);
+        }
+
+        search_pos = block_end + 1;
+    }
+
+    urls
+}
+
+fn extract_url_value(block: &str) -> Option<String> {
+    // Collect all url() values from the block, then pick the best format for fontdue.
+    let mut urls = Vec::new();
+    let lower = block.to_ascii_lowercase();
+    let mut search_pos = 0;
+
+    while let Some(url_offset) = lower[search_pos..].find("url(") {
+        let start = search_pos + url_offset + 4;
+        let rest = &block[start..];
+
+        let (url, skip) = if rest.starts_with('"') || rest.starts_with('\'') {
+            let quote = rest.as_bytes()[0] as char;
+            let inner = &rest[1..];
+            match inner.find(quote) {
+                Some(end) => (&inner[..end], start + end + 2),
+                None => break,
+            }
+        } else {
+            match rest.find(')') {
+                Some(end) => (rest[..end].trim(), start + end),
+                None => break,
+            }
+        };
+
+        if !url.is_empty() {
+            urls.push(url.to_string());
+        }
+        search_pos = skip + 1;
+    }
+
+    // Only pick TTF/OTF since fontdue supports those natively.
+    urls.into_iter()
+        .find(|u| {
+            let l = u.to_ascii_lowercase();
+            l.ends_with(".ttf") || l.ends_with(".otf")
+        })
 }
 
 #[cfg(test)]

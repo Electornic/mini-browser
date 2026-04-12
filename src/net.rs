@@ -244,7 +244,7 @@ pub fn http_get(url: &Url) -> Result<HttpResponse, NetworkError> {
         .map_err(|error| NetworkError::Io(error.to_string()))?;
 
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: mini-browser/0.1\r\nAccept: text/html,*/*\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: mini-browser/0.1\r\nAccept: text/html,*/*\r\nAccept-Encoding: identity\r\n\r\n",
         url.path, url.host
     );
 
