@@ -61,18 +61,8 @@ impl ParseError {
 
 pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
     let mut parser = Parser::new(source);
-    let stylesheet = parser.parse_stylesheet()?;
-    parser.consume_whitespace();
-
-    // Just like the HTML parser, leftover input means the stylesheet was not fully understood.
-    if parser.eof() {
-        Ok(stylesheet)
-    } else {
-        Err(ParseError::new(
-            parser.pos,
-            "unexpected trailing input after parsing stylesheet",
-        ))
-    }
+    let stylesheet = parser.parse_stylesheet_tolerant();
+    Ok(stylesheet)
 }
 
 struct Parser<'a> {
@@ -85,21 +75,86 @@ impl<'a> Parser<'a> {
         Self { pos: 0, input }
     }
 
-    fn parse_stylesheet(&mut self) -> Result<Stylesheet, ParseError> {
+    fn parse_stylesheet_tolerant(&mut self) -> Stylesheet {
         let mut rules = Vec::new();
 
         loop {
-            self.consume_whitespace();
+            self.skip_whitespace_and_comments();
 
             if self.eof() {
                 break;
             }
 
-            // A stylesheet is just a flat sequence of rules at this stage.
-            rules.push(self.parse_rule()?);
+            // Skip at-rules (@media, @charset, @keyframes, etc.) the toy parser does not model.
+            if self.next_char() == Some('@') {
+                self.skip_at_rule();
+                continue;
+            }
+
+            // Try parsing a normal rule; skip to the next block boundary on failure.
+            let saved = self.pos;
+            match self.parse_rule() {
+                Ok(rule) => rules.push(rule),
+                Err(_) => {
+                    self.pos = saved;
+                    self.skip_to_end_of_block();
+                }
+            }
         }
 
-        Ok(Stylesheet { rules })
+        Stylesheet { rules }
+    }
+
+    fn skip_whitespace_and_comments(&mut self) {
+        loop {
+            self.consume_whitespace();
+            if self.starts_with("/*") {
+                self.pos += 2;
+                while !self.eof() && !self.starts_with("*/") {
+                    if let Some(ch) = self.next_char() {
+                        self.pos += ch.len_utf8();
+                    }
+                }
+                if self.starts_with("*/") {
+                    self.pos += 2;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn skip_at_rule(&mut self) {
+        // At-rules either end with ';' or contain a '{...}' block.
+        let mut brace_depth = 0;
+        while let Some(ch) = self.next_char() {
+            self.pos += ch.len_utf8();
+            match ch {
+                '{' => brace_depth += 1,
+                '}' if brace_depth > 1 => brace_depth -= 1,
+                '}' if brace_depth == 1 => return,
+                ';' if brace_depth == 0 => return,
+                _ => {}
+            }
+        }
+    }
+
+    fn skip_to_end_of_block(&mut self) {
+        // Advance past the next '}' so the parser can attempt the next rule.
+        let mut brace_depth = 0;
+        while let Some(ch) = self.next_char() {
+            self.pos += ch.len_utf8();
+            match ch {
+                '{' => brace_depth += 1,
+                '}' if brace_depth > 1 => brace_depth -= 1,
+                '}' => return,
+                _ => {}
+            }
+        }
+    }
+
+    fn starts_with(&self, value: &str) -> bool {
+        self.input[self.pos..].starts_with(value)
     }
 
     fn parse_rule(&mut self) -> Result<Rule, ParseError> {
@@ -119,9 +174,9 @@ impl<'a> Parser<'a> {
         let mut selectors = Vec::new();
 
         loop {
-            self.consume_whitespace();
+            self.skip_whitespace_and_comments();
             selectors.push(self.parse_selector()?);
-            self.consume_whitespace();
+            self.skip_whitespace_and_comments();
 
             // A single rule can target multiple simple selectors separated by commas.
             if self.next_char() == Some(',') {
@@ -157,16 +212,23 @@ impl<'a> Parser<'a> {
         let mut declarations = Vec::new();
 
         loop {
-            self.consume_whitespace();
+            self.skip_whitespace_and_comments();
 
             if self.eof() || self.next_char() == Some('}') {
                 break;
             }
 
-            // Declarations stay in source order so later properties can overwrite earlier ones.
-            declarations.push(self.parse_declaration()?);
-            self.consume_whitespace();
+            // Try parsing a declaration; skip to the next ';' or '}' on failure.
+            let saved = self.pos;
+            match self.parse_declaration() {
+                Ok(decl) => declarations.push(decl),
+                Err(_) => {
+                    self.pos = saved;
+                    self.consume_while(|ch| ch != ';' && ch != '}');
+                }
+            }
 
+            self.skip_whitespace_and_comments();
             if self.next_char() == Some(';') {
                 self.consume_char();
             }
@@ -385,9 +447,12 @@ mod tests {
     }
 
     #[test]
-    fn returns_error_for_missing_colon() {
-        let error = parse("div { color red; }").unwrap_err();
+    fn skips_invalid_declarations() {
+        let stylesheet = parse("div { color red; font-size: 16px; }").unwrap();
 
-        assert!(error.message.contains("expected ':'"));
+        // The malformed "color red" declaration is skipped; valid ones are kept.
+        assert_eq!(stylesheet.rules.len(), 1);
+        assert_eq!(stylesheet.rules[0].declarations.len(), 1);
+        assert_eq!(stylesheet.rules[0].declarations[0].name, "font-size");
     }
 }
