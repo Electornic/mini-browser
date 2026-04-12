@@ -66,9 +66,39 @@ impl<'a> Parser<'a> {
     fn parse_node(&mut self) -> Result<Node, ParseError> {
         // A leading '<' means element syntax; anything else is raw text content.
         if self.next_char() == Some('<') {
+            // Skip constructs the toy parser does not model but real HTML contains.
+            if self.starts_with("<!") {
+                self.skip_declaration_or_comment();
+                return Ok(Node::text(""));
+            }
             self.parse_element()
         } else {
             Ok(self.parse_text())
+        }
+    }
+
+    fn skip_declaration_or_comment(&mut self) {
+        if self.starts_with("<!--") {
+            // HTML comments end at the first "-->".
+            self.pos += 4;
+            while !self.eof() && !self.starts_with("-->") {
+                if let Some(ch) = self.next_char() {
+                    self.pos += ch.len_utf8();
+                }
+            }
+            if self.starts_with("-->") {
+                self.pos += 3;
+            }
+        } else {
+            // DOCTYPE and other <! declarations end at '>'.
+            while !self.eof() && self.next_char() != Some('>') {
+                if let Some(ch) = self.next_char() {
+                    self.pos += ch.len_utf8();
+                }
+            }
+            if self.next_char() == Some('>') {
+                self.pos += 1;
+            }
         }
     }
 
@@ -84,6 +114,19 @@ impl<'a> Parser<'a> {
         }
 
         self.expect_char('>')?;
+
+        // Void elements never have children or closing tags in real HTML.
+        if is_void_element(&tag_name) {
+            return Ok(Node::element(tag_name, attributes, Vec::new()));
+        }
+
+        // Raw text elements contain code or styles, not nested HTML.
+        // Their content must be consumed verbatim until the matching closing tag.
+        if is_raw_text_element(&tag_name) {
+            self.skip_raw_text_content(&tag_name);
+            return Ok(Node::element(tag_name, attributes, Vec::new()));
+        }
+
         let children = self.parse_nodes()?;
 
         // Keep balancing strict instead of trying to recover like a real browser would.
@@ -100,6 +143,26 @@ impl<'a> Parser<'a> {
         self.expect_char('>')?;
 
         Ok(Node::element(tag_name, attributes, children))
+    }
+
+    fn skip_raw_text_content(&mut self, tag_name: &str) {
+        let closing = format!("</{tag_name}>");
+        while !self.eof() && !self.starts_with_ignore_case(&closing) {
+            // Advance by one full character to stay on valid UTF-8 boundaries.
+            if let Some(ch) = self.next_char() {
+                self.pos += ch.len_utf8();
+            }
+        }
+        // Consume the closing tag itself.
+        if self.starts_with_ignore_case(&closing) {
+            self.pos += closing.len();
+        }
+    }
+
+    fn starts_with_ignore_case(&self, value: &str) -> bool {
+        self.input[self.pos..]
+            .get(..value.len())
+            .is_some_and(|slice| slice.eq_ignore_ascii_case(value))
     }
 
     fn parse_text(&mut self) -> Node {
@@ -129,6 +192,12 @@ impl<'a> Parser<'a> {
     fn parse_attr(&mut self) -> Result<(String, String), ParseError> {
         let name = self.parse_tag_name()?;
         self.consume_whitespace();
+
+        // Boolean attributes like `disabled` or `async` have no value.
+        if self.next_char() != Some('=') {
+            return Ok((name, String::new()));
+        }
+
         self.expect_char('=')?;
         self.consume_whitespace();
         let value = self.parse_attr_value()?;
@@ -213,6 +282,18 @@ impl<'a> Parser<'a> {
             )),
         }
     }
+}
+
+fn is_raw_text_element(tag_name: &str) -> bool {
+    matches!(tag_name, "script" | "style")
+}
+
+fn is_void_element(tag_name: &str) -> bool {
+    matches!(
+        tag_name,
+        "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input"
+            | "link" | "meta" | "param" | "source" | "track" | "wbr"
+    )
 }
 
 #[cfg(test)]
