@@ -686,7 +686,9 @@ fn glyph_pattern(ch: char) -> [&'static str; 7] {
 mod tests {
     use crate::{css, html, layout, render, style};
 
-    use super::{Color, DisplayCommand, ImageCommand, TextCommand, rasterize, translate};
+    use super::{
+        Color, CornerRadii, DisplayCommand, ImageCommand, TextCommand, rasterize, translate,
+    };
 
     fn display_list(html_source: &str, css_source: &str) -> Vec<DisplayCommand> {
         let node = html::parse(html_source)
@@ -978,6 +980,137 @@ mod tests {
                     },
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn rounded_rect_with_zero_radius_matches_solid_rect() {
+        let rect = crate::layout::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+        };
+        let color = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+
+        let solid = rasterize(&[DisplayCommand::SolidRect(color, rect)], 4, 4, &[]);
+        let rounded = rasterize(
+            &[DisplayCommand::RoundedRect(
+                color,
+                rect,
+                CornerRadii::default(),
+            )],
+            4,
+            4,
+            &[],
+        );
+
+        assert_eq!(solid, rounded);
+    }
+
+    #[test]
+    fn rounded_rect_uniform_radius_clips_all_four_corners() {
+        let pixels = rasterize(
+            &[DisplayCommand::RoundedRect(
+                Color {
+                    r: 255,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                },
+                crate::layout::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 4.0,
+                    height: 4.0,
+                },
+                CornerRadii::uniform(2.0),
+            )],
+            4,
+            4,
+            &[],
+        );
+
+        // All four corner pixels lie outside the inscribed circle and stay white.
+        assert_eq!(pixels[0], 0xFFFFFF, "(0,0) clipped by tl");
+        assert_eq!(pixels[3], 0xFFFFFF, "(3,0) clipped by tr");
+        assert_eq!(pixels[12], 0xFFFFFF, "(0,3) clipped by bl");
+        assert_eq!(pixels[15], 0xFFFFFF, "(3,3) clipped by br");
+
+        // Pixels just inside each corner stay filled.
+        assert_eq!(pixels[5], 0xFF0000, "(1,1) inside tl arc");
+        assert_eq!(pixels[10], 0xFF0000, "(2,2) inside br arc");
+    }
+
+    #[test]
+    fn rounded_rect_per_corner_radii_only_clip_specified_corner() {
+        let pixels = rasterize(
+            &[DisplayCommand::RoundedRect(
+                Color {
+                    r: 255,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                },
+                crate::layout::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 4.0,
+                    height: 4.0,
+                },
+                CornerRadii {
+                    tl: 2.0,
+                    tr: 0.0,
+                    br: 0.0,
+                    bl: 0.0,
+                },
+            )],
+            4,
+            4,
+            &[],
+        );
+
+        // Only the top-left corner is rounded; the other three corners stay sharp.
+        assert_eq!(pixels[0], 0xFFFFFF, "(0,0) clipped by tl");
+        assert_eq!(pixels[3], 0xFF0000, "(3,0) tr is sharp");
+        assert_eq!(pixels[12], 0xFF0000, "(0,3) bl is sharp");
+        assert_eq!(pixels[15], 0xFF0000, "(3,3) br is sharp");
+    }
+
+    #[test]
+    fn translate_moves_rounded_rect_position_only() {
+        let commands = translate(
+            vec![DisplayCommand::RoundedRect(
+                Color::BLACK,
+                crate::layout::Rect {
+                    x: 1.0,
+                    y: 2.0,
+                    width: 10.0,
+                    height: 6.0,
+                },
+                CornerRadii::uniform(3.0),
+            )],
+            4.0,
+            5.0,
+        );
+
+        assert_eq!(
+            commands[0],
+            DisplayCommand::RoundedRect(
+                Color::BLACK,
+                crate::layout::Rect {
+                    x: 5.0,
+                    y: 7.0,
+                    width: 10.0,
+                    height: 6.0,
+                },
+                CornerRadii::uniform(3.0),
+            )
         );
     }
 }
