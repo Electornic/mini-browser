@@ -133,10 +133,24 @@ fn background_command(layout_box: &LayoutBox) -> Option<DisplayCommand> {
         _ => return None,
     };
 
-    Some(DisplayCommand::SolidRect(
-        color,
-        layout_box.dimensions.padding_box(),
-    ))
+    let rect = layout_box.dimensions.padding_box();
+    let radius = border_radius(node);
+    if radius > 0.0 {
+        Some(DisplayCommand::RoundedRect(
+            color,
+            rect,
+            CornerRadii::uniform(radius),
+        ))
+    } else {
+        Some(DisplayCommand::SolidRect(color, rect))
+    }
+}
+
+fn border_radius(node: &crate::style::StyledNode) -> f32 {
+    match node.value("border-radius") {
+        Some(Value::Length(value, Unit::Px)) => *value,
+        _ => 0.0,
+    }
 }
 
 fn text_command(layout_box: &LayoutBox) -> Option<DisplayCommand> {
@@ -981,6 +995,32 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn css_border_radius_emits_rounded_rect_background() {
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 100px;
+                    height: 40px;
+                    background-color: #336699;
+                    border-radius: 8px;
+                }
+            "#,
+        );
+
+        // First command is the background; non-zero border-radius selects RoundedRect.
+        match &commands[0] {
+            DisplayCommand::RoundedRect(_, _, radii) => {
+                assert_eq!(radii.tl, 8.0);
+                assert_eq!(radii.tr, 8.0);
+                assert_eq!(radii.br, 8.0);
+                assert_eq!(radii.bl, 8.0);
+            }
+            other => panic!("expected RoundedRect background, got {other:?}"),
+        }
     }
 
     #[test]
