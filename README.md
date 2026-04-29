@@ -1,54 +1,65 @@
 # mini-browser
 
-작은 범위의 브라우저를 Rust로 구현하는 학습용 프로젝트다.
+브라우저 렌더링/스타일/JS 엔진을 Rust로 직접 구현해보는 학습용 프로젝트.
 
-이 프로젝트의 목표는 URL 또는 정적 입력으로부터 HTML/CSS를 읽고, 이를 DOM/스타일/레이아웃 구조로 변환한 뒤, 가장 단순한 형태의 렌더러로 화면에 그리는 것이다.
+URL 또는 정적 입력에서 HTML/CSS를 읽어 DOM/스타일/레이아웃 구조로 변환한 뒤, 자체 렌더러로 화면에 그린다. 단계(Phase) 단위로 범위를 늘려간다 — Phase 0은 정적 렌더링 + Chrome 스타일 UI까지, Phase 1은 CSS 표현력 확장(flexbox/grid 포함), Phase 2는 JS 엔진 임베드와 DOM 바인딩.
 
-## Current Scope
+## Phase Status
 
-- Window / Event Loop
-- HTML Parser
-- DOM Tree
-- CSS Parser
-- Style Engine
-- Block Layout Engine
-- Basic Renderer (Rect + Text)
-- Simple Network Loader
-- Basic Resource Loader
+| Phase | Status | Theme |
+|---|---|---|
+| 0 | **Done** | Block layout + Chrome 스타일 UI + NTP 시작 페이지 |
+| 1 | Backlog | CSS Expansion (units, selectors, position, flexbox, grid) |
+| 2 | Backlog | JS Engine Integration (Boa 임베드 + DOM 바인딩) |
 
-## Initial Pipeline
+자세한 task 분해는 [docs/roadmap.md](docs/roadmap.md) 참조.
+
+## Pipeline
 
 ```text
-URL
+URL or sample input
   -> Network Loader
   -> HTML / CSS text
   -> HTML Parser / CSS Parser
   -> DOM Tree / Stylesheet
   -> Style Engine
-  -> Layout Tree
-  -> Display Commands
-  -> Window Renderer
+  -> Block Layout (margin: auto, text-align: center, border-radius)
+  -> Display Commands (SolidRect / RoundedRect / Text / Image)
+  -> Rasterizer
+  -> Window
 ```
 
-## Project Status
+## Project Status (Phase 0 Done)
 
-현재는 아래 기반 모듈이 구현된 상태다.
+### 렌더링 파이프라인
+- DOM 자료구조, HTML/CSS parser, Style Engine
+- Block Layout Engine (`margin: auto`, `text-align: center` 지원)
+- Display List: `SolidRect` / `RoundedRect` / `Text` / `Image`
+- 기본 inline 흐름 (`<a>` / `<span>` / `<img>`)
 
-- DOM 자료구조
-- HTML parser
-- CSS parser
-- Style Engine
-- Block Layout Engine
-- Basic Renderer (Display List: Rect + Text)
-- Window / Event Loop
-- Simple Network Loader
-- Basic Resource Loader
-- Basic Image Loader
+### 네트워크 / 리소스
+- HTTP/HTTPS GET + redirect 추적
+- `<link rel="stylesheet">` 자동 로드
+- `<img src>` 자동 로드 + 렌더링
+- web font (`@font-face`) 로드 + macOS 시스템 폰트 fallback (한글 표시)
+- 에러 페이지, `text/plain` 페이지 처리
 
-현재는 `http://`와 `https://` 기반 HTML 문서 다운로드, 기본 redirect 추적, `<link rel="stylesheet">` CSS 로드, `<img src>` 이미지 다운로드 및 기본 렌더링을 지원한다.
-기본 박스 렌더링에는 `background-color`, `border-*`, `border-color`가 반영된다.
-또한 `body`, `p`, `h1`, `a`에는 최소 기본 스타일이 적용된다.
-`a`, `span`, text node는 기본적인 inline 흐름으로 한 줄에 배치된다.
+### Chrome UI
+- 상단 chrome (88px = 32 tab strip + 56 toolbar)
+- 단일 탭 (위쪽 corner만 둥근 RoundedRect)
+- pill 모양 주소창 (focus 시 blue ring)
+- chevron back/forward 아이콘 + 3-dot 메뉴 (rect-composed icons)
+- 히스토리 navigation (Alt+←/→ 또는 `Cmd/Ctrl+[ ]`)
+
+### CSS support (Phase 0 시점)
+- selector: tag/class/id (단일)
+- 단위: `px`만
+- properties: `width`/`height`/`margin-*`/`padding-*`/`border-*`/`background-color`/`color`/`font-size`/`text-align`/`border-radius`
+- inheritance: `color`, `font-size`, `text-align`
+- 색상: hex (`#RGB` / `#RRGGBB`)
+
+### 시작 페이지 (NTP)
+URL 인자 없이 실행하면 Chrome NTP 스타일 페이지가 보임 — 가운데 큰 로고, pill 검색창, 단축 타일 4개.
 
 ## Documents
 
@@ -100,6 +111,6 @@ macOS용 `.app` 및 `.dmg`를 만들려면:
 
 ## Notes
 
-- 초기 구현은 최소 기능 우선이다.
-- 불필요한 리팩터링보다 단계별 동작 검증을 우선한다.
-- 처음부터 완전한 HTML/CSS 브라우저를 목표로 하지 않는다.
+- 단계(Phase)별 task 단위로 commit을 작게 끊는다.
+- 각 Phase 종료 시 [docs/roadmap.md](docs/roadmap.md)와 README/AGENTS의 status를 갱신한다.
+- "정확하게 동작하는 작은 브라우저"가 1차 목표이고, 표준 100% 호환은 목표가 아니다.

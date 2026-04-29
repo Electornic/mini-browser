@@ -1,157 +1,199 @@
 # Roadmap
 
-## Principles
+이 프로젝트는 학습 목적의 Rust 미니 브라우저로, 단계(Phase) 단위로 범위를 늘려간다. 각 Phase는 독립적인 commit/PR 단위로 진행 가능한 task로 쪼개져 있고, 각 task는 학습 가치(Learning Value)와 예상 작업량(Effort)을 적어 우선순위를 가늠하기 쉽게 한다.
 
-- 작게 구현하고 바로 검증한다.
+## Phase Overview
+
+| Phase | Status | Theme | Outcome |
+|---|---|---|---|
+| 0 | Done | Block layout + Chrome-style UI | URL 인자 없이 실행 시 Chrome NTP 모양의 시작 페이지가 보인다 |
+| 1 | Backlog | CSS Expansion | 실제 웹페이지에 가까운 CSS 표현력 확보 (selectors, units, advanced layout) |
+| 2 | Backlog | JS Engine Integration | Boa 엔진 임베드 + DOM 바인딩, 단순 JS 동작 페이지 렌더 |
+
+## Working Principles
+
+- 작게 구현하고 바로 검증한다 (각 task = 1~3 commit).
 - 각 단계는 독립적으로 디버그 가능해야 한다.
-- 먼저 정적 입력으로 렌더링 파이프라인을 완성한 뒤 네트워크를 붙인다.
+- 한 Phase가 끝날 때마다 문서를 갱신한다.
+- 의존이 큰 task는 Dependencies 컬럼에 명시한다.
 
-## Milestone 1: DOM Foundations
+## Phase 0 — Block Layout + Chrome UI (Done)
 
-목표:
-- DOM 자료구조 정의
-- 기본 HTML parser 구현
+다음 항목은 모두 main 브랜치에 반영됨.
 
-완료 조건:
-- 간단한 HTML 문자열을 element/text tree로 변환할 수 있다.
-- 중첩 구조와 속성(`id`, `class`)을 읽을 수 있다.
-- 디버그 출력 또는 테스트로 tree 구조를 확인할 수 있다.
+### 렌더링 파이프라인
+- DOM 자료구조, HTML parser, CSS parser, Style Engine
+- Block layout engine, inline 흐름 (`a`/`span`/`img`)
+- Display command (SolidRect / Text / Image)
+- 라스터라이저, 윈도우 이벤트 루프 (`minifb`)
 
-검증 예시:
-- `"<div id='a'><p>Hello</p></div>"` 파싱 테스트
+### 네트워크 / 리소스
+- HTTP/HTTPS GET + redirect 추적
+- `<link rel="stylesheet">`, `<img src>` 자동 로드
+- web font (`@font-face`) 로드 + system font fallback (AppleSDGothicNeo)
+- 에러 페이지, `text/plain` 페이지 처리
 
-## Milestone 2: CSS Foundations
+### Chrome v2 (이번 Phase에서 추가됨)
+- `RoundedRect` 디스플레이 프리미티브 (4-corner radii)
+- pill 모양 주소창 (focus-aware blue ring)
+- chevron back/forward 아이콘 + 3-dot 메뉴 (rect-composed)
+- 단일 탭 strip (위쪽 corner만 둥근 RoundedRect)
+- layout `margin: auto` (가로 정렬)
+- layout `text-align: center` (inline-flow alignment)
+- CSS `border-radius` 파싱 + 렌더 hookup
 
-목표:
-- CSS parser 구현
-- 단순 selector와 declaration 해석
+### NTP (New Tab Page)
+- URL 인자 없이 실행 시 Chrome NTP 모양: 가운데 로고 + pill 검색창 + 4 단축 타일
 
-완료 조건:
-- tag/class/id selector를 읽을 수 있다.
-- declaration 목록을 property/value 형태로 저장할 수 있다.
-- 잘 형식이 맞는 CSS 입력을 테스트로 검증할 수 있다.
+## Phase 0 Carryover (Phase 1에서 처리)
 
-검증 예시:
-- `"div { color: red; } .note { margin-top: 8px; }"`
+Phase 0에서 의도적으로 미룬 polish 항목. Phase 1 시작 시 가장 먼저 처리.
 
-## Milestone 3: Style Engine
+| Task | Effort | Value | Notes |
+|---|---|---|---|
+| 인라인-of-인라인 alignment (`<a>` 안쪽 텍스트 가운데 정렬) | 3d | ★★ | NTP 타일 라벨이 좌상단에 붙는 문제 |
+| `border-radius` 4-value shorthand (`8px 12px ...`) | 1d | ★ | 현재는 단일 uniform만 |
+| 주소창 placeholder 색 차별화 | 1d | ★ | 비어 있을 때 회색으로 표시 |
+| 메뉴 버튼 클릭 hit-test (액션은 TBD) | 1d | ★ | 현재 장식만 |
+| refresh / 홈 아이콘 (arc 프리미티브 또는 대체 디자인) | 3d | ★★ | 회전 화살표 모양 필요 |
 
-목표:
-- DOM과 CSS를 연결해 styled tree 생성
+## Phase 1 — CSS Expansion (Backlog)
 
-완료 조건:
-- selector matching이 동작한다.
-- 기본 우선순위(tag < class < id)를 반영한다.
-- 일부 상속 속성(`color`, `font-size`)이 동작한다.
+목표: 실제 웹페이지에서 흔히 보는 CSS 기능을 학습 단위로 직접 구현해본다. Phase 1 종료 시 단순 React 랜딩페이지 정도가 거의 깨지지 않고 렌더 가능해야 한다.
 
-검증 예시:
-- 동일 노드에 여러 규칙이 적용될 때 최종 스타일 비교
+### 1A. Values & Selectors
 
-## Milestone 4: Block Layout
+| Task | Files | Effort | Value | Dependencies |
+|---|---|---|---|---|
+| Length units: `%`, `em`, `rem` | css.rs, layout.rs | 1-2d | ★ | computed/used value 개념 |
+| Color formats: `rgb()`, `rgba()`, named (red/blue) | css.rs | 2-3d | ★ | |
+| Descendant selector (`.a .b`) | style.rs | 1w | ★★ | |
+| Child selector (`.a > .b`) | style.rs | 3d | ★★ | descendant 먼저 |
+| `:hover` pseudo-class | style.rs, render.rs | 1w | ★★★ | interaction state, style invalidation |
+| `:focus`, `:active` | style.rs | 3d | ★★ | `:hover` 먼저 |
 
-목표:
-- block formatting context 기반 레이아웃 구현
+### 1B. Layout Modes
 
-완료 조건:
-- viewport 폭 기준으로 block 박스를 위에서 아래로 배치한다.
-- width, margin, padding, background 영역을 계산할 수 있다.
-- layout tree 또는 dimensions를 테스트로 검증할 수 있다.
+| Task | Files | Effort | Value | Dependencies |
+|---|---|---|---|---|
+| `display: inline-block` | layout.rs | 3-5d | ★★★ | layout mode dispatch 도입 |
+| `position: relative` | layout.rs | 1w | ★★★ | |
+| `position: absolute` | layout.rs | 1-2w | ★★★ | containing block 추적 |
+| `position: fixed` | layout.rs, main.rs | 3d | ★★ | absolute 먼저 |
+| Stacking context / `z-index` | render.rs, layout.rs | 1w | ★★★ | absolute 먼저 |
+| Float layout (`float: left/right`) | layout.rs | 1w | ★★ | |
+| Margin collapse | layout.rs | 1w | ★★ | |
+| `line-height` / `vertical-align` (inline) | layout.rs, render.rs | 1w | ★★ | |
 
-검증 예시:
-- 부모 폭 800일 때 자식 박스 좌표/크기 확인
+### 1C. Paint
 
-## Milestone 5: Basic Painting
+| Task | Files | Effort | Value | Dependencies |
+|---|---|---|---|---|
+| Linear gradient | render.rs, css.rs | 1w | ★★ | |
+| Radial gradient | render.rs | 3-5d | ★ | linear 먼저 |
+| `box-shadow` | render.rs | 1w | ★★ | |
+| `text-shadow` | render.rs | 3d | ★ | |
+| `opacity` / alpha compositing | render.rs | 3-5d | ★★ | |
+| `transform: translate/scale/rotate` | render.rs, layout.rs | 2-3w | ★★★ | affine matrix, hit-test 재설계 |
 
-목표:
-- layout tree를 display command로 변환
-- rect + text 렌더링 구현
+### 1D. Big Layout (마지막)
 
-완료 조건:
-- 배경 사각형과 텍스트를 화면에 그릴 수 있다.
-- 최소 하나의 샘플 문서를 창에 렌더할 수 있다.
+| Task | Files | Effort | Value | Dependencies |
+|---|---|---|---|---|
+| **Flexbox 최소 (justify/align)** | layout.rs | 2-4w | ★★★ | Phase 1B 완료 후 |
+| Flexbox: `flex-grow/shrink/basis` | layout.rs | 1-2w | ★★★ | minimal 먼저 |
+| **Grid: track sizing** | layout.rs | 1-2m | ★★★ | flexbox 완료 후 |
+| Grid: areas, line names | layout.rs | 2w | ★★★ | track sizing 먼저 |
 
-검증 예시:
-- hard-coded DOM/CSS를 입력으로 사용한 렌더링 확인
+## Phase 2 — JS Engine Integration (Backlog)
 
-## Milestone 6: Window Integration
+목표: 정적 HTML/CSS만 그리던 브라우저에 동적 동작을 넣는다. 자체 구현 대신 [Boa](https://crates.io/crates/boa_engine) 임베드 — DOM 바인딩과 reflow trigger가 진짜 학습 포인트.
 
-목표:
-- event loop와 renderer 연결
+### 2A. Engine Embed
 
-완료 조건:
-- 창 생성 후 초기 렌더가 가능하다.
-- resize 또는 redraw 이벤트에 반응할 수 있다.
+| Task | Files | Effort | Value | Dependencies |
+|---|---|---|---|---|
+| `boa_engine` 의존성 추가 + hello-world | Cargo.toml, 새 모듈 | 1-2d | ★ | |
+| `<script>` 태그 실행 (HTML 파싱 → script 추출 → 실행) | html.rs, 새 모듈 | 3-5d | ★★ | engine embed 먼저 |
+| `console.log` → stderr 바인딩 | js.rs (가칭) | 1d | ★ | engine embed 먼저 |
 
-검증 예시:
-- 앱 실행 시 샘플 페이지 표시
+### 2B. DOM Bindings (read-only first)
 
-## Milestone 7: Network Loader
+| Task | Files | Effort | Value | Dependencies |
+|---|---|---|---|---|
+| `document`, `window` globals | js.rs, dom.rs | 3-5d | ★★ | engine embed |
+| `document.querySelector` | js.rs, style.rs (selector 재사용) | 1w | ★★★ | descendant selector 필요 (Phase 1) |
+| `document.getElementById` | js.rs | 2d | ★ | |
+| `.textContent` (read) | js.rs | 2d | ★ | |
+| `.getAttribute()` | js.rs | 2d | ★ | |
 
-목표:
-- URL parsing
-- HTTP GET
-- HTML 다운로드
+### 2C. DOM Mutation + Reflow
 
-완료 조건:
-- URL 문자열에서 scheme/host/path를 파싱할 수 있다.
-- 원격 HTML을 GET으로 가져와 parser로 넘길 수 있다.
-- 오류 응답 또는 연결 실패를 처리할 수 있다.
+| Task | Files | Effort | Value | Dependencies |
+|---|---|---|---|---|
+| `document.createElement` | js.rs, dom.rs | 3d | ★★ | |
+| `.appendChild`, `.removeChild` | js.rs, dom.rs | 3d | ★★ | createElement |
+| Mutation → reflow trigger (스타일/레이아웃 재계산) | main.rs | 1-2w | ★★★ | mutation API 먼저 |
+| `.innerHTML` write (fragment HTML 파싱) | html.rs (fragment 모드 추가), js.rs | 1w | ★★★ | |
 
-검증 예시:
-- 단일 테스트 서버 또는 고정 URL fetch
+### 2D. Events & Async
 
-## Milestone 8: Resource Loader
+| Task | Files | Effort | Value | Dependencies |
+|---|---|---|---|---|
+| Event loop (microtask + macrotask 큐) | main.rs, js.rs | 1w | ★★★ | engine embed |
+| `addEventListener('click', ...)` | js.rs, main.rs | 1w | ★★★ | event loop |
+| `setTimeout`, `setInterval` | js.rs, main.rs | 3-5d | ★★ | event loop |
+| `requestAnimationFrame` | js.rs, main.rs | 3d | ★★ | event loop |
 
-목표:
-- 외부 stylesheet 로드
-- 상대 URL 해석
-- 선택적으로 이미지 로드
+### 2E. Network from JS (선택)
 
-완료 조건:
-- `<link rel="stylesheet">`를 읽고 CSS를 추가 다운로드할 수 있다.
-- base URL 기준으로 상대 경로를 절대 경로로 해석할 수 있다.
-- 여러 stylesheet를 style engine에 전달할 수 있다.
+| Task | Files | Effort | Value | Dependencies |
+|---|---|---|---|---|
+| `fetch()` basic GET | js.rs, net.rs | 1w | ★★ | event loop, async |
+| `XMLHttpRequest` minimal | js.rs, net.rs | 3-5d | ★ | fetch 먼저 |
 
-검증 예시:
-- HTML + external CSS 조합 렌더링
+## Phase Beyond — 명시적 비포함
 
-## Milestone 9: Stabilization
+다음은 학습 가치 대비 범위 폭증이 너무 커서 현 시점 로드맵에서 제외:
 
-목표:
-- 모듈 정리
-- 테스트 보강
-- 디버그 도구 추가
+- WebGL / Canvas 2D context
+- WebSocket
+- IndexedDB, ServiceWorker, Web Workers
+- HTTP/2, HTTP/3, gzip/brotli compression
+- 멀티탭 UI (단일 탭 유지)
+- 히스토리 페이지 (chrome://history 같은)
+- 실제 캐시 / 쿠키 정교화
+- 폰트 셰이핑 (HarfBuzz 수준), BiDi, line breaking 정교화
 
-완료 조건:
-- parser/style/layout 핵심 테스트가 존재한다.
-- 주요 데이터 구조 출력이나 trace가 가능하다.
-- 최소 데모 페이지가 안정적으로 렌더된다.
+이 항목이 필요해지는 시점이 오면 그때 별도 Phase 3+ 로드맵을 작성한다.
 
 ## Suggested Work Order
 
-1. `dom`
-2. `html`
-3. `css`
-4. `style`
-5. `layout`
-6. `render`
-7. `window`
-8. `net`
-9. `resource loader`
+Phase 1은 위 표의 1A → 1B → 1C → 1D 순서가 자연스럽다. 1A는 다른 모든 항목의 기반(단위, 셀렉터)이라 제일 먼저 깔아야 한다. 1D(flex/grid)는 가장 큼.
+
+Phase 2는 2A → 2B → 2C → 2D → 2E 순서.
 
 ## Verification Strategy
 
-- parser 계층은 unit test 중심
-- style/layout 계층은 snapshot 또는 구조 비교 중심
-- renderer/window 계층은 수동 실행 검증
-- network 계층은 integration test 또는 샘플 서버 기반 검증
+- parser 계층 (`html`, `css`): unit test 중심
+- style/layout 계층: snapshot 또는 구조 비교 중심
+- renderer/window 계층: 수동 실행 검증 + display command 비교
+- network 계층: integration test 또는 샘플 서버 기반
+- JS 계층 (Phase 2): JS 코드를 입력으로 받아 DOM 변경 결과를 비교
 
-## Next Concrete Step
+각 task 완료 시 다음 4개 커맨드로 검증:
 
-다음 구현은 `렌더 품질 보강` 또는 `content-type/error 화면 보강`이다. 현재 HTTP/HTTPS, redirect, CSS, 이미지 리소스까지 로드할 수 있으므로, 이제 네트워크 에러 처리 보강이나 레이아웃/텍스트 렌더 품질 개선 단계로 넘어갈 수 있다.
+```
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+cargo build
+```
 
 ## Related Documents
 
+- [README.md](../README.md)
+- [AGENTS.md](../AGENTS.md)
 - [Project Spec](spec.md)
 - [Architecture](architecture.md)
 - [Data Model](data-model.md)

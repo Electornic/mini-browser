@@ -4,25 +4,25 @@
 
 ## Project Goal
 
-이 프로젝트는 Rust로 구현하는 학습용 미니 브라우저다.
+이 프로젝트는 Rust로 구현하는 학습용 미니 브라우저다. 단계(Phase) 단위로 범위를 늘려간다.
 
-현재 목표 범위:
-- Window / Event Loop
-- HTML Parser
-- DOM Tree
-- CSS Parser
-- Style Engine
-- Block Layout Engine
-- Basic Renderer (Rect + Text)
-- Simple Network Loader
-- Basic Resource Loader
+**Phase 0 (Done)** — 블록 layout 기반 정적 렌더링 파이프라인 + Chrome 스타일 chrome:
+- Window / Event Loop, HTML Parser, DOM Tree, CSS Parser, Style Engine
+- Block Layout Engine (`margin: auto`, `text-align: center` 포함), 기본 inline 흐름
+- Renderer: Rect + RoundedRect + Text + Image, `border-radius` hookup
+- Simple Network Loader (HTTP/HTTPS + redirect), Resource Loader (CSS/이미지/web font)
+- Chrome 스타일 chrome (탭 strip, pill 주소창, chevron 아이콘) + Chrome NTP 모양 시작 페이지
+
+**Phase 1 (Backlog)** — CSS Expansion (units, advanced selectors, position, flexbox, grid 등). 자세한 task는 `docs/roadmap.md` 참조.
+
+**Phase 2 (Backlog)** — JS Engine Integration (Boa 임베드 + DOM 바인딩 + reflow trigger).
 
 상세 범위와 설계는 아래 문서를 기준으로 한다.
 - `README.md`
 - `docs/spec.md`
 - `docs/architecture.md`
 - `docs/data-model.md`
-- `docs/roadmap.md`
+- `docs/roadmap.md` (Phase별 task 매트릭스 — source of truth)
 
 작업 전에 관련 문서를 먼저 읽고, 구현 방향이 문서와 어긋나면 문서도 함께 갱신한다.
 
@@ -45,23 +45,12 @@
 
 ## Implementation Guidance
 
-- 초기 구현은 “정적 입력으로 렌더링 파이프라인 완성”을 우선한다.
-- 네트워크는 렌더링 파이프라인이 최소 동작한 뒤 연결한다.
-- HTML/CSS는 처음부터 표준 전체를 구현하지 않는다.
-- block layout only 원칙을 유지한다.
-- renderer는 rect/text primitive 중심으로 시작한다.
+- HTML/CSS는 표준 전체를 구현하지 않는다. 필요한 만큼만 단계적으로 늘린다.
+- block layout이 기본. inline 흐름은 `<a>`/`<span>`/`<img>` 같은 명시적 인라인 태그에 한정.
+- Phase 1에서 layout 모드를 추가할 때마다 기존 block 경로를 깨지 않게 한다 (`display: inline-block`, `position` 등).
+- renderer는 rect/rounded-rect/text/image primitive 중심. 새 paint 효과(gradient, shadow 등)는 새 프리미티브로 추가하고 기존을 깨지 않는다.
+- 모듈 경계 유지: parser, style, layout, render, network 사이의 책임을 흐리지 않는다.
 - 설계 기준 자료구조는 `docs/data-model.md`를 우선 참조한다.
-
-권장 구현 순서:
-1. `dom`
-2. `html`
-3. `css`
-4. `style`
-5. `layout`
-6. `render`
-7. `window`
-8. `net`
-9. `resource loader`
 
 ## Code Organization
 
@@ -130,17 +119,24 @@
 - 실행한 커맨드 및 결과
 - 문서 업데이트 여부(업데이트함/생략함 + 사유 1줄)
 
-## Non-Goals
+## Long-term Roadmap
 
-초기 단계에서 아래는 우선 구현 대상이 아니다.
+Phase 0(블록 layout + Chrome 스타일 UI + NTP)은 main에 반영됨. 이후 단계는 학습 우선 순서대로 정리되어 있다.
 
-- JavaScript engine
-- full HTML5 parser
-- full CSS compliance
-- flexbox / grid
-- 복잡한 inline layout
-- cache, cookie, redirect, compression
-- 멀티탭, 히스토리 UI
+- **Phase 1 — CSS Expansion**: 단위(`%`/`em`/`rem`), descendant/child/`:hover` selectors, `inline-block`, `position`, `transform`, `box-shadow`, gradient, **flexbox**, **grid** 등.
+- **Phase 2 — JS Engine Integration**: [Boa](https://crates.io/crates/boa_engine) 임베드, DOM 바인딩(`document`/`querySelector`/`addEventListener`), mutation → reflow trigger, event loop, `setTimeout`/`requestAnimationFrame`, `fetch` 기본 GET.
+
+Phase별 task 분해와 작업량/학습 가치 매트릭스는 [docs/roadmap.md](docs/roadmap.md)에 있다. 진행 시 그 파일이 source of truth.
+
+### 명시적 비포함
+
+다음 항목은 학습 가치 대비 범위 폭증이 커서 로드맵에서 제외한다(필요 시 별도 Phase로 다시 평가):
+
+- WebGL / Canvas 2D context
+- WebSocket, IndexedDB, ServiceWorker
+- HTTP/2/3, compression(gzip/brotli)
+- 멀티탭 UI, 히스토리 페이지
+- 폰트 셰이핑(HarfBuzz 수준), BiDi 정교화
 
 ## Working Style
 
