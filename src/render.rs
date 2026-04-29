@@ -8,8 +8,29 @@ use crate::{
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisplayCommand {
     SolidRect(Color, Rect),
+    RoundedRect(Color, Rect, CornerRadii),
     Text(TextCommand),
     Image(ImageCommand),
+}
+
+// Per-corner radii so tabs (top corners only) and pills (uniform) share one primitive.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct CornerRadii {
+    pub tl: f32,
+    pub tr: f32,
+    pub br: f32,
+    pub bl: f32,
+}
+
+impl CornerRadii {
+    pub fn uniform(radius: f32) -> Self {
+        Self {
+            tl: radius,
+            tr: radius,
+            br: radius,
+            bl: radius,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +67,10 @@ pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<Dis
                 rect.x += dx;
                 rect.y += dy;
             }
+            DisplayCommand::RoundedRect(_, rect, _) => {
+                rect.x += dx;
+                rect.y += dy;
+            }
             DisplayCommand::Text(text) => {
                 text.x += dx;
                 text.y += dy;
@@ -72,6 +97,9 @@ pub fn rasterize(
         match command {
             DisplayCommand::SolidRect(color, rect) => {
                 fill_rect(&mut buffer, width, height, *color, *rect)
+            }
+            DisplayCommand::RoundedRect(color, rect, radii) => {
+                fill_rounded_rect(&mut buffer, width, height, *color, *rect, *radii)
             }
             DisplayCommand::Text(text) => draw_text(&mut buffer, width, height, text, fonts),
             DisplayCommand::Image(image) => draw_image(&mut buffer, width, height, image),
@@ -268,6 +296,74 @@ fn fill_rect(buffer: &mut [u32], width: usize, height: usize, color: Color, rect
         let row = y * width;
         for x in x_start..x_end {
             buffer[row + x] = pixel;
+        }
+    }
+}
+
+fn fill_rounded_rect(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    color: Color,
+    rect: Rect,
+    radii: CornerRadii,
+) {
+    // Fall back to the cheaper rectangle filler when no corner is rounded.
+    if radii.tl == 0.0 && radii.tr == 0.0 && radii.br == 0.0 && radii.bl == 0.0 {
+        fill_rect(buffer, width, height, color, rect);
+        return;
+    }
+
+    let x_start = rect.x.max(0.0).floor() as usize;
+    let y_start = rect.y.max(0.0).floor() as usize;
+    let x_end = (rect.x + rect.width).ceil().max(0.0) as usize;
+    let y_end = (rect.y + rect.height).ceil().max(0.0) as usize;
+    let x_end = x_end.min(width);
+    let y_end = y_end.min(height);
+    let pixel = rgb_u32(color);
+
+    // Cap each radius to half the rect so corners never overlap.
+    let max_radius = (rect.width.min(rect.height) / 2.0).max(0.0);
+    let tl = radii.tl.clamp(0.0, max_radius);
+    let tr = radii.tr.clamp(0.0, max_radius);
+    let br = radii.br.clamp(0.0, max_radius);
+    let bl = radii.bl.clamp(0.0, max_radius);
+
+    let left = rect.x;
+    let top = rect.y;
+    let right = rect.x + rect.width;
+    let bottom = rect.y + rect.height;
+
+    for y in y_start..y_end {
+        let py = y as f32 + 0.5;
+        let row = y * width;
+        for x in x_start..x_end {
+            let px = x as f32 + 0.5;
+
+            // Pixels in the straight band always paint; only corner regions need a distance check.
+            let inside = if tl > 0.0 && px < left + tl && py < top + tl {
+                let dx = px - (left + tl);
+                let dy = py - (top + tl);
+                dx * dx + dy * dy <= tl * tl
+            } else if tr > 0.0 && px > right - tr && py < top + tr {
+                let dx = px - (right - tr);
+                let dy = py - (top + tr);
+                dx * dx + dy * dy <= tr * tr
+            } else if br > 0.0 && px > right - br && py > bottom - br {
+                let dx = px - (right - br);
+                let dy = py - (bottom - br);
+                dx * dx + dy * dy <= br * br
+            } else if bl > 0.0 && px < left + bl && py > bottom - bl {
+                let dx = px - (left + bl);
+                let dy = py - (bottom - bl);
+                dx * dx + dy * dy <= bl * bl
+            } else {
+                true
+            };
+
+            if inside {
+                buffer[row + x] = pixel;
+            }
         }
     }
 }

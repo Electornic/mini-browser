@@ -728,6 +728,7 @@ fn document_height(commands: &[render::DisplayCommand]) -> f32 {
     commands.iter().fold(0.0, |max_bottom, command| {
         let bottom = match command {
             render::DisplayCommand::SolidRect(_, rect) => rect.y + rect.height,
+            render::DisplayCommand::RoundedRect(_, rect, _) => rect.y + rect.height,
             render::DisplayCommand::Text(text) => text.y + text.font_size,
             render::DisplayCommand::Image(image) => image.y + image.height,
         };
