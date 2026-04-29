@@ -1016,24 +1016,72 @@ fn page_step(viewport_height: usize) -> f32 {
 }
 
 fn sample_html() -> &'static str {
+    // The default landing page mimics Chrome's new tab page so the browser has
+    // something visually meaningful to show before any URL is entered.
     r#"
-        <div id="app" class="page">
-            <h1>Mini Browser</h1>
-            <p>Hello from the first HTML parser milestone.</p>
+        <div id="ntp">
+            <div class="logo">mini browser</div>
+            <div class="search-pill">Search the web or type a URL</div>
+            <div class="shortcuts">
+                <a href="https://example.com" class="tile">example</a>
+                <a href="https://www.rust-lang.org" class="tile">rust</a>
+                <a href="https://news.ycombinator.com" class="tile">hn</a>
+                <a href="https://github.com" class="tile">github</a>
+            </div>
         </div>
     "#
 }
 
 fn sample_css() -> &'static str {
+    // Centering relies on the layout engine's new margin: auto + text-align: center
+    // support, and the rounded surfaces rely on border-radius being wired through
+    // the renderer. Together they sketch a Chrome-NTP silhouette without leaving
+    // the block layout regime.
     r#"
-        #app {
-            width: 320px;
-            padding-top: 12px;
-            padding-left: 8px;
-            background-color: #f0f4f8;
+        #ntp {
+            width: 720px;
+            margin-left: auto;
+            margin-right: auto;
+            padding-top: 64px;
+            padding-bottom: 80px;
+            text-align: center;
+            background-color: #ffffff;
         }
-        h1 { font-size: 28px; margin-bottom: 8px; color: #222222; }
-        p { color: #0066cc; font-size: 18px; margin-top: 4px; }
+        .logo {
+            font-size: 48px;
+            color: #5f6368;
+            margin-bottom: 28px;
+        }
+        .search-pill {
+            width: 472px;
+            height: 22px;
+            padding-top: 14px;
+            margin-left: auto;
+            margin-right: auto;
+            margin-bottom: 36px;
+            background-color: #f1f3f4;
+            border-radius: 18px;
+            color: #80868b;
+            font-size: 14px;
+        }
+        .shortcuts {
+            width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .tile {
+            width: 48px;
+            height: 48px;
+            padding-top: 16px;
+            padding-left: 8px;
+            padding-right: 8px;
+            background-color: #f8f9fa;
+            border-radius: 12px;
+            margin-left: 16px;
+            margin-right: 16px;
+            color: #3c4043;
+            font-size: 11px;
+        }
     "#
 }
 
