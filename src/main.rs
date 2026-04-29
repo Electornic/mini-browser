@@ -17,6 +17,9 @@ const NAV_BUTTON_WIDTH: f32 = 20.0;
 const NAV_BUTTON_HEIGHT: f32 = 18.0;
 const BACK_BUTTON_X: f32 = 12.0;
 const FORWARD_BUTTON_X: f32 = 36.0;
+const MENU_BUTTON_WIDTH: f32 = 20.0;
+const MENU_BUTTON_RIGHT_PAD: f32 = 12.0;
+const MENU_BUTTON_GAP: f32 = 8.0;
 
 #[derive(Debug, Clone)]
 struct BrowserState {
@@ -600,16 +603,17 @@ fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
     ];
     commands.extend(nav_button_commands(
         back_button_rect(),
-        "<",
+        true,
         chrome.can_go_back,
         chrome.hovered_action == Some(ChromeAction::Back),
     ));
     commands.extend(nav_button_commands(
         forward_button_rect(),
-        ">",
+        false,
         chrome.can_go_forward,
         chrome.hovered_action == Some(ChromeAction::Forward),
     ));
+    commands.extend(menu_button_commands(menu_button_rect(width)));
 
     if chrome.address_bar_selected {
         commands.push(render::DisplayCommand::SolidRect(
@@ -651,61 +655,109 @@ fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
 
 fn nav_button_commands(
     rect: layout::Rect,
-    label: &str,
+    pointing_left: bool,
     enabled: bool,
     hovered: bool,
-) -> [render::DisplayCommand; 2] {
-    // Buttons are just a background rect plus a text glyph. There is no separate widget system.
-    [
-        render::DisplayCommand::SolidRect(
-            if !enabled {
-                css::Color {
-                    r: 235,
-                    g: 235,
-                    b: 235,
-                    a: 255,
-                }
-            } else if hovered {
-                css::Color {
-                    r: 210,
-                    g: 223,
-                    b: 246,
-                    a: 255,
-                }
-            } else {
-                css::Color {
-                    r: 255,
-                    g: 255,
-                    b: 255,
-                    a: 255,
-                }
+) -> Vec<render::DisplayCommand> {
+    // Toolbar buttons are flat by default and only paint a circular hover wash on rollover.
+    let mut commands = Vec::new();
+    if hovered && enabled {
+        commands.push(render::DisplayCommand::RoundedRect(
+            css::Color {
+                r: 232,
+                g: 234,
+                b: 237,
+                a: 255,
             },
             rect,
-        ),
-        render::DisplayCommand::Text(render::TextCommand {
-            text: label.to_string(),
-            x: rect.x + 7.0,
-            y: rect.y + 5.0,
-            color: if enabled {
-                css::Color::BLACK
+            render::CornerRadii::uniform(rect.height.min(rect.width) / 2.0),
+        ));
+    }
+
+    let icon_color = if enabled {
+        css::Color {
+            r: 60,
+            g: 64,
+            b: 67,
+            a: 255,
+        }
+    } else {
+        css::Color {
+            r: 154,
+            g: 160,
+            b: 166,
+            a: 255,
+        }
+    };
+    commands.extend(chevron_commands(rect, icon_color, pointing_left));
+    commands
+}
+
+fn chevron_commands(
+    rect: layout::Rect,
+    color: css::Color,
+    pointing_left: bool,
+) -> Vec<render::DisplayCommand> {
+    // Chevrons are seven 1px rows offset from the center line, forming a 2px-thick caret.
+    let cx = rect.x + rect.width / 2.0;
+    let cy = rect.y + rect.height / 2.0;
+    (0i32..7)
+        .map(|row| {
+            let dy = row - 3;
+            let offset = dy.unsigned_abs() as f32;
+            let x = if pointing_left {
+                cx - 1.0 + offset
             } else {
-                css::Color {
-                    r: 150,
-                    g: 150,
-                    b: 150,
-                    a: 255,
-                }
-            },
-            font_size: 8.0,
-        }),
-    ]
+                cx - 1.0 - offset
+            };
+            render::DisplayCommand::SolidRect(
+                color,
+                layout::Rect {
+                    x,
+                    y: cy - 3.0 + row as f32,
+                    width: 2.0,
+                    height: 1.0,
+                },
+            )
+        })
+        .collect()
+}
+
+fn menu_button_commands(rect: layout::Rect) -> Vec<render::DisplayCommand> {
+    // Three vertical dots stand in for the overflow menu; the button is decorative for now.
+    let cx = rect.x + rect.width / 2.0;
+    let cy = rect.y + rect.height / 2.0;
+    let dot_size = 3.0;
+    let spacing = 5.0;
+    let icon_color = css::Color {
+        r: 60,
+        g: 64,
+        b: 67,
+        a: 255,
+    };
+
+    (-1..=1i32)
+        .map(|i| {
+            render::DisplayCommand::RoundedRect(
+                icon_color,
+                layout::Rect {
+                    x: cx - dot_size / 2.0,
+                    y: cy + (i as f32 * spacing) - dot_size / 2.0,
+                    width: dot_size,
+                    height: dot_size,
+                },
+                render::CornerRadii::uniform(dot_size / 2.0),
+            )
+        })
+        .collect()
 }
 
 fn address_bar_rect(viewport_width: f32) -> layout::Rect {
+    let menu_reserved = MENU_BUTTON_RIGHT_PAD + MENU_BUTTON_WIDTH + MENU_BUTTON_GAP;
     layout::Rect {
         x: ADDRESS_BOX_X,
         y: ADDRESS_BOX_Y,
-        width: (viewport_width - ADDRESS_BOX_X - 12.0).max(0.0),
+        width: (viewport_width - ADDRESS_BOX_X - menu_reserved).max(0.0),
         height: ADDRESS_BOX_HEIGHT,
     }
 }
@@ -724,6 +776,15 @@ fn forward_button_rect() -> layout::Rect {
         x: FORWARD_BUTTON_X,
         y: NAV_BUTTON_Y,
         width: NAV_BUTTON_WIDTH,
+        height: NAV_BUTTON_HEIGHT,
+    }
+}
+
+fn menu_button_rect(viewport_width: f32) -> layout::Rect {
+    layout::Rect {
+        x: viewport_width - MENU_BUTTON_RIGHT_PAD - MENU_BUTTON_WIDTH,
+        y: NAV_BUTTON_Y,
+        width: MENU_BUTTON_WIDTH,
         height: NAV_BUTTON_HEIGHT,
     }
 }
@@ -1251,7 +1312,9 @@ mod tests {
         assert_eq!(rect.x, ADDRESS_BOX_X);
         assert_eq!(rect.y, ADDRESS_BOX_Y);
         assert_eq!(rect.height, ADDRESS_BOX_HEIGHT);
-        assert_eq!(rect.width, 720.0);
+        // Address bar reserves space for the menu button on the right edge:
+        // 800 viewport - 68 address-x - (12 right pad + 20 menu width + 8 gap) = 692.
+        assert_eq!(rect.width, 692.0);
     }
 
     #[test]
