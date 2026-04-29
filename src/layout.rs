@@ -54,15 +54,49 @@ fn layout_node(
     cursor_y: &mut f32,
     parent_width: f32,
 ) -> LayoutBox {
-    let margin = edge_sizes(node, "margin");
+    let raw_margin = edge_sizes(node, "margin");
     let padding = edge_sizes(node, "padding");
     let border = edge_sizes(node, "border");
 
-    let horizontal_non_content =
-        margin.left + margin.right + padding.left + padding.right + border.left + border.right;
-    let content_width = length_value(node, "width")
-        .or_else(|| intrinsic_width(node))
-        .unwrap_or((parent_width - horizontal_non_content).max(0.0));
+    // CSS auto-margin centering only applies when a width is specified.
+    let explicit_width = length_value(node, "width").or_else(|| intrinsic_width(node));
+    let left_auto = is_auto(node, "margin-left");
+    let right_auto = is_auto(node, "margin-right");
+
+    let (content_width, margin_left, margin_right) = if let Some(width) = explicit_width {
+        let used = padding.left + padding.right + border.left + border.right + width;
+        let total_margin_space = (parent_width - used).max(0.0);
+        let (ml, mr) = match (left_auto, right_auto) {
+            (true, true) => (total_margin_space / 2.0, total_margin_space / 2.0),
+            (true, false) => (
+                (total_margin_space - raw_margin.right).max(0.0),
+                raw_margin.right,
+            ),
+            (false, true) => (
+                raw_margin.left,
+                (total_margin_space - raw_margin.left).max(0.0),
+            ),
+            (false, false) => (raw_margin.left, raw_margin.right),
+        };
+        (width, ml, mr)
+    } else {
+        // With width: auto, an auto horizontal margin collapses to 0 and the
+        // content stretches to fill the parent.
+        let ml = if left_auto { 0.0 } else { raw_margin.left };
+        let mr = if right_auto { 0.0 } else { raw_margin.right };
+        let horizontal_non_content =
+            ml + mr + padding.left + padding.right + border.left + border.right;
+        let width = (parent_width - horizontal_non_content).max(0.0);
+        (width, ml, mr)
+    };
+
+    let margin = EdgeSizes {
+        left: margin_left,
+        right: margin_right,
+        top: raw_margin.top,
+        bottom: raw_margin.bottom,
+    };
+
     let content_x = parent_x + margin.left + border.left + padding.left;
     let content_y = *cursor_y + margin.top + border.top + padding.top;
 
@@ -310,6 +344,10 @@ fn length_value(node: &StyledNode, name: &str) -> Option<f32> {
     }
 }
 
+fn is_auto(node: &StyledNode, name: &str) -> bool {
+    matches!(node.value(name), Some(Value::Keyword(keyword)) if keyword == "auto")
+}
+
 fn attribute_length(element: &ElementData, name: &str) -> Option<f32> {
     element
         .attributes
@@ -438,5 +476,66 @@ mod tests {
         assert_eq!(link.dimensions.content.x, 0.0);
         assert!(span.dimensions.content.x > link.dimensions.content.x);
         assert_eq!(link.dimensions.content.y, span.dimensions.content.y);
+    }
+
+    #[test]
+    fn margin_auto_centers_block_horizontally() {
+        let styled = styled_root(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 100px;
+                    height: 40px;
+                    margin-left: auto;
+                    margin-right: auto;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 400.0);
+
+        // 400 viewport - 100 width = 300 leftover, split evenly across both margins.
+        assert_eq!(layout.dimensions.content.width, 100.0);
+        assert_eq!(layout.dimensions.content.x, 150.0);
+        assert_eq!(layout.dimensions.margin.left, 150.0);
+        assert_eq!(layout.dimensions.margin.right, 150.0);
+    }
+
+    #[test]
+    fn one_sided_margin_auto_pushes_content_to_far_side() {
+        let styled = styled_root(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 100px;
+                    margin-left: auto;
+                    margin-right: 20px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 400.0);
+
+        // 400 - 100 = 300 leftover, minus the explicit 20px right margin = 280 left margin.
+        assert_eq!(layout.dimensions.margin.left, 280.0);
+        assert_eq!(layout.dimensions.margin.right, 20.0);
+        assert_eq!(layout.dimensions.content.x, 280.0);
+    }
+
+    #[test]
+    fn margin_auto_collapses_when_width_is_auto() {
+        let styled = styled_root(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    margin-left: auto;
+                    margin-right: auto;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 400.0);
+
+        // CSS spec: with width: auto, auto margins collapse to 0 and content fills.
+        assert_eq!(layout.dimensions.margin.left, 0.0);
+        assert_eq!(layout.dimensions.margin.right, 0.0);
+        assert_eq!(layout.dimensions.content.width, 400.0);
     }
 }
