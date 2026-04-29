@@ -542,12 +542,15 @@ fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
         }
     } else {
         css::Color {
-            r: 170,
-            g: 178,
-            b: 190,
+            r: 218,
+            g: 220,
+            b: 224,
             a: 255,
         }
     };
+    let pill_radius = address_box.height / 2.0;
+    let pill_outer = render::CornerRadii::uniform(pill_radius);
+    let pill_inner = render::CornerRadii::uniform((pill_radius - 1.0).max(0.0));
 
     let mut commands = vec![
         render::DisplayCommand::SolidRect(
@@ -564,8 +567,8 @@ fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
                 height: CHROME_HEIGHT,
             },
         ),
-        render::DisplayCommand::SolidRect(border_color, address_box),
-        render::DisplayCommand::SolidRect(
+        render::DisplayCommand::RoundedRect(border_color, address_box, pill_outer),
+        render::DisplayCommand::RoundedRect(
             css::Color {
                 r: 255,
                 g: 255,
@@ -578,6 +581,7 @@ fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
                 width: (address_box.width - 2.0).max(0.0),
                 height: (address_box.height - 2.0).max(0.0),
             },
+            pill_inner,
         ),
         render::DisplayCommand::Text(render::TextCommand {
             text: address_display.clone(),
