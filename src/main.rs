@@ -542,17 +542,35 @@ fn build_document_view(
     commands.extend(collect_image_commands(&layout, current_url, images));
     Ok(DocumentView {
         commands,
-        links: collect_link_targets(&layout, None),
+        links: collect_link_targets(&layout, None, false),
     })
 }
 
 fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
     // Chrome rendering is intentionally separate from page rendering so scrolling never moves it.
     let width = chrome.viewport_width as f32;
-    let address_display = if chrome.address_input.is_empty() {
-        "http://example.com".to_string()
+    let input_empty = chrome.address_input.is_empty();
+    // The placeholder only renders when the bar is empty AND not in select-all-on-focus mode,
+    // so a user who clicks the bar to type sees an empty field instead of greyed text under
+    // their cursor.
+    let address_display = if input_empty {
+        if chrome.address_bar_selected {
+            String::new()
+        } else {
+            "http://example.com".to_string()
+        }
     } else {
         chrome.address_input.to_string()
+    };
+    let address_color = if input_empty {
+        css::Color {
+            r: 154,
+            g: 160,
+            b: 166,
+            a: 255,
+        }
+    } else {
+        css::Color::BLACK
     };
     let address_box = address_bar_rect(width);
     let border_color = if chrome.address_bar_focused {
@@ -657,7 +675,7 @@ fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             text: address_display.clone(),
             x: ADDRESS_TEXT_X,
             y: ADDRESS_TEXT_Y,
-            color: css::Color::BLACK,
+            color: address_color,
             font_size: 8.0,
         }),
         render::DisplayCommand::Text(render::TextCommand {
@@ -871,9 +889,13 @@ fn document_height(commands: &[render::DisplayCommand]) -> f32 {
 fn collect_link_targets(
     layout_box: &layout::LayoutBox,
     inherited_href: Option<&str>,
+    inherited_no_underline: bool,
 ) -> Vec<LinkTarget> {
     let own_href = href_for_layout_box(layout_box);
     let current_href = own_href.or(inherited_href);
+    // text-decoration: none on any ancestor (typically the <a> itself) suppresses
+    // underlines for everything below it.
+    let no_underline = inherited_no_underline || has_text_decoration_none(layout_box);
     let mut targets = Vec::new();
 
     // Link targets are collected separately from display commands because clicking needs rectangles,
@@ -882,15 +904,25 @@ fn collect_link_targets(
         targets.push(LinkTarget {
             href: href.to_string(),
             rect: layout_box.dimensions.content,
-            underline: own_href.is_none(),
+            underline: own_href.is_none() && !no_underline,
         });
     }
 
     for child in &layout_box.children {
-        targets.extend(collect_link_targets(child, current_href));
+        targets.extend(collect_link_targets(child, current_href, no_underline));
     }
 
     targets
+}
+
+fn has_text_decoration_none(layout_box: &layout::LayoutBox) -> bool {
+    match &layout_box.box_type {
+        layout::BoxType::BlockNode(node) => matches!(
+            node.value("text-decoration"),
+            Some(css::Value::Keyword(keyword)) if keyword == "none"
+        ),
+        layout::BoxType::AnonymousBlock => false,
+    }
 }
 
 fn collect_image_commands(
@@ -1042,8 +1074,8 @@ fn sample_css() -> &'static str {
             width: 720px;
             margin-left: auto;
             margin-right: auto;
-            padding-top: 64px;
-            padding-bottom: 80px;
+            padding-top: 48px;
+            padding-bottom: 60px;
             text-align: center;
             background-color: #ffffff;
         }
@@ -1058,9 +1090,9 @@ fn sample_css() -> &'static str {
             padding-top: 14px;
             margin-left: auto;
             margin-right: auto;
-            margin-bottom: 36px;
+            margin-bottom: 40px;
             background-color: #f1f3f4;
-            border-radius: 18px;
+            border-radius: 22px;
             color: #80868b;
             font-size: 14px;
         }
@@ -1071,16 +1103,18 @@ fn sample_css() -> &'static str {
         }
         .tile {
             width: 48px;
-            height: 48px;
-            padding-top: 16px;
+            height: 16px;
+            padding-top: 36px;
+            padding-bottom: 12px;
             padding-left: 8px;
             padding-right: 8px;
-            background-color: #f8f9fa;
+            background-color: #f1f3f4;
             border-radius: 12px;
-            margin-left: 16px;
-            margin-right: 16px;
+            margin-left: 12px;
+            margin-right: 12px;
             color: #3c4043;
-            font-size: 11px;
+            font-size: 12px;
+            text-decoration: none;
         }
     "#
 }
@@ -1281,13 +1315,15 @@ fn load_initial_state() -> BrowserState {
             }
         },
         None => BrowserState::new(
-            "http://example.com".into(),
+            // NTP starts with an empty address bar so the placeholder text shows in
+            // muted gray rather than as a real URL the user appears to have typed.
+            String::new(),
             sample_html().to_string(),
             sample_css().to_string(),
             HashMap::new(),
             Vec::new(),
             None,
-            "type url and press enter",
+            "",
         ),
     }
 }
@@ -1388,13 +1424,35 @@ mod tests {
             .unwrap();
         let styled = style::style_tree(&node, &[]);
         let layout_tree = layout::layout_tree(&styled, 300.0);
-        let links = collect_link_targets(&layout_tree, None);
+        let links = collect_link_targets(&layout_tree, None, false);
 
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].href, "/next");
         assert_eq!(links[1].href, "/next");
         assert!(!links[0].underline);
         assert!(links[1].underline);
+    }
+
+    #[test]
+    fn text_decoration_none_suppresses_link_underline() {
+        let node = html::parse(r#"<a href="/next" class="tile">Hello</a>"#)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let stylesheet = css::parse(".tile { text-decoration: none; }").unwrap();
+        let styled = style::style_tree(&node, &[stylesheet]);
+        let layout_tree = layout::layout_tree(&styled, 300.0);
+        let links = collect_link_targets(&layout_tree, None, false);
+
+        // Both the <a> target and the inherited text target keep their click rects, but the
+        // text-decoration declaration on the <a> suppresses the underline that would normally
+        // appear on the descendant text node.
+        assert!(!links.is_empty());
+        assert!(
+            links.iter().all(|link| !link.underline),
+            "no underline should be emitted when text-decoration is none"
+        );
     }
 
     #[test]
