@@ -102,7 +102,8 @@ fn layout_node(
 
     // Parents with only inline children lay them out left-to-right; everything else stays block.
     let (children, auto_content_height) = if uses_inline_flow(node) {
-        layout_inline_children(&node.children, content_x, content_y, content_width)
+        let align = inline_align_for(node);
+        layout_inline_children(&node.children, content_x, content_y, content_width, align)
     } else {
         let mut child_cursor_y = content_y;
         let children = node
@@ -142,30 +143,73 @@ fn layout_inline_children(
     content_x: f32,
     content_y: f32,
     content_width: f32,
+    align: InlineAlign,
 ) -> (Vec<LayoutBox>, f32) {
-    let mut line_x = content_x;
-    let mut line_y = content_y;
-    let mut line_height = 0.0;
-    let mut max_bottom = content_y;
-    let mut boxes = Vec::new();
+    // First pass: pack children into lines using their measured widths so we can know
+    // each line's total width before placing any box. The placement pass uses that
+    // information to offset the line for non-left alignments.
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut line_widths: Vec<f32> = Vec::new();
+    let mut current_line: Vec<usize> = Vec::new();
+    let mut current_width: f32 = 0.0;
 
-    // Inline layout here is intentionally simple: a single line that wraps when width runs out.
-    for child in children {
-        let child_size = inline_total_size(child);
-        if line_x > content_x && line_x + child_size.width > content_x + content_width {
-            line_x = content_x;
-            line_y += line_height;
-            line_height = 0.0;
+    for (idx, child) in children.iter().enumerate() {
+        let child_w = inline_total_size(child).width;
+        if !current_line.is_empty() && current_width + child_w > content_width {
+            lines.push(std::mem::take(&mut current_line));
+            line_widths.push(current_width);
+            current_width = 0.0;
         }
+        current_line.push(idx);
+        current_width += child_w;
+    }
+    if !current_line.is_empty() {
+        lines.push(current_line);
+        line_widths.push(current_width);
+    }
 
-        let child_box = layout_inline_node(child, line_x, line_y);
-        line_x += child_size.width;
-        line_height = line_height.max(child_size.height);
+    // Second pass: place each line at its alignment-corrected offset.
+    let mut boxes = Vec::new();
+    let mut line_y = content_y;
+    let mut max_bottom = content_y;
+
+    for (line_idx, line_children) in lines.iter().enumerate() {
+        let line_width = line_widths[line_idx];
+        let line_offset = match align {
+            InlineAlign::Left => 0.0,
+            InlineAlign::Center => ((content_width - line_width) / 2.0).max(0.0),
+            InlineAlign::Right => (content_width - line_width).max(0.0),
+        };
+        let mut line_x = content_x + line_offset;
+        let mut line_height = 0.0f32;
+        for &child_idx in line_children {
+            let child = &children[child_idx];
+            let child_size = inline_total_size(child);
+            let child_box = layout_inline_node(child, line_x, line_y);
+            line_x += child_size.width;
+            line_height = line_height.max(child_size.height);
+            boxes.push(child_box);
+        }
         max_bottom = max_bottom.max(line_y + line_height);
-        boxes.push(child_box);
+        line_y += line_height;
     }
 
     (boxes, max_bottom - content_y)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InlineAlign {
+    Left,
+    Center,
+    Right,
+}
+
+fn inline_align_for(node: &StyledNode) -> InlineAlign {
+    match node.value("text-align") {
+        Some(Value::Keyword(keyword)) if keyword == "center" => InlineAlign::Center,
+        Some(Value::Keyword(keyword)) if keyword == "right" => InlineAlign::Right,
+        _ => InlineAlign::Left,
+    }
 }
 
 fn layout_inline_node(node: &StyledNode, x: f32, y: f32) -> LayoutBox {
@@ -518,6 +562,38 @@ mod tests {
         assert_eq!(layout.dimensions.margin.left, 280.0);
         assert_eq!(layout.dimensions.margin.right, 20.0);
         assert_eq!(layout.dimensions.content.x, 280.0);
+    }
+
+    #[test]
+    fn text_align_center_offsets_inline_line() {
+        let styled = styled_root(
+            r#"<p><a href="/x">Go</a></p>"#,
+            r#"
+                p { width: 200px; text-align: center; }
+                a { width: 40px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 400.0);
+        let link = &layout.children[0];
+
+        // Line width is 40, container is 200, so the line offsets by (200-40)/2 = 80.
+        assert_eq!(link.dimensions.content.x, 80.0);
+    }
+
+    #[test]
+    fn text_align_left_keeps_default_layout() {
+        let styled = styled_root(
+            r#"<p><a href="/x">Go</a></p>"#,
+            r#"
+                p { width: 200px; }
+                a { width: 40px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 400.0);
+        let link = &layout.children[0];
+
+        // No alignment override means the line still starts at content_x = 0.
+        assert_eq!(link.dimensions.content.x, 0.0);
     }
 
     #[test]
