@@ -3,16 +3,20 @@ use std::{collections::HashMap, env};
 use mini_browser::{css, dom::NodeType, html, layout, net, render, resource, style, window};
 
 // These constants define the browser chrome at the top of the window.
-// Everything below `CHROME_HEIGHT` is treated as page content.
-const CHROME_HEIGHT: f32 = 56.0;
-const ADDRESS_TEXT_Y: f32 = 12.0;
-const STATUS_TEXT_Y: f32 = 34.0;
+// Everything below `CHROME_HEIGHT` is treated as page content. The chrome stacks
+// a tab strip on top of a toolbar; toolbar constants are expressed in screen
+// coordinates so they already include `TAB_STRIP_HEIGHT` as their top offset.
+const TAB_STRIP_HEIGHT: f32 = 32.0;
+const TOOLBAR_HEIGHT: f32 = 56.0;
+const CHROME_HEIGHT: f32 = TAB_STRIP_HEIGHT + TOOLBAR_HEIGHT;
+const ADDRESS_TEXT_Y: f32 = TAB_STRIP_HEIGHT + 12.0;
+const STATUS_TEXT_Y: f32 = TAB_STRIP_HEIGHT + 34.0;
 const ADDRESS_BOX_X: f32 = 68.0;
-const ADDRESS_BOX_Y: f32 = 8.0;
+const ADDRESS_BOX_Y: f32 = TAB_STRIP_HEIGHT + 8.0;
 const ADDRESS_BOX_HEIGHT: f32 = 18.0;
 const ADDRESS_TEXT_X: f32 = 72.0;
 const ADDRESS_CHAR_WIDTH: f32 = 6.0;
-const NAV_BUTTON_Y: f32 = 8.0;
+const NAV_BUTTON_Y: f32 = TAB_STRIP_HEIGHT + 8.0;
 const NAV_BUTTON_WIDTH: f32 = 20.0;
 const NAV_BUTTON_HEIGHT: f32 = 18.0;
 const BACK_BUTTON_X: f32 = 12.0;
@@ -20,6 +24,13 @@ const FORWARD_BUTTON_X: f32 = 36.0;
 const MENU_BUTTON_WIDTH: f32 = 20.0;
 const MENU_BUTTON_RIGHT_PAD: f32 = 12.0;
 const MENU_BUTTON_GAP: f32 = 8.0;
+const TAB_X: f32 = 8.0;
+const TAB_Y: f32 = 4.0;
+const TAB_WIDTH: f32 = 240.0;
+const TAB_HEIGHT: f32 = TAB_STRIP_HEIGHT - TAB_Y;
+const TAB_RADIUS: f32 = 8.0;
+const TAB_TITLE_X: f32 = TAB_X + 12.0;
+const TAB_TITLE_Y: f32 = TAB_Y + 9.0;
 
 #[derive(Debug, Clone)]
 struct BrowserState {
@@ -72,6 +83,7 @@ struct ChromeState<'a> {
     can_go_back: bool,
     can_go_forward: bool,
     hovered_action: Option<ChromeAction>,
+    tab_title: &'a str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +177,12 @@ impl BrowserState {
             .map(|link| link.href.as_str());
         let hovered_action = self.hovered_chrome_action(input);
 
+        let tab_title = self
+            .current_url
+            .as_ref()
+            .map(|url| url.host.as_str())
+            .filter(|host| !host.is_empty())
+            .unwrap_or("New Tab");
         let mut commands = chrome_commands(ChromeState {
             viewport_width,
             address_input: &self.address_input,
@@ -176,6 +194,7 @@ impl BrowserState {
             can_go_back: self.can_go_back(),
             can_go_forward: self.can_go_forward(),
             hovered_action,
+            tab_title,
         });
         // Page commands are translated below the fixed chrome and then decorated with link underlines.
         commands.extend(render::translate(
@@ -555,21 +574,69 @@ fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
     let pill_outer = render::CornerRadii::uniform(pill_radius);
     let pill_inner = render::CornerRadii::uniform((pill_radius - 1.0).max(0.0));
 
+    let toolbar_bg = css::Color {
+        r: 236,
+        g: 239,
+        b: 244,
+        a: 255,
+    };
+    let tab_strip_bg = css::Color {
+        r: 222,
+        g: 225,
+        b: 230,
+        a: 255,
+    };
     let mut commands = vec![
+        // Tab strip sits behind everything else and is the darker band of chrome.
         render::DisplayCommand::SolidRect(
-            css::Color {
-                r: 236,
-                g: 239,
-                b: 244,
-                a: 255,
-            },
+            tab_strip_bg,
             layout::Rect {
                 x: 0.0,
                 y: 0.0,
                 width,
-                height: CHROME_HEIGHT,
+                height: TAB_STRIP_HEIGHT,
             },
         ),
+        // Toolbar fills the rest of the chrome with the lighter foreground color.
+        render::DisplayCommand::SolidRect(
+            toolbar_bg,
+            layout::Rect {
+                x: 0.0,
+                y: TAB_STRIP_HEIGHT,
+                width,
+                height: TOOLBAR_HEIGHT,
+            },
+        ),
+        // Active tab paints in the same color as the toolbar so the two surfaces merge
+        // seamlessly along the bottom edge while the rounded top corners show on the
+        // darker strip.
+        render::DisplayCommand::RoundedRect(
+            toolbar_bg,
+            layout::Rect {
+                x: TAB_X,
+                y: TAB_Y,
+                width: TAB_WIDTH,
+                height: TAB_HEIGHT,
+            },
+            render::CornerRadii {
+                tl: TAB_RADIUS,
+                tr: TAB_RADIUS,
+                br: 0.0,
+                bl: 0.0,
+            },
+        ),
+        render::DisplayCommand::Text(render::TextCommand {
+            text: chrome.tab_title.to_string(),
+            x: TAB_TITLE_X,
+            y: TAB_TITLE_Y,
+            color: css::Color {
+                r: 60,
+                g: 64,
+                b: 67,
+                a: 255,
+            },
+            font_size: 8.0,
+        }),
         render::DisplayCommand::RoundedRect(border_color, address_box, pill_outer),
         render::DisplayCommand::RoundedRect(
             css::Color {
