@@ -242,11 +242,10 @@ fn extract_url_value(block: &str) -> Option<String> {
     }
 
     // Only pick TTF/OTF since fontdue supports those natively.
-    urls.into_iter()
-        .find(|u| {
-            let l = u.to_ascii_lowercase();
-            l.ends_with(".ttf") || l.ends_with(".otf")
-        })
+    urls.into_iter().find(|u| {
+        let l = u.to_ascii_lowercase();
+        l.ends_with(".ttf") || l.ends_with(".otf")
+    })
 }
 
 #[cfg(test)]

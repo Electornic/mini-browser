@@ -2,7 +2,6 @@ use std::{cell::RefCell, rc::Rc};
 
 use minifb::{InputCallback, Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 
-
 // WindowInput is the per-frame snapshot that the browser UI consumes.
 #[derive(Debug, Clone, Default)]
 pub struct WindowInput {
