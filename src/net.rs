@@ -154,12 +154,12 @@ pub fn load_html_document(url: &Url) -> Result<(String, Url), NetworkError> {
         ));
     }
 
-    if let Some(content_type) = response.header("content-type") {
-        if !content_type.starts_with("text/html") {
-            return Err(NetworkError::UnexpectedContentType(
-                content_type.to_string(),
-            ));
-        }
+    if let Some(content_type) = response.header("content-type")
+        && !content_type.starts_with("text/html")
+    {
+        return Err(NetworkError::UnexpectedContentType(
+            content_type.to_string(),
+        ));
     }
 
     let document =
@@ -177,12 +177,12 @@ pub fn load_css(url: &Url) -> Result<String, NetworkError> {
         ));
     }
 
-    if let Some(content_type) = response.header("content-type") {
-        if !content_type.starts_with("text/css") {
-            return Err(NetworkError::UnexpectedContentType(
-                content_type.to_string(),
-            ));
-        }
+    if let Some(content_type) = response.header("content-type")
+        && !content_type.starts_with("text/css")
+    {
+        return Err(NetworkError::UnexpectedContentType(
+            content_type.to_string(),
+        ));
     }
 
     String::from_utf8(response.body).map_err(|_| NetworkError::InvalidBodyEncoding)
@@ -198,12 +198,12 @@ pub fn load_image(url: &Url) -> Result<Vec<u8>, NetworkError> {
         ));
     }
 
-    if let Some(content_type) = response.header("content-type") {
-        if !content_type.starts_with("image/") {
-            return Err(NetworkError::UnexpectedContentType(
-                content_type.to_string(),
-            ));
-        }
+    if let Some(content_type) = response.header("content-type")
+        && !content_type.starts_with("image/")
+    {
+        return Err(NetworkError::UnexpectedContentType(
+            content_type.to_string(),
+        ));
     }
 
     Ok(response.body)

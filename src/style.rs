@@ -36,10 +36,10 @@ fn style_tree_with_parent(
     // Real browsers inherit many properties. Here we only inherit a few text-related ones
     // because they make documents readable without making the style system much more complex.
     for property in ["color", "font-size"] {
-        if !specified_values.contains_key(property) {
-            if let Some(value) = parent_values.and_then(|values| values.get(property)) {
-                specified_values.insert(property.to_string(), value.clone());
-            }
+        if !specified_values.contains_key(property)
+            && let Some(value) = parent_values.and_then(|values| values.get(property))
+        {
+            specified_values.insert(property.to_string(), value.clone());
         }
     }
 

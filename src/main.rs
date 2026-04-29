@@ -990,18 +990,15 @@ fn escape_html(value: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn load_remote_document(
-    raw_url: &str,
-) -> Result<
-    (
-        String,
-        String,
-        HashMap<String, resource::LoadedImage>,
-        Vec<Vec<u8>>,
-        net::Url,
-    ),
+type LoadedDocument = (
     String,
-> {
+    String,
+    HashMap<String, resource::LoadedImage>,
+    Vec<Vec<u8>>,
+    net::Url,
+);
+
+fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
     // This function is the app-facing loader. It translates low-level fetch/content-type details
     // into "what document should the browser show?".
     let url = net::Url::parse(raw_url).map_err(|error| format!("url error: {error:?}"))?;
@@ -1021,7 +1018,13 @@ fn load_remote_document(
         let body = String::from_utf8(response.body)
             .map_err(|_| describe_network_error(&net::NetworkError::InvalidBodyEncoding))?;
         let (document_html, stylesheet) = text_document(&body, &final_url.to_string());
-        return Ok((document_html, stylesheet, HashMap::new(), Vec::new(), final_url));
+        return Ok((
+            document_html,
+            stylesheet,
+            HashMap::new(),
+            Vec::new(),
+            final_url,
+        ));
     }
 
     if !content_type.starts_with("text/html") {
@@ -1117,16 +1120,16 @@ fn build_font_cache(font_data: &[Vec<u8>]) -> Vec<fontdue::Font> {
         .collect();
 
     // Fall back to a macOS system font so pages without web fonts can still render Korean/CJK.
-    if let Ok(system_font_bytes) = std::fs::read("/System/Library/Fonts/AppleSDGothicNeo.ttc") {
-        if let Ok(font) = fontdue::Font::from_bytes(
+    if let Ok(system_font_bytes) = std::fs::read("/System/Library/Fonts/AppleSDGothicNeo.ttc")
+        && let Ok(font) = fontdue::Font::from_bytes(
             system_font_bytes.as_slice(),
             fontdue::FontSettings {
                 collection_index: 0,
                 ..fontdue::FontSettings::default()
             },
-        ) {
-            fonts.push(font);
-        }
+        )
+    {
+        fonts.push(font);
     }
 
     fonts

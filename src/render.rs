@@ -299,7 +299,16 @@ fn draw_text(
 
         let Some(font) = font_match else {
             // No font has this glyph — use the bitmap fallback for this character.
-            draw_bitmap_char(buffer, width, height, ch, cursor_x, text.y, text.color, text.font_size);
+            draw_bitmap_char(
+                buffer,
+                width,
+                height,
+                ch,
+                cursor_x,
+                text.y,
+                text.color,
+                text.font_size,
+            );
             cursor_x += text.font_size * 0.75;
             continue;
         };
@@ -345,12 +354,22 @@ fn draw_text_bitmap(buffer: &mut [u32], width: usize, height: usize, text: &Text
     let mut cursor_x = text.x;
 
     for ch in text.text.chars() {
-        draw_bitmap_char(buffer, width, height, ch, cursor_x, text.y, text.color, text.font_size);
+        draw_bitmap_char(
+            buffer,
+            width,
+            height,
+            ch,
+            cursor_x,
+            text.y,
+            text.color,
+            text.font_size,
+        );
         let scale = (text.font_size / 8.0).max(1.0).round();
         cursor_x += if ch == ' ' { 4.0 * scale } else { 6.0 * scale };
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_bitmap_char(
     buffer: &mut [u32],
     width: usize,
