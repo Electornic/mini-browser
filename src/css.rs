@@ -12,10 +12,25 @@ pub struct Rule {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Selector {
+pub enum SimpleSelector {
     Tag(String),
     Class(String),
     Id(String),
+}
+
+/// A complex selector is a list of simple selectors joined by combinators.
+/// `parts` is ordered left-to-right (outermost ancestor first, target element last).
+/// A length-1 selector is a plain simple selector. Future combinators (>, +, ~) will live
+/// alongside `parts` once they are introduced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selector {
+    pub parts: Vec<SimpleSelector>,
+}
+
+impl Selector {
+    pub fn simple(part: SimpleSelector) -> Self {
+        Self { parts: vec![part] }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -230,16 +245,21 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_selector(&mut self) -> Result<Selector, ParseError> {
+        // Single simple selector for now; combinator support lands in a follow-up commit.
+        Ok(Selector::simple(self.parse_simple_selector()?))
+    }
+
+    fn parse_simple_selector(&mut self) -> Result<SimpleSelector, ParseError> {
         match self.next_char() {
             Some('.') => {
                 self.consume_char();
-                Ok(Selector::Class(self.parse_identifier()?))
+                Ok(SimpleSelector::Class(self.parse_identifier()?))
             }
             Some('#') => {
                 self.consume_char();
-                Ok(Selector::Id(self.parse_identifier()?))
+                Ok(SimpleSelector::Id(self.parse_identifier()?))
             }
-            Some(_) => Ok(Selector::Tag(self.parse_identifier()?)),
+            Some(_) => Ok(SimpleSelector::Tag(self.parse_identifier()?)),
             None => Err(ParseError::new(
                 self.pos,
                 "unexpected end of input while parsing selector",
@@ -541,7 +561,7 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Color, Selector, Unit, Value, parse};
+    use super::{Color, Selector, SimpleSelector, Unit, Value, parse};
 
     #[test]
     fn parses_multiple_rules_and_selectors() {
@@ -562,7 +582,10 @@ mod tests {
         assert_eq!(stylesheet.rules.len(), 2);
         assert_eq!(
             stylesheet.rules[0].selectors,
-            vec![Selector::Tag("h1".into()), Selector::Class("title".into())]
+            vec![
+                Selector::simple(SimpleSelector::Tag("h1".into())),
+                Selector::simple(SimpleSelector::Class("title".into())),
+            ]
         );
         assert_eq!(
             stylesheet.rules[0].declarations[0].value,
@@ -579,7 +602,7 @@ mod tests {
         );
         assert_eq!(
             stylesheet.rules[1].selectors,
-            vec![Selector::Id("app".into())]
+            vec![Selector::simple(SimpleSelector::Id("app".into()))]
         );
     }
 

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    css::{Declaration, Selector, Stylesheet, Unit, Value},
+    css::{Declaration, Selector, SimpleSelector, Stylesheet, Unit, Value},
     dom::{ElementData, Node, NodeType},
 };
 
@@ -214,24 +214,40 @@ fn matching_specificity(node: &Node, selectors: &[Selector]) -> Option<u32> {
 }
 
 fn selector_specificity(selector: &Selector) -> u32 {
-    match selector {
-        Selector::Tag(_) => 1,
-        Selector::Class(_) => 10,
-        Selector::Id(_) => 100,
+    // Sum specificity across the whole chain so descendant selectors will already give the
+    // right answer once the parser starts emitting them.
+    selector.parts.iter().map(simple_specificity).sum()
+}
+
+fn simple_specificity(simple: &SimpleSelector) -> u32 {
+    match simple {
+        SimpleSelector::Tag(_) => 1,
+        SimpleSelector::Class(_) => 10,
+        SimpleSelector::Id(_) => 100,
     }
 }
 
 fn matches_selector(node: &Node, selector: &Selector) -> bool {
+    // The rightmost simple selector (the "target") must match the element being styled.
+    // Ancestor combinator matching lands in the follow-up commit; until then the parser
+    // only emits length-1 chains, so this is equivalent to the old single-selector matcher.
+    let Some(target) = selector.parts.last() else {
+        return false;
+    };
+    matches_simple(node, target)
+}
+
+fn matches_simple(node: &Node, simple: &SimpleSelector) -> bool {
     let element = match &node.node_type {
         NodeType::Element(element) => element,
         // Text nodes never match selectors directly; they only inherit style from parents.
         NodeType::Text(_) => return false,
     };
 
-    match selector {
-        Selector::Tag(tag_name) => element.tag_name == *tag_name,
-        Selector::Class(class_name) => has_class(element, class_name),
-        Selector::Id(id) => element
+    match simple {
+        SimpleSelector::Tag(tag_name) => element.tag_name == *tag_name,
+        SimpleSelector::Class(class_name) => has_class(element, class_name),
+        SimpleSelector::Id(id) => element
             .attributes
             .get("id")
             .is_some_and(|value| value == id),
