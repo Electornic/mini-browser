@@ -29,22 +29,23 @@ impl StyledNode {
 pub fn style_tree(root: &Node, stylesheets: &[Stylesheet]) -> StyledNode {
     // The root font-size feeds rem resolution for every descendant. Compute it up front
     // by treating the root as if it lived inside the user-agent default font-size.
-    let raw_root = specified_values(root, stylesheets);
+    let raw_root = specified_values(root, stylesheets, &[]);
     let root_font_size = resolve_font_size(
         raw_root.get("font-size"),
         DEFAULT_FONT_SIZE,
         DEFAULT_FONT_SIZE,
     );
-    style_tree_with_parent(root, stylesheets, None, root_font_size)
+    style_tree_with_parent(root, stylesheets, None, root_font_size, &[])
 }
 
-fn style_tree_with_parent(
-    node: &Node,
+fn style_tree_with_parent<'a>(
+    node: &'a Node,
     stylesheets: &[Stylesheet],
     parent_values: Option<&PropertyMap>,
     root_font_size: f32,
+    ancestors: &[&'a Node],
 ) -> StyledNode {
-    let mut specified_values = specified_values(node, stylesheets);
+    let mut specified_values = specified_values(node, stylesheets, ancestors);
 
     // Real browsers inherit many properties. Here we only inherit a few text-related ones
     // because they make documents readable without making the style system much more complex.
@@ -84,11 +85,20 @@ fn style_tree_with_parent(
         }
     }
 
+    // Append self to the ancestor chain children see during their selector matching.
+    let mut child_ancestors: Vec<&Node> = ancestors.to_vec();
+    child_ancestors.push(node);
     let children = node
         .children
         .iter()
         .map(|child| {
-            style_tree_with_parent(child, stylesheets, Some(&specified_values), root_font_size)
+            style_tree_with_parent(
+                child,
+                stylesheets,
+                Some(&specified_values),
+                root_font_size,
+                &child_ancestors,
+            )
         })
         .collect();
 
@@ -110,7 +120,7 @@ fn resolve_font_size(raw: Option<&Value>, parent_font_size: f32, root_font_size:
     }
 }
 
-fn specified_values(node: &Node, stylesheets: &[Stylesheet]) -> PropertyMap {
+fn specified_values(node: &Node, stylesheets: &[Stylesheet], ancestors: &[&Node]) -> PropertyMap {
     let mut matched = Vec::new();
 
     // First collect every rule that matches this node together with its specificity and order.
@@ -119,7 +129,7 @@ fn specified_values(node: &Node, stylesheets: &[Stylesheet]) -> PropertyMap {
         .flat_map(|sheet| sheet.rules.iter())
         .enumerate()
     {
-        if let Some(specificity) = matching_specificity(node, &rule.selectors) {
+        if let Some(specificity) = matching_specificity(node, ancestors, &rule.selectors) {
             matched.push((specificity, rule_order, &rule.declarations));
         }
     }
@@ -204,11 +214,11 @@ fn apply_declarations(values: &mut PropertyMap, declarations: &[Declaration]) {
     }
 }
 
-fn matching_specificity(node: &Node, selectors: &[Selector]) -> Option<u32> {
+fn matching_specificity(node: &Node, ancestors: &[&Node], selectors: &[Selector]) -> Option<u32> {
     // The highest matching selector wins within a rule group such as `h1, .title`.
     selectors
         .iter()
-        .filter(|selector| matches_selector(node, selector))
+        .filter(|selector| matches_selector(node, ancestors, selector))
         .map(selector_specificity)
         .max()
 }
@@ -227,14 +237,30 @@ fn simple_specificity(simple: &SimpleSelector) -> u32 {
     }
 }
 
-fn matches_selector(node: &Node, selector: &Selector) -> bool {
-    // The rightmost simple selector (the "target") must match the element being styled.
-    // Ancestor combinator matching lands in the follow-up commit; until then the parser
-    // only emits length-1 chains, so this is equivalent to the old single-selector matcher.
-    let Some(target) = selector.parts.last() else {
+fn matches_selector(node: &Node, ancestors: &[&Node], selector: &Selector) -> bool {
+    // Right-to-left matching: the rightmost simple selector is the target and must match
+    // the element being styled. The remaining parts have to appear in DOM order somewhere
+    // along the ancestor chain. The walk is greedy — it consumes the closest matching
+    // ancestor — which is fine for the descendant combinator because all parts only need
+    // *some* ancestor to satisfy them, not a specific one.
+    let Some((target, rest)) = selector.parts.split_last() else {
         return false;
     };
-    matches_simple(node, target)
+    if !matches_simple(node, target) {
+        return false;
+    }
+
+    let mut ancestor_iter = ancestors.iter().rev();
+    for part in rest.iter().rev() {
+        loop {
+            match ancestor_iter.next() {
+                Some(ancestor) if matches_simple(ancestor, part) => break,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+    true
 }
 
 fn matches_simple(node: &Node, simple: &SimpleSelector) -> bool {
@@ -382,6 +408,63 @@ mod tests {
                 r: 0,
                 g: 102,
                 b: 204,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn descendant_selector_matches_nested_target() {
+        let root = parse_html(
+            r#"<div class="outer"><section><span class="inner">hi</span></section></div>"#,
+        );
+        let stylesheet = parse_css(".outer .inner { color: #ff0000; }");
+        let styled = style::style_tree(&root, &[stylesheet]);
+        let inner = &styled.children[0].children[0];
+
+        // .outer .inner targets the <span>, even though a <section> sits between them.
+        assert_eq!(
+            inner.value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn descendant_selector_does_not_match_when_ancestor_is_missing() {
+        let root = parse_html(r#"<div><span class="inner">hi</span></div>"#);
+        let stylesheet = parse_css(".outer .inner { color: #ff0000; }");
+        let styled = style::style_tree(&root, &[stylesheet]);
+        let inner = &styled.children[0];
+
+        // No `.outer` ancestor exists, so the rule must not apply.
+        assert_eq!(inner.value("color"), None);
+    }
+
+    #[test]
+    fn descendant_selector_specificity_sums_across_chain() {
+        // .outer .inner has specificity 10 + 10 = 20, beating the lone .inner rule (10)
+        // even when the latter is listed later in the stylesheet.
+        let root = parse_html(r#"<div class="outer"><span class="inner">hi</span></div>"#);
+        let stylesheet = parse_css(
+            r#"
+                .outer .inner { color: #ff0000; }
+                .inner { color: #00ff00; }
+            "#,
+        );
+        let styled = style::style_tree(&root, &[stylesheet]);
+        let inner = &styled.children[0];
+
+        assert_eq!(
+            inner.value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
                 a: 255,
             }))
         );

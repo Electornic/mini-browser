@@ -245,8 +245,35 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_selector(&mut self) -> Result<Selector, ParseError> {
-        // Single simple selector for now; combinator support lands in a follow-up commit.
-        Ok(Selector::simple(self.parse_simple_selector()?))
+        // A complex selector is one or more simple selectors separated by combinators.
+        // For now the only combinator is whitespace (descendant). Compound selectors like
+        // `.a.b` (no separator) are still rejected — we stop the chain as soon as we see
+        // another simple selector that is not preceded by whitespace.
+        let mut parts = vec![self.parse_simple_selector()?];
+
+        loop {
+            let saved = self.pos;
+            let ws_start = self.pos;
+            self.consume_whitespace();
+            let had_whitespace = self.pos > ws_start;
+
+            if !had_whitespace {
+                self.pos = saved;
+                break;
+            }
+
+            match self.next_char() {
+                Some(ch) if ch == '.' || ch == '#' || ch.is_ascii_alphabetic() || ch == '_' => {
+                    parts.push(self.parse_simple_selector()?);
+                }
+                _ => {
+                    self.pos = saved;
+                    break;
+                }
+            }
+        }
+
+        Ok(Selector { parts })
     }
 
     fn parse_simple_selector(&mut self) -> Result<SimpleSelector, ParseError> {
@@ -603,6 +630,35 @@ mod tests {
         assert_eq!(
             stylesheet.rules[1].selectors,
             vec![Selector::simple(SimpleSelector::Id("app".into()))]
+        );
+    }
+
+    #[test]
+    fn parses_descendant_selector_chain() {
+        let stylesheet = parse(".outer .inner { color: red; }").unwrap();
+        let selector = &stylesheet.rules[0].selectors[0];
+
+        // Whitespace-separated simple selectors collapse into a single descendant chain
+        // ordered left-to-right (outer ancestor first, target last).
+        assert_eq!(
+            selector.parts,
+            vec![
+                SimpleSelector::Class("outer".into()),
+                SimpleSelector::Class("inner".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn descendant_chain_supports_three_levels() {
+        let stylesheet = parse("nav ul li { display: block; }").unwrap();
+        assert_eq!(
+            stylesheet.rules[0].selectors[0].parts,
+            vec![
+                SimpleSelector::Tag("nav".into()),
+                SimpleSelector::Tag("ul".into()),
+                SimpleSelector::Tag("li".into()),
+            ]
         );
     }
 
