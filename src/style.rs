@@ -357,6 +357,10 @@ fn matches_simple(node: &Node, is_hovered: bool, simple: &SimpleSelector) -> boo
     match simple.pseudo {
         None => true,
         Some(PseudoClass::Hover) => is_hovered,
+        // Focus and active state plumbing arrives in the next commit; for now the
+        // matcher just declines to match these pseudos so the surrounding cascade
+        // keeps behaving sensibly.
+        Some(PseudoClass::Focus) | Some(PseudoClass::Active) => false,
     }
 }
 

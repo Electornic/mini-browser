@@ -22,6 +22,8 @@ pub enum SimpleSelectorKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PseudoClass {
     Hover,
+    Focus,
+    Active,
 }
 
 /// A single simple selector position: a tag/class/id base plus an optional
@@ -371,6 +373,8 @@ impl<'a> Parser<'a> {
             let name = self.parse_identifier()?;
             match name.as_str() {
                 "hover" => Some(PseudoClass::Hover),
+                "focus" => Some(PseudoClass::Focus),
+                "active" => Some(PseudoClass::Active),
                 // Unknown pseudo-classes parse silently to None so the surrounding rule
                 // is still applied; the selector just never matches `:unknown` cases.
                 _ => None,
@@ -758,6 +762,23 @@ mod tests {
         assert_eq!(parts[0].pseudo, None);
         assert_eq!(parts[1].kind, SimpleSelectorKind::Class("item".into()));
         assert_eq!(parts[1].pseudo, Some(PseudoClass::Hover));
+    }
+
+    #[test]
+    fn parses_focus_and_active_pseudo_classes() {
+        let stylesheet = parse(
+            r#"
+                a:focus { color: red; }
+                .btn:active { color: blue; }
+            "#,
+        )
+        .unwrap();
+
+        let focus_part = &stylesheet.rules[0].selectors[0].parts[0];
+        let active_part = &stylesheet.rules[1].selectors[0].parts[0];
+
+        assert_eq!(focus_part.pseudo, Some(PseudoClass::Focus));
+        assert_eq!(active_part.pseudo, Some(PseudoClass::Active));
     }
 
     #[test]
