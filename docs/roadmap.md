@@ -7,7 +7,10 @@
 | Phase | Status | Theme | Outcome |
 |---|---|---|---|
 | 0 | Done | Block layout + Chrome-style UI | URL 인자 없이 실행 시 Chrome NTP 모양의 시작 페이지가 보인다 |
-| 1 | Backlog | CSS Expansion | 실제 웹페이지에 가까운 CSS 표현력 확보 (selectors, units, advanced layout) |
+| 1A | Done | Values & Selectors | %/em/rem 단위, named/rgb/rgba 색상, descendant/child 셀렉터, :hover/:focus/:active |
+| 1B | Backlog | Layout Modes | inline-block, position 계열, stacking/z-index, float, margin collapse, line-height |
+| 1C | Backlog | Paint | gradient, box-shadow, opacity, transform |
+| 1D | Backlog | Big Layout | Flexbox / Grid |
 | 2 | Backlog | JS Engine Integration | Boa 엔진 임베드 + DOM 바인딩, 단순 JS 동작 페이지 렌더 |
 
 ## Working Principles
@@ -66,16 +69,16 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 
 목표: 실제 웹페이지에서 흔히 보는 CSS 기능을 학습 단위로 직접 구현해본다. Phase 1 종료 시 단순 React 랜딩페이지 정도가 거의 깨지지 않고 렌더 가능해야 한다.
 
-### 1A. Values & Selectors
+### 1A. Values & Selectors (Done)
 
-| Task | Files | Effort | Value | Dependencies |
-|---|---|---|---|---|
-| Length units: `%`, `em`, `rem` | css.rs, layout.rs | 1-2d | ★ | computed/used value 개념 |
-| Color formats: `rgb()`, `rgba()`, named (red/blue) | css.rs | 2-3d | ★ | |
-| Descendant selector (`.a .b`) | style.rs | 1w | ★★ | |
-| Child selector (`.a > .b`) | style.rs | 3d | ★★ | descendant 먼저 |
-| `:hover` pseudo-class | style.rs, render.rs | 1w | ★★★ | interaction state, style invalidation |
-| `:focus`, `:active` | style.rs | 3d | ★★ | `:hover` 먼저 |
+| Task | Status | Notes |
+|---|---|---|
+| Length units: `%`, `em`, `rem` | Done | em/rem은 style 단계에서, %는 layout 단계에서 resolve. 높이 % 는 parent_width로 근사 (TODO) |
+| Color formats: `rgb()`, `rgba()`, named (red/blue) | Done | HTML4 16색 + 자주 쓰이는 몇 개 + transparent. legacy comma-separated rgb/rgba |
+| Descendant selector (`.a .b`) | Done | `Selector` 구조체 + 우측에서 좌측 매칭, ancestor chain plumbing |
+| Child selector (`.a > .b`) | Done | `Combinator` enum. `>`(공백 무관) 인식, immediate parent만 검사 |
+| `:hover` pseudo-class | Done | DOM path 식별자 기반, 1-frame lag, hover ancestor 전파 |
+| `:focus`, `:active` | Done | `PseudoState` 구조체 통합. focus는 비전파, active는 hover처럼 전파. WindowInput에 `left_mouse_held` 추가 |
 
 ### 1B. Layout Modes
 
