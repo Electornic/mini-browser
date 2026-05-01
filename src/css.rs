@@ -18,18 +18,32 @@ pub enum SimpleSelector {
     Id(String),
 }
 
+/// How two adjacent simple selectors in a complex selector are related.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Combinator {
+    /// Whitespace combinator: the right side is some descendant of the left side.
+    Descendant,
+    /// `>` combinator: the right side must be the immediate child of the left side.
+    Child,
+}
+
 /// A complex selector is a list of simple selectors joined by combinators.
 /// `parts` is ordered left-to-right (outermost ancestor first, target element last).
-/// A length-1 selector is a plain simple selector. Future combinators (>, +, ~) will live
-/// alongside `parts` once they are introduced.
+/// `combinators` is parallel to the boundaries between consecutive parts, so its length
+/// is always `parts.len().saturating_sub(1)`. A length-1 selector is a plain simple
+/// selector with no combinators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selector {
     pub parts: Vec<SimpleSelector>,
+    pub combinators: Vec<Combinator>,
 }
 
 impl Selector {
     pub fn simple(part: SimpleSelector) -> Self {
-        Self { parts: vec![part] }
+        Self {
+            parts: vec![part],
+            combinators: Vec::new(),
+        }
     }
 }
 
@@ -245,11 +259,13 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_selector(&mut self) -> Result<Selector, ParseError> {
-        // A complex selector is one or more simple selectors separated by combinators.
-        // For now the only combinator is whitespace (descendant). Compound selectors like
-        // `.a.b` (no separator) are still rejected — we stop the chain as soon as we see
-        // another simple selector that is not preceded by whitespace.
+        // A complex selector is one or more simple selectors joined by combinators.
+        // Whitespace alone is the descendant combinator; `>` (optionally surrounded by
+        // whitespace) is the child combinator. Compound selectors like `.a.b` (no
+        // separator at all) are still rejected — we stop the chain as soon as we see
+        // another simple selector that is not preceded by whitespace or `>`.
         let mut parts = vec![self.parse_simple_selector()?];
+        let mut combinators = Vec::new();
 
         loop {
             let saved = self.pos;
@@ -257,14 +273,23 @@ impl<'a> Parser<'a> {
             self.consume_whitespace();
             let had_whitespace = self.pos > ws_start;
 
-            if !had_whitespace {
+            // `>` takes precedence over whitespace: the surrounding spaces are just
+            // formatting, the combinator itself is Child.
+            let combinator = if self.next_char() == Some('>') {
+                self.consume_char();
+                self.consume_whitespace();
+                Combinator::Child
+            } else if had_whitespace {
+                Combinator::Descendant
+            } else {
                 self.pos = saved;
                 break;
-            }
+            };
 
             match self.next_char() {
                 Some(ch) if ch == '.' || ch == '#' || ch.is_ascii_alphabetic() || ch == '_' => {
                     parts.push(self.parse_simple_selector()?);
+                    combinators.push(combinator);
                 }
                 _ => {
                     self.pos = saved;
@@ -273,7 +298,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(Selector { parts })
+        Ok(Selector { parts, combinators })
     }
 
     fn parse_simple_selector(&mut self) -> Result<SimpleSelector, ParseError> {
@@ -588,7 +613,7 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Color, Selector, SimpleSelector, Unit, Value, parse};
+    use super::{Color, Combinator, Selector, SimpleSelector, Unit, Value, parse};
 
     #[test]
     fn parses_multiple_rules_and_selectors() {
@@ -646,6 +671,49 @@ mod tests {
                 SimpleSelector::Class("outer".into()),
                 SimpleSelector::Class("inner".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn parses_child_combinator_with_optional_surrounding_whitespace() {
+        // Both `.a > .b` and `.a>.b` should parse the same way.
+        let with_spaces = parse(".outer > .inner { color: red; }").unwrap();
+        let no_spaces = parse(".outer>.inner { color: red; }").unwrap();
+
+        let expected_parts = vec![
+            SimpleSelector::Class("outer".into()),
+            SimpleSelector::Class("inner".into()),
+        ];
+        let expected_combinators = vec![Combinator::Child];
+
+        assert_eq!(with_spaces.rules[0].selectors[0].parts, expected_parts);
+        assert_eq!(
+            with_spaces.rules[0].selectors[0].combinators,
+            expected_combinators
+        );
+        assert_eq!(no_spaces.rules[0].selectors[0].parts, expected_parts);
+        assert_eq!(
+            no_spaces.rules[0].selectors[0].combinators,
+            expected_combinators
+        );
+    }
+
+    #[test]
+    fn parses_mixed_descendant_and_child_combinators() {
+        let stylesheet = parse("nav ul > li { display: block; }").unwrap();
+        let selector = &stylesheet.rules[0].selectors[0];
+
+        assert_eq!(
+            selector.parts,
+            vec![
+                SimpleSelector::Tag("nav".into()),
+                SimpleSelector::Tag("ul".into()),
+                SimpleSelector::Tag("li".into()),
+            ]
+        );
+        assert_eq!(
+            selector.combinators,
+            vec![Combinator::Descendant, Combinator::Child]
         );
     }
 

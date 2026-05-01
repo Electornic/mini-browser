@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    css::{Declaration, Selector, SimpleSelector, Stylesheet, Unit, Value},
+    css::{Combinator, Declaration, Selector, SimpleSelector, Stylesheet, Unit, Value},
     dom::{ElementData, Node, NodeType},
 };
 
@@ -239,11 +239,11 @@ fn simple_specificity(simple: &SimpleSelector) -> u32 {
 
 fn matches_selector(node: &Node, ancestors: &[&Node], selector: &Selector) -> bool {
     // Right-to-left matching: the rightmost simple selector is the target and must match
-    // the element being styled. The remaining parts have to appear in DOM order somewhere
-    // along the ancestor chain. The walk is greedy — it consumes the closest matching
-    // ancestor — which is fine for the descendant combinator because all parts only need
-    // *some* ancestor to satisfy them, not a specific one.
-    let Some((target, rest)) = selector.parts.split_last() else {
+    // the element being styled. Each preceding part is checked against ancestors using the
+    // combinator that connects it to the part on its right:
+    //   - Descendant: walk up until any ancestor matches.
+    //   - Child: the very next ancestor must match; no skipping.
+    let Some((target, leading)) = selector.parts.split_last() else {
         return false;
     };
     if !matches_simple(node, target) {
@@ -251,13 +251,20 @@ fn matches_selector(node: &Node, ancestors: &[&Node], selector: &Selector) -> bo
     }
 
     let mut ancestor_iter = ancestors.iter().rev();
-    for part in rest.iter().rev() {
-        loop {
-            match ancestor_iter.next() {
-                Some(ancestor) if matches_simple(ancestor, part) => break,
-                Some(_) => continue,
-                None => return false,
-            }
+    for (j, part) in leading.iter().enumerate().rev() {
+        let combinator = selector.combinators[j];
+        match combinator {
+            Combinator::Descendant => loop {
+                match ancestor_iter.next() {
+                    Some(ancestor) if matches_simple(ancestor, part) => break,
+                    Some(_) => continue,
+                    None => return false,
+                }
+            },
+            Combinator::Child => match ancestor_iter.next() {
+                Some(ancestor) if matches_simple(ancestor, part) => {}
+                _ => return false,
+            },
         }
     }
     true
@@ -443,6 +450,59 @@ mod tests {
 
         // No `.outer` ancestor exists, so the rule must not apply.
         assert_eq!(inner.value("color"), None);
+    }
+
+    #[test]
+    fn child_selector_matches_only_immediate_parent() {
+        // .outer > .inner should NOT match when a <section> sits between the two —
+        // unlike descendant, the child combinator forbids skipping.
+        let nested = parse_html(
+            r#"<div class="outer"><section><span class="inner">hi</span></section></div>"#,
+        );
+        let stylesheet = parse_css(".outer > .inner { color: #ff0000; }");
+        let styled = style::style_tree(&nested, &[stylesheet]);
+        let inner = &styled.children[0].children[0];
+
+        assert_eq!(inner.value("color"), None);
+    }
+
+    #[test]
+    fn child_selector_matches_when_parent_is_direct() {
+        let direct = parse_html(r#"<div class="outer"><span class="inner">hi</span></div>"#);
+        let stylesheet = parse_css(".outer > .inner { color: #ff0000; }");
+        let styled = style::style_tree(&direct, &[stylesheet]);
+        let inner = &styled.children[0];
+
+        assert_eq!(
+            inner.value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn mixed_descendant_and_child_combinators_compose_correctly() {
+        // `nav ul > li` requires: target is <li>, its parent is <ul>, and somewhere up
+        // the chain a <nav> ancestor exists.
+        let root =
+            parse_html(r#"<nav class="primary"><div><ul><li class="t">hi</li></ul></div></nav>"#);
+        let stylesheet = parse_css("nav ul > li { color: #ff0000; }");
+        let styled = style::style_tree(&root, &[stylesheet]);
+        let li = &styled.children[0].children[0].children[0];
+
+        assert_eq!(
+            li.value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }))
+        );
     }
 
     #[test]
