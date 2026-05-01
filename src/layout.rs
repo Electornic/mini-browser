@@ -256,22 +256,31 @@ fn layout_node(
         let align = inline_align_for(node);
         layout_inline_children(&node.children, content_x, content_y, content_width, align)
     } else {
+        // Block flow: stack children top-to-bottom while collapsing the
+        // previous in-flow child's margin-bottom against the next child's
+        // margin-top. Out-of-flow children skip both the cursor advance and
+        // the collapse chain — they neither push siblings down nor break
+        // adjacency between the in-flow neighbours that surround them.
         let mut child_cursor_y = content_y;
-        let children = node
-            .children
-            .iter()
-            .map(|child| {
-                if is_out_of_flow(child) {
-                    // Absolute children are out of flow: they lay out at the
-                    // current static cursor but never advance it for siblings.
-                    // Pass 2 will move them to their final spot.
-                    let mut frozen = child_cursor_y;
-                    layout_node(child, content_x, &mut frozen, content_width)
-                } else {
-                    layout_node(child, content_x, &mut child_cursor_y, content_width)
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut prev_margin_bottom: f32 = 0.0;
+        let mut children: Vec<LayoutBox> = Vec::with_capacity(node.children.len());
+        for child in &node.children {
+            if is_out_of_flow(child) {
+                let mut frozen = child_cursor_y;
+                children.push(layout_node(child, content_x, &mut frozen, content_width));
+                continue;
+            }
+            // The cursor at this point already includes prev_margin_bottom from
+            // the previous in-flow child's tail. Subtracting `(sum - combined)`
+            // collapses it against the next margin-top before the child uses
+            // the cursor as its own starting position.
+            let next_margin_top = length_value(child, "margin-top", content_width).unwrap_or(0.0);
+            let combined = collapse_margins(prev_margin_bottom, next_margin_top);
+            child_cursor_y += combined - (prev_margin_bottom + next_margin_top);
+            let laid_out = layout_node(child, content_x, &mut child_cursor_y, content_width);
+            prev_margin_bottom = laid_out.dimensions.margin.bottom;
+            children.push(laid_out);
+        }
         (children, child_height(node, content_y, child_cursor_y))
     };
 
@@ -743,6 +752,20 @@ fn is_auto(node: &StyledNode, name: &str) -> bool {
     matches!(node.value(name), Some(Value::Keyword(keyword)) if keyword == "auto")
 }
 
+fn collapse_margins(prev: f32, next: f32) -> f32 {
+    // CSS adjacent-margin collapse rules:
+    // - both non-negative → max
+    // - both non-positive → most negative (min)
+    // - mixed signs → algebraic sum
+    if prev >= 0.0 && next >= 0.0 {
+        prev.max(next)
+    } else if prev <= 0.0 && next <= 0.0 {
+        prev.min(next)
+    } else {
+        prev + next
+    }
+}
+
 fn is_position_relative(node: &StyledNode) -> bool {
     matches!(node.value("position"), Some(Value::Keyword(keyword)) if keyword == "relative")
 }
@@ -840,7 +863,9 @@ mod tests {
 
         assert_eq!(layout.dimensions.content.width, 300.0);
         assert_eq!(first.dimensions.content.y, 5.0);
-        assert_eq!(second.dimensions.content.y, 37.0);
+        // Adjacent vertical margins collapse: gap between blocks is max(7, 5) = 7,
+        // not sum (12). Second block's content_y = first bottom (25) + 7 = 32.
+        assert_eq!(second.dimensions.content.y, 32.0);
     }
 
     #[test]
@@ -1739,6 +1764,84 @@ mod tests {
         // 25% of 800 viewport width = 200. 50% of 600 root outer height = 300.
         assert_eq!(fix.dimensions.content.x, 200.0);
         assert_eq!(fix.dimensions.content.y, 300.0);
+    }
+
+    #[test]
+    fn adjacent_positive_margins_collapse_to_max() {
+        // .a's margin-bottom (30) and .b's margin-top (10) collapse to the
+        // larger of the two: gap = 30, not 40.
+        let styled = styled_root(
+            r#"<div id="root"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #root { width: 300px; }
+                .a { height: 20px; margin-bottom: 30px; }
+                .b { height: 15px; margin-top: 10px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let b = &layout.children[1];
+
+        // a's content ends at 20; gap = max(30, 10) = 30 → b.y = 50.
+        assert_eq!(b.dimensions.content.y, 50.0);
+    }
+
+    #[test]
+    fn adjacent_negative_margins_collapse_to_min() {
+        // Two non-positive margins collapse to the most negative: gap pulls
+        // siblings closer by the larger absolute value, not by the sum.
+        let styled = styled_root(
+            r#"<div id="root"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #root { width: 300px; }
+                .a { height: 20px; margin-bottom: -10px; }
+                .b { height: 15px; margin-top: -5px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let b = &layout.children[1];
+
+        // a content ends at 20. min(-10, -5) = -10 from that bottom: b.y = 10.
+        assert_eq!(b.dimensions.content.y, 10.0);
+    }
+
+    #[test]
+    fn mixed_sign_margins_sum_algebraically() {
+        // CSS spec: when one margin is positive and the other negative, they
+        // combine by simple addition.
+        let styled = styled_root(
+            r#"<div id="root"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #root { width: 300px; }
+                .a { height: 20px; margin-bottom: 30px; }
+                .b { height: 15px; margin-top: -10px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let b = &layout.children[1];
+
+        // a content ends at 20; gap = 30 + (-10) = 20 → b.y = 40.
+        assert_eq!(b.dimensions.content.y, 40.0);
+    }
+
+    #[test]
+    fn absolute_child_does_not_break_margin_collapse_chain() {
+        // Out-of-flow children should not reset the in-flow margin-collapse
+        // chain — .a and .b are still considered adjacent for collapse even
+        // with an absolute box between them in the DOM.
+        let styled = styled_root(
+            r#"<div id="root"><div class="a"></div><div class="abs"></div><div class="b"></div></div>"#,
+            r#"
+                #root { width: 300px; }
+                .a { height: 20px; margin-bottom: 30px; }
+                .abs { position: absolute; width: 50px; height: 50px; }
+                .b { height: 15px; margin-top: 10px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let b = &layout.children[2];
+
+        // Same outcome as if .abs were not there: gap = max(30, 10) = 30.
+        assert_eq!(b.dimensions.content.y, 50.0);
     }
 
     #[test]
