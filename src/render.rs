@@ -134,20 +134,27 @@ fn background_command(layout_box: &LayoutBox) -> Option<DisplayCommand> {
     };
 
     let rect = layout_box.dimensions.padding_box();
-    let radius = border_radius(node);
-    if radius > 0.0 {
-        Some(DisplayCommand::RoundedRect(
-            color,
-            rect,
-            CornerRadii::uniform(radius),
-        ))
-    } else {
+    let radii = border_radii(node);
+    if radii.tl == 0.0 && radii.tr == 0.0 && radii.br == 0.0 && radii.bl == 0.0 {
         Some(DisplayCommand::SolidRect(color, rect))
+    } else {
+        Some(DisplayCommand::RoundedRect(color, rect, radii))
     }
 }
 
-fn border_radius(node: &crate::style::StyledNode) -> f32 {
-    match node.value("border-radius") {
+fn border_radii(node: &crate::style::StyledNode) -> CornerRadii {
+    // The shorthand `border-radius` is expanded into four corner properties at parse time,
+    // so painting just reads each corner independently.
+    CornerRadii {
+        tl: corner_radius(node, "border-top-left-radius"),
+        tr: corner_radius(node, "border-top-right-radius"),
+        br: corner_radius(node, "border-bottom-right-radius"),
+        bl: corner_radius(node, "border-bottom-left-radius"),
+    }
+}
+
+fn corner_radius(node: &crate::style::StyledNode, name: &str) -> f32 {
+    match node.value(name) {
         Some(Value::Length(value, Unit::Px)) => *value,
         _ => 0.0,
     }
@@ -1018,6 +1025,32 @@ mod tests {
                 assert_eq!(radii.tr, 8.0);
                 assert_eq!(radii.br, 8.0);
                 assert_eq!(radii.bl, 8.0);
+            }
+            other => panic!("expected RoundedRect background, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn css_border_radius_four_value_shorthand_assigns_each_corner() {
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 100px;
+                    height: 40px;
+                    background-color: #336699;
+                    border-radius: 1px 2px 3px 4px;
+                }
+            "#,
+        );
+
+        // 4-value shorthand maps to tl/tr/br/bl in source order.
+        match &commands[0] {
+            DisplayCommand::RoundedRect(_, _, radii) => {
+                assert_eq!(radii.tl, 1.0);
+                assert_eq!(radii.tr, 2.0);
+                assert_eq!(radii.br, 3.0);
+                assert_eq!(radii.bl, 4.0);
             }
             other => panic!("expected RoundedRect background, got {other:?}"),
         }

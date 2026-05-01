@@ -219,9 +219,11 @@ impl<'a> Parser<'a> {
             }
 
             // Try parsing a declaration; skip to the next ';' or '}' on failure.
+            // Shorthands like `border-radius` expand into multiple per-corner declarations,
+            // so each call may contribute more than one entry.
             let saved = self.pos;
             match self.parse_declaration() {
-                Ok(decl) => declarations.push(decl),
+                Ok(decls) => declarations.extend(decls),
                 Err(_) => {
                     self.pos = saved;
                     self.consume_while(|ch| ch != ';' && ch != '}');
@@ -237,14 +239,69 @@ impl<'a> Parser<'a> {
         Ok(declarations)
     }
 
-    fn parse_declaration(&mut self) -> Result<Declaration, ParseError> {
+    fn parse_declaration(&mut self) -> Result<Vec<Declaration>, ParseError> {
         let name = self.parse_identifier()?;
         self.consume_whitespace();
         self.expect_char(':')?;
         self.consume_whitespace();
-        let value = self.parse_value()?;
 
-        Ok(Declaration { name, value })
+        if name == "border-radius" {
+            return self.parse_border_radius_shorthand();
+        }
+
+        let value = self.parse_value()?;
+        Ok(vec![Declaration { name, value }])
+    }
+
+    fn parse_border_radius_shorthand(&mut self) -> Result<Vec<Declaration>, ParseError> {
+        // CSS allows 1-4 length tokens. Per spec: 1=all, 2=tl/br + tr/bl,
+        // 3=tl + tr/bl + br, 4=tl + tr + br + bl.
+        let mut lengths = Vec::new();
+        loop {
+            self.consume_whitespace();
+            match self.next_char() {
+                Some(ch) if ch.is_ascii_digit() || ch == '.' => {}
+                _ => break,
+            }
+            lengths.push(self.parse_length_or_number()?);
+            if lengths.len() == 4 {
+                break;
+            }
+        }
+
+        if lengths.is_empty() {
+            return Err(ParseError::new(
+                self.pos,
+                "border-radius requires at least one length",
+            ));
+        }
+
+        let (tl, tr, br, bl) = match lengths.as_slice() {
+            [v] => (v.clone(), v.clone(), v.clone(), v.clone()),
+            [tl_br, tr_bl] => (tl_br.clone(), tr_bl.clone(), tl_br.clone(), tr_bl.clone()),
+            [tl, tr_bl, br] => (tl.clone(), tr_bl.clone(), br.clone(), tr_bl.clone()),
+            [tl, tr, br, bl] => (tl.clone(), tr.clone(), br.clone(), bl.clone()),
+            _ => unreachable!(),
+        };
+
+        Ok(vec![
+            Declaration {
+                name: "border-top-left-radius".into(),
+                value: tl,
+            },
+            Declaration {
+                name: "border-top-right-radius".into(),
+                value: tr,
+            },
+            Declaration {
+                name: "border-bottom-right-radius".into(),
+                value: br,
+            },
+            Declaration {
+                name: "border-bottom-left-radius".into(),
+                value: bl,
+            },
+        ])
     }
 
     fn parse_value(&mut self) -> Result<Value, ParseError> {
@@ -444,6 +501,80 @@ mod tests {
                 a: 255,
             })
         );
+    }
+
+    #[test]
+    fn border_radius_single_value_expands_to_uniform_corners() {
+        let stylesheet = parse("div { border-radius: 8px; }").unwrap();
+        let names: Vec<&str> = stylesheet.rules[0]
+            .declarations
+            .iter()
+            .map(|decl| decl.name.as_str())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "border-top-left-radius",
+                "border-top-right-radius",
+                "border-bottom-right-radius",
+                "border-bottom-left-radius",
+            ]
+        );
+        for decl in &stylesheet.rules[0].declarations {
+            assert_eq!(decl.value, Value::Length(8.0, Unit::Px));
+        }
+    }
+
+    #[test]
+    fn border_radius_two_values_pair_diagonal_corners() {
+        let stylesheet = parse("div { border-radius: 8px 12px; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+
+        // 2-value shorthand: first is tl/br, second is tr/bl.
+        assert_eq!(decls[0].name, "border-top-left-radius");
+        assert_eq!(decls[0].value, Value::Length(8.0, Unit::Px));
+        assert_eq!(decls[1].name, "border-top-right-radius");
+        assert_eq!(decls[1].value, Value::Length(12.0, Unit::Px));
+        assert_eq!(decls[2].name, "border-bottom-right-radius");
+        assert_eq!(decls[2].value, Value::Length(8.0, Unit::Px));
+        assert_eq!(decls[3].name, "border-bottom-left-radius");
+        assert_eq!(decls[3].value, Value::Length(12.0, Unit::Px));
+    }
+
+    #[test]
+    fn border_radius_four_values_assign_each_corner() {
+        let stylesheet = parse("div { border-radius: 1px 2px 3px 4px; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+
+        assert_eq!(decls[0].value, Value::Length(1.0, Unit::Px));
+        assert_eq!(decls[1].value, Value::Length(2.0, Unit::Px));
+        assert_eq!(decls[2].value, Value::Length(3.0, Unit::Px));
+        assert_eq!(decls[3].value, Value::Length(4.0, Unit::Px));
+    }
+
+    #[test]
+    fn border_radius_three_values_share_minor_diagonal() {
+        let stylesheet = parse("div { border-radius: 1px 2px 3px; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+
+        // 3-value shorthand: tl, tr/bl, br.
+        assert_eq!(decls[0].value, Value::Length(1.0, Unit::Px));
+        assert_eq!(decls[1].value, Value::Length(2.0, Unit::Px));
+        assert_eq!(decls[2].value, Value::Length(3.0, Unit::Px));
+        assert_eq!(decls[3].value, Value::Length(2.0, Unit::Px));
+    }
+
+    #[test]
+    fn explicit_corner_property_overrides_shorthand_when_listed_after() {
+        let stylesheet =
+            parse("div { border-radius: 8px; border-top-left-radius: 12px; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+
+        // Shorthand still expands first; the explicit property follows and wins on cascade.
+        assert_eq!(decls.len(), 5);
+        assert_eq!(decls[4].name, "border-top-left-radius");
+        assert_eq!(decls[4].value, Value::Length(12.0, Unit::Px));
     }
 
     #[test]
