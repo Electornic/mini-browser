@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 0 | Done | Block layout + Chrome-style UI | URL 인자 없이 실행 시 Chrome NTP 모양의 시작 페이지가 보인다 |
 | 1A | Done | Values & Selectors | %/em/rem 단위, named/rgb/rgba 색상, descendant/child 셀렉터, :hover/:focus/:active |
-| 1B | Backlog | Layout Modes | inline-block, position 계열, stacking/z-index, float, margin collapse, line-height |
+| 1B | In progress | Layout Modes | inline-block ✅, position: relative/absolute/fixed ✅, stacking/z-index, float, margin collapse, line-height |
 | 1C | Backlog | Paint | gradient, box-shadow, opacity, transform |
 | 1D | Backlog | Big Layout | Flexbox / Grid |
 | 2 | Backlog | JS Engine Integration | Boa 엔진 임베드 + DOM 바인딩, 단순 JS 동작 페이지 렌더 |
@@ -82,16 +82,16 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 
 ### 1B. Layout Modes
 
-| Task | Files | Effort | Value | Dependencies |
-|---|---|---|---|---|
-| `display: inline-block` | layout.rs | 3-5d | ★★★ | layout mode dispatch 도입 |
-| `position: relative` | layout.rs | 1w | ★★★ | |
-| `position: absolute` | layout.rs | 1-2w | ★★★ | containing block 추적 |
-| `position: fixed` | layout.rs, main.rs | 3d | ★★ | absolute 먼저 |
-| Stacking context / `z-index` | render.rs, layout.rs | 1w | ★★★ | absolute 먼저 |
-| Float layout (`float: left/right`) | layout.rs | 1w | ★★ | |
-| Margin collapse | layout.rs | 1w | ★★ | |
-| `line-height` / `vertical-align` (inline) | layout.rs, render.rs | 1w | ★★ | |
+| Task | Status | Files | Effort | Value | Dependencies |
+|---|---|---|---|---|---|
+| `display: inline-block` | Done | layout.rs | 3-5d | ★★★ | inline-flow 안에서 size/placement 분기. 미지정 width는 shrink-to-fit (자식 너비 합 + parent cap) |
+| `position: relative` | Done | layout.rs | 1w | ★★★ | normal layout 후 subtree 전체를 (dx, dy) 평행이동. sibling cursor·line packing은 unoffset 좌표 그대로. 양쪽 set 시 left/top 우선. block/inline/inline-block 모두 지원 |
+| `position: absolute` | Done | layout.rs | 1-2w | ★★★ | 2-pass: pass 1은 static layout(흐름 cursor 안 움직임), pass 2는 containing-block 스택을 들고 트리를 다시 걸어 outer edge를 (cb_x+left, cb_y+top) 또는 right/bottom 기준으로 이동. 가장 가까운 positioned 조상의 padding box가 cb, 없으면 viewport. percent left/right는 cb.width, top/bottom은 cb.height에 resolve. block/inline 양쪽 + 중첩 absolute 지원 |
+| `position: fixed` | Done | layout.rs | 3d | ★★ | absolute의 분기 — `is_out_of_flow`로 inflow 제외 통합, pass 2가 `initial_cb`(viewport)도 함께 들고 다니며 fixed 노드만 그쪽으로 resolve. percent도 viewport 기준 |
+| Stacking context / `z-index` | Backlog | render.rs, layout.rs | 1w | ★★★ | absolute 먼저 |
+| Float layout (`float: left/right`) | Backlog | layout.rs | 1w | ★★ | |
+| Margin collapse | Backlog | layout.rs | 1w | ★★ | |
+| `line-height` / `vertical-align` (inline) | Backlog | layout.rs, render.rs | 1w | ★★ | |
 
 ### 1C. Paint
 

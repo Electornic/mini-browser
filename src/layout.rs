@@ -45,7 +45,157 @@ pub enum BoxType {
 
 pub fn layout_tree(root: &StyledNode, viewport_width: f32) -> LayoutBox {
     let mut cursor_y = 0.0;
-    layout_node(root, 0.0, &mut cursor_y, viewport_width)
+    let mut layout_box = layout_node(root, 0.0, &mut cursor_y, viewport_width);
+    // Pass 2: walk the tree and move every `position: absolute` subtree to
+    // its final spot relative to its containing block. The initial
+    // containing block is the viewport; we only know its width, so we use
+    // the laid-out root's own outer height as the height base for the
+    // initial CB — close enough for `bottom`/`%` resolution at the root.
+    let initial_cb_height = outer_rect(&layout_box).height;
+    let initial_cb = ContainingBlock {
+        x: 0.0,
+        y: 0.0,
+        width: viewport_width,
+        height: initial_cb_height,
+    };
+    reposition_absolutes(&mut layout_box, initial_cb, initial_cb);
+    layout_box
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ContainingBlock {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+fn reposition_absolutes(
+    layout_box: &mut LayoutBox,
+    cb: ContainingBlock,
+    initial_cb: ContainingBlock,
+) {
+    // If THIS box is positioned, descendants resolve their containing block
+    // against this box's padding box. The CB inherited from above is what
+    // applies to THIS box itself when it is `position: absolute`. Fixed
+    // boxes ignore the inherited CB entirely and always use the viewport.
+    let child_cb = if box_is_positioned(layout_box) {
+        padding_box_as_cb(layout_box)
+    } else {
+        cb
+    };
+
+    for child in &mut layout_box.children {
+        reposition_absolutes(child, child_cb, initial_cb);
+    }
+
+    let resolution_cb = if box_is_fixed(layout_box) {
+        Some(initial_cb)
+    } else if box_is_absolute(layout_box) {
+        Some(cb)
+    } else {
+        None
+    };
+    if let Some(target_cb) = resolution_cb {
+        let (delta_x, delta_y) = absolute_offset_delta(layout_box, target_cb);
+        if delta_x != 0.0 || delta_y != 0.0 {
+            shift_layout_subtree(layout_box, delta_x, delta_y);
+        }
+    }
+}
+
+fn padding_box_as_cb(layout_box: &LayoutBox) -> ContainingBlock {
+    let d = &layout_box.dimensions;
+    ContainingBlock {
+        x: d.content.x - d.padding.left,
+        y: d.content.y - d.padding.top,
+        width: d.padding.left + d.content.width + d.padding.right,
+        height: d.padding.top + d.content.height + d.padding.bottom,
+    }
+}
+
+fn absolute_offset_delta(layout_box: &LayoutBox, cb: ContainingBlock) -> (f32, f32) {
+    // Resolve `top`/`right`/`bottom`/`left` against the containing block.
+    // When the start side is set we pin to it; otherwise the end side pins
+    // the OUTER edge to (cb_end - end_value). Falling through to neither
+    // means stay put at the static position computed in pass 1.
+    let node = match box_styled_node(layout_box) {
+        Some(node) => node,
+        None => return (0.0, 0.0),
+    };
+    let outer = outer_rect(layout_box);
+    let left = length_value(node, "left", cb.width);
+    let right = length_value(node, "right", cb.width);
+    let top = length_value(node, "top", cb.height);
+    let bottom = length_value(node, "bottom", cb.height);
+
+    let target_outer_x = if let Some(value) = left {
+        cb.x + value
+    } else if let Some(value) = right {
+        cb.x + cb.width - value - outer.width
+    } else {
+        outer.x
+    };
+    let target_outer_y = if let Some(value) = top {
+        cb.y + value
+    } else if let Some(value) = bottom {
+        cb.y + cb.height - value - outer.height
+    } else {
+        outer.y
+    };
+
+    (target_outer_x - outer.x, target_outer_y - outer.y)
+}
+
+fn box_styled_node(layout_box: &LayoutBox) -> Option<&StyledNode> {
+    match &layout_box.box_type {
+        BoxType::BlockNode(node) => Some(node),
+        BoxType::AnonymousBlock => None,
+    }
+}
+
+fn box_position_keyword(layout_box: &LayoutBox) -> Option<&str> {
+    match box_styled_node(layout_box).and_then(|node| node.value("position"))? {
+        Value::Keyword(keyword) => Some(keyword.as_str()),
+        _ => None,
+    }
+}
+
+fn box_is_positioned(layout_box: &LayoutBox) -> bool {
+    matches!(
+        box_position_keyword(layout_box),
+        Some("relative" | "absolute" | "fixed")
+    )
+}
+
+fn box_is_absolute(layout_box: &LayoutBox) -> bool {
+    matches!(box_position_keyword(layout_box), Some("absolute"))
+}
+
+fn box_is_fixed(layout_box: &LayoutBox) -> bool {
+    matches!(box_position_keyword(layout_box), Some("fixed"))
+}
+
+fn outer_rect(layout_box: &LayoutBox) -> Rect {
+    let d = &layout_box.dimensions;
+    Rect {
+        x: d.content.x - d.padding.left - d.border.left - d.margin.left,
+        y: d.content.y - d.padding.top - d.border.top - d.margin.top,
+        width: d.margin.left
+            + d.border.left
+            + d.padding.left
+            + d.content.width
+            + d.padding.right
+            + d.border.right
+            + d.margin.right,
+        height: d.margin.top
+            + d.border.top
+            + d.padding.top
+            + d.content.height
+            + d.padding.bottom
+            + d.border.bottom
+            + d.margin.bottom,
+    }
 }
 
 fn layout_node(
@@ -110,7 +260,17 @@ fn layout_node(
         let children = node
             .children
             .iter()
-            .map(|child| layout_node(child, content_x, &mut child_cursor_y, content_width))
+            .map(|child| {
+                if is_out_of_flow(child) {
+                    // Absolute children are out of flow: they lay out at the
+                    // current static cursor but never advance it for siblings.
+                    // Pass 2 will move them to their final spot.
+                    let mut frozen = child_cursor_y;
+                    layout_node(child, content_x, &mut frozen, content_width)
+                } else {
+                    layout_node(child, content_x, &mut child_cursor_y, content_width)
+                }
+            })
             .collect::<Vec<_>>();
         (children, child_height(node, content_y, child_cursor_y))
     };
@@ -134,13 +294,17 @@ fn layout_node(
         margin,
     };
 
+    // Sibling cursor advances based on the *unoffset* outer bottom: a relative
+    // element only shifts its own subtree, never its in-flow neighbors.
     *cursor_y = content_y + content_height + padding.bottom + border.bottom + margin.bottom;
 
-    LayoutBox {
+    let mut layout_box = LayoutBox {
         box_type: BoxType::BlockNode(node.clone()),
         dimensions,
         children,
-    }
+    };
+    apply_relative_offset(&mut layout_box, node, parent_width);
+    layout_box
 }
 
 fn layout_inline_children(
@@ -160,6 +324,11 @@ fn layout_inline_children(
     let mut current_width: f32 = 0.0;
 
     for (idx, child) in children.iter().enumerate() {
+        // Absolute children are out of flow — they neither contribute to line
+        // width nor cause line breaks. They get laid out separately below.
+        if is_out_of_flow(child) {
+            continue;
+        }
         let child_w = inline_total_size(child, content_width).width;
         if !current_line.is_empty() && current_width + child_w > content_width {
             lines.push(std::mem::take(&mut current_line));
@@ -174,7 +343,10 @@ fn layout_inline_children(
         line_widths.push(current_width);
     }
 
-    // Second pass: place each line at its alignment-corrected offset.
+    // Second pass: place each line at its alignment-corrected offset. We read the
+    // actual outer height from the laid-out box (rather than re-measuring) so
+    // inline-block children, whose auto height is only known after their own
+    // layout pass, contribute the right line height here.
     let mut boxes = Vec::new();
     let mut line_y = content_y;
     let mut max_bottom = content_y;
@@ -190,17 +362,38 @@ fn layout_inline_children(
         let mut line_height = 0.0f32;
         for &child_idx in line_children {
             let child = &children[child_idx];
-            let child_size = inline_total_size(child, content_width);
-            let child_box = layout_inline_node(child, line_x, line_y, content_width);
-            line_x += child_size.width;
-            line_height = line_height.max(child_size.height);
+            let child_box = layout_inline_or_inline_block(child, line_x, line_y, content_width);
+            let outer = outer_rect(&child_box);
+            line_x += outer.width;
+            line_height = line_height.max(outer.height);
             boxes.push(child_box);
         }
         max_bottom = max_bottom.max(line_y + line_height);
         line_y += line_height;
     }
 
+    // Lay out absolute children at the parent's content origin (their static
+    // position approximation). Pass 2 will replace this with the offsets
+    // resolved against their containing block.
+    for child in children.iter().filter(|child| is_out_of_flow(child)) {
+        let abs_box = layout_inline_or_inline_block(child, content_x, content_y, content_width);
+        boxes.push(abs_box);
+    }
+
     (boxes, max_bottom - content_y)
+}
+
+fn layout_inline_or_inline_block(
+    node: &StyledNode,
+    x: f32,
+    y: f32,
+    available_width: f32,
+) -> LayoutBox {
+    if is_inline_block(node) {
+        layout_inline_block_node(node, x, y, available_width)
+    } else {
+        layout_inline_node(node, x, y, available_width)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,7 +431,7 @@ fn layout_inline_node(node: &StyledNode, x: f32, y: f32, parent_width: f32) -> L
         Vec::new()
     };
 
-    LayoutBox {
+    let mut layout_box = LayoutBox {
         box_type: BoxType::BlockNode(node.clone()),
         dimensions: Dimensions {
             content: Rect {
@@ -252,7 +445,9 @@ fn layout_inline_node(node: &StyledNode, x: f32, y: f32, parent_width: f32) -> L
             margin,
         },
         children,
-    }
+    };
+    apply_relative_offset(&mut layout_box, node, parent_width);
+    layout_box
 }
 
 fn layout_inline_sequence_no_wrap(
@@ -262,9 +457,12 @@ fn layout_inline_sequence_no_wrap(
     content_width: f32,
     align: InlineAlign,
 ) -> Vec<LayoutBox> {
-    // Sum widths first so we know how much horizontal slack the line has before placing boxes.
+    // Sum widths first so we know how much horizontal slack the line has
+    // before placing boxes. Absolute children sit out of flow so they don't
+    // contribute to the line.
     let total_width: f32 = children
         .iter()
+        .filter(|child| !is_out_of_flow(child))
         .map(|child| inline_total_size(child, content_width).width)
         .sum();
     let line_offset = match align {
@@ -277,8 +475,15 @@ fn layout_inline_sequence_no_wrap(
     let mut boxes = Vec::new();
 
     for child in children {
-        let child_box = layout_inline_node(child, cursor_x, y, content_width);
-        cursor_x += inline_total_size(child, content_width).width;
+        if is_out_of_flow(child) {
+            // Static position approximation: at the parent's content origin.
+            // Pass 2 will move it once the containing block is known.
+            let abs_box = layout_inline_or_inline_block(child, content_x, y, content_width);
+            boxes.push(abs_box);
+            continue;
+        }
+        let child_box = layout_inline_or_inline_block(child, cursor_x, y, content_width);
+        cursor_x += outer_rect(&child_box).width;
         boxes.push(child_box);
     }
 
@@ -294,7 +499,11 @@ fn uses_inline_flow(node: &StyledNode) -> bool {
 fn is_inline_node(node: &StyledNode) -> bool {
     match node.value("display") {
         Some(Value::Keyword(keyword)) if keyword == "block" => return false,
-        Some(Value::Keyword(keyword)) if keyword == "inline" => return true,
+        // inline-block participates in inline flow (sits on a line) but is sized
+        // and laid out internally like a block — that dispatch happens later.
+        Some(Value::Keyword(keyword)) if keyword == "inline" || keyword == "inline-block" => {
+            return true;
+        }
         _ => {}
     }
 
@@ -305,7 +514,14 @@ fn is_inline_node(node: &StyledNode) -> bool {
     }
 }
 
+fn is_inline_block(node: &StyledNode) -> bool {
+    matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "inline-block")
+}
+
 fn inline_total_size(node: &StyledNode, parent_width: f32) -> Rect {
+    if is_inline_block(node) {
+        return inline_block_outer_size(node, parent_width);
+    }
     let margin = edge_sizes(node, "margin", parent_width);
     let padding = edge_sizes(node, "padding", parent_width);
     let border = edge_sizes(node, "border", parent_width);
@@ -330,6 +546,105 @@ fn inline_total_size(node: &StyledNode, parent_width: f32) -> Rect {
         width,
         height,
     }
+}
+
+fn inline_block_outer_size(node: &StyledNode, available_width: f32) -> Rect {
+    // For line packing we only need an accurate width — height ends up being
+    // re-read from the laid-out box, so we approximate it from explicit
+    // height plus surrounding box edges.
+    let margin = edge_sizes(node, "margin", available_width);
+    let padding = edge_sizes(node, "padding", available_width);
+    let border = edge_sizes(node, "border", available_width);
+    let content_width = inline_block_resolved_width(node, available_width);
+    let content_height = length_value(node, "height", available_width).unwrap_or(0.0);
+    Rect {
+        x: 0.0,
+        y: 0.0,
+        width: margin.left
+            + border.left
+            + padding.left
+            + content_width
+            + padding.right
+            + border.right
+            + margin.right,
+        height: margin.top
+            + border.top
+            + padding.top
+            + content_height
+            + padding.bottom
+            + border.bottom
+            + margin.bottom,
+    }
+}
+
+fn inline_block_resolved_width(node: &StyledNode, available_width: f32) -> f32 {
+    length_value(node, "width", available_width)
+        .or_else(|| intrinsic_width(node))
+        .unwrap_or_else(|| inline_block_shrink_to_fit_width(node, available_width))
+}
+
+fn inline_block_shrink_to_fit_width(node: &StyledNode, available_width: f32) -> f32 {
+    // Toy shrink-to-fit: text uses approximate glyph width; element uses the
+    // sum of inline child widths, capped to the available content width so a
+    // long run still wraps rather than overflowing the container.
+    let natural = match &node.node.node_type {
+        NodeType::Text(text) => text.chars().count() as f32 * inline_char_width(node),
+        NodeType::Element(_) => node
+            .children
+            .iter()
+            .map(|child| inline_total_size(child, available_width).width)
+            .sum(),
+    };
+    natural.min(available_width)
+}
+
+fn layout_inline_block_node(node: &StyledNode, x: f32, y: f32, available_width: f32) -> LayoutBox {
+    // Inline-block ignores `margin: auto` (auto only collapses for in-flow
+    // blocks), so we just take the raw declared margins here.
+    let margin = edge_sizes(node, "margin", available_width);
+    let padding = edge_sizes(node, "padding", available_width);
+    let border = edge_sizes(node, "border", available_width);
+    let content_width = inline_block_resolved_width(node, available_width);
+
+    let content_x = x + margin.left + border.left + padding.left;
+    let content_y = y + margin.top + border.top + padding.top;
+
+    // Same dispatch as the regular block path: if every child is inline, run
+    // the inline flow; otherwise stack block children top-to-bottom inside our
+    // content box.
+    let (children, auto_content_height) = if uses_inline_flow(node) {
+        let align = inline_align_for(node);
+        layout_inline_children(&node.children, content_x, content_y, content_width, align)
+    } else {
+        let mut child_cursor_y = content_y;
+        let children = node
+            .children
+            .iter()
+            .map(|child| layout_node(child, content_x, &mut child_cursor_y, content_width))
+            .collect::<Vec<_>>();
+        (children, child_height(node, content_y, child_cursor_y))
+    };
+
+    let content_height = length_value(node, "height", available_width)
+        .unwrap_or_else(|| auto_content_height.max(intrinsic_height(node)));
+
+    let mut layout_box = LayoutBox {
+        box_type: BoxType::BlockNode(node.clone()),
+        dimensions: Dimensions {
+            content: Rect {
+                x: content_x,
+                y: content_y,
+                width: content_width,
+                height: content_height,
+            },
+            padding,
+            border,
+            margin,
+        },
+        children,
+    };
+    apply_relative_offset(&mut layout_box, node, available_width);
+    layout_box
 }
 
 fn inline_content_width(node: &StyledNode, parent_width: f32) -> f32 {
@@ -426,6 +741,64 @@ fn length_value(node: &StyledNode, name: &str, base: f32) -> Option<f32> {
 
 fn is_auto(node: &StyledNode, name: &str) -> bool {
     matches!(node.value(name), Some(Value::Keyword(keyword)) if keyword == "auto")
+}
+
+fn is_position_relative(node: &StyledNode) -> bool {
+    matches!(node.value("position"), Some(Value::Keyword(keyword)) if keyword == "relative")
+}
+
+fn is_position_absolute(node: &StyledNode) -> bool {
+    matches!(node.value("position"), Some(Value::Keyword(keyword)) if keyword == "absolute")
+}
+
+fn is_position_fixed(node: &StyledNode) -> bool {
+    matches!(node.value("position"), Some(Value::Keyword(keyword)) if keyword == "fixed")
+}
+
+fn is_out_of_flow(node: &StyledNode) -> bool {
+    // Both `absolute` and `fixed` skip in-flow placement during pass 1; they
+    // differ only in which containing block pass 2 resolves them against.
+    is_position_absolute(node) || is_position_fixed(node)
+}
+
+fn relative_offset(node: &StyledNode, base: f32) -> Option<(f32, f32)> {
+    // CSS spec: top/bottom percent resolves against the containing block's height
+    // and left/right against its width. The layout walk only carries width on hand,
+    // so percent offsets reuse `base` for both axes — same shortcut already taken
+    // for percent margin/padding.
+    if !is_position_relative(node) {
+        return None;
+    }
+    let left = length_value(node, "left", base);
+    let right = length_value(node, "right", base);
+    let top = length_value(node, "top", base);
+    let bottom = length_value(node, "bottom", base);
+    // When both sides are set, the start side wins (LTR + top-down): `left` and
+    // `top` take precedence and the opposite side is ignored.
+    let dx = left.unwrap_or_else(|| -right.unwrap_or(0.0));
+    let dy = top.unwrap_or_else(|| -bottom.unwrap_or(0.0));
+    if dx == 0.0 && dy == 0.0 {
+        None
+    } else {
+        Some((dx, dy))
+    }
+}
+
+fn apply_relative_offset(layout_box: &mut LayoutBox, node: &StyledNode, base: f32) {
+    if let Some((dx, dy)) = relative_offset(node, base) {
+        shift_layout_subtree(layout_box, dx, dy);
+    }
+}
+
+fn shift_layout_subtree(layout_box: &mut LayoutBox, dx: f32, dy: f32) {
+    // Relative positioning shifts the visual rect of the box and *every*
+    // descendant — siblings and cursors keep using the unshifted geometry, so
+    // we only mutate this subtree.
+    layout_box.dimensions.content.x += dx;
+    layout_box.dimensions.content.y += dy;
+    for child in &mut layout_box.children {
+        shift_layout_subtree(child, dx, dy);
+    }
 }
 
 fn attribute_length(element: &ElementData, name: &str) -> Option<f32> {
@@ -705,6 +1078,667 @@ mod tests {
 
         // Inner inherits 24px font-size, so 5em = 120px.
         assert_eq!(inner.dimensions.content.width, 120.0);
+    }
+
+    #[test]
+    fn inline_block_flows_horizontally_with_explicit_size() {
+        // Two inline-block siblings should stack on a single line and respect
+        // their explicit width/height instead of stretching to the container.
+        let styled = styled_root(
+            r#"<div id="row"><span class="chip">A</span><span class="chip">B</span></div>"#,
+            r#"
+                #row { width: 400px; }
+                .chip {
+                    display: inline-block;
+                    width: 80px;
+                    height: 30px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let first = &layout.children[0];
+        let second = &layout.children[1];
+
+        assert_eq!(first.dimensions.content.x, 0.0);
+        assert_eq!(first.dimensions.content.y, 0.0);
+        assert_eq!(first.dimensions.content.width, 80.0);
+        assert_eq!(first.dimensions.content.height, 30.0);
+        // Second box sits to the right of the first with the same baseline.
+        assert_eq!(second.dimensions.content.x, 80.0);
+        assert_eq!(second.dimensions.content.y, 0.0);
+    }
+
+    #[test]
+    fn inline_block_wraps_to_next_line_when_overflowing() {
+        // Three 80px chips into a 200px row: third one wraps below the first two.
+        let styled = styled_root(
+            r#"<div id="row"><span class="chip">A</span><span class="chip">B</span><span class="chip">C</span></div>"#,
+            r#"
+                #row { width: 200px; }
+                .chip {
+                    display: inline-block;
+                    width: 80px;
+                    height: 30px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let third = &layout.children[2];
+
+        assert_eq!(third.dimensions.content.x, 0.0);
+        assert_eq!(third.dimensions.content.y, 30.0);
+    }
+
+    #[test]
+    fn inline_block_padding_and_margin_count_toward_outer_width() {
+        // Outer width = margin(5+5) + padding(10+10) + width(40) = 70.
+        let styled = styled_root(
+            r#"<div id="row"><span class="chip"></span><span class="chip"></span></div>"#,
+            r#"
+                #row { width: 400px; }
+                .chip {
+                    display: inline-block;
+                    width: 40px;
+                    height: 20px;
+                    margin-left: 5px;
+                    margin-right: 5px;
+                    padding-left: 10px;
+                    padding-right: 10px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let first = &layout.children[0];
+        let second = &layout.children[1];
+
+        // First chip's content_x = 0 + margin-left(5) + padding-left(10) = 15.
+        assert_eq!(first.dimensions.content.x, 15.0);
+        assert_eq!(first.dimensions.content.width, 40.0);
+        // Second chip's content_x = first outer end (70) + own margin/padding offsets.
+        assert_eq!(second.dimensions.content.x, 70.0 + 15.0);
+    }
+
+    #[test]
+    fn inline_block_runs_block_layout_for_inner_block_children() {
+        // An inline-block with two block children should stack them vertically inside
+        // its own content box and report a height equal to their combined heights.
+        let styled = styled_root(
+            r#"<div id="row"><span class="card"><div class="row"></div><div class="row"></div></span></div>"#,
+            r#"
+                #row { width: 400px; }
+                .card {
+                    display: inline-block;
+                    width: 100px;
+                }
+                .row { height: 25px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let card = &layout.children[0];
+        let inner_first = &card.children[0];
+        let inner_second = &card.children[1];
+
+        assert_eq!(card.dimensions.content.width, 100.0);
+        assert_eq!(card.dimensions.content.height, 50.0);
+        assert_eq!(inner_first.dimensions.content.y, 0.0);
+        assert_eq!(inner_second.dimensions.content.y, 25.0);
+        // Inner block children fill the inline-block's content width.
+        assert_eq!(inner_first.dimensions.content.width, 100.0);
+    }
+
+    #[test]
+    fn inline_block_taller_sibling_sets_line_height() {
+        // The line height should pick up the tallest inline-block on the line so
+        // that the next line starts below the tallest box, not the first one.
+        let styled = styled_root(
+            r#"<div id="row"><span class="short">A</span><span class="tall">B</span><span class="short">C</span><span class="short">D</span></div>"#,
+            r#"
+                #row { width: 200px; }
+                .short {
+                    display: inline-block;
+                    width: 60px;
+                    height: 20px;
+                }
+                .tall {
+                    display: inline-block;
+                    width: 60px;
+                    height: 50px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        // Three 60px chips fit on the first line (180/200), the fourth wraps.
+        let fourth = &layout.children[3];
+        // Wrap row should clear the tallest box on the previous line (50px), not 20px.
+        assert_eq!(fourth.dimensions.content.y, 50.0);
+    }
+
+    #[test]
+    fn position_relative_offsets_box_without_shifting_siblings() {
+        // The relative box visually moves by (left, top), but the next sibling
+        // still starts where the relative box would have ended in normal flow.
+        let styled = styled_root(
+            r#"<div id="root"><div class="shifted"></div><div class="next"></div></div>"#,
+            r#"
+                #root { width: 300px; }
+                .shifted {
+                    position: relative;
+                    left: 20px;
+                    top: 30px;
+                    height: 40px;
+                }
+                .next { height: 25px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let shifted = &layout.children[0];
+        let next = &layout.children[1];
+
+        // Visual position picks up the offset.
+        assert_eq!(shifted.dimensions.content.x, 20.0);
+        assert_eq!(shifted.dimensions.content.y, 30.0);
+        // Sibling still stacks at the unoffset bottom (40px), not 70px.
+        assert_eq!(next.dimensions.content.x, 0.0);
+        assert_eq!(next.dimensions.content.y, 40.0);
+    }
+
+    #[test]
+    fn position_relative_propagates_offset_to_descendants() {
+        // Children should visually shift by the same amount as the relative
+        // ancestor: their on-screen rects are computed by translating the whole
+        // subtree, not by re-laying out the children.
+        let styled = styled_root(
+            r#"<div id="root"><div class="outer"><div class="inner"></div></div></div>"#,
+            r#"
+                #root { width: 300px; }
+                .outer {
+                    position: relative;
+                    left: 15px;
+                    top: 25px;
+                    height: 80px;
+                }
+                .inner { height: 30px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let outer = &layout.children[0];
+        let inner = &outer.children[0];
+
+        assert_eq!(outer.dimensions.content.x, 15.0);
+        assert_eq!(outer.dimensions.content.y, 25.0);
+        // Inner sits flush inside the outer's content box, then shares the shift.
+        assert_eq!(inner.dimensions.content.x, 15.0);
+        assert_eq!(inner.dimensions.content.y, 25.0);
+    }
+
+    #[test]
+    fn position_relative_with_right_and_bottom_uses_negative_offset() {
+        // `right`/`bottom` push the box away from those edges, which is just a
+        // negative shift along the normal-flow axes for a relative element.
+        let styled = styled_root(
+            r#"<div id="root"><div class="floater"></div><div class="after"></div></div>"#,
+            r#"
+                #root { width: 300px; }
+                .floater {
+                    position: relative;
+                    right: 10px;
+                    bottom: 5px;
+                    height: 20px;
+                }
+                .after { height: 15px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let floater = &layout.children[0];
+        let after = &layout.children[1];
+
+        // right: 10 → dx = -10, bottom: 5 → dy = -5.
+        assert_eq!(floater.dimensions.content.x, -10.0);
+        assert_eq!(floater.dimensions.content.y, -5.0);
+        // Sibling cursor ignores the shift; flow continues at unoffset bottom.
+        assert_eq!(after.dimensions.content.y, 20.0);
+    }
+
+    #[test]
+    fn position_relative_left_wins_over_right() {
+        // CSS spec for LTR: when both `left` and `right` are set on a relative
+        // box, `left` wins and `right` is ignored.
+        let styled = styled_root(
+            r#"<div id="root"><div class="box"></div></div>"#,
+            r#"
+                #root { width: 300px; }
+                .box {
+                    position: relative;
+                    left: 12px;
+                    right: 50px;
+                    height: 10px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let shifted = &layout.children[0];
+
+        assert_eq!(shifted.dimensions.content.x, 12.0);
+    }
+
+    #[test]
+    fn position_relative_works_on_inline_block() {
+        // Relative shift should compose on top of inline-block placement so the
+        // chip moves visually but does not change where the next chip sits.
+        let styled = styled_root(
+            r#"<div id="row"><span class="chip"></span><span class="chip shifted"></span><span class="chip"></span></div>"#,
+            r#"
+                #row { width: 400px; }
+                .chip {
+                    display: inline-block;
+                    width: 60px;
+                    height: 20px;
+                }
+                .shifted {
+                    position: relative;
+                    left: 100px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let first = &layout.children[0];
+        let middle = &layout.children[1];
+        let third = &layout.children[2];
+
+        // First sits at the left edge.
+        assert_eq!(first.dimensions.content.x, 0.0);
+        // Middle would be at 60, then shifts +100 visually.
+        assert_eq!(middle.dimensions.content.x, 160.0);
+        // Third sits at 120 — the inline cursor advanced as if middle were unshifted.
+        assert_eq!(third.dimensions.content.x, 120.0);
+    }
+
+    #[test]
+    fn position_relative_resolves_percent_offsets_against_parent_width() {
+        // The toy uses parent_width as the base for both axes, matching the
+        // existing percent-on-margin/padding approximation.
+        let styled = styled_root(
+            r#"<div id="root"><div class="box"></div></div>"#,
+            r#"
+                #root { width: 200px; }
+                .box {
+                    position: relative;
+                    left: 25%;
+                    top: 10%;
+                    height: 10px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let shifted = &layout.children[0];
+
+        // 25% of 200px = 50px, 10% of 200px = 20px.
+        assert_eq!(shifted.dimensions.content.x, 50.0);
+        assert_eq!(shifted.dimensions.content.y, 20.0);
+    }
+
+    #[test]
+    fn position_relative_zero_offsets_keep_box_in_place() {
+        // `position: relative` with no offsets is a no-op for layout (the only
+        // visible effect is becoming a containing block for absolutes, which we
+        // do not yet support). The box should land exactly where a static box
+        // would.
+        let styled = styled_root(
+            r#"<div id="root"><div class="box"></div></div>"#,
+            r#"
+                #root { width: 200px; }
+                .box {
+                    position: relative;
+                    height: 30px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let shifted = &layout.children[0];
+
+        assert_eq!(shifted.dimensions.content.x, 0.0);
+        assert_eq!(shifted.dimensions.content.y, 0.0);
+    }
+
+    #[test]
+    fn position_absolute_is_removed_from_in_flow_cursor() {
+        // Sibling after the absolute box should layout where the absolute
+        // would have been, since absolutes do not advance the block cursor.
+        let styled = styled_root(
+            r#"<div id="root"><div class="spacer"></div><div class="abs"></div><div class="next"></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .spacer { height: 30px; }
+                .abs {
+                    position: absolute;
+                    width: 100px;
+                    height: 50px;
+                }
+                .next { height: 25px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let abs = &layout.children[1];
+        let next = &layout.children[2];
+
+        // With no offsets, the absolute keeps its static position (under spacer).
+        assert_eq!(abs.dimensions.content.y, 30.0);
+        // .next sits flush below .spacer, ignoring the absolute box.
+        assert_eq!(next.dimensions.content.y, 30.0);
+    }
+
+    #[test]
+    fn position_absolute_uses_initial_containing_block_when_no_positioned_ancestor() {
+        // Without a positioned ancestor, the containing block is the viewport
+        // (origin 0,0). top/left land the outer edge there.
+        let styled = styled_root(
+            r#"<div id="root"><div class="abs"></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .abs {
+                    position: absolute;
+                    left: 50px;
+                    top: 80px;
+                    width: 100px;
+                    height: 30px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let abs = &layout.children[0];
+
+        assert_eq!(abs.dimensions.content.x, 50.0);
+        assert_eq!(abs.dimensions.content.y, 80.0);
+    }
+
+    #[test]
+    fn position_absolute_resolves_against_nearest_positioned_ancestor_padding_box() {
+        // The .container is `position: relative` so it becomes the CB. The
+        // CB is its padding box, so left/top land relative to that — including
+        // its own padding offset on the inside.
+        let styled = styled_root(
+            r#"<div id="root"><div class="container"><div class="abs"></div></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .container {
+                    position: relative;
+                    margin-top: 100px;
+                    padding-left: 20px;
+                    padding-top: 20px;
+                    padding-right: 20px;
+                    padding-bottom: 20px;
+                    height: 200px;
+                }
+                .abs {
+                    position: absolute;
+                    left: 30px;
+                    top: 40px;
+                    width: 50px;
+                    height: 25px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let container = &layout.children[0];
+        let abs = &container.children[0];
+
+        // .container starts at margin-top 100. CB origin = padding-box top-left
+        // = (0, 100). Offsets land outer edge at (30, 140).
+        assert_eq!(abs.dimensions.content.x, 30.0);
+        assert_eq!(abs.dimensions.content.y, 140.0);
+    }
+
+    #[test]
+    fn position_absolute_right_and_bottom_pin_to_far_edges_of_cb() {
+        // right/bottom anchor the OUTER far edges to (cb.right - right) and
+        // (cb.bottom - bottom). Outer width/height get subtracted so the box
+        // sits inside the cb, not flush against the edge.
+        let styled = styled_root(
+            r#"<div id="root"><div class="container"><div class="abs"></div></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .container {
+                    position: relative;
+                    width: 200px;
+                    height: 100px;
+                }
+                .abs {
+                    position: absolute;
+                    right: 10px;
+                    bottom: 20px;
+                    width: 30px;
+                    height: 25px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let container = &layout.children[0];
+        let abs = &container.children[0];
+
+        // CB = (0, 0, 200, 100). x = 200 - 10 - 30 = 160. y = 100 - 20 - 25 = 55.
+        assert_eq!(abs.dimensions.content.x, 160.0);
+        assert_eq!(abs.dimensions.content.y, 55.0);
+    }
+
+    #[test]
+    fn position_absolute_keeps_static_position_when_no_offsets_set() {
+        // Auto on every offset means the absolute box stays where it would
+        // have been laid out in normal flow — useful as a containing block
+        // marker without actually moving the box.
+        let styled = styled_root(
+            r#"<div id="root"><div class="spacer"></div><div class="abs"></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .spacer { height: 75px; }
+                .abs {
+                    position: absolute;
+                    width: 100px;
+                    height: 30px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let abs = &layout.children[1];
+
+        // Static position lands directly below the 75px spacer.
+        assert_eq!(abs.dimensions.content.x, 0.0);
+        assert_eq!(abs.dimensions.content.y, 75.0);
+    }
+
+    #[test]
+    fn position_absolute_resolves_percent_against_cb_dimensions() {
+        // Percent left/right resolves against cb width, top/bottom against cb
+        // height — unlike most other percent properties in our toy that share
+        // the width base.
+        let styled = styled_root(
+            r#"<div id="root"><div class="container"><div class="abs"></div></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .container {
+                    position: relative;
+                    width: 200px;
+                    height: 100px;
+                }
+                .abs {
+                    position: absolute;
+                    left: 25%;
+                    top: 50%;
+                    width: 30px;
+                    height: 20px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let container = &layout.children[0];
+        let abs = &container.children[0];
+
+        // 25% of 200 = 50, 50% of 100 = 50.
+        assert_eq!(abs.dimensions.content.x, 50.0);
+        assert_eq!(abs.dimensions.content.y, 50.0);
+    }
+
+    #[test]
+    fn nested_absolute_compounds_through_each_containing_block() {
+        // Inner absolute resolves against outer's padding box, then outer's
+        // own offsets shift the whole subtree (including inner) by another
+        // delta. Both shifts compose in the natural top-down order.
+        let styled = styled_root(
+            r#"<div id="root"><div class="outer"><div class="inner"></div></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .outer {
+                    position: absolute;
+                    left: 50px;
+                    top: 100px;
+                    width: 200px;
+                    height: 150px;
+                }
+                .inner {
+                    position: absolute;
+                    left: 20px;
+                    top: 30px;
+                    width: 30px;
+                    height: 20px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let outer = &layout.children[0];
+        let inner = &outer.children[0];
+
+        // Inner gets shifted to (20, 30) within outer's CB (originally at 0,0),
+        // then outer's own (50, 100) shift carries inner along.
+        assert_eq!(outer.dimensions.content.x, 50.0);
+        assert_eq!(outer.dimensions.content.y, 100.0);
+        assert_eq!(inner.dimensions.content.x, 70.0);
+        assert_eq!(inner.dimensions.content.y, 130.0);
+    }
+
+    #[test]
+    fn position_absolute_inside_inline_flow_does_not_break_lines() {
+        // An absolute child inside an inline parent must not contribute to
+        // line packing — three normal chips should still fit on one line of
+        // a 200px row even with an absolute chip mixed in between.
+        let styled = styled_root(
+            r#"<div id="row"><span class="chip"></span><span class="chip abs"></span><span class="chip"></span><span class="chip"></span></div>"#,
+            r#"
+                #row { width: 200px; position: relative; height: 50px; }
+                .chip {
+                    display: inline-block;
+                    width: 60px;
+                    height: 20px;
+                }
+                .abs {
+                    position: absolute;
+                    top: 5px;
+                    left: 5px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        // children: chip0, abs (out of flow → pushed to end), chip1, chip2.
+        let chip0 = &layout.children[0];
+        let chip1 = &layout.children[1];
+        let chip2 = &layout.children[2];
+        let abs = &layout.children[3];
+
+        // Three in-flow chips occupy 0, 60, 120 on the same line.
+        assert_eq!(chip0.dimensions.content.x, 0.0);
+        assert_eq!(chip0.dimensions.content.y, 0.0);
+        assert_eq!(chip1.dimensions.content.x, 60.0);
+        assert_eq!(chip1.dimensions.content.y, 0.0);
+        assert_eq!(chip2.dimensions.content.x, 120.0);
+        assert_eq!(chip2.dimensions.content.y, 0.0);
+        // Absolute chip lands at #row's CB origin + (5, 5).
+        assert_eq!(abs.dimensions.content.x, 5.0);
+        assert_eq!(abs.dimensions.content.y, 5.0);
+    }
+
+    #[test]
+    fn position_fixed_is_removed_from_in_flow_cursor() {
+        // Same out-of-flow semantics as absolute: a fixed sibling should not
+        // shift the next in-flow box down.
+        let styled = styled_root(
+            r#"<div id="root"><div class="spacer"></div><div class="fix"></div><div class="next"></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .spacer { height: 30px; }
+                .fix {
+                    position: fixed;
+                    width: 100px;
+                    height: 50px;
+                }
+                .next { height: 25px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let next = &layout.children[2];
+
+        assert_eq!(next.dimensions.content.y, 30.0);
+    }
+
+    #[test]
+    fn position_fixed_ignores_positioned_ancestor_and_uses_viewport() {
+        // Even with a `position: relative` container that would normally be the
+        // CB for an absolute descendant, fixed boxes resolve against the
+        // viewport (initial CB).
+        let styled = styled_root(
+            r#"<div id="root"><div class="container"><div class="fix"></div></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .container {
+                    position: relative;
+                    margin-top: 100px;
+                    padding-left: 30px;
+                    padding-top: 30px;
+                    padding-right: 30px;
+                    padding-bottom: 30px;
+                    height: 200px;
+                }
+                .fix {
+                    position: fixed;
+                    left: 50px;
+                    top: 80px;
+                    width: 100px;
+                    height: 30px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let container = &layout.children[0];
+        let fix = &container.children[0];
+
+        // If this were `position: absolute`, the CB would be the container's
+        // padding box at (0, 100), placing the box at (50, 180). Fixed lands
+        // at the viewport origin instead: (50, 80).
+        assert_eq!(fix.dimensions.content.x, 50.0);
+        assert_eq!(fix.dimensions.content.y, 80.0);
+    }
+
+    #[test]
+    fn position_fixed_resolves_percent_against_viewport_size() {
+        // Initial CB width is the viewport width passed to layout_tree; height
+        // falls back to the laid-out root's outer height. Setting an explicit
+        // height on the root pins both axes to known values.
+        let styled = styled_root(
+            r#"<div id="root"><div class="fix"></div></div>"#,
+            r#"
+                #root { width: 400px; height: 600px; }
+                .fix {
+                    position: fixed;
+                    left: 25%;
+                    top: 50%;
+                    width: 30px;
+                    height: 20px;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let fix = &layout.children[0];
+
+        // 25% of 800 viewport width = 200. 50% of 600 root outer height = 300.
+        assert_eq!(fix.dimensions.content.x, 200.0);
+        assert_eq!(fix.dimensions.content.y, 300.0);
     }
 
     #[test]
