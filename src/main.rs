@@ -1212,7 +1212,7 @@ fn collect_link_targets(
 
 fn has_text_decoration_none(layout_box: &layout::LayoutBox) -> bool {
     match &layout_box.box_type {
-        layout::BoxType::BlockNode(node) => matches!(
+        layout::BoxType::BlockNode(node) | layout::BoxType::FlexNode(node) => matches!(
             node.value("text-decoration"),
             Some(css::Value::Keyword(keyword)) if keyword == "none"
         ),
@@ -1245,28 +1245,33 @@ fn should_collect_link_target(layout_box: &layout::LayoutBox, own_href: Option<&
 
     matches!(
         &layout_box.box_type,
-        layout::BoxType::BlockNode(styled_node) if matches!(styled_node.node.node_type, NodeType::Text(_))
+        layout::BoxType::BlockNode(styled_node) | layout::BoxType::FlexNode(styled_node)
+            if matches!(styled_node.node.node_type, NodeType::Text(_))
     )
 }
 
 fn href_for_layout_box(layout_box: &layout::LayoutBox) -> Option<&str> {
     match &layout_box.box_type {
-        layout::BoxType::BlockNode(styled_node) => match &styled_node.node.node_type {
-            NodeType::Element(element) => element.attributes.get("href").map(String::as_str),
-            NodeType::Text(_) => None,
-        },
+        layout::BoxType::BlockNode(styled_node) | layout::BoxType::FlexNode(styled_node) => {
+            match &styled_node.node.node_type {
+                NodeType::Element(element) => element.attributes.get("href").map(String::as_str),
+                NodeType::Text(_) => None,
+            }
+        }
         layout::BoxType::AnonymousBlock => None,
     }
 }
 
 fn src_for_layout_box(layout_box: &layout::LayoutBox) -> Option<&str> {
     match &layout_box.box_type {
-        layout::BoxType::BlockNode(styled_node) => match &styled_node.node.node_type {
-            NodeType::Element(element) if element.tag_name == "img" => {
-                element.attributes.get("src").map(String::as_str)
+        layout::BoxType::BlockNode(styled_node) | layout::BoxType::FlexNode(styled_node) => {
+            match &styled_node.node.node_type {
+                NodeType::Element(element) if element.tag_name == "img" => {
+                    element.attributes.get("src").map(String::as_str)
+                }
+                _ => None,
             }
-            _ => None,
-        },
+        }
         layout::BoxType::AnonymousBlock => None,
     }
 }

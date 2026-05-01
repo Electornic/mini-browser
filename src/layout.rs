@@ -40,6 +40,12 @@ pub struct LayoutBox {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoxType {
     BlockNode(StyledNode),
+    // A flex container's outer box behaves like a block (its width/margin/padding
+    // resolve the same way), but its children lay out along a main axis instead
+    // of stacking vertically. The variant is distinct so render and hit-test
+    // code can identify flex containers when needed; child placement happens in
+    // `layout_flex_children`.
+    FlexNode(StyledNode),
     AnonymousBlock,
 }
 
@@ -149,7 +155,7 @@ fn absolute_offset_delta(layout_box: &LayoutBox, cb: ContainingBlock) -> (f32, f
 
 fn box_styled_node(layout_box: &LayoutBox) -> Option<&StyledNode> {
     match &layout_box.box_type {
-        BoxType::BlockNode(node) => Some(node),
+        BoxType::BlockNode(node) | BoxType::FlexNode(node) => Some(node),
         BoxType::AnonymousBlock => None,
     }
 }
@@ -251,8 +257,14 @@ fn layout_node(
     let content_x = parent_x + margin.left + border.left + padding.left;
     let content_y = *cursor_y + margin.top + border.top + padding.top;
 
-    // Parents with only inline children lay them out left-to-right; everything else stays block.
-    let (children, auto_content_height) = if uses_inline_flow(node) {
+    // Flex container: children lay out along the main axis (commit 1 = row,
+    // flex-start, no wrap, no grow/shrink). Skip inline-flow/block-flow paths
+    // entirely — flex flow ignores margin collapse and floats by spec.
+    // Otherwise: parents with only inline children lay them out left-to-right;
+    // everything else stays block.
+    let (children, auto_content_height) = if is_flex_container(node) {
+        layout_flex_children(&node.children, content_x, content_y, content_width)
+    } else if uses_inline_flow(node) {
         let align = inline_align_for(node);
         layout_inline_children(&node.children, content_x, content_y, content_width, align)
     } else {
@@ -365,12 +377,66 @@ fn layout_node(
     *cursor_y = content_y + content_height + padding.bottom + border.bottom + margin.bottom;
 
     let mut layout_box = LayoutBox {
-        box_type: BoxType::BlockNode(node.clone()),
+        box_type: if is_flex_container(node) {
+            BoxType::FlexNode(node.clone())
+        } else {
+            BoxType::BlockNode(node.clone())
+        },
         dimensions,
         children,
     };
     apply_relative_offset(&mut layout_box, node, parent_width);
     layout_box
+}
+
+fn layout_flex_children(
+    children: &[StyledNode],
+    content_x: f32,
+    content_y: f32,
+    content_width: f32,
+) -> (Vec<LayoutBox>, f32) {
+    // Commit 1 minimal flex: row direction, flex-start, no wrap, no grow/shrink.
+    // Each child is sized like an inline-block (explicit width wins, otherwise
+    // shrink-to-fit) and placed at the running main-axis cursor. The container
+    // content_height becomes the tallest child's outer height — flex flow does
+    // not stack vertically, so child heights sum on the cross axis as max, not
+    // sum.
+    //
+    // Margin collapse and floats are deliberately skipped: per CSS flexbox
+    // spec, items inside a flex container do not collapse margins with their
+    // siblings, and `float` is ignored on flex items.
+    let mut boxes: Vec<LayoutBox> = Vec::with_capacity(children.len());
+    let mut cursor_x = content_x;
+    let mut max_outer_height: f32 = 0.0;
+    for child in children {
+        if is_out_of_flow(child) {
+            // Static-position approximation, same trick as inline flow: drop
+            // the absolute child at the container's content origin and let
+            // pass 2 reposition it against its containing block.
+            let abs_box = layout_inline_or_inline_block(child, content_x, content_y, content_width);
+            boxes.push(abs_box);
+            continue;
+        }
+        let child_box = layout_flex_item(child, cursor_x, content_y, content_width);
+        let outer = outer_rect(&child_box);
+        cursor_x += outer.width;
+        max_outer_height = max_outer_height.max(outer.height);
+        boxes.push(child_box);
+    }
+    (boxes, max_outer_height)
+}
+
+fn layout_flex_item(node: &StyledNode, x: f32, y: f32, available_width: f32) -> LayoutBox {
+    // Flex items are block-level boxes from the inside (their own children
+    // still lay out as block/inline/flex), but on the outside they get
+    // shrink-to-fit sizing rather than stretching to fill the parent. The
+    // inline-block path already implements exactly that sizing rule, so we
+    // reuse it directly.
+    layout_inline_block_node(node, x, y, available_width)
+}
+
+fn is_flex_container(node: &StyledNode) -> bool {
+    matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "flex")
 }
 
 fn layout_inline_children(
@@ -675,10 +741,13 @@ fn layout_inline_block_node(node: &StyledNode, x: f32, y: f32, available_width: 
     let content_x = x + margin.left + border.left + padding.left;
     let content_y = y + margin.top + border.top + padding.top;
 
-    // Same dispatch as the regular block path: if every child is inline, run
-    // the inline flow; otherwise stack block children top-to-bottom inside our
-    // content box.
-    let (children, auto_content_height) = if uses_inline_flow(node) {
+    // Same dispatch as the regular block path with one extra branch for flex
+    // containers: if `display: flex`, lay children out along the main axis;
+    // else if every child is inline, run inline flow; otherwise stack block
+    // children top-to-bottom inside our content box.
+    let (children, auto_content_height) = if is_flex_container(node) {
+        layout_flex_children(&node.children, content_x, content_y, content_width)
+    } else if uses_inline_flow(node) {
         let align = inline_align_for(node);
         layout_inline_children(&node.children, content_x, content_y, content_width, align)
     } else {
@@ -695,7 +764,11 @@ fn layout_inline_block_node(node: &StyledNode, x: f32, y: f32, available_width: 
         .unwrap_or_else(|| auto_content_height.max(intrinsic_height(node)));
 
     let mut layout_box = LayoutBox {
-        box_type: BoxType::BlockNode(node.clone()),
+        box_type: if is_flex_container(node) {
+            BoxType::FlexNode(node.clone())
+        } else {
+            BoxType::BlockNode(node.clone())
+        },
         dimensions: Dimensions {
             content: Rect {
                 x: content_x,
@@ -2176,5 +2249,82 @@ mod tests {
         assert_eq!(layout.dimensions.margin.left, 0.0);
         assert_eq!(layout.dimensions.margin.right, 0.0);
         assert_eq!(layout.dimensions.content.width, 400.0);
+    }
+
+    #[test]
+    fn flex_container_box_type_is_flex_node() {
+        // The container itself becomes a FlexNode so render/hit-test code can
+        // tell it apart from a plain block. Children stay as BlockNodes — only
+        // the container changes box_type.
+        let styled = styled_root(
+            r#"<div id="row"><div class="item"></div></div>"#,
+            r#"
+                #row { display: flex; width: 400px; }
+                .item { width: 100px; height: 50px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        assert!(matches!(layout.box_type, super::BoxType::FlexNode(_)));
+        assert!(matches!(
+            layout.children[0].box_type,
+            super::BoxType::BlockNode(_)
+        ));
+    }
+
+    #[test]
+    fn flex_row_lays_children_horizontally_at_flex_start() {
+        // Three explicit-width items in a flex row should sit shoulder-to-shoulder
+        // starting at the container's content_x, not stacked vertically.
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div><div class="c"></div></div>"#,
+            r#"
+                #row { display: flex; width: 400px; }
+                .a { width: 60px; height: 40px; }
+                .b { width: 80px; height: 30px; }
+                .c { width: 100px; height: 50px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+        let c = &layout.children[2];
+
+        assert_eq!(a.dimensions.content.x, 0.0);
+        assert_eq!(b.dimensions.content.x, 60.0);
+        assert_eq!(c.dimensions.content.x, 140.0);
+        // All sit on the same baseline (commit 1 has no align-items, so they
+        // all start at content_y = 0).
+        assert_eq!(a.dimensions.content.y, 0.0);
+        assert_eq!(b.dimensions.content.y, 0.0);
+        assert_eq!(c.dimensions.content.y, 0.0);
+        // Container's auto height = tallest child outer height = 50.
+        assert_eq!(layout.dimensions.content.height, 50.0);
+    }
+
+    #[test]
+    fn flex_items_skip_margin_collapse() {
+        // Two flex siblings with vertical margins should not collapse — flex
+        // flow ignores margin collapse entirely. Each item's margin-top
+        // contributes a fresh top offset within the container.
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #row { display: flex; width: 400px; }
+                .a { width: 50px; height: 30px; margin-top: 10px; }
+                .b { width: 50px; height: 30px; margin-top: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+
+        // Each item sits at its own margin-top below the container's content
+        // top. (Block flow would have collapsed these against each other; flex
+        // flow keeps them independent on the cross axis.)
+        assert_eq!(a.dimensions.content.y, 10.0);
+        assert_eq!(b.dimensions.content.y, 20.0);
+        // Main-axis stacking still works.
+        assert_eq!(a.dimensions.content.x, 0.0);
+        assert_eq!(b.dimensions.content.x, 50.0);
     }
 }
