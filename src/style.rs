@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::{
     css::{
-        Combinator, Declaration, Selector, SimpleSelector, SimpleSelectorKind, Stylesheet, Unit,
-        Value,
+        Combinator, Declaration, PseudoClass, Selector, SimpleSelector, SimpleSelectorKind,
+        Stylesheet, Unit, Value,
     },
     dom::{ElementData, Node, NodeType},
 };
@@ -30,25 +30,49 @@ impl StyledNode {
 }
 
 pub fn style_tree(root: &Node, stylesheets: &[Stylesheet]) -> StyledNode {
+    // Most callers do not care about hover state — they get a "nothing is hovered" tree.
+    style_tree_with_hover(root, stylesheets, None)
+}
+
+/// Build the styled tree given the DOM path of the currently hovered element, if any.
+/// `hovered_path` is the sequence of child indices from the root that identifies the
+/// node under the user's pointer. The matcher uses it to light up `:hover` rules
+/// targeting that node (and rules anchored on hovered ancestors).
+pub fn style_tree_with_hover(
+    root: &Node,
+    stylesheets: &[Stylesheet],
+    hovered_path: Option<&[usize]>,
+) -> StyledNode {
     // The root font-size feeds rem resolution for every descendant. Compute it up front
     // by treating the root as if it lived inside the user-agent default font-size.
-    let raw_root = specified_values(root, stylesheets, &[]);
+    let raw_root = specified_values(root, stylesheets, &[], false);
     let root_font_size = resolve_font_size(
         raw_root.get("font-size"),
         DEFAULT_FONT_SIZE,
         DEFAULT_FONT_SIZE,
     );
-    style_tree_with_parent(root, stylesheets, None, root_font_size, &[])
+    style_tree_inner(
+        root,
+        stylesheets,
+        None,
+        root_font_size,
+        &[],
+        &[],
+        hovered_path,
+    )
 }
 
-fn style_tree_with_parent<'a>(
+fn style_tree_inner<'a>(
     node: &'a Node,
     stylesheets: &[Stylesheet],
     parent_values: Option<&PropertyMap>,
     root_font_size: f32,
-    ancestors: &[&'a Node],
+    ancestors: &[(&'a Node, bool)],
+    current_path: &[usize],
+    hovered_path: Option<&[usize]>,
 ) -> StyledNode {
-    let mut specified_values = specified_values(node, stylesheets, ancestors);
+    let is_hovered = hovered_path == Some(current_path);
+    let mut specified_values = specified_values(node, stylesheets, ancestors, is_hovered);
 
     // Real browsers inherit many properties. Here we only inherit a few text-related ones
     // because they make documents readable without making the style system much more complex.
@@ -88,19 +112,26 @@ fn style_tree_with_parent<'a>(
         }
     }
 
-    // Append self to the ancestor chain children see during their selector matching.
-    let mut child_ancestors: Vec<&Node> = ancestors.to_vec();
-    child_ancestors.push(node);
+    // Append self to the ancestor chain children see during their selector matching,
+    // carrying the resolved hover state so descendant matches can check pseudo classes
+    // anchored on hovered ancestors (e.g. `.outer:hover .inner`).
+    let mut child_ancestors: Vec<(&Node, bool)> = ancestors.to_vec();
+    child_ancestors.push((node, is_hovered));
     let children = node
         .children
         .iter()
-        .map(|child| {
-            style_tree_with_parent(
+        .enumerate()
+        .map(|(idx, child)| {
+            let mut child_path: Vec<usize> = current_path.to_vec();
+            child_path.push(idx);
+            style_tree_inner(
                 child,
                 stylesheets,
                 Some(&specified_values),
                 root_font_size,
                 &child_ancestors,
+                &child_path,
+                hovered_path,
             )
         })
         .collect();
@@ -123,7 +154,12 @@ fn resolve_font_size(raw: Option<&Value>, parent_font_size: f32, root_font_size:
     }
 }
 
-fn specified_values(node: &Node, stylesheets: &[Stylesheet], ancestors: &[&Node]) -> PropertyMap {
+fn specified_values(
+    node: &Node,
+    stylesheets: &[Stylesheet],
+    ancestors: &[(&Node, bool)],
+    is_hovered: bool,
+) -> PropertyMap {
     let mut matched = Vec::new();
 
     // First collect every rule that matches this node together with its specificity and order.
@@ -132,7 +168,9 @@ fn specified_values(node: &Node, stylesheets: &[Stylesheet], ancestors: &[&Node]
         .flat_map(|sheet| sheet.rules.iter())
         .enumerate()
     {
-        if let Some(specificity) = matching_specificity(node, ancestors, &rule.selectors) {
+        if let Some(specificity) =
+            matching_specificity(node, is_hovered, ancestors, &rule.selectors)
+        {
             matched.push((specificity, rule_order, &rule.declarations));
         }
     }
@@ -217,11 +255,16 @@ fn apply_declarations(values: &mut PropertyMap, declarations: &[Declaration]) {
     }
 }
 
-fn matching_specificity(node: &Node, ancestors: &[&Node], selectors: &[Selector]) -> Option<u32> {
+fn matching_specificity(
+    node: &Node,
+    is_hovered: bool,
+    ancestors: &[(&Node, bool)],
+    selectors: &[Selector],
+) -> Option<u32> {
     // The highest matching selector wins within a rule group such as `h1, .title`.
     selectors
         .iter()
-        .filter(|selector| matches_selector(node, ancestors, selector))
+        .filter(|selector| matches_selector(node, is_hovered, ancestors, selector))
         .map(selector_specificity)
         .max()
 }
@@ -243,16 +286,23 @@ fn simple_specificity(simple: &SimpleSelector) -> u32 {
     kind_specificity + pseudo_specificity
 }
 
-fn matches_selector(node: &Node, ancestors: &[&Node], selector: &Selector) -> bool {
+fn matches_selector(
+    node: &Node,
+    is_hovered: bool,
+    ancestors: &[(&Node, bool)],
+    selector: &Selector,
+) -> bool {
     // Right-to-left matching: the rightmost simple selector is the target and must match
     // the element being styled. Each preceding part is checked against ancestors using the
     // combinator that connects it to the part on its right:
     //   - Descendant: walk up until any ancestor matches.
     //   - Child: the very next ancestor must match; no skipping.
+    // Hover state for both the target and each ancestor is carried alongside the node so
+    // pseudo-classes anchored anywhere on the chain (e.g. `.outer:hover .inner`) work.
     let Some((target, leading)) = selector.parts.split_last() else {
         return false;
     };
-    if !matches_simple(node, target) {
+    if !matches_simple(node, is_hovered, target) {
         return false;
     }
 
@@ -262,13 +312,18 @@ fn matches_selector(node: &Node, ancestors: &[&Node], selector: &Selector) -> bo
         match combinator {
             Combinator::Descendant => loop {
                 match ancestor_iter.next() {
-                    Some(ancestor) if matches_simple(ancestor, part) => break,
+                    Some((ancestor, ancestor_hover))
+                        if matches_simple(ancestor, *ancestor_hover, part) =>
+                    {
+                        break;
+                    }
                     Some(_) => continue,
                     None => return false,
                 }
             },
             Combinator::Child => match ancestor_iter.next() {
-                Some(ancestor) if matches_simple(ancestor, part) => {}
+                Some((ancestor, ancestor_hover))
+                    if matches_simple(ancestor, *ancestor_hover, part) => {}
                 _ => return false,
             },
         }
@@ -276,7 +331,7 @@ fn matches_selector(node: &Node, ancestors: &[&Node], selector: &Selector) -> bo
     true
 }
 
-fn matches_simple(node: &Node, simple: &SimpleSelector) -> bool {
+fn matches_simple(node: &Node, is_hovered: bool, simple: &SimpleSelector) -> bool {
     let element = match &node.node_type {
         NodeType::Element(element) => element,
         // Text nodes never match selectors directly; they only inherit style from parents.
@@ -296,10 +351,10 @@ fn matches_simple(node: &Node, simple: &SimpleSelector) -> bool {
         return false;
     }
 
-    // Pseudo-class matching is inert in this commit — hover state isn't plumbed through
-    // the style pass yet, so any pseudo on the selector causes the rule to silently fail
-    // to match. The follow-up commit threads hover identity through and lights this up.
-    simple.pseudo.is_none()
+    match simple.pseudo {
+        None => true,
+        Some(PseudoClass::Hover) => is_hovered,
+    }
 }
 
 fn has_class(element: &ElementData, class_name: &str) -> bool {
@@ -521,10 +576,97 @@ mod tests {
     }
 
     #[test]
-    fn hover_pseudo_class_does_not_match_yet_without_hover_state() {
-        // Until hover identity is plumbed through the style pass, any pseudo on the
-        // selector causes the rule to silently fail to match. A bare-class fallback
-        // confirms the surrounding cascade still works.
+    fn hover_pseudo_class_matches_when_hovered_path_targets_node() {
+        // Build: <div><a class="btn">click</a></div>. The root has one child (the <a>),
+        // so the <a>'s DOM path is [0]. Telling style_tree_with_hover that [0] is hovered
+        // should activate the .btn:hover rule.
+        let root = parse_html(r#"<div><a class="btn">click</a></div>"#);
+        let stylesheet = parse_css(
+            r#"
+                .btn { color: #00ff00; }
+                .btn:hover { color: #ff0000; }
+            "#,
+        );
+        let styled = style::style_tree_with_hover(&root, &[stylesheet], Some(&[0]));
+        let link = &styled.children[0];
+
+        assert_eq!(
+            link.value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn hover_pseudo_class_only_applies_to_the_hovered_node_not_siblings() {
+        // Two .btn siblings; only the first ([0,0]) is "hovered". The second should keep
+        // the non-hover color, proving the hovered_path identifies a single node.
+        let root = parse_html(r#"<div><a class="btn">a</a><a class="btn">b</a></div>"#);
+        let stylesheet = parse_css(
+            r#"
+                .btn { color: #00ff00; }
+                .btn:hover { color: #ff0000; }
+            "#,
+        );
+        let styled = style::style_tree_with_hover(&root, &[stylesheet], Some(&[0]));
+        let first = &styled.children[0];
+        let second = &styled.children[1];
+
+        assert_eq!(
+            first.value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }))
+        );
+        assert_eq!(
+            second.value("color"),
+            Some(&Value::Color(Color {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn hover_on_ancestor_propagates_through_descendant_combinator() {
+        // .outer:hover .inner — when the .outer ancestor is hovered, the descendant
+        // .inner picks up the rule even though .inner itself isn't under the cursor.
+        let root = parse_html(r#"<div class="outer"><span class="inner">x</span></div>"#);
+        let stylesheet = parse_css(
+            r#"
+                .inner { color: #00ff00; }
+                .outer:hover .inner { color: #ff0000; }
+            "#,
+        );
+        // Path [] is the root <div class="outer">.
+        let styled = style::style_tree_with_hover(&root, &[stylesheet], Some(&[]));
+        let inner = &styled.children[0];
+
+        assert_eq!(
+            inner.value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn hover_pseudo_class_does_not_match_when_no_hover_path_is_given() {
+        // The legacy entry point — `style_tree` without hover info — defaults to "nothing
+        // is hovered", so any :hover rule should silently fail to match. A bare-class
+        // fallback confirms the surrounding cascade still works.
         let root = parse_html(r#"<a class="btn">click</a>"#);
         let stylesheet = parse_css(
             r#"
