@@ -139,6 +139,10 @@ pub enum TrackSize {
     /// A flexible track sized via `<n>fr`. `1fr` carries weight 1.0, `2fr`
     /// carries 2.0, etc. Distribution against free space mirrors flex-grow.
     Fraction(f32),
+    /// `auto` track — sizes to fit its widest item (the column's max-content
+    /// natural width). Resolution requires a pre-pass to lay each item out
+    /// without a track constraint and read its natural outer width.
+    Auto,
 }
 
 /// Single function in a `transform: ...` list. Stored in source order so the
@@ -593,6 +597,19 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_grid_track_size(&mut self) -> Result<TrackSize, ParseError> {
+        // `auto` is the only non-numeric token allowed in commit G2; bigger
+        // keywords like `min-content`/`max-content` would extend this branch.
+        if matches!(self.next_char(), Some(ch) if ch.is_ascii_alphabetic()) {
+            let keyword = self.parse_identifier()?;
+            return match keyword.as_str() {
+                "auto" => Ok(TrackSize::Auto),
+                other => Err(ParseError::new(
+                    self.pos,
+                    format!("unsupported grid track keyword '{other}'"),
+                )),
+            };
+        }
+
         // Read the leading number, then peek a unit — `fr` becomes a Fraction,
         // anything else routes through the regular length unit set.
         let number_str = self.consume_while(|ch| ch.is_ascii_digit() || ch == '.');

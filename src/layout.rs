@@ -739,38 +739,38 @@ fn container_box_type(node: &StyledNode) -> BoxType {
     }
 }
 
-fn layout_grid_children(
-    container: &StyledNode,
-    children: &[StyledNode],
+fn layout_grid_children<'a>(
+    container: &'a StyledNode,
+    children: &'a [StyledNode],
     content_x: f32,
     content_y: f32,
     content_width: f32,
 ) -> (Vec<LayoutBox>, f32) {
-    // Three-pass placement.
-    //   Pass 1: resolve column tracks to pixel widths, then lay out each
-    //           in-flow item at its column's x position with row y = content_y
-    //           as a placeholder. Auto-flow is row-major: item k goes to
+    // Four-pass placement.
+    //   Pass 0: lay each in-flow item out at the container origin with the
+    //           full container width as available_width, just to measure
+    //           natural outer widths. Auto tracks need these; Length/fr
+    //           tracks ignore them. Auto-flow is row-major: item k goes to
     //           (row = k / n_cols, col = k % n_cols).
-    //   Pass 2: compute each row's height as the max outer height of its
-    //           items.
-    //   Pass 3: shift each item down by its row's cumulative y offset.
+    //   Pass 1: resolve column tracks to pixel widths using the natural-width
+    //           samples (auto tracks pick the column max).
+    //   Pass 2: shift each item to its track's x and grow its content to
+    //           fill the track when no explicit width was declared.
+    //   Pass 3: compute each row's height (max outer height) and shift each
+    //           item down by its row's cumulative y offset.
     //
     // Out-of-flow children skip the grid entirely — they sit at the container
-    // origin during pass 1 and the absolute reposition pass at the tree root
+    // origin during pass 0 and the absolute reposition pass at the tree root
     // moves them to their containing block.
-    let columns = grid_track_columns(container, content_width);
-    let n_cols = columns.len().max(1);
-
-    let mut col_offsets: Vec<f32> = Vec::with_capacity(columns.len());
-    let mut acc = 0.0;
-    for w in &columns {
-        col_offsets.push(acc);
-        acc += w;
-    }
+    let track_decls = match container.value("grid-template-columns") {
+        Some(Value::TrackList(tracks)) if !tracks.is_empty() => Some(tracks.as_slice()),
+        _ => None,
+    };
+    let n_cols = track_decls.map(|t| t.len()).unwrap_or(1).max(1);
 
     let mut boxes: Vec<LayoutBox> = Vec::with_capacity(children.len());
-    // Each entry: (row_index, column_index, boxes index) for one in-flow item.
-    let mut cell_assignments: Vec<(usize, usize, usize)> = Vec::new();
+    // Each entry: (row, col, boxes index, source styled node) for one in-flow item.
+    let mut cell_assignments: Vec<(usize, usize, usize, &'a StyledNode)> = Vec::new();
     let mut next_cell = 0usize;
 
     for child in children {
@@ -782,35 +782,74 @@ fn layout_grid_children(
         let col = next_cell % n_cols;
         let row = next_cell / n_cols;
         next_cell += 1;
-        let track_x = content_x + col_offsets[col];
-        let track_width = columns[col];
         let box_idx = boxes.len();
-        cell_assignments.push((row, col, box_idx));
-        boxes.push(layout_grid_item(child, track_x, content_y, track_width));
+        cell_assignments.push((row, col, box_idx, child));
+        // Pre-pass: lay out at the container origin so we can read the
+        // item's natural outer width before knowing its track width.
+        boxes.push(layout_inline_block_node(
+            child,
+            content_x,
+            content_y,
+            content_width,
+        ));
     }
 
-    // Pass 2: row heights = max(item outer height) per row.
+    // Per-column natural max outer width — feeds auto track sizing.
+    let mut natural_max_per_col = vec![0.0_f32; n_cols];
+    for &(_, col, box_idx, _) in &cell_assignments {
+        let w = outer_rect(&boxes[box_idx]).width;
+        if w > natural_max_per_col[col] {
+            natural_max_per_col[col] = w;
+        }
+    }
+
+    let columns = resolve_grid_columns(track_decls, content_width, &natural_max_per_col);
+    let mut col_offsets: Vec<f32> = Vec::with_capacity(columns.len());
+    let mut acc = 0.0;
+    for w in &columns {
+        col_offsets.push(acc);
+        acc += w;
+    }
+
+    // Pass 2: shift each item to its track and grow content to fill.
+    for &(_, col, box_idx, child) in &cell_assignments {
+        let target_outer_x = content_x + col_offsets[col];
+        let current_outer_x = outer_rect(&boxes[box_idx]).x;
+        let dx = target_outer_x - current_outer_x;
+        if dx != 0.0 {
+            shift_layout_subtree(&mut boxes[box_idx], dx, 0.0);
+        }
+        if !matches!(child.value("width"), Some(Value::Length(_, _))) {
+            let edges =
+                outer_rect(&boxes[box_idx]).width - boxes[box_idx].dimensions.content.width;
+            let target = (columns[col] - edges).max(0.0);
+            if boxes[box_idx].dimensions.content.width < target {
+                boxes[box_idx].dimensions.content.width = target;
+            }
+        }
+    }
+
+    // Pass 3: row heights = max(item outer height) per row, then cumulative
+    // y offsets shifted onto each item.
     let n_rows = cell_assignments
         .iter()
-        .map(|&(row, _, _)| row + 1)
+        .map(|&(row, _, _, _)| row + 1)
         .max()
         .unwrap_or(0);
     let mut row_heights = vec![0.0_f32; n_rows];
-    for &(row, _, box_idx) in &cell_assignments {
+    for &(row, _, box_idx, _) in &cell_assignments {
         let h = outer_rect(&boxes[box_idx]).height;
         if h > row_heights[row] {
             row_heights[row] = h;
         }
     }
-
-    // Pass 3: cumulative y offsets per row, then shift each item to its row.
     let mut row_offsets: Vec<f32> = Vec::with_capacity(n_rows);
     let mut acc = 0.0;
     for h in &row_heights {
         row_offsets.push(acc);
         acc += h;
     }
-    for &(row, _, box_idx) in &cell_assignments {
+    for &(row, _, box_idx, _) in &cell_assignments {
         let dy = row_offsets[row];
         if dy != 0.0 {
             shift_layout_subtree(&mut boxes[box_idx], 0.0, dy);
@@ -821,40 +860,24 @@ fn layout_grid_children(
     (boxes, auto_content_height)
 }
 
-fn layout_grid_item(node: &StyledNode, x: f32, y: f32, track_width: f32) -> LayoutBox {
-    // Grid items fill their column track unless they declared an explicit
-    // smaller width. We delegate to inline-block layout (which sizes content
-    // and edges identically to other paths) and then post-hoc grow the
-    // content rect to fill the track when no explicit width is set. Items
-    // that already meet or exceed track_width keep their declared size —
-    // overflow within a track is allowed in spec land.
-    let mut item = layout_inline_block_node(node, x, y, track_width);
-    if !matches!(node.value("width"), Some(Value::Length(_, _))) {
-        let edges = outer_rect(&item).width - item.dimensions.content.width;
-        let target = (track_width - edges).max(0.0);
-        if item.dimensions.content.width < target {
-            item.dimensions.content.width = target;
-        }
-    }
-    item
-}
-
-fn grid_track_columns(node: &StyledNode, content_width: f32) -> Vec<f32> {
-    // Resolves `grid-template-columns` to a Vec of pixel widths. Length tracks
-    // are taken at face value (Px after style resolution; Percent resolves
-    // against the container's own content width). Fraction (`fr`) tracks
-    // share the leftover width proportional to their weight, mirroring
-    // flex-grow's distribution. With no declaration, behave like a single
-    // full-width track so a bare `display: grid` still produces sensible
-    // single-column output.
-    let tracks = match node.value("grid-template-columns") {
-        Some(Value::TrackList(tracks)) if !tracks.is_empty() => tracks.as_slice(),
+fn resolve_grid_columns(
+    tracks: Option<&[TrackSize]>,
+    content_width: f32,
+    natural_max_per_col: &[f32],
+) -> Vec<f32> {
+    // Resolves `grid-template-columns` to a Vec of pixel widths. Length and
+    // Auto tracks contribute fixed budget; Fraction tracks split the leftover
+    // proportionally to their weight, like flex-grow. With no declaration,
+    // behave like a single full-width track so a bare `display: grid` still
+    // produces sensible single-column output.
+    let tracks = match tracks {
+        Some(t) if !t.is_empty() => t,
         _ => return vec![content_width],
     };
 
     let mut fixed_total = 0.0_f32;
     let mut total_fr = 0.0_f32;
-    for track in tracks {
+    for (i, track) in tracks.iter().enumerate() {
         match track {
             TrackSize::Length(value, Unit::Px) => fixed_total += *value,
             TrackSize::Length(value, Unit::Percent) => {
@@ -863,6 +886,7 @@ fn grid_track_columns(node: &StyledNode, content_width: f32) -> Vec<f32> {
             // em/rem are resolved to Px during style; this fallback only
             // matters if a future code path bypasses style-time resolution.
             TrackSize::Length(value, _) => fixed_total += *value,
+            TrackSize::Auto => fixed_total += natural_max_per_col.get(i).copied().unwrap_or(0.0),
             TrackSize::Fraction(weight) => total_fr += *weight,
         }
     }
@@ -870,10 +894,12 @@ fn grid_track_columns(node: &StyledNode, content_width: f32) -> Vec<f32> {
 
     tracks
         .iter()
-        .map(|track| match track {
+        .enumerate()
+        .map(|(i, track)| match track {
             TrackSize::Length(value, Unit::Px) => *value,
             TrackSize::Length(value, Unit::Percent) => *value / 100.0 * content_width,
             TrackSize::Length(value, _) => *value,
+            TrackSize::Auto => natural_max_per_col.get(i).copied().unwrap_or(0.0),
             TrackSize::Fraction(weight) if total_fr > 0.0 => free * *weight / total_fr,
             TrackSize::Fraction(_) => 0.0,
         })
@@ -3248,6 +3274,71 @@ mod tests {
         assert_eq!(a.dimensions.content.x, 0.0);
         assert_eq!(b.dimensions.content.x, 100.0);
         assert_eq!(c.dimensions.content.x, 175.0);
+    }
+
+    #[test]
+    fn grid_auto_track_sizes_to_widest_column_item() {
+        // 3 columns: 100px, auto, 1fr. Container = 400px.
+        // Items in col 1 (the auto column) have natural widths 80 and 60 →
+        // auto track = 80. Fixed budget = 100 + 80 = 180. Free = 220 → 1fr = 220.
+        // So columns = [100, 80, 220], offsets = [0, 100, 180].
+        let styled = styled_root(
+            r#"<div id="g">
+                <div class="a"></div>
+                <div class="b"></div>
+                <div class="c"></div>
+                <div class="d"></div>
+                <div class="e"></div>
+                <div class="f"></div>
+            </div>"#,
+            r#"
+                #g { display: grid; grid-template-columns: 100px auto 1fr; width: 400px; }
+                .a, .d { height: 20px; }
+                .b { width: 80px; height: 20px; }
+                .c, .f { height: 20px; }
+                .e { width: 60px; height: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+
+        // First row: a (col 0), b (col 1, auto), c (col 2, fr)
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+        let c = &layout.children[2];
+        // Second row: d, e, f
+        let e = &layout.children[4];
+
+        // Column offsets should be 0, 100, 180.
+        assert_eq!(a.dimensions.content.x, 0.0);
+        assert_eq!(b.dimensions.content.x, 100.0);
+        assert_eq!(c.dimensions.content.x, 180.0);
+        // Auto track width = 80 (max of items in col 1) → b stays at 80,
+        // and e (60) stays at 60 (post-hoc fill won't shrink below explicit width).
+        assert_eq!(b.dimensions.content.width, 80.0);
+        assert_eq!(e.dimensions.content.width, 60.0);
+        // 1fr column = leftover = 400 - 180 = 220.
+        assert_eq!(c.dimensions.content.width, 220.0);
+    }
+
+    #[test]
+    fn grid_auto_track_with_no_items_collapses_to_zero() {
+        // Auto track with no items in the column → natural max = 0 → track = 0.
+        // Useful for testing that fr tracks still share leftover correctly.
+        let styled = styled_root(
+            r#"<div id="g"><div class="a"></div></div>"#,
+            r#"
+                #g { display: grid; grid-template-columns: auto 1fr; width: 200px; }
+                .a { height: 20px; width: 60px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+
+        // Item lands in col 0 (auto). Natural width = 60 → auto track = 60.
+        // 1fr in col 1 takes leftover 140 (no items).
+        assert_eq!(a.dimensions.content.x, 0.0);
+        assert_eq!(a.dimensions.content.width, 60.0);
+        // Container width is set; child of col 1 is none, so no test there.
     }
 
     #[test]
