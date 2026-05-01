@@ -108,6 +108,30 @@ pub enum Value {
     // Unitless number — used for properties like `z-index`, `line-height`,
     // `opacity` where the value is a bare number rather than a length.
     Number(f32),
+    // Functional `linear-gradient(...)` value, used as a `background-image`.
+    Gradient(LinearGradient),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearGradient {
+    pub direction: GradientDirection,
+    pub stops: Vec<ColorStop>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GradientDirection {
+    ToTop,
+    ToBottom,
+    ToLeft,
+    ToRight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColorStop {
+    pub color: Color,
+    /// 0.0–1.0 along the gradient. `None` means "let the renderer place it
+    /// automatically by distributing evenly between defined neighbours."
+    pub position: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -512,10 +536,13 @@ impl<'a> Parser<'a> {
             // form is recognised when an opening paren follows the identifier name.
             Some(_) => {
                 let ident = self.parse_identifier()?;
-                if self.next_char() == Some('(')
-                    && (ident.eq_ignore_ascii_case("rgb") || ident.eq_ignore_ascii_case("rgba"))
-                {
-                    return self.parse_rgb_function(ident.eq_ignore_ascii_case("rgba"));
+                if self.next_char() == Some('(') {
+                    if ident.eq_ignore_ascii_case("rgb") || ident.eq_ignore_ascii_case("rgba") {
+                        return self.parse_rgb_function(ident.eq_ignore_ascii_case("rgba"));
+                    }
+                    if ident.eq_ignore_ascii_case("linear-gradient") {
+                        return self.parse_linear_gradient();
+                    }
                 }
                 Ok(named_color(&ident)
                     .map(Value::Color)
@@ -557,6 +584,100 @@ impl<'a> Parser<'a> {
         self.expect_char(')')?;
 
         Ok(Value::Color(Color { r, g, b, a }))
+    }
+
+    fn parse_linear_gradient(&mut self) -> Result<Value, ParseError> {
+        // Supported forms (MVP):
+        //   linear-gradient(<color> [<%>]?, <color> [<%>]? [, ...])
+        //   linear-gradient(to top|bottom|left|right, <stops...>)
+        // Angle (`45deg`) and corner directions (`to top left`) are deferred.
+        self.expect_char('(')?;
+        self.consume_whitespace();
+
+        let direction = if self.starts_with("to ") || self.starts_with("to\t") {
+            // Eat "to" identifier, then read a side keyword. A direction prefix
+            // must be followed by a comma before the first color stop.
+            let _to = self.parse_identifier()?;
+            self.consume_whitespace();
+            let side = self.parse_identifier()?;
+            let dir = match side.as_str() {
+                "top" => GradientDirection::ToTop,
+                "bottom" => GradientDirection::ToBottom,
+                "left" => GradientDirection::ToLeft,
+                "right" => GradientDirection::ToRight,
+                other => {
+                    return Err(ParseError::new(
+                        self.pos,
+                        format!("unsupported gradient direction 'to {other}'"),
+                    ));
+                }
+            };
+            self.consume_whitespace();
+            self.expect_char(',')?;
+            dir
+        } else {
+            GradientDirection::ToBottom
+        };
+
+        let mut stops = Vec::new();
+        loop {
+            self.consume_whitespace();
+            stops.push(self.parse_color_stop()?);
+            self.consume_whitespace();
+            match self.next_char() {
+                Some(',') => {
+                    self.consume_char();
+                }
+                Some(')') => break,
+                _ => {
+                    return Err(ParseError::new(
+                        self.pos,
+                        "expected ',' or ')' in linear-gradient",
+                    ));
+                }
+            }
+        }
+        self.expect_char(')')?;
+
+        if stops.len() < 2 {
+            return Err(ParseError::new(
+                self.pos,
+                "linear-gradient requires at least two color stops",
+            ));
+        }
+
+        Ok(Value::Gradient(LinearGradient { direction, stops }))
+    }
+
+    fn parse_color_stop(&mut self) -> Result<ColorStop, ParseError> {
+        // A stop is a color value, optionally followed by a percentage
+        // position. We delegate to parse_value so anything that would parse
+        // as a color elsewhere (`#fff`, `rgb()`, named, etc.) works here too.
+        let color = match self.parse_value()? {
+            Value::Color(color) => color,
+            other => {
+                return Err(ParseError::new(
+                    self.pos,
+                    format!("expected a color in gradient stop, got {other:?}"),
+                ));
+            }
+        };
+        self.consume_whitespace();
+        let position = if matches!(self.next_char(), Some(ch) if ch.is_ascii_digit() || ch == '.') {
+            let value = self.parse_unsigned_number()?;
+            if self.next_char() == Some('%') {
+                self.consume_char();
+                Some((value / 100.0).clamp(0.0, 1.0))
+            } else {
+                return Err(ParseError::new(
+                    self.pos,
+                    "gradient stop position must be a percentage",
+                ));
+            }
+        } else {
+            None
+        };
+        Ok(ColorStop { color, position })
     }
 
     fn parse_color_byte(&mut self) -> Result<u8, ParseError> {
@@ -715,8 +836,8 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Color, Combinator, PseudoClass, Selector, SimpleSelector, SimpleSelectorKind, Unit, Value,
-        parse,
+        Color, Combinator, GradientDirection, PseudoClass, Selector, SimpleSelector,
+        SimpleSelectorKind, Unit, Value, parse,
     };
 
     #[test]
@@ -1138,5 +1259,52 @@ mod tests {
         let decls = &stylesheet.rules[0].declarations;
 
         assert_eq!(decls[0].value, Value::Number(1.5));
+    }
+
+    #[test]
+    fn parses_linear_gradient_default_direction_and_auto_stops() {
+        // Without `to <side>`, the gradient runs top → bottom. Stops without
+        // explicit positions stay as `None` so the renderer can distribute.
+        let stylesheet = parse(".a { background-image: linear-gradient(red, blue); }").unwrap();
+        let decl = &stylesheet.rules[0].declarations[0];
+
+        let gradient = match &decl.value {
+            Value::Gradient(gradient) => gradient,
+            other => panic!("expected Gradient, got {other:?}"),
+        };
+        assert_eq!(gradient.direction, GradientDirection::ToBottom);
+        assert_eq!(gradient.stops.len(), 2);
+        assert_eq!(gradient.stops[0].position, None);
+        assert_eq!(gradient.stops[1].position, None);
+        assert_eq!(gradient.stops[0].color.r, 255);
+        assert_eq!(gradient.stops[1].color.b, 255);
+    }
+
+    #[test]
+    fn parses_linear_gradient_with_explicit_direction() {
+        // `to right` rotates the axis horizontally; the parser preserves the
+        // direction without changing stop ordering.
+        let stylesheet =
+            parse(".a { background-image: linear-gradient(to right, red, blue); }").unwrap();
+        let gradient = match &stylesheet.rules[0].declarations[0].value {
+            Value::Gradient(gradient) => gradient,
+            other => panic!("expected Gradient, got {other:?}"),
+        };
+        assert_eq!(gradient.direction, GradientDirection::ToRight);
+    }
+
+    #[test]
+    fn parses_linear_gradient_with_explicit_stop_positions() {
+        // `red 0%, yellow 50%, blue 100%` should preserve every stop's
+        // percentage as a 0..1 float, no auto-distribution.
+        let stylesheet =
+            parse(".a { background-image: linear-gradient(red 0%, yellow 50%, blue 100%); }")
+                .unwrap();
+        let gradient = match &stylesheet.rules[0].declarations[0].value {
+            Value::Gradient(gradient) => gradient,
+            other => panic!("expected Gradient, got {other:?}"),
+        };
+        let positions: Vec<_> = gradient.stops.iter().map(|s| s.position).collect();
+        assert_eq!(positions, vec![Some(0.0), Some(0.5), Some(1.0)]);
     }
 }

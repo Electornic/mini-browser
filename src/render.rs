@@ -1,5 +1,5 @@
 use crate::{
-    css::{Color, Unit, Value},
+    css::{Color, ColorStop, GradientDirection, Unit, Value},
     dom::NodeType,
     layout::{Dimensions, LayoutBox, Rect},
 };
@@ -11,6 +11,23 @@ pub enum DisplayCommand {
     RoundedRect(Color, Rect, CornerRadii),
     Text(TextCommand),
     Image(ImageCommand),
+    /// Linear gradient fill. Stops are pre-resolved to absolute positions in
+    /// 0..1 along the gradient axis so the rasterizer doesn't have to redo
+    /// the auto-position math.
+    LinearGradient(GradientCommand),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GradientCommand {
+    pub rect: Rect,
+    pub direction: GradientDirection,
+    pub stops: Vec<ResolvedStop>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedStop {
+    pub position: f32,
+    pub color: Color,
 }
 
 // Per-corner radii so tabs (top corners only) and pills (uniform) share one primitive.
@@ -83,6 +100,10 @@ pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<Dis
                 image.x += dx;
                 image.y += dy;
             }
+            DisplayCommand::LinearGradient(gradient) => {
+                gradient.rect.x += dx;
+                gradient.rect.y += dy;
+            }
         }
     }
 
@@ -107,6 +128,9 @@ pub fn rasterize(
             }
             DisplayCommand::Text(text) => draw_text(&mut buffer, width, height, text, fonts),
             DisplayCommand::Image(image) => draw_image(&mut buffer, width, height, image),
+            DisplayCommand::LinearGradient(gradient) => {
+                fill_linear_gradient(&mut buffer, width, height, gradient)
+            }
         }
     }
 
@@ -188,9 +212,12 @@ fn paint_non_positioned(
 }
 
 fn paint_self(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>, alpha: f32) {
-    // Per-box paint order is background -> border -> text, so text always
-    // sits on top of its own background.
+    // Per-box paint order is background-color -> background-image (gradient)
+    // -> border -> text, matching CSS spec stacking within a single element.
     if let Some(command) = background_command(layout_box, alpha) {
+        commands.push(command);
+    }
+    if let Some(command) = gradient_command(layout_box, alpha) {
         commands.push(command);
     }
     commands.extend(border_commands(layout_box, alpha));
@@ -284,6 +311,73 @@ fn background_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayComma
     } else {
         Some(DisplayCommand::RoundedRect(color, rect, radii))
     }
+}
+
+fn gradient_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
+    let node = layout_box.styled_node()?;
+    let gradient = match node.value("background-image") {
+        Some(Value::Gradient(gradient)) => gradient,
+        _ => return None,
+    };
+    let stops = resolve_gradient_stops(&gradient.stops, alpha);
+    if stops.len() < 2 {
+        return None;
+    }
+    Some(DisplayCommand::LinearGradient(GradientCommand {
+        rect: layout_box.dimensions.padding_box(),
+        direction: gradient.direction,
+        stops,
+    }))
+}
+
+fn resolve_gradient_stops(stops: &[ColorStop], alpha: f32) -> Vec<ResolvedStop> {
+    // CSS auto-position rules (simplified):
+    //   1. First stop without a position pins to 0.0; last pins to 1.0.
+    //   2. Any unpositioned stop between two positioned ones is filled in by
+    //      even distribution along the gap.
+    //   3. After the pass, positions are clamped to be monotonically
+    //      non-decreasing so a malformed gradient never produces NaN math.
+    let n = stops.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut positions: Vec<Option<f32>> = stops.iter().map(|stop| stop.position).collect();
+    if positions[0].is_none() {
+        positions[0] = Some(0.0);
+    }
+    if positions[n - 1].is_none() {
+        positions[n - 1] = Some(1.0);
+    }
+    let mut last_known = 0;
+    for i in 1..n {
+        if positions[i].is_some() {
+            // Distribute every still-unknown stop in (last_known, i) evenly.
+            let start = positions[last_known].unwrap();
+            let end = positions[i].unwrap();
+            let span = i - last_known;
+            for offset in 1..span {
+                if positions[last_known + offset].is_none() {
+                    let t = offset as f32 / span as f32;
+                    positions[last_known + offset] = Some(start + (end - start) * t);
+                }
+            }
+            last_known = i;
+        }
+    }
+    let mut last = 0.0;
+    let mut out = Vec::with_capacity(n);
+    for (i, position) in positions.iter().enumerate() {
+        let mut p = position.unwrap_or(last);
+        if p < last {
+            p = last;
+        }
+        last = p;
+        out.push(ResolvedStop {
+            position: p,
+            color: apply_alpha(stops[i].color, alpha),
+        });
+    }
+    out
 }
 
 fn border_radii(node: &crate::style::StyledNode) -> CornerRadii {
@@ -494,6 +588,88 @@ fn fill_rect(buffer: &mut [u32], width: usize, height: usize, color: Color, rect
             let b = (a * cb + inv * (bg & 0xFF)) / 255;
             buffer[row + x] = (r << 16) | (g << 8) | b;
         }
+    }
+}
+
+fn fill_linear_gradient(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    gradient: &GradientCommand,
+) {
+    let rect = gradient.rect;
+    let x_start = rect.x.max(0.0).floor() as usize;
+    let y_start = rect.y.max(0.0).floor() as usize;
+    let x_end = ((rect.x + rect.width).ceil().max(0.0) as usize).min(width);
+    let y_end = ((rect.y + rect.height).ceil().max(0.0) as usize).min(height);
+
+    if gradient.stops.is_empty() {
+        return;
+    }
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return;
+    }
+
+    for y in y_start..y_end {
+        for x in x_start..x_end {
+            let progress = match gradient.direction {
+                GradientDirection::ToBottom => (y as f32 + 0.5 - rect.y) / rect.height,
+                GradientDirection::ToTop => 1.0 - (y as f32 + 0.5 - rect.y) / rect.height,
+                GradientDirection::ToRight => (x as f32 + 0.5 - rect.x) / rect.width,
+                GradientDirection::ToLeft => 1.0 - (x as f32 + 0.5 - rect.x) / rect.width,
+            };
+            let progress = progress.clamp(0.0, 1.0);
+            let color = sample_gradient(&gradient.stops, progress);
+            if color.a == 0 {
+                continue;
+            }
+            let idx = y * width + x;
+            if color.a == 255 {
+                buffer[idx] = rgb_u32(color);
+            } else {
+                let bg = buffer[idx];
+                let a = color.a as u32;
+                let inv = 255 - a;
+                let r = (a * color.r as u32 + inv * ((bg >> 16) & 0xFF)) / 255;
+                let g = (a * color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
+                let b = (a * color.b as u32 + inv * (bg & 0xFF)) / 255;
+                buffer[idx] = (r << 16) | (g << 8) | b;
+            }
+        }
+    }
+}
+
+fn sample_gradient(stops: &[ResolvedStop], progress: f32) -> Color {
+    // Clamp to the first/last stop for progress outside the [0, 1] band.
+    if progress <= stops[0].position {
+        return stops[0].color;
+    }
+    let last = stops[stops.len() - 1];
+    if progress >= last.position {
+        return last.color;
+    }
+    // Linear search is fine for the small stop counts CSS gradients have in
+    // practice — interpolate the bracketing pair in straight RGB space.
+    for window in stops.windows(2) {
+        let a = window[0];
+        let b = window[1];
+        if progress >= a.position && progress <= b.position {
+            let span = (b.position - a.position).max(f32::EPSILON);
+            let t = (progress - a.position) / span;
+            return lerp_color(a.color, b.color, t);
+        }
+    }
+    last.color
+}
+
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let inv = 1.0 - t;
+    Color {
+        r: (a.r as f32 * inv + b.r as f32 * t) as u8,
+        g: (a.g as f32 * inv + b.g as f32 * t) as u8,
+        b: (a.b as f32 * inv + b.b as f32 * t) as u8,
+        a: (a.a as f32 * inv + b.a as f32 * t) as u8,
     }
 }
 
@@ -1742,6 +1918,91 @@ mod tests {
             })
             .expect("red rect for .c");
         assert_eq!(red_alpha, 31);
+    }
+
+    #[test]
+    fn linear_gradient_vertical_red_to_blue_interpolates_top_to_bottom() {
+        // 1×4 strip with `linear-gradient(red, blue)` — top row should be
+        // mostly red, bottom row mostly blue. Exact midpoints depend on
+        // pixel-center sampling, so we just check the dominant channel.
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 1px;
+                    height: 4px;
+                    background-image: linear-gradient(red, blue);
+                }
+            "#,
+        );
+        let pixels = render::rasterize(&commands, 1, 4, &[]);
+
+        let top_r = (pixels[0] >> 16) & 0xFF;
+        let top_b = pixels[0] & 0xFF;
+        let bottom_r = (pixels[3] >> 16) & 0xFF;
+        let bottom_b = pixels[3] & 0xFF;
+
+        assert!(top_r > 200, "top should be mostly red, got r={top_r}");
+        assert!(top_b < 50, "top should have little blue, got b={top_b}");
+        assert!(
+            bottom_r < 50,
+            "bottom should have little red, got r={bottom_r}"
+        );
+        assert!(
+            bottom_b > 200,
+            "bottom should be mostly blue, got b={bottom_b}"
+        );
+    }
+
+    #[test]
+    fn linear_gradient_to_right_interpolates_left_to_right() {
+        // Same gradient, rotated to the horizontal axis — direction wins.
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 4px;
+                    height: 1px;
+                    background-image: linear-gradient(to right, red, blue);
+                }
+            "#,
+        );
+        let pixels = render::rasterize(&commands, 4, 1, &[]);
+
+        let left_r = (pixels[0] >> 16) & 0xFF;
+        let left_b = pixels[0] & 0xFF;
+        let right_r = (pixels[3] >> 16) & 0xFF;
+        let right_b = pixels[3] & 0xFF;
+
+        assert!(left_r > 200, "left should be mostly red, got r={left_r}");
+        assert!(
+            right_b > 200,
+            "right should be mostly blue, got b={right_b}"
+        );
+        assert!(left_b < 50);
+        assert!(right_r < 50);
+    }
+
+    #[test]
+    fn linear_gradient_explicit_stop_positions_pin_color_at_those_points() {
+        // With `red 0%, blue 25%, blue 100%`, every pixel from x=1 onward in
+        // a 4px wide row should already be pure blue (the second stop pins it).
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 4px;
+                    height: 1px;
+                    background-image: linear-gradient(to right, red 0%, blue 25%, blue 100%);
+                }
+            "#,
+        );
+        let pixels = render::rasterize(&commands, 4, 1, &[]);
+
+        // Pixel index 1 sits at progress = 1.5/4 = 0.375 ≥ 0.25 → fully blue.
+        assert_eq!(pixels[1], 0x000000FF);
+        assert_eq!(pixels[2], 0x000000FF);
+        assert_eq!(pixels[3], 0x000000FF);
     }
 
     #[test]
