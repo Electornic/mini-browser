@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::{
     css::{
         Combinator, Declaration, PseudoClass, Selector, SimpleSelector, SimpleSelectorKind,
-        Stylesheet, Unit, Value,
+        Stylesheet, TrackSize, Unit, Value,
     },
     dom::{ElementData, Node, NodeType},
 };
@@ -159,6 +159,22 @@ fn style_tree_inner<'a>(
         match value {
             Value::Length(v, Unit::Em) => *value = Value::Length(*v * own_font_size, Unit::Px),
             Value::Length(v, Unit::Rem) => *value = Value::Length(*v * root_font_size, Unit::Px),
+            // Track lists (grid-template-columns/rows) can mix length tracks
+            // with fr tracks; resolve em/rem inside Length tracks the same way
+            // we resolve top-level lengths so layout only ever sees Px / %.
+            Value::TrackList(tracks) => {
+                for track in tracks.iter_mut() {
+                    match track {
+                        TrackSize::Length(v, Unit::Em) => {
+                            *track = TrackSize::Length(*v * own_font_size, Unit::Px);
+                        }
+                        TrackSize::Length(v, Unit::Rem) => {
+                            *track = TrackSize::Length(*v * root_font_size, Unit::Px);
+                        }
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
     }

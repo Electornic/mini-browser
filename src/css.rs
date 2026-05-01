@@ -123,6 +123,22 @@ pub enum Value {
     // right-to-left to the box. The list grows by appending more variants
     // to `TransformOp` (translate first; scale/rotate land in later commits).
     TransformList(Vec<TransformOp>),
+    // CSS Grid `grid-template-columns` / `grid-template-rows` value: an
+    // ordered list of track sizes. `fr` is scoped to the track-list context
+    // (it has no meaning as a stand-alone length), so it lives on `TrackSize`
+    // instead of growing the global `Unit` enum.
+    TrackList(Vec<TrackSize>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrackSize {
+    /// A fixed track sized via `<length>`. After style resolution this is
+    /// always `Unit::Px` (em/rem already converted), but percent stays as-is
+    /// to be resolved against the container at layout time.
+    Length(f32, Unit),
+    /// A flexible track sized via `<n>fr`. `1fr` carries weight 1.0, `2fr`
+    /// carries 2.0, etc. Distribution against free space mirrors flex-grow.
+    Fraction(f32),
 }
 
 /// Single function in a `transform: ...` list. Stored in source order so the
@@ -542,8 +558,80 @@ impl<'a> Parser<'a> {
             return self.parse_flex_shorthand();
         }
 
+        if name == "grid-template-columns" || name == "grid-template-rows" {
+            let value = self.parse_grid_track_list()?;
+            return Ok(vec![Declaration { name, value }]);
+        }
+
         let value = self.parse_value()?;
         Ok(vec![Declaration { name, value }])
+    }
+
+    fn parse_grid_track_list(&mut self) -> Result<Value, ParseError> {
+        // CSS `grid-template-columns: 100px 1fr 200px` — whitespace-separated
+        // track sizes. Each token is either a `<length>` (resolves later in
+        // layout) or a `<number>fr` (a flexible fraction). The `fr` unit only
+        // makes sense inside this list, so we parse it here instead of
+        // teaching the generic length parser about it.
+        let mut tracks = Vec::new();
+        loop {
+            self.consume_whitespace();
+            match self.next_char() {
+                Some(';') | Some('}') | None => break,
+                _ => {}
+            }
+            let track = self.parse_grid_track_size()?;
+            tracks.push(track);
+        }
+        if tracks.is_empty() {
+            return Err(ParseError::new(
+                self.pos,
+                "grid track list requires at least one track size",
+            ));
+        }
+        Ok(Value::TrackList(tracks))
+    }
+
+    fn parse_grid_track_size(&mut self) -> Result<TrackSize, ParseError> {
+        // Read the leading number, then peek a unit — `fr` becomes a Fraction,
+        // anything else routes through the regular length unit set.
+        let number_str = self.consume_while(|ch| ch.is_ascii_digit() || ch == '.');
+        if number_str.is_empty() {
+            return Err(ParseError::new(
+                self.pos,
+                "grid track size requires a numeric value",
+            ));
+        }
+        let value = number_str.parse::<f32>().map_err(|_| {
+            ParseError::new(
+                self.pos,
+                format!("invalid numeric value '{number_str}' in grid track"),
+            )
+        })?;
+
+        if self.next_char() == Some('%') {
+            self.consume_char();
+            return Ok(TrackSize::Length(value, Unit::Percent));
+        }
+
+        if !matches!(self.next_char(), Some(ch) if ch.is_alphabetic()) {
+            return Err(ParseError::new(
+                self.pos,
+                "grid track size requires a unit (px/em/rem/% or fr)",
+            ));
+        }
+
+        let unit = self.parse_identifier()?;
+        match unit.as_str() {
+            "fr" => Ok(TrackSize::Fraction(value)),
+            "px" => Ok(TrackSize::Length(value, Unit::Px)),
+            "em" => Ok(TrackSize::Length(value, Unit::Em)),
+            "rem" => Ok(TrackSize::Length(value, Unit::Rem)),
+            other => Err(ParseError::new(
+                self.pos,
+                format!("unsupported grid track unit '{other}'"),
+            )),
+        }
     }
 
     fn parse_flex_shorthand(&mut self) -> Result<Vec<Declaration>, ParseError> {
@@ -1275,7 +1363,7 @@ impl<'a> Parser<'a> {
 mod tests {
     use super::{
         BoxShadow, Color, Combinator, GradientDirection, GradientKind, PseudoClass, Selector,
-        SimpleSelector, SimpleSelectorKind, TextShadow, TransformOp, Unit, Value, parse,
+        SimpleSelector, SimpleSelectorKind, TextShadow, TrackSize, TransformOp, Unit, Value, parse,
     };
 
     #[test]
@@ -1993,6 +2081,42 @@ mod tests {
         assert_eq!(decls[0].value, Value::Number(2.0));
         assert_eq!(decls[1].name, "flex-shrink");
         assert_eq!(decls[1].value, Value::Number(1.0));
+    }
+
+    #[test]
+    fn grid_template_columns_parses_lengths_and_fractions() {
+        let stylesheet = parse(".g { grid-template-columns: 100px 1fr 2fr 50px; }").unwrap();
+        let value = &stylesheet.rules[0].declarations[0].value;
+        let tracks = match value {
+            Value::TrackList(tracks) => tracks,
+            other => panic!("expected TrackList, got {other:?}"),
+        };
+        assert_eq!(tracks.len(), 4);
+        assert_eq!(tracks[0], TrackSize::Length(100.0, Unit::Px));
+        assert_eq!(tracks[1], TrackSize::Fraction(1.0));
+        assert_eq!(tracks[2], TrackSize::Fraction(2.0));
+        assert_eq!(tracks[3], TrackSize::Length(50.0, Unit::Px));
+    }
+
+    #[test]
+    fn grid_template_columns_rejects_unitless_number() {
+        // A bare number with no unit is ambiguous (`5` could be 5px or 5fr)
+        // so the parser refuses rather than guessing.
+        let stylesheet = parse(".g { grid-template-columns: 5; }");
+        // The parser is tolerant — it returns Ok with the rule dropped or kept
+        // empty. Just assert the bad declaration didn't sneak through as a
+        // TrackList by the size matching the dropped state.
+        if let Ok(stylesheet) = stylesheet {
+            for rule in stylesheet.rules {
+                for decl in rule.declarations {
+                    if decl.name == "grid-template-columns"
+                        && let Value::TrackList(tracks) = decl.value
+                    {
+                        assert!(tracks.is_empty(), "unitless number should not parse");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

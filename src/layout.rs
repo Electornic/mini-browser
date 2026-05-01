@@ -1,5 +1,5 @@
 use crate::{
-    css::{Unit, Value},
+    css::{TrackSize, Unit, Value},
     dom::{ElementData, NodeType},
     style::StyledNode,
 };
@@ -46,6 +46,11 @@ pub enum BoxType {
     // code can identify flex containers when needed; child placement happens in
     // `layout_flex_children`.
     FlexNode(StyledNode),
+    // A grid container: outer box resolves like a block, but children get
+    // placed into a 2D track grid resolved from `grid-template-columns` /
+    // `grid-template-rows`. Auto-flow is row-major. Layout dispatch happens
+    // in `layout_grid_children`.
+    GridNode(StyledNode),
     AnonymousBlock,
 }
 
@@ -155,7 +160,7 @@ fn absolute_offset_delta(layout_box: &LayoutBox, cb: ContainingBlock) -> (f32, f
 
 fn box_styled_node(layout_box: &LayoutBox) -> Option<&StyledNode> {
     match &layout_box.box_type {
-        BoxType::BlockNode(node) | BoxType::FlexNode(node) => Some(node),
+        BoxType::BlockNode(node) | BoxType::FlexNode(node) | BoxType::GridNode(node) => Some(node),
         BoxType::AnonymousBlock => None,
     }
 }
@@ -257,13 +262,15 @@ fn layout_node(
     let content_x = parent_x + margin.left + border.left + padding.left;
     let content_y = *cursor_y + margin.top + border.top + padding.top;
 
-    // Flex container: children lay out along the main axis (commit 1 = row,
-    // flex-start, no wrap, no grow/shrink). Skip inline-flow/block-flow paths
-    // entirely — flex flow ignores margin collapse and floats by spec.
+    // Flex / Grid containers run their own child-placement algorithms and
+    // bypass the inline-flow/block-flow paths entirely. Both ignore margin
+    // collapse and floats per spec.
     // Otherwise: parents with only inline children lay them out left-to-right;
     // everything else stays block.
     let (children, auto_content_height) = if is_flex_container(node) {
         layout_flex_children(node, &node.children, content_x, content_y, content_width)
+    } else if is_grid_container(node) {
+        layout_grid_children(node, &node.children, content_x, content_y, content_width)
     } else if uses_inline_flow(node) {
         let align = inline_align_for(node);
         layout_inline_children(&node.children, content_x, content_y, content_width, align)
@@ -377,11 +384,7 @@ fn layout_node(
     *cursor_y = content_y + content_height + padding.bottom + border.bottom + margin.bottom;
 
     let mut layout_box = LayoutBox {
-        box_type: if is_flex_container(node) {
-            BoxType::FlexNode(node.clone())
-        } else {
-            BoxType::BlockNode(node.clone())
-        },
+        box_type: container_box_type(node),
         dimensions,
         children,
     };
@@ -722,6 +725,161 @@ fn is_flex_container(node: &StyledNode) -> bool {
     matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "flex")
 }
 
+fn is_grid_container(node: &StyledNode) -> bool {
+    matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "grid")
+}
+
+fn container_box_type(node: &StyledNode) -> BoxType {
+    if is_flex_container(node) {
+        BoxType::FlexNode(node.clone())
+    } else if is_grid_container(node) {
+        BoxType::GridNode(node.clone())
+    } else {
+        BoxType::BlockNode(node.clone())
+    }
+}
+
+fn layout_grid_children(
+    container: &StyledNode,
+    children: &[StyledNode],
+    content_x: f32,
+    content_y: f32,
+    content_width: f32,
+) -> (Vec<LayoutBox>, f32) {
+    // Three-pass placement.
+    //   Pass 1: resolve column tracks to pixel widths, then lay out each
+    //           in-flow item at its column's x position with row y = content_y
+    //           as a placeholder. Auto-flow is row-major: item k goes to
+    //           (row = k / n_cols, col = k % n_cols).
+    //   Pass 2: compute each row's height as the max outer height of its
+    //           items.
+    //   Pass 3: shift each item down by its row's cumulative y offset.
+    //
+    // Out-of-flow children skip the grid entirely — they sit at the container
+    // origin during pass 1 and the absolute reposition pass at the tree root
+    // moves them to their containing block.
+    let columns = grid_track_columns(container, content_width);
+    let n_cols = columns.len().max(1);
+
+    let mut col_offsets: Vec<f32> = Vec::with_capacity(columns.len());
+    let mut acc = 0.0;
+    for w in &columns {
+        col_offsets.push(acc);
+        acc += w;
+    }
+
+    let mut boxes: Vec<LayoutBox> = Vec::with_capacity(children.len());
+    // Each entry: (row_index, column_index, boxes index) for one in-flow item.
+    let mut cell_assignments: Vec<(usize, usize, usize)> = Vec::new();
+    let mut next_cell = 0usize;
+
+    for child in children {
+        if is_out_of_flow(child) {
+            let abs_box = layout_inline_or_inline_block(child, content_x, content_y, content_width);
+            boxes.push(abs_box);
+            continue;
+        }
+        let col = next_cell % n_cols;
+        let row = next_cell / n_cols;
+        next_cell += 1;
+        let track_x = content_x + col_offsets[col];
+        let track_width = columns[col];
+        let box_idx = boxes.len();
+        cell_assignments.push((row, col, box_idx));
+        boxes.push(layout_grid_item(child, track_x, content_y, track_width));
+    }
+
+    // Pass 2: row heights = max(item outer height) per row.
+    let n_rows = cell_assignments
+        .iter()
+        .map(|&(row, _, _)| row + 1)
+        .max()
+        .unwrap_or(0);
+    let mut row_heights = vec![0.0_f32; n_rows];
+    for &(row, _, box_idx) in &cell_assignments {
+        let h = outer_rect(&boxes[box_idx]).height;
+        if h > row_heights[row] {
+            row_heights[row] = h;
+        }
+    }
+
+    // Pass 3: cumulative y offsets per row, then shift each item to its row.
+    let mut row_offsets: Vec<f32> = Vec::with_capacity(n_rows);
+    let mut acc = 0.0;
+    for h in &row_heights {
+        row_offsets.push(acc);
+        acc += h;
+    }
+    for &(row, _, box_idx) in &cell_assignments {
+        let dy = row_offsets[row];
+        if dy != 0.0 {
+            shift_layout_subtree(&mut boxes[box_idx], 0.0, dy);
+        }
+    }
+
+    let auto_content_height: f32 = row_heights.iter().sum();
+    (boxes, auto_content_height)
+}
+
+fn layout_grid_item(node: &StyledNode, x: f32, y: f32, track_width: f32) -> LayoutBox {
+    // Grid items fill their column track unless they declared an explicit
+    // smaller width. We delegate to inline-block layout (which sizes content
+    // and edges identically to other paths) and then post-hoc grow the
+    // content rect to fill the track when no explicit width is set. Items
+    // that already meet or exceed track_width keep their declared size —
+    // overflow within a track is allowed in spec land.
+    let mut item = layout_inline_block_node(node, x, y, track_width);
+    if !matches!(node.value("width"), Some(Value::Length(_, _))) {
+        let edges = outer_rect(&item).width - item.dimensions.content.width;
+        let target = (track_width - edges).max(0.0);
+        if item.dimensions.content.width < target {
+            item.dimensions.content.width = target;
+        }
+    }
+    item
+}
+
+fn grid_track_columns(node: &StyledNode, content_width: f32) -> Vec<f32> {
+    // Resolves `grid-template-columns` to a Vec of pixel widths. Length tracks
+    // are taken at face value (Px after style resolution; Percent resolves
+    // against the container's own content width). Fraction (`fr`) tracks
+    // share the leftover width proportional to their weight, mirroring
+    // flex-grow's distribution. With no declaration, behave like a single
+    // full-width track so a bare `display: grid` still produces sensible
+    // single-column output.
+    let tracks = match node.value("grid-template-columns") {
+        Some(Value::TrackList(tracks)) if !tracks.is_empty() => tracks.as_slice(),
+        _ => return vec![content_width],
+    };
+
+    let mut fixed_total = 0.0_f32;
+    let mut total_fr = 0.0_f32;
+    for track in tracks {
+        match track {
+            TrackSize::Length(value, Unit::Px) => fixed_total += *value,
+            TrackSize::Length(value, Unit::Percent) => {
+                fixed_total += *value / 100.0 * content_width;
+            }
+            // em/rem are resolved to Px during style; this fallback only
+            // matters if a future code path bypasses style-time resolution.
+            TrackSize::Length(value, _) => fixed_total += *value,
+            TrackSize::Fraction(weight) => total_fr += *weight,
+        }
+    }
+    let free = (content_width - fixed_total).max(0.0);
+
+    tracks
+        .iter()
+        .map(|track| match track {
+            TrackSize::Length(value, Unit::Px) => *value,
+            TrackSize::Length(value, Unit::Percent) => *value / 100.0 * content_width,
+            TrackSize::Length(value, _) => *value,
+            TrackSize::Fraction(weight) if total_fr > 0.0 => free * *weight / total_fr,
+            TrackSize::Fraction(_) => 0.0,
+        })
+        .collect()
+}
+
 fn flex_direction(node: &StyledNode) -> FlexDirection {
     match node.value("flex-direction") {
         Some(Value::Keyword(keyword)) if keyword == "column" => FlexDirection::Column,
@@ -1042,12 +1200,14 @@ fn layout_inline_block_node(node: &StyledNode, x: f32, y: f32, available_width: 
     let content_x = x + margin.left + border.left + padding.left;
     let content_y = y + margin.top + border.top + padding.top;
 
-    // Same dispatch as the regular block path with one extra branch for flex
-    // containers: if `display: flex`, lay children out along the main axis;
-    // else if every child is inline, run inline flow; otherwise stack block
-    // children top-to-bottom inside our content box.
+    // Same dispatch as the regular block path with extra branches for flex
+    // and grid containers: dispatch to their respective placement algorithms
+    // first; else if every child is inline, run inline flow; otherwise stack
+    // block children top-to-bottom inside our content box.
     let (children, auto_content_height) = if is_flex_container(node) {
         layout_flex_children(node, &node.children, content_x, content_y, content_width)
+    } else if is_grid_container(node) {
+        layout_grid_children(node, &node.children, content_x, content_y, content_width)
     } else if uses_inline_flow(node) {
         let align = inline_align_for(node);
         layout_inline_children(&node.children, content_x, content_y, content_width, align)
@@ -1065,11 +1225,7 @@ fn layout_inline_block_node(node: &StyledNode, x: f32, y: f32, available_width: 
         .unwrap_or_else(|| auto_content_height.max(intrinsic_height(node)));
 
     let mut layout_box = LayoutBox {
-        box_type: if is_flex_container(node) {
-            BoxType::FlexNode(node.clone())
-        } else {
-            BoxType::BlockNode(node.clone())
-        },
+        box_type: container_box_type(node),
         dimensions: Dimensions {
             content: Rect {
                 x: content_x,
@@ -2998,6 +3154,116 @@ mod tests {
         assert_eq!(b.dimensions.content.height, 100.0);
         assert_eq!(a.dimensions.content.y, 0.0);
         assert_eq!(b.dimensions.content.y, 100.0);
+    }
+
+    #[test]
+    fn grid_container_box_type_is_grid_node() {
+        let styled = styled_root(
+            r#"<div id="g"><div></div></div>"#,
+            r#"
+                #g { display: grid; grid-template-columns: 100px 100px; width: 200px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        assert!(matches!(layout.box_type, super::BoxType::GridNode(_)));
+    }
+
+    #[test]
+    fn grid_two_fixed_columns_place_items_side_by_side() {
+        // Two 100px columns → first item at x=0 width=100, second at x=100
+        // width=100. With one row, container height = max child outer height.
+        let styled = styled_root(
+            r#"<div id="g"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #g { display: grid; grid-template-columns: 100px 100px; width: 200px; }
+                .a { height: 50px; }
+                .b { height: 70px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+
+        assert_eq!(a.dimensions.content.x, 0.0);
+        assert_eq!(b.dimensions.content.x, 100.0);
+        assert_eq!(a.dimensions.content.y, 0.0);
+        assert_eq!(b.dimensions.content.y, 0.0);
+        // Items without explicit width fill their track.
+        assert_eq!(a.dimensions.content.width, 100.0);
+        assert_eq!(b.dimensions.content.width, 100.0);
+        // Container height = single-row max = 70.
+        assert_eq!(layout.dimensions.content.height, 70.0);
+    }
+
+    #[test]
+    fn grid_auto_flow_wraps_to_next_row_after_columns_full() {
+        // Three 100px columns + 4 items → 4th item wraps to row 2 col 0.
+        // Row 1 height = max(20, 30, 40) = 40, row 2 height = 25.
+        // 4th item should land at y = 40, x = 0.
+        let styled = styled_root(
+            r#"<div id="g">
+                <div class="a"></div>
+                <div class="b"></div>
+                <div class="c"></div>
+                <div class="d"></div>
+            </div>"#,
+            r#"
+                #g { display: grid; grid-template-columns: 100px 100px 100px; width: 300px; }
+                .a { height: 20px; }
+                .b { height: 30px; }
+                .c { height: 40px; }
+                .d { height: 25px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let d = &layout.children[3];
+
+        assert_eq!(d.dimensions.content.x, 0.0);
+        assert_eq!(d.dimensions.content.y, 40.0);
+        // Container height = sum(row heights) = 40 + 25 = 65.
+        assert_eq!(layout.dimensions.content.height, 65.0);
+    }
+
+    #[test]
+    fn grid_fr_unit_distributes_free_space_proportionally() {
+        // Container = 400px; tracks = 100px 1fr 3fr → fixed=100, free=300,
+        // total_fr=4 → 1fr=75, 3fr=225. Columns: 100, 75, 225.
+        let styled = styled_root(
+            r#"<div id="g"><div class="a"></div><div class="b"></div><div class="c"></div></div>"#,
+            r#"
+                #g { display: grid; grid-template-columns: 100px 1fr 3fr; width: 400px; }
+                .a { height: 20px; }
+                .b { height: 20px; }
+                .c { height: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+        let c = &layout.children[2];
+
+        assert_eq!(a.dimensions.content.width, 100.0);
+        assert_eq!(b.dimensions.content.width, 75.0);
+        assert_eq!(c.dimensions.content.width, 225.0);
+        assert_eq!(a.dimensions.content.x, 0.0);
+        assert_eq!(b.dimensions.content.x, 100.0);
+        assert_eq!(c.dimensions.content.x, 175.0);
+    }
+
+    #[test]
+    fn grid_explicit_item_width_keeps_declared_size() {
+        // When the item has explicit width, the post-hoc track-fill stays out
+        // of its way — the item keeps its 50px width inside the 100px track.
+        let styled = styled_root(
+            r#"<div id="g"><div class="a"></div></div>"#,
+            r#"
+                #g { display: grid; grid-template-columns: 100px; width: 100px; }
+                .a { width: 50px; height: 30px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        assert_eq!(a.dimensions.content.width, 50.0);
     }
 
     #[test]

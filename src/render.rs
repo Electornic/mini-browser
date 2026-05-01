@@ -1225,9 +1225,9 @@ fn font_size(node: &crate::style::StyledNode) -> f32 {
 impl LayoutBox {
     fn styled_node(&self) -> Option<&crate::style::StyledNode> {
         match &self.box_type {
-            crate::layout::BoxType::BlockNode(node) | crate::layout::BoxType::FlexNode(node) => {
-                Some(node)
-            }
+            crate::layout::BoxType::BlockNode(node)
+            | crate::layout::BoxType::FlexNode(node)
+            | crate::layout::BoxType::GridNode(node) => Some(node),
             crate::layout::BoxType::AnonymousBlock => None,
         }
     }
