@@ -138,6 +138,11 @@ pub enum TransformOp {
     /// fast path here, scale-only matrices stay axis-aligned and the rect
     /// dimensions are multiplied through directly.
     Scale { x: f32, y: f32 },
+    /// `rotate(<angle>)` in radians (the parser converts deg/rad/turn/grad
+    /// into this canonical unit so the renderer never has to look at a
+    /// CSS unit again). Rotation breaks axis-aligned rasterizing and
+    /// triggers the slow inverse-pixel-sample path.
+    Rotate(f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -609,6 +614,12 @@ impl<'a> Parser<'a> {
                     self.consume_whitespace();
                     TransformOp::Scale { x: 1.0, y }
                 }
+                "rotate" => {
+                    self.consume_whitespace();
+                    let theta = self.parse_angle_token()?;
+                    self.consume_whitespace();
+                    TransformOp::Rotate(theta)
+                }
                 other => {
                     return Err(ParseError::new(
                         self.pos,
@@ -724,6 +735,47 @@ impl<'a> Parser<'a> {
             spread_radius,
             color,
         }))
+    }
+
+    fn parse_angle_token(&mut self) -> Result<f32, ParseError> {
+        // CSS rotate() takes an `<angle>`: a number plus a unit (deg, rad,
+        // turn, grad). The toy supports all four and converts to radians so
+        // the renderer can call `.sin_cos()` directly without re-checking
+        // units later.
+        self.consume_whitespace();
+        let negative = if self.next_char() == Some('-') {
+            self.consume_char();
+            true
+        } else {
+            false
+        };
+        let number = self.consume_while(|ch| ch.is_ascii_digit() || ch == '.');
+        let mut value = number
+            .parse::<f32>()
+            .map_err(|_| ParseError::new(self.pos, format!("invalid angle '{number}'")))?;
+        if negative {
+            value = -value;
+        }
+        let unit = match self.next_char() {
+            Some(ch) if ch.is_alphabetic() => self.parse_identifier()?,
+            // CSS spec only allows a unitless 0; anything else needs a unit,
+            // but `0` with no unit is common enough to accept defensively.
+            _ => String::new(),
+        };
+        let radians = match unit.as_str() {
+            "deg" => value * std::f32::consts::PI / 180.0,
+            "rad" => value,
+            "turn" => value * std::f32::consts::TAU,
+            "grad" => value * std::f32::consts::PI / 200.0,
+            "" if value == 0.0 => 0.0,
+            other => {
+                return Err(ParseError::new(
+                    self.pos,
+                    format!("unsupported angle unit '{other}'"),
+                ));
+            }
+        };
+        Ok(radians)
     }
 
     fn parse_length_token(&mut self) -> Result<f32, ParseError> {
@@ -1802,6 +1854,43 @@ mod tests {
                 TransformOp::Scale { x: 1.0, y: 0.25 },
             ]
         );
+    }
+
+    #[test]
+    fn parses_transform_rotate_in_degrees_and_radians() {
+        let stylesheet = parse(".a { transform: rotate(45deg) rotate(2rad); }").unwrap();
+        let ops = match &stylesheet.rules[0].declarations[0].value {
+            Value::TransformList(ops) => ops.clone(),
+            other => panic!("expected TransformList, got {other:?}"),
+        };
+        // 45deg → π/4 rad. The `rad` form is passed through verbatim.
+        let expected = [std::f32::consts::FRAC_PI_4, 2.0];
+        let actual: Vec<f32> = ops
+            .iter()
+            .map(|op| match op {
+                TransformOp::Rotate(theta) => *theta,
+                other => panic!("expected Rotate, got {other:?}"),
+            })
+            .collect();
+        for (got, want) in actual.iter().zip(expected.iter()) {
+            assert!((got - want).abs() < 1e-4, "got {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn parses_transform_rotate_negative_and_turn_unit() {
+        let stylesheet = parse(".a { transform: rotate(-0.25turn); }").unwrap();
+        let ops = match &stylesheet.rules[0].declarations[0].value {
+            Value::TransformList(ops) => ops.clone(),
+            other => panic!("expected TransformList, got {other:?}"),
+        };
+        match ops.as_slice() {
+            [TransformOp::Rotate(theta)] => {
+                // -0.25 turn = -π/2.
+                assert!((theta + std::f32::consts::FRAC_PI_2).abs() < 1e-4);
+            }
+            other => panic!("expected single Rotate, got {other:?}"),
+        }
     }
 
     #[test]

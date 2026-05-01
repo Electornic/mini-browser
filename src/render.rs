@@ -56,6 +56,27 @@ impl Affine {
         }
     }
 
+    /// `theta` is in radians (CSS deg/rad/turn/grad are normalised at parse time).
+    pub fn rotate(theta: f32) -> Self {
+        let (s, c) = theta.sin_cos();
+        Self {
+            a: c,
+            b: s,
+            c: -s,
+            d: c,
+            e: 0.0,
+            f: 0.0,
+        }
+    }
+
+    /// True iff the matrix is a pure translate+scale (no rotation/shear).
+    /// The fast paint+raster path relies on this — when it's false, the
+    /// box's primitives have to flow through the slow inverse-pixel-sample
+    /// path inside `TransformGroup`.
+    pub fn is_axis_aligned(&self) -> bool {
+        self.b == 0.0 && self.c == 0.0
+    }
+
     /// Standard 3x3 matrix multiply, restricted to the affine submatrix.
     pub fn compose(&self, other: Self) -> Self {
         Self {
@@ -121,6 +142,14 @@ pub enum DisplayCommand {
     /// Outset box-shadow: a colored rectangle (already shifted by offset and
     /// inflated by spread) with a linear-ramp blur band around the edges.
     BoxShadow(ShadowCommand),
+    /// A flat list of primitive commands rendered through the given affine
+    /// matrix. The paint pass wraps a box's emitted primitives in this when
+    /// the inherited+own matrix has rotation (b != 0 || c != 0), so that
+    /// the rasterizer can scan-convert through the matrix instead of trying
+    /// to bake rotation into axis-aligned rect coordinates. Translate+scale
+    /// matrices skip the wrapper and bake into the rect directly to keep
+    /// the fast rasterizer path on the common case.
+    TransformGroup(Affine, Vec<DisplayCommand>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -223,6 +252,12 @@ pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<Dis
                 shadow.rect.x += dx;
                 shadow.rect.y += dy;
             }
+            DisplayCommand::TransformGroup(transform, _) => {
+                // The inner primitives are in logical coords; shifting them
+                // means composing a screen-space translate on the *left* of
+                // the matrix so the result is `T(dx,dy) * matrix * logical`.
+                *transform = Affine::translate(dx, dy).compose(*transform);
+            }
         }
     }
 
@@ -238,25 +273,32 @@ pub fn rasterize(
     let mut buffer = vec![rgb_u32(Color::WHITE); width * height];
 
     for command in commands {
-        match command {
-            DisplayCommand::SolidRect(color, rect) => {
-                fill_rect(&mut buffer, width, height, *color, *rect)
-            }
-            DisplayCommand::RoundedRect(color, rect, radii) => {
-                fill_rounded_rect(&mut buffer, width, height, *color, *rect, *radii)
-            }
-            DisplayCommand::Text(text) => draw_text(&mut buffer, width, height, text, fonts),
-            DisplayCommand::Image(image) => draw_image(&mut buffer, width, height, image),
-            DisplayCommand::Gradient(gradient) => {
-                fill_gradient(&mut buffer, width, height, gradient)
-            }
-            DisplayCommand::BoxShadow(shadow) => {
-                fill_box_shadow(&mut buffer, width, height, shadow)
-            }
-        }
+        rasterize_command(&mut buffer, width, height, command, fonts);
     }
 
     buffer
+}
+
+fn rasterize_command(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    command: &DisplayCommand,
+    fonts: &[fontdue::Font],
+) {
+    match command {
+        DisplayCommand::SolidRect(color, rect) => fill_rect(buffer, width, height, *color, *rect),
+        DisplayCommand::RoundedRect(color, rect, radii) => {
+            fill_rounded_rect(buffer, width, height, *color, *rect, *radii)
+        }
+        DisplayCommand::Text(text) => draw_text(buffer, width, height, text, fonts),
+        DisplayCommand::Image(image) => draw_image(buffer, width, height, image),
+        DisplayCommand::Gradient(gradient) => fill_gradient(buffer, width, height, gradient),
+        DisplayCommand::BoxShadow(shadow) => fill_box_shadow(buffer, width, height, shadow),
+        DisplayCommand::TransformGroup(transform, inner) => {
+            rasterize_through_transform(buffer, width, height, *transform, inner, fonts);
+        }
+    }
 }
 
 fn paint_stacking_context(
@@ -368,7 +410,7 @@ fn paint_self(
     // Push the inherited+own transform onto the commands this box just emitted.
     // The emitters work in logical (untransformed) coordinates; the affine
     // matrix is the only thing that maps logical → screen pixels.
-    apply_transform(&mut commands[start..], transform);
+    finalize_box_transform(commands, start, transform);
 }
 
 fn collect_positioned_into<'a>(
@@ -414,6 +456,7 @@ pub fn transform_for(layout_box: &LayoutBox) -> Affine {
         let m = match op {
             TransformOp::Translate { x, y } => Affine::translate(*x, *y),
             TransformOp::Scale { x, y } => Affine::scale(*x, *y),
+            TransformOp::Rotate(theta) => Affine::rotate(*theta),
         };
         raw = raw.compose(m);
     }
@@ -425,12 +468,27 @@ pub fn transform_for(layout_box: &LayoutBox) -> Affine {
         .compose(Affine::translate(-cx, -cy))
 }
 
-fn apply_transform(commands: &mut [DisplayCommand], transform: Affine) {
-    // Skipping the walk when there is nothing to do keeps the painted output
+fn finalize_box_transform(commands: &mut Vec<DisplayCommand>, start: usize, transform: Affine) {
+    // Skipping the work when there is nothing to do keeps the painted output
     // bit-identical for pages that do not use `transform`.
     if transform.is_identity() {
         return;
     }
+    if transform.is_axis_aligned() {
+        // Translate+scale: bake into rect/x/y/width/height in place. The
+        // rasterizer's existing fast path then handles the result without
+        // needing to know a transform was ever involved.
+        bake_axis_aligned(&mut commands[start..], transform);
+        return;
+    }
+    // Rotation/shear: pull this box's just-emitted primitives into a single
+    // group so the rasterizer can scan-convert them through the matrix
+    // (inverse-pixel-sample). The rect/x/y inside stay logical.
+    let inner: Vec<DisplayCommand> = commands.drain(start..).collect();
+    commands.push(DisplayCommand::TransformGroup(transform, inner));
+}
+
+fn bake_axis_aligned(commands: &mut [DisplayCommand], transform: Affine) {
     for command in commands {
         match command {
             DisplayCommand::SolidRect(_, rect) => transform_rect_in_place(rect, transform),
@@ -463,6 +521,9 @@ fn apply_transform(commands: &mut [DisplayCommand], transform: Affine) {
                 // as soft light.
                 shadow.blur_radius *= scalar_scale(transform);
             }
+            // Rotated children should not be present here because rotation
+            // routes through the TransformGroup branch; ignore defensively.
+            DisplayCommand::TransformGroup(_, _) => {}
         }
     }
 }
@@ -472,6 +533,362 @@ fn scalar_scale(transform: Affine) -> f32 {
     // average of the two diagonal entries is the obvious "scalar" scale to
     // apply to inherently 1-dimensional things like font-size and blur.
     (transform.a + transform.d) * 0.5
+}
+
+fn rasterize_through_transform(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    transform: Affine,
+    commands: &[DisplayCommand],
+    fonts: &[fontdue::Font],
+) {
+    // Slow path: each inner primitive's logical bounds are mapped to a
+    // screen-space bounding box through `transform`; every pixel in that
+    // bbox is inverse-mapped back to logical space and sampled against
+    // the primitive there. The matrix never has to be axis-aligned, so
+    // rotation and shear come out correct.
+    let inverse = transform.inverse();
+    for command in commands {
+        match command {
+            DisplayCommand::SolidRect(color, rect) => {
+                let color = *color;
+                let rect = *rect;
+                paint_through(buffer, width, height, rect, transform, inverse, |lx, ly| {
+                    if point_in_logical_rect(lx, ly, rect) {
+                        Some(color)
+                    } else {
+                        None
+                    }
+                });
+            }
+            DisplayCommand::RoundedRect(color, rect, radii) => {
+                let color = *color;
+                let rect = *rect;
+                let radii = *radii;
+                paint_through(buffer, width, height, rect, transform, inverse, |lx, ly| {
+                    if point_in_logical_rounded_rect(lx, ly, rect, radii) {
+                        Some(color)
+                    } else {
+                        None
+                    }
+                });
+            }
+            DisplayCommand::Gradient(gradient) => {
+                let rect = gradient.rect;
+                paint_through(buffer, width, height, rect, transform, inverse, |lx, ly| {
+                    let progress = gradient_progress(lx, ly, rect, gradient.kind);
+                    let color = sample_gradient(&gradient.stops, progress.clamp(0.0, 1.0));
+                    if color.a == 0 { None } else { Some(color) }
+                });
+            }
+            DisplayCommand::BoxShadow(shadow) => {
+                // Logical bounds expand by blur on every side because the
+                // soft falloff lives outside the rect itself.
+                let blur = shadow.blur_radius.max(0.0);
+                let bounds = Rect {
+                    x: shadow.rect.x - blur,
+                    y: shadow.rect.y - blur,
+                    width: shadow.rect.width + 2.0 * blur,
+                    height: shadow.rect.height + 2.0 * blur,
+                };
+                paint_through(
+                    buffer,
+                    width,
+                    height,
+                    bounds,
+                    transform,
+                    inverse,
+                    |lx, ly| {
+                        let coverage = shadow_coverage(lx, ly, shadow.rect, blur);
+                        if coverage <= 0.0 {
+                            return None;
+                        }
+                        let alpha = ((shadow.color.a as f32) * coverage).clamp(0.0, 255.0) as u8;
+                        Some(Color {
+                            r: shadow.color.r,
+                            g: shadow.color.g,
+                            b: shadow.color.b,
+                            a: alpha,
+                        })
+                    },
+                );
+            }
+            DisplayCommand::Image(image) => {
+                let bounds = Rect {
+                    x: image.x,
+                    y: image.y,
+                    width: image.width,
+                    height: image.height,
+                };
+                let sw = image.source_width;
+                let sh = image.source_height;
+                if sw == 0 || sh == 0 || bounds.width <= 0.0 || bounds.height <= 0.0 {
+                    continue;
+                }
+                paint_through(
+                    buffer,
+                    width,
+                    height,
+                    bounds,
+                    transform,
+                    inverse,
+                    |lx, ly| {
+                        let u = (lx - bounds.x) / bounds.width;
+                        let v = (ly - bounds.y) / bounds.height;
+                        if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
+                            return None;
+                        }
+                        let sx = (u * sw as f32).floor().clamp(0.0, (sw - 1) as f32) as usize;
+                        let sy = (v * sh as f32).floor().clamp(0.0, (sh - 1) as f32) as usize;
+                        let pixel = image.pixels[sy * sw + sx];
+                        Some(Color {
+                            r: ((pixel >> 16) & 0xFF) as u8,
+                            g: ((pixel >> 8) & 0xFF) as u8,
+                            b: (pixel & 0xFF) as u8,
+                            a: 255,
+                        })
+                    },
+                );
+            }
+            DisplayCommand::Text(text) => {
+                draw_text_through(buffer, width, height, text, transform, inverse, fonts);
+            }
+            DisplayCommand::TransformGroup(_, _) => {
+                // Nested groups never get emitted by the paint pass — each
+                // box wraps its own primitives at most once with the
+                // cumulative matrix. Ignore defensively if it ever happens.
+            }
+        }
+    }
+}
+
+fn paint_through<F>(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    logical_bounds: Rect,
+    transform: Affine,
+    inverse: Affine,
+    sample: F,
+) where
+    F: Fn(f32, f32) -> Option<Color>,
+{
+    if logical_bounds.width <= 0.0 || logical_bounds.height <= 0.0 {
+        return;
+    }
+    // Project the four logical corners through the matrix to find the
+    // screen-space rectangle that needs to be scanned. For axis-aligned
+    // transforms the four corners collapse onto the original rect; for
+    // rotation they describe a rotated quad whose AABB is what we walk.
+    let corners = [
+        transform.apply_point(logical_bounds.x, logical_bounds.y),
+        transform.apply_point(logical_bounds.x + logical_bounds.width, logical_bounds.y),
+        transform.apply_point(
+            logical_bounds.x + logical_bounds.width,
+            logical_bounds.y + logical_bounds.height,
+        ),
+        transform.apply_point(logical_bounds.x, logical_bounds.y + logical_bounds.height),
+    ];
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for (cx, cy) in corners {
+        min_x = min_x.min(cx);
+        max_x = max_x.max(cx);
+        min_y = min_y.min(cy);
+        max_y = max_y.max(cy);
+    }
+    let x_start = min_x.max(0.0).floor() as usize;
+    let y_start = min_y.max(0.0).floor() as usize;
+    let x_end = (max_x.ceil().max(0.0) as usize).min(width);
+    let y_end = (max_y.ceil().max(0.0) as usize).min(height);
+
+    for y in y_start..y_end {
+        let row = y * width;
+        for x in x_start..x_end {
+            let (lx, ly) = inverse.apply_point(x as f32 + 0.5, y as f32 + 0.5);
+            let Some(color) = sample(lx, ly) else {
+                continue;
+            };
+            if color.a == 0 {
+                continue;
+            }
+            blend_pixel(&mut buffer[row + x], color);
+        }
+    }
+}
+
+fn blend_pixel(slot: &mut u32, color: Color) {
+    if color.a == 255 {
+        *slot = rgb_u32(color);
+        return;
+    }
+    let bg = *slot;
+    let a = color.a as u32;
+    let inv = 255 - a;
+    let r = (a * color.r as u32 + inv * ((bg >> 16) & 0xFF)) / 255;
+    let g = (a * color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
+    let b = (a * color.b as u32 + inv * (bg & 0xFF)) / 255;
+    *slot = (r << 16) | (g << 8) | b;
+}
+
+fn point_in_logical_rect(lx: f32, ly: f32, rect: Rect) -> bool {
+    lx >= rect.x && lx < rect.x + rect.width && ly >= rect.y && ly < rect.y + rect.height
+}
+
+fn point_in_logical_rounded_rect(lx: f32, ly: f32, rect: Rect, radii: CornerRadii) -> bool {
+    if !point_in_logical_rect(lx, ly, rect) {
+        return false;
+    }
+    let max_r = (rect.width.min(rect.height) / 2.0).max(0.0);
+    let tl = radii.tl.clamp(0.0, max_r);
+    let tr = radii.tr.clamp(0.0, max_r);
+    let br = radii.br.clamp(0.0, max_r);
+    let bl = radii.bl.clamp(0.0, max_r);
+    let left = rect.x;
+    let top = rect.y;
+    let right = rect.x + rect.width;
+    let bottom = rect.y + rect.height;
+    if tl > 0.0 && lx < left + tl && ly < top + tl {
+        let dx = lx - (left + tl);
+        let dy = ly - (top + tl);
+        return dx * dx + dy * dy <= tl * tl;
+    }
+    if tr > 0.0 && lx > right - tr && ly < top + tr {
+        let dx = lx - (right - tr);
+        let dy = ly - (top + tr);
+        return dx * dx + dy * dy <= tr * tr;
+    }
+    if br > 0.0 && lx > right - br && ly > bottom - br {
+        let dx = lx - (right - br);
+        let dy = ly - (bottom - br);
+        return dx * dx + dy * dy <= br * br;
+    }
+    if bl > 0.0 && lx < left + bl && ly > bottom - bl {
+        let dx = lx - (left + bl);
+        let dy = ly - (bottom - bl);
+        return dx * dx + dy * dy <= bl * bl;
+    }
+    true
+}
+
+fn gradient_progress(lx: f32, ly: f32, rect: Rect, kind: GradientKind) -> f32 {
+    match kind {
+        GradientKind::Linear(GradientDirection::ToBottom) => (ly - rect.y) / rect.height,
+        GradientKind::Linear(GradientDirection::ToTop) => 1.0 - (ly - rect.y) / rect.height,
+        GradientKind::Linear(GradientDirection::ToRight) => (lx - rect.x) / rect.width,
+        GradientKind::Linear(GradientDirection::ToLeft) => 1.0 - (lx - rect.x) / rect.width,
+        GradientKind::Radial => {
+            let cx = rect.x + rect.width * 0.5;
+            let cy = rect.y + rect.height * 0.5;
+            let nx = (lx - cx) / (rect.width * 0.5);
+            let ny = (ly - cy) / (rect.height * 0.5);
+            (nx * nx + ny * ny).sqrt()
+        }
+    }
+}
+
+fn shadow_coverage(lx: f32, ly: f32, rect: Rect, blur: f32) -> f32 {
+    // Same linear falloff fill_box_shadow uses for the fast path: distance
+    // to the nearest point inside the rect, normalised by the blur radius.
+    let left = rect.x;
+    let top = rect.y;
+    let right = rect.x + rect.width;
+    let bottom = rect.y + rect.height;
+    let dx = (left - lx).max(0.0).max(lx - right);
+    let dy = (top - ly).max(0.0).max(ly - bottom);
+    let dist = (dx * dx + dy * dy).sqrt();
+    if blur > 0.0 {
+        (1.0 - dist / blur).clamp(0.0, 1.0)
+    } else if dist == 0.0 {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn draw_text_through(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    text: &TextCommand,
+    transform: Affine,
+    inverse: Affine,
+    fonts: &[fontdue::Font],
+) {
+    // Per-glyph: rasterize the glyph in its own local coordinates, then for
+    // every pixel in the screen-space bbox of the glyph quad, inverse-map
+    // back to glyph-local and sample the bitmap. The glyph itself never
+    // needs to know about rotation — only the placement does.
+    if fonts.is_empty() {
+        // The bitmap fallback path doesn't support arbitrary transforms;
+        // skip rather than draw at the wrong orientation. Pages that hit
+        // this branch typically have no fonts loaded at all.
+        return;
+    }
+    let font_size = text.font_size.max(8.0);
+    let ascent = fonts[0]
+        .horizontal_line_metrics(font_size)
+        .map(|m| m.ascent)
+        .unwrap_or(font_size * 0.8);
+    let mut cursor_x = text.x;
+
+    for ch in text.text.chars() {
+        let Some(font) = fonts
+            .iter()
+            .find(|f| f.lookup_glyph_index(ch) != 0 || ch == ' ')
+        else {
+            cursor_x += font_size * 0.75;
+            continue;
+        };
+        let (metrics, bitmap) = font.rasterize(ch, font_size);
+        if metrics.width == 0 || metrics.height == 0 {
+            cursor_x += metrics.advance_width;
+            continue;
+        }
+        let glyph_origin_x = cursor_x + metrics.xmin as f32;
+        let glyph_origin_y = text.y + ascent - metrics.height as f32 - metrics.ymin as f32;
+        let glyph_bounds = Rect {
+            x: glyph_origin_x,
+            y: glyph_origin_y,
+            width: metrics.width as f32,
+            height: metrics.height as f32,
+        };
+        let color = text.color;
+        paint_through(
+            buffer,
+            width,
+            height,
+            glyph_bounds,
+            transform,
+            inverse,
+            |lx, ly| {
+                let gx = (lx - glyph_origin_x).floor() as i32;
+                let gy = (ly - glyph_origin_y).floor() as i32;
+                if gx < 0 || gy < 0 || gx as usize >= metrics.width || gy as usize >= metrics.height
+                {
+                    return None;
+                }
+                let alpha = bitmap[gy as usize * metrics.width + gx as usize];
+                if alpha == 0 {
+                    return None;
+                }
+                let coverage = (alpha as u32 * color.a as u32) / 255;
+                if coverage == 0 {
+                    return None;
+                }
+                Some(Color {
+                    r: color.r,
+                    g: color.g,
+                    b: color.b,
+                    a: coverage as u8,
+                })
+            },
+        );
+        cursor_x += metrics.advance_width;
+    }
 }
 
 fn transform_rect_in_place(rect: &mut Rect, transform: Affine) {
@@ -2692,6 +3109,90 @@ mod tests {
         let (x, y) = t.compose(t.inverse()).apply_point(7.0, 3.0);
         assert!((x - 7.0).abs() < 1e-4);
         assert!((y - 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn transform_rotate_wraps_emitted_commands_in_transform_group() {
+        // Rotation breaks axis-aligned baking, so apply_transform must
+        // route the box's primitives through a TransformGroup with the
+        // cumulative matrix attached. The inner SolidRect should still be
+        // in the box's logical coordinates.
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 20px;
+                    height: 10px;
+                    background-color: red;
+                    transform: rotate(45deg);
+                }
+            "#,
+        );
+
+        match commands.as_slice() {
+            [DisplayCommand::TransformGroup(transform, inner)] => {
+                assert!(
+                    !transform.is_axis_aligned(),
+                    "rotate must produce a non-axis-aligned matrix"
+                );
+                match inner.as_slice() {
+                    [DisplayCommand::SolidRect(_, rect)] => {
+                        // Logical rect — pre-transform — at the box's
+                        // own (0, 0) with the declared 20x10 size.
+                        assert_eq!(rect.x, 0.0);
+                        assert_eq!(rect.y, 0.0);
+                        assert_eq!(rect.width, 20.0);
+                        assert_eq!(rect.height, 10.0);
+                    }
+                    other => panic!("expected one SolidRect inside group, got {other:?}"),
+                }
+            }
+            other => panic!("expected one TransformGroup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_rotate_paints_pixel_at_post_rotation_position() {
+        // 90deg rotates the box's right edge to the bottom. Centre of the
+        // 10x4 logical box maps to roughly the same screen point (since
+        // we rotate around the centre by default), so the centre pixel
+        // should still be filled — but a corner pixel that was inside
+        // the unrotated box must now miss.
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 10px;
+                    height: 4px;
+                    background-color: red;
+                    transform: rotate(90deg);
+                }
+            "#,
+        );
+        // Larger canvas so the rotated quad (which now extends to ~10px
+        // tall and ~4px wide centred on (5, 2)) lands cleanly in-frame.
+        let pixels = render::rasterize(&commands, 16, 16, &[]);
+        // Logical centre is (5, 2); rotation around that point keeps the
+        // centre pixel painted. We pick (5, 2) on the screen and assert
+        // it's red.
+        let centre = pixels[2 * 16 + 5];
+        assert_eq!(centre & 0x00FFFFFF, 0x00FF0000);
+
+        // Pre-rotation, screen pixel (8, 2) sat inside the 10x4 box
+        // (close to its right edge). After rotating 90° around (5, 2)
+        // that screen position now maps to logical (5, -1) — outside
+        // the box — so it should NOT be painted red.
+        let outside = pixels[2 * 16 + 8];
+        assert_ne!(outside & 0x00FFFFFF, 0x00FF0000);
+    }
+
+    #[test]
+    fn affine_rotate_round_trips_a_point_through_inverse() {
+        let theta = std::f32::consts::FRAC_PI_3; // 60°
+        let t = super::Affine::rotate(theta);
+        let (x, y) = t.compose(t.inverse()).apply_point(11.0, -4.0);
+        assert!((x - 11.0).abs() < 1e-4);
+        assert!((y + 4.0).abs() < 1e-4);
     }
 
     #[test]

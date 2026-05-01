@@ -1101,16 +1101,66 @@ fn menu_button_rect(viewport_width: f32) -> layout::Rect {
 
 fn document_height(commands: &[render::DisplayCommand]) -> f32 {
     commands.iter().fold(0.0, |max_bottom, command| {
-        let bottom = match command {
-            render::DisplayCommand::SolidRect(_, rect) => rect.y + rect.height,
-            render::DisplayCommand::RoundedRect(_, rect, _) => rect.y + rect.height,
-            render::DisplayCommand::Text(text) => text.y + text.font_size,
-            render::DisplayCommand::Image(image) => image.y + image.height,
-            render::DisplayCommand::Gradient(gradient) => gradient.rect.y + gradient.rect.height,
-            render::DisplayCommand::BoxShadow(shadow) => shadow.rect.y + shadow.rect.height,
-        };
+        let bottom = command_bottom(command);
         max_bottom.max(bottom)
     })
+}
+
+fn command_bottom(command: &render::DisplayCommand) -> f32 {
+    match command {
+        render::DisplayCommand::SolidRect(_, rect) => rect.y + rect.height,
+        render::DisplayCommand::RoundedRect(_, rect, _) => rect.y + rect.height,
+        render::DisplayCommand::Text(text) => text.y + text.font_size,
+        render::DisplayCommand::Image(image) => image.y + image.height,
+        render::DisplayCommand::Gradient(gradient) => gradient.rect.y + gradient.rect.height,
+        render::DisplayCommand::BoxShadow(shadow) => shadow.rect.y + shadow.rect.height,
+        render::DisplayCommand::TransformGroup(transform, inner) => {
+            // Logical bottom is the max-y of inner commands; map every
+            // inner command's logical bbox through the matrix and take the
+            // worst y of the four projected corners. Anything bigger is a
+            // false positive here, but better that than under-reporting and
+            // clipping a rotated element off the bottom of the document.
+            inner
+                .iter()
+                .map(|cmd| projected_command_bottom(cmd, *transform))
+                .fold(0.0_f32, f32::max)
+        }
+    }
+}
+
+fn projected_command_bottom(command: &render::DisplayCommand, transform: render::Affine) -> f32 {
+    let bounds = match command {
+        render::DisplayCommand::SolidRect(_, rect) => *rect,
+        render::DisplayCommand::RoundedRect(_, rect, _) => *rect,
+        render::DisplayCommand::Text(text) => layout::Rect {
+            x: text.x,
+            y: text.y,
+            // Bitmap-rasterised text doesn't know its own width here; for
+            // overflow purposes the font_size box is a safe upper bound.
+            width: text.font_size,
+            height: text.font_size,
+        },
+        render::DisplayCommand::Image(image) => layout::Rect {
+            x: image.x,
+            y: image.y,
+            width: image.width,
+            height: image.height,
+        },
+        render::DisplayCommand::Gradient(gradient) => gradient.rect,
+        render::DisplayCommand::BoxShadow(shadow) => shadow.rect,
+        // Inner TransformGroups should never appear in practice; treat as 0.
+        render::DisplayCommand::TransformGroup(_, _) => return 0.0,
+    };
+    let corners = [
+        transform.apply_point(bounds.x, bounds.y),
+        transform.apply_point(bounds.x + bounds.width, bounds.y),
+        transform.apply_point(bounds.x + bounds.width, bounds.y + bounds.height),
+        transform.apply_point(bounds.x, bounds.y + bounds.height),
+    ];
+    corners
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f32::NEG_INFINITY, f32::max)
 }
 
 fn collect_link_targets(
@@ -2126,6 +2176,68 @@ mod tests {
         let plain_path = super::compute_hovered_dom_path(
             &window::WindowInput {
                 mouse_position: Some((55.0, leaf_window_y)),
+                ..window::WindowInput::default()
+            },
+            &plain_layout,
+            0.0,
+        );
+        assert_eq!(plain_path, Some(vec![]));
+    }
+
+    #[test]
+    fn hovered_dom_path_accounts_for_transform_rotate() {
+        // Rotate a 20×20 square leaf 45° around its centre (10, 10). The
+        // rotated diamond extends beyond the leaf's logical x range (out
+        // to ~24) along the screen axis, so a cursor parked at screen
+        // (23, 10) must hit the leaf even though the same cursor would
+        // miss the unrotated 20×20 box.
+        // Use a div with no text child so the deepest hit is unambiguously
+        // the leaf — adding text would introduce an inline-flow child whose
+        // own box also picks up the inherited rotation transform, and it is
+        // separately interesting to track its post-transform extent.
+        let html_source = r#"<div id="root"><div class="leaf"></div></div>"#;
+        let css_source = r#"
+            #root { width: 200px; height: 80px; }
+            .leaf { width: 20px; height: 20px; transform: rotate(45deg); }
+        "#;
+        let node = mini_browser::html::parse(html_source)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let stylesheet = mini_browser::css::parse(css_source).unwrap();
+        let styled = mini_browser::style::style_tree(&node, &[stylesheet]);
+        let layout = mini_browser::layout::layout_tree(&styled, 800.0);
+
+        let leaf_window_y = super::CHROME_HEIGHT + 10.0;
+        let path = super::compute_hovered_dom_path(
+            &window::WindowInput {
+                mouse_position: Some((23.0, leaf_window_y)),
+                ..window::WindowInput::default()
+            },
+            &layout,
+            0.0,
+        );
+        assert_eq!(path, Some(vec![0]));
+
+        // Sanity: with no rotation, the same cursor lands outside the leaf
+        // and the deepest hit is the root.
+        let plain_html = r#"<div id="root"><div class="leaf"></div></div>"#;
+        let plain_css = r#"
+            #root { width: 200px; height: 80px; }
+            .leaf { width: 20px; height: 20px; }
+        "#;
+        let plain_node = mini_browser::html::parse(plain_html)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let plain_sheet = mini_browser::css::parse(plain_css).unwrap();
+        let plain_styled = mini_browser::style::style_tree(&plain_node, &[plain_sheet]);
+        let plain_layout = mini_browser::layout::layout_tree(&plain_styled, 800.0);
+        let plain_path = super::compute_hovered_dom_path(
+            &window::WindowInput {
+                mouse_position: Some((23.0, leaf_window_y)),
                 ..window::WindowInput::default()
             },
             &plain_layout,
