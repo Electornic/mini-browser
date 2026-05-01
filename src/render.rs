@@ -263,12 +263,19 @@ fn text_command(layout_box: &LayoutBox) -> Option<DisplayCommand> {
         NodeType::Element(_) => return None,
     };
 
+    // CSS half-leading: when line-height > font-size, the extra space splits
+    // evenly above and below the glyph so the text sits centered inside its
+    // line box. This is what makes `line-height: 2` look balanced rather than
+    // pushing the glyph to the top of an oversized box.
+    let glyph_size = font_size(node);
+    let half_leading = ((layout_box.dimensions.content.height - glyph_size) / 2.0).max(0.0);
+
     Some(DisplayCommand::Text(TextCommand {
         text,
         x: layout_box.dimensions.content.x,
-        y: layout_box.dimensions.content.y,
+        y: layout_box.dimensions.content.y + half_leading,
         color: text_color(node),
-        font_size: font_size(node),
+        font_size: glyph_size,
     }))
 }
 
@@ -1508,5 +1515,38 @@ mod tests {
             red_idx < green_idx,
             "outer paints before its inner descendant"
         );
+    }
+
+    #[test]
+    fn text_glyph_is_offset_by_half_leading_inside_line_box() {
+        // 40px line-height with 20px font-size leaves (40-20)/2 = 10px of
+        // half-leading above the glyph. The text command y should land at
+        // line_box_top + half_leading, which centers the glyph in the line.
+        let commands = display_list(
+            r#"<p>X</p>"#,
+            r#"
+                p {
+                    font-size: 20px;
+                    line-height: 40px;
+                    margin-top: 0;
+                    margin-bottom: 0;
+                }
+            "#,
+        );
+
+        let text = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DisplayCommand::Text(t) => Some(t),
+                _ => None,
+            })
+            .expect("paragraph emits a Text command");
+
+        // p has no margin/padding, so its content origin is (0, 0). The line
+        // box top is at content_y = 0; glyph sits 10px below that.
+        assert_eq!(text.y, 10.0);
+        // font-size in the command stays 20 — line-height does not scale
+        // glyph rendering, only the surrounding box.
+        assert_eq!(text.font_size, 20.0);
     }
 }

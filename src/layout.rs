@@ -676,7 +676,10 @@ fn inline_content_height(node: &StyledNode, parent_width: f32) -> f32 {
     // Same caveat as block height: percent on inline height should reference the parent's
     // height, but we only have parent_width on hand. Toy pages have not exercised this yet.
     length_value(node, "height", parent_width).unwrap_or_else(|| match &node.node.node_type {
-        NodeType::Text(_) => inline_font_size(node),
+        // Text contributes its line-height (not just glyph height) so a parent
+        // line box stretches to fit `line-height: 1.5` even when no descendant
+        // declares an explicit height.
+        NodeType::Text(_) => inline_line_height_px(node),
         NodeType::Element(element) if element.tag_name == "img" => intrinsic_height(node),
         NodeType::Element(_) => node
             .children
@@ -690,6 +693,22 @@ fn inline_content_height(node: &StyledNode, parent_width: f32) -> f32 {
 fn inline_font_size(node: &StyledNode) -> f32 {
     // font-size is always Px after the style pass, so the percent base is irrelevant here.
     length_value(node, "font-size", 0.0).unwrap_or(16.0)
+}
+
+pub(crate) fn inline_line_height_px(node: &StyledNode) -> f32 {
+    // CSS `line-height` resolves against the element's *own* font-size:
+    // - <number>: bare multiplier (inherits as the number, applied per element)
+    // - <length>: absolute (em/rem already converted to Px during style)
+    // - <percent>: applied to this node's font-size
+    // - keyword `normal` / unset: identity (= font-size); skip extra leading
+    let font_size = inline_font_size(node);
+    match node.value("line-height") {
+        Some(Value::Number(multiplier)) => font_size * multiplier,
+        Some(Value::Length(value, Unit::Px)) => *value,
+        Some(Value::Length(value, Unit::Percent)) => font_size * value / 100.0,
+        Some(Value::Length(value, _)) => *value,
+        _ => font_size,
+    }
 }
 
 fn inline_char_width(node: &StyledNode) -> f32 {
@@ -1842,6 +1861,89 @@ mod tests {
 
         // Same outcome as if .abs were not there: gap = max(30, 10) = 30.
         assert_eq!(b.dimensions.content.y, 50.0);
+    }
+
+    #[test]
+    fn line_height_number_multiplies_font_size() {
+        // Unitless line-height applies as a multiplier of the element's own
+        // font-size at every level — 16px × 1.5 = 24px tall text.
+        let styled = styled_root(
+            r#"<p>Hello</p>"#,
+            r#"
+                p { font-size: 16px; line-height: 1.5; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 400.0);
+        let text = &layout.children[0];
+
+        assert_eq!(text.dimensions.content.height, 24.0);
+    }
+
+    #[test]
+    fn line_height_length_uses_absolute_value() {
+        // A length value pins the line height regardless of the local
+        // font-size — text is 16px tall but its line box stretches to 30.
+        let styled = styled_root(
+            r#"<p>Hello</p>"#,
+            r#"
+                p { font-size: 16px; line-height: 30px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 400.0);
+        let text = &layout.children[0];
+
+        assert_eq!(text.dimensions.content.height, 30.0);
+    }
+
+    #[test]
+    fn line_height_percent_resolves_against_own_font_size() {
+        // 150% of 20px font-size = 30px line height.
+        let styled = styled_root(
+            r#"<p>Hi</p>"#,
+            r#"
+                p { font-size: 20px; line-height: 150%; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 400.0);
+        let text = &layout.children[0];
+
+        assert_eq!(text.dimensions.content.height, 30.0);
+    }
+
+    #[test]
+    fn line_height_number_inherits_and_reapplies_per_descendant_font_size() {
+        // Per CSS spec, a unitless line-height inherits as the bare number,
+        // so descendants apply it against their *own* font-size — span's
+        // 24px font × 1.5 multiplier = 36px line box, even though p itself
+        // is 16px.
+        let styled = styled_root(
+            r#"<p><span>X</span></p>"#,
+            r#"
+                p { font-size: 16px; line-height: 1.5; }
+                span { font-size: 24px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 400.0);
+        let span = &layout.children[0];
+
+        assert_eq!(span.dimensions.content.height, 36.0);
+    }
+
+    #[test]
+    fn line_box_stretches_to_tallest_inline_child() {
+        // A line containing a 12px span and a 30px span should be 30 tall —
+        // that's the max of the per-child line heights, not their sum.
+        let styled = styled_root(
+            r#"<p><span class="small">a</span><span class="big">b</span></p>"#,
+            r#"
+                p { font-size: 16px; }
+                .small { font-size: 12px; }
+                .big { font-size: 30px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 400.0);
+
+        assert_eq!(layout.dimensions.content.height, 30.0);
     }
 
     #[test]
