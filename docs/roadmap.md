@@ -9,7 +9,7 @@
 | 0 | Done | Block layout + Chrome-style UI | URL 인자 없이 실행 시 Chrome NTP 모양의 시작 페이지가 보인다 |
 | 1A | Done | Values & Selectors | %/em/rem 단위, named/rgb/rgba 색상, descendant/child 셀렉터, :hover/:focus/:active |
 | 1B | Done | Layout Modes | inline-block ✅, position: relative/absolute/fixed ✅, stacking/z-index ✅, margin collapse ✅, line-height ✅, float ✅ |
-| 1C | Backlog | Paint | gradient, box-shadow, opacity, transform |
+| 1C | In progress | Paint | opacity ✅, gradient, box-shadow, transform |
 | 1D | Backlog | Big Layout | Flexbox / Grid |
 | 2 | Backlog | JS Engine Integration | Boa 엔진 임베드 + DOM 바인딩, 단순 JS 동작 페이지 렌더 |
 
@@ -95,14 +95,14 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 
 ### 1C. Paint
 
-| Task | Files | Effort | Value | Dependencies |
-|---|---|---|---|---|
-| Linear gradient | render.rs, css.rs | 1w | ★★ | |
-| Radial gradient | render.rs | 3-5d | ★ | linear 먼저 |
-| `box-shadow` | render.rs | 1w | ★★ | |
-| `text-shadow` | render.rs | 3d | ★ | |
-| `opacity` / alpha compositing | render.rs | 3-5d | ★★ | |
-| `transform: translate/scale/rotate` | render.rs, layout.rs | 2-3w | ★★★ | affine matrix, hit-test 재설계 |
+| Task | Status | Files | Effort | Value | Dependencies |
+|---|---|---|---|---|---|
+| `opacity` / alpha compositing | Done | render.rs | 3-5d | ★★ | paint pass에 inherited alpha 스레딩, 각 노드의 effective = inherited × own. positioned 자손은 collect 시점에 ancestor chain의 cumulative alpha를 함께 저장해 stacking context 분리에도 chain 보존. fill_rect/fill_rounded_rect에 source-over 블렌딩 추가, fontdue 글리프 coverage에 color.a 곱해 글리프 자체도 attenuate. **간이화**: 부모 단위 compositing group(offscreen buffer)이 아닌 노드별 곱셈이라 겹친 자식들은 진짜 한 그룹으로 합쳐지지 않음 |
+| Linear gradient | Backlog | render.rs, css.rs | 1w | ★★ | |
+| Radial gradient | Backlog | render.rs | 3-5d | ★ | linear 먼저 |
+| `box-shadow` | Backlog | render.rs | 1w | ★★ | |
+| `text-shadow` | Backlog | render.rs | 3d | ★ | |
+| `transform: translate/scale/rotate` | Backlog | render.rs, layout.rs | 2-3w | ★★★ | affine matrix, hit-test 재설계 |
 
 ### 1D. Big Layout (마지막)
 

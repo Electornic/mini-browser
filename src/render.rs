@@ -56,8 +56,10 @@ pub struct ImageCommand {
 pub fn build_display_list(layout_root: &LayoutBox) -> Vec<DisplayCommand> {
     let mut commands = Vec::new();
     // The root layout box is treated as the initial stacking context: every
-    // positioned descendant ends up sorted into z-layers under it.
-    paint_stacking_context(layout_root, &mut commands);
+    // positioned descendant ends up sorted into z-layers under it. The
+    // initial inherited alpha is 1.0 — every non-1 opacity in the tree
+    // multiplies into the alpha passed to descendants.
+    paint_stacking_context(layout_root, &mut commands, 1.0);
     commands
 }
 
@@ -111,87 +113,108 @@ pub fn rasterize(
     buffer
 }
 
-fn paint_stacking_context(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>) {
+fn paint_stacking_context(
+    layout_box: &LayoutBox,
+    commands: &mut Vec<DisplayCommand>,
+    inherited_alpha: f32,
+) {
+    let effective_alpha = inherited_alpha * opacity_of(layout_box);
+
     // 1. Paint this stacking-context-creator's own bg/border/text.
-    paint_self(layout_box, commands);
+    paint_self(layout_box, commands, effective_alpha);
 
     // Walk descendants and pluck out the positioned subtrees — each becomes
     // its own atomic z-layer. Non-positioned content is painted between the
     // negative and zero/positive z-layers, so we need both groups separately.
-    let mut positioned: Vec<&LayoutBox> = Vec::new();
+    // The alpha stored alongside each entry is the *inherited* alpha from
+    // the actual ancestor chain, before the positioned box's own opacity is
+    // applied — paint_stacking_context will apply that itself.
+    let mut positioned: Vec<(&LayoutBox, f32)> = Vec::new();
     for child in &layout_box.children {
-        collect_positioned_into(child, &mut positioned);
+        collect_positioned_into(child, &mut positioned, effective_alpha);
     }
 
-    let mut negative: Vec<&LayoutBox> = positioned
+    let mut negative: Vec<(&LayoutBox, f32)> = positioned
         .iter()
         .copied()
-        .filter(|b| z_index_of(b) < 0)
+        .filter(|(b, _)| z_index_of(b) < 0)
         .collect();
-    let zero_or_auto: Vec<&LayoutBox> = positioned
+    let zero_or_auto: Vec<(&LayoutBox, f32)> = positioned
         .iter()
         .copied()
-        .filter(|b| z_index_of(b) == 0)
+        .filter(|(b, _)| z_index_of(b) == 0)
         .collect();
-    let mut positive: Vec<&LayoutBox> = positioned
+    let mut positive: Vec<(&LayoutBox, f32)> = positioned
         .iter()
         .copied()
-        .filter(|b| z_index_of(b) > 0)
+        .filter(|(b, _)| z_index_of(b) > 0)
         .collect();
     // Stable sort preserves tree order among siblings sharing a z-index.
-    negative.sort_by_key(|b| z_index_of(b));
-    positive.sort_by_key(|b| z_index_of(b));
+    negative.sort_by_key(|(b, _)| z_index_of(b));
+    positive.sort_by_key(|(b, _)| z_index_of(b));
 
     // 2. Negative-z layers paint first → they sit BEHIND non-positioned content.
-    for child in &negative {
-        paint_stacking_context(child, commands);
+    for (child, alpha) in &negative {
+        paint_stacking_context(child, commands, *alpha);
     }
 
     // 3. Non-positioned descendants in tree order. Positioned subtrees are
     //    skipped here because they already belong to a z-layer.
     for child in &layout_box.children {
-        paint_non_positioned(child, commands);
+        paint_non_positioned(child, commands, effective_alpha);
     }
 
     // 4 & 5. Zero/auto layers in tree order, then positive-z (sorted asc).
-    for child in zero_or_auto.iter().chain(positive.iter()) {
-        paint_stacking_context(child, commands);
+    for (child, alpha) in zero_or_auto.iter().chain(positive.iter()) {
+        paint_stacking_context(child, commands, *alpha);
     }
 }
 
-fn paint_non_positioned(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>) {
+fn paint_non_positioned(
+    layout_box: &LayoutBox,
+    commands: &mut Vec<DisplayCommand>,
+    inherited_alpha: f32,
+) {
     // Stop at any positioned box — its painting belongs to its enclosing
     // stacking context, where z-order is decided.
     if is_positioned_box(layout_box) {
         return;
     }
-    paint_self(layout_box, commands);
+    let effective_alpha = inherited_alpha * opacity_of(layout_box);
+    paint_self(layout_box, commands, effective_alpha);
     for child in &layout_box.children {
-        paint_non_positioned(child, commands);
+        paint_non_positioned(child, commands, effective_alpha);
     }
 }
 
-fn paint_self(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>) {
+fn paint_self(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>, alpha: f32) {
     // Per-box paint order is background -> border -> text, so text always
     // sits on top of its own background.
-    if let Some(command) = background_command(layout_box) {
+    if let Some(command) = background_command(layout_box, alpha) {
         commands.push(command);
     }
-    commands.extend(border_commands(layout_box));
-    if let Some(command) = text_command(layout_box) {
+    commands.extend(border_commands(layout_box, alpha));
+    if let Some(command) = text_command(layout_box, alpha) {
         commands.push(command);
     }
 }
 
-fn collect_positioned_into<'a>(layout_box: &'a LayoutBox, out: &mut Vec<&'a LayoutBox>) {
+fn collect_positioned_into<'a>(
+    layout_box: &'a LayoutBox,
+    out: &mut Vec<(&'a LayoutBox, f32)>,
+    inherited_alpha: f32,
+) {
     if is_positioned_box(layout_box) {
-        out.push(layout_box);
+        // Stash the *inherited* alpha (before this box's own opacity); the
+        // recipient paint_stacking_context applies the box's own opacity itself.
+        out.push((layout_box, inherited_alpha));
         // Don't recurse: the positioned box's own descendants live inside its
         // own stacking context and are handled when we paint it.
         return;
     }
+    let effective_alpha = inherited_alpha * opacity_of(layout_box);
     for child in &layout_box.children {
-        collect_positioned_into(child, out);
+        collect_positioned_into(child, out, effective_alpha);
     }
 }
 
@@ -205,6 +228,31 @@ fn is_positioned_box(layout_box: &LayoutBox) -> bool {
         Some(Value::Keyword(keyword))
             if keyword == "relative" || keyword == "absolute" || keyword == "fixed"
     )
+}
+
+fn opacity_of(layout_box: &LayoutBox) -> f32 {
+    // CSS `opacity` is a unitless number in [0, 1]; default 1 (fully opaque).
+    // Real CSS would isolate the subtree as a compositing group; we cheat by
+    // multiplying the factor into every emitted color along the descendant
+    // chain — visually identical for solid fills, slightly off for overlapping
+    // children that should composite together first.
+    let node = match layout_box.styled_node() {
+        Some(node) => node,
+        None => return 1.0,
+    };
+    match node.value("opacity") {
+        Some(Value::Number(value)) => value.clamp(0.0, 1.0),
+        _ => 1.0,
+    }
+}
+
+fn apply_alpha(color: Color, factor: f32) -> Color {
+    Color {
+        r: color.r,
+        g: color.g,
+        b: color.b,
+        a: ((color.a as f32) * factor).clamp(0.0, 255.0) as u8,
+    }
 }
 
 fn z_index_of(layout_box: &LayoutBox) -> i32 {
@@ -222,10 +270,10 @@ fn z_index_of(layout_box: &LayoutBox) -> i32 {
     }
 }
 
-fn background_command(layout_box: &LayoutBox) -> Option<DisplayCommand> {
+fn background_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
     let node = layout_box.styled_node()?;
     let color = match node.value("background-color") {
-        Some(Value::Color(color)) => *color,
+        Some(Value::Color(color)) => apply_alpha(*color, alpha),
         _ => return None,
     };
 
@@ -256,7 +304,7 @@ fn corner_radius(node: &crate::style::StyledNode, name: &str) -> f32 {
     }
 }
 
-fn text_command(layout_box: &LayoutBox) -> Option<DisplayCommand> {
+fn text_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
     let node = layout_box.styled_node()?;
     let text = match &node.node.node_type {
         NodeType::Text(text) => text.clone(),
@@ -274,18 +322,18 @@ fn text_command(layout_box: &LayoutBox) -> Option<DisplayCommand> {
         text,
         x: layout_box.dimensions.content.x,
         y: layout_box.dimensions.content.y + half_leading,
-        color: text_color(node),
+        color: apply_alpha(text_color(node), alpha),
         font_size: glyph_size,
     }))
 }
 
-fn border_commands(layout_box: &LayoutBox) -> Vec<DisplayCommand> {
+fn border_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayCommand> {
     let node = match layout_box.styled_node() {
         Some(node) => node,
         None => return Vec::new(),
     };
     let color = match node.value("border-color") {
-        Some(Value::Color(color)) => *color,
+        Some(Value::Color(color)) => apply_alpha(*color, alpha),
         _ => return Vec::new(),
     };
     let border = layout_box.dimensions.border;
@@ -414,12 +462,37 @@ fn fill_rect(buffer: &mut [u32], width: usize, height: usize, color: Color, rect
     let y_end = (rect.y + rect.height).ceil().max(0.0) as usize;
     let x_end = x_end.min(width);
     let y_end = y_end.min(height);
-    let pixel = rgb_u32(color);
 
+    if color.a == 0 {
+        return;
+    }
+    if color.a == 255 {
+        // Fully opaque: skip the per-pixel blend math.
+        let pixel = rgb_u32(color);
+        for y in y_start..y_end {
+            let row = y * width;
+            for x in x_start..x_end {
+                buffer[row + x] = pixel;
+            }
+        }
+        return;
+    }
+
+    // Source-over with the fill color's alpha as the blend weight against
+    // whatever is already in the buffer at each pixel.
+    let a = color.a as u32;
+    let inv = 255 - a;
+    let cr = color.r as u32;
+    let cg = color.g as u32;
+    let cb = color.b as u32;
     for y in y_start..y_end {
         let row = y * width;
         for x in x_start..x_end {
-            buffer[row + x] = pixel;
+            let bg = buffer[row + x];
+            let r = (a * cr + inv * ((bg >> 16) & 0xFF)) / 255;
+            let g = (a * cg + inv * ((bg >> 8) & 0xFF)) / 255;
+            let b = (a * cb + inv * (bg & 0xFF)) / 255;
+            buffer[row + x] = (r << 16) | (g << 8) | b;
         }
     }
 }
@@ -444,7 +517,10 @@ fn fill_rounded_rect(
     let y_end = (rect.y + rect.height).ceil().max(0.0) as usize;
     let x_end = x_end.min(width);
     let y_end = y_end.min(height);
-    let pixel = rgb_u32(color);
+
+    if color.a == 0 {
+        return;
+    }
 
     // Cap each radius to half the rect so corners never overlap.
     let max_radius = (rect.width.min(rect.height) / 2.0).max(0.0);
@@ -457,6 +533,14 @@ fn fill_rounded_rect(
     let top = rect.y;
     let right = rect.x + rect.width;
     let bottom = rect.y + rect.height;
+
+    let opaque = color.a == 255;
+    let pixel = rgb_u32(color);
+    let a = color.a as u32;
+    let inv = 255 - a;
+    let cr = color.r as u32;
+    let cg = color.g as u32;
+    let cb = color.b as u32;
 
     for y in y_start..y_end {
         let py = y as f32 + 0.5;
@@ -485,8 +569,17 @@ fn fill_rounded_rect(
                 true
             };
 
-            if inside {
+            if !inside {
+                continue;
+            }
+            if opaque {
                 buffer[row + x] = pixel;
+            } else {
+                let bg = buffer[row + x];
+                let r = (a * cr + inv * ((bg >> 16) & 0xFF)) / 255;
+                let g = (a * cg + inv * ((bg >> 8) & 0xFF)) / 255;
+                let b = (a * cb + inv * (bg & 0xFF)) / 255;
+                buffer[row + x] = (r << 16) | (g << 8) | b;
             }
         }
     }
@@ -551,16 +644,21 @@ fn draw_text(
                 }
 
                 let idx = py as usize * width + px as usize;
-                if alpha >= 128 {
+                // Compose glyph coverage with text color's alpha so opacity
+                // (or any pre-multiplied alpha on the color) attenuates the
+                // visible glyph, not just AA edges.
+                let coverage = (alpha as u32 * text.color.a as u32) / 255;
+                if coverage == 0 {
+                    continue;
+                }
+                if coverage >= 255 {
                     buffer[idx] = rgb_u32(text.color);
-                } else if alpha >= 32 {
-                    // Simple alpha blend for anti-aliased edges.
+                } else {
                     let bg = buffer[idx];
-                    let a = alpha as u32;
-                    let inv = 255 - a;
-                    let r = (a * text.color.r as u32 + inv * ((bg >> 16) & 0xFF)) / 255;
-                    let g = (a * text.color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
-                    let b = (a * text.color.b as u32 + inv * (bg & 0xFF)) / 255;
+                    let inv = 255 - coverage;
+                    let r = (coverage * text.color.r as u32 + inv * ((bg >> 16) & 0xFF)) / 255;
+                    let g = (coverage * text.color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
+                    let b = (coverage * text.color.b as u32 + inv * (bg & 0xFF)) / 255;
                     buffer[idx] = (r << 16) | (g << 8) | b;
                 }
             }
@@ -1548,5 +1646,129 @@ mod tests {
         // font-size in the command stays 20 — line-height does not scale
         // glyph rendering, only the surrounding box.
         assert_eq!(text.font_size, 20.0);
+    }
+
+    fn first_solid_alpha_for(commands: &[DisplayCommand]) -> u8 {
+        commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DisplayCommand::SolidRect(color, _) => Some(color.a),
+                _ => None,
+            })
+            .expect("at least one SolidRect")
+    }
+
+    #[test]
+    fn opacity_attenuates_emitted_color_alpha() {
+        // `opacity: 0.5` should multiply the background color's alpha by 0.5
+        // when the SolidRect is emitted — 255 * 0.5 = 127.
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 50px;
+                    height: 50px;
+                    background-color: #ff0000;
+                    opacity: 0.5;
+                }
+            "#,
+        );
+
+        assert_eq!(first_solid_alpha_for(&commands), 127);
+    }
+
+    #[test]
+    fn nested_opacities_multiply() {
+        // Inner `.b`'s alpha = parent 0.5 × own 0.5 = 0.25 → 255 × 0.25 = 63.
+        let commands = display_list(
+            r#"<div class="a"><div class="b"></div></div>"#,
+            r#"
+                .a {
+                    width: 100px;
+                    height: 100px;
+                    background-color: #ff0000;
+                    opacity: 0.5;
+                }
+                .b {
+                    width: 50px;
+                    height: 50px;
+                    background-color: #0000ff;
+                    opacity: 0.5;
+                }
+            "#,
+        );
+
+        let alphas: Vec<u8> = commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DisplayCommand::SolidRect(color, _) => Some(color.a),
+                _ => None,
+            })
+            .collect();
+        // Two rects: parent first (.a, alpha = 127), then child (.b, alpha = 63).
+        assert_eq!(alphas[0], 127);
+        assert_eq!(alphas[1], 63);
+    }
+
+    #[test]
+    fn opacity_inherits_through_non_positioned_ancestor_into_positioned_descendant() {
+        // The hard case: positioned descendants jump out of the normal paint
+        // walk into a z-layer, so the alpha they inherit must come from the
+        // collected ancestor chain — not from the stacking context root.
+        // Final alpha for `.c` = 0.5 × 0.5 × 0.5 = 0.125 → 255 × 0.125 = 31.
+        let commands = display_list(
+            r#"<div class="a"><div class="b"><div class="c"></div></div></div>"#,
+            r#"
+                .a { width: 200px; height: 200px; opacity: 0.5; }
+                .b { width: 100px; height: 100px; opacity: 0.5; }
+                .c {
+                    position: absolute;
+                    width: 50px;
+                    height: 50px;
+                    background-color: #ff0000;
+                    opacity: 0.5;
+                }
+            "#,
+        );
+
+        // Find the red rect — that's `.c`'s background.
+        let red_alpha = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DisplayCommand::SolidRect(color, _) if color.r == 255 && color.g == 0 => {
+                    Some(color.a)
+                }
+                _ => None,
+            })
+            .expect("red rect for .c");
+        assert_eq!(red_alpha, 31);
+    }
+
+    #[test]
+    fn fill_rect_alpha_blends_with_existing_pixel() {
+        // White buffer + 50% red → red channel stays 255, green/blue mix to ~127.
+        let red_half = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 128,
+        };
+        let pixels = render::rasterize(
+            &[DisplayCommand::SolidRect(
+                red_half,
+                crate::layout::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1.0,
+                    height: 1.0,
+                },
+            )],
+            1,
+            1,
+            &[],
+        );
+
+        // Expected: r ≈ 255, g and b ≈ 127. Single u32 = 0xFF7F7F.
+        assert_eq!(pixels[0], 0x00FF7F7F);
     }
 }
