@@ -29,37 +29,82 @@ impl StyledNode {
     }
 }
 
-pub fn style_tree(root: &Node, stylesheets: &[Stylesheet]) -> StyledNode {
-    // Most callers do not care about hover state — they get a "nothing is hovered" tree.
-    style_tree_with_hover(root, stylesheets, None)
+/// User-facing interaction state passed into `style_tree_with_state`. Each field is the
+/// DOM path (sequence of child indices from the root) of the corresponding node, or
+/// `None` if the state is not active.
+#[derive(Default, Copy, Clone, Debug)]
+pub struct InteractionState<'a> {
+    pub hover: Option<&'a [usize]>,
+    pub focus: Option<&'a [usize]>,
+    pub active: Option<&'a [usize]>,
 }
 
-/// Build the styled tree given the DOM path of the currently hovered element, if any.
-/// `hovered_path` is the sequence of child indices from the root that identifies the
-/// node under the user's pointer. The matcher uses it to light up `:hover` rules
-/// targeting that node (and rules anchored on hovered ancestors).
+/// Per-node pseudo-class state used during selector matching.
+#[derive(Default, Copy, Clone, Debug)]
+struct PseudoState {
+    hover: bool,
+    focus: bool,
+    active: bool,
+}
+
+pub fn style_tree(root: &Node, stylesheets: &[Stylesheet]) -> StyledNode {
+    // Most callers do not care about interaction state — they get a "nothing engaged" tree.
+    style_tree_with_state(root, stylesheets, InteractionState::default())
+}
+
+/// Backward-compatible convenience: same as `style_tree_with_state` with only the
+/// hovered path filled in. New callers should reach for `style_tree_with_state` directly.
 pub fn style_tree_with_hover(
     root: &Node,
     stylesheets: &[Stylesheet],
     hovered_path: Option<&[usize]>,
 ) -> StyledNode {
+    style_tree_with_state(
+        root,
+        stylesheets,
+        InteractionState {
+            hover: hovered_path,
+            ..Default::default()
+        },
+    )
+}
+
+/// Build the styled tree given a complete picture of interaction state. Each path slice
+/// identifies the node under that interaction; matching uses CSS-spec semantics —
+/// :hover and :active propagate to ancestors of the deepest engaged node, while :focus
+/// only matches the focused node itself.
+pub fn style_tree_with_state(
+    root: &Node,
+    stylesheets: &[Stylesheet],
+    state: InteractionState<'_>,
+) -> StyledNode {
     // The root font-size feeds rem resolution for every descendant. Compute it up front
     // by treating the root as if it lived inside the user-agent default font-size.
-    let raw_root = specified_values(root, stylesheets, &[], false);
+    let raw_root = specified_values(root, stylesheets, &[], PseudoState::default());
     let root_font_size = resolve_font_size(
         raw_root.get("font-size"),
         DEFAULT_FONT_SIZE,
         DEFAULT_FONT_SIZE,
     );
-    style_tree_inner(
-        root,
-        stylesheets,
-        None,
-        root_font_size,
-        &[],
-        &[],
-        hovered_path,
-    )
+    style_tree_inner(root, stylesheets, None, root_font_size, &[], &[], state)
+}
+
+fn pseudo_state_for(state: InteractionState<'_>, current_path: &[usize]) -> PseudoState {
+    let prefix_match = |target: Option<&[usize]>| -> bool {
+        // Hover/active propagate up: every ancestor on the way down to the deepest
+        // engaged node also enters the state. starts_with returns true when the engaged
+        // path begins with `current_path`, i.e. current is an ancestor (or self).
+        matches!(target, Some(p) if p.starts_with(current_path))
+    };
+    let exact_match = |target: Option<&[usize]>| -> bool {
+        // :focus only matches the focused element itself; ancestors do not pick it up.
+        target == Some(current_path)
+    };
+    PseudoState {
+        hover: prefix_match(state.hover),
+        focus: exact_match(state.focus),
+        active: prefix_match(state.active),
+    }
 }
 
 fn style_tree_inner<'a>(
@@ -67,15 +112,12 @@ fn style_tree_inner<'a>(
     stylesheets: &[Stylesheet],
     parent_values: Option<&PropertyMap>,
     root_font_size: f32,
-    ancestors: &[(&'a Node, bool)],
+    ancestors: &[(&'a Node, PseudoState)],
     current_path: &[usize],
-    hovered_path: Option<&[usize]>,
+    state: InteractionState<'_>,
 ) -> StyledNode {
-    // CSS spec: when the cursor is over a descendant, every ancestor on the way down
-    // also enters its :hover state. So treat any prefix of the deepest hovered path
-    // as hovered, not just the leaf itself.
-    let is_hovered = matches!(hovered_path, Some(target) if target.starts_with(current_path));
-    let mut specified_values = specified_values(node, stylesheets, ancestors, is_hovered);
+    let pseudo = pseudo_state_for(state, current_path);
+    let mut specified_values = specified_values(node, stylesheets, ancestors, pseudo);
 
     // Real browsers inherit many properties. Here we only inherit a few text-related ones
     // because they make documents readable without making the style system much more complex.
@@ -116,10 +158,10 @@ fn style_tree_inner<'a>(
     }
 
     // Append self to the ancestor chain children see during their selector matching,
-    // carrying the resolved hover state so descendant matches can check pseudo classes
-    // anchored on hovered ancestors (e.g. `.outer:hover .inner`).
-    let mut child_ancestors: Vec<(&Node, bool)> = ancestors.to_vec();
-    child_ancestors.push((node, is_hovered));
+    // carrying the resolved pseudo-state so descendant matches can check pseudo classes
+    // anchored on engaged ancestors (e.g. `.outer:hover .inner`).
+    let mut child_ancestors: Vec<(&Node, PseudoState)> = ancestors.to_vec();
+    child_ancestors.push((node, pseudo));
     let children = node
         .children
         .iter()
@@ -134,7 +176,7 @@ fn style_tree_inner<'a>(
                 root_font_size,
                 &child_ancestors,
                 &child_path,
-                hovered_path,
+                state,
             )
         })
         .collect();
@@ -160,8 +202,8 @@ fn resolve_font_size(raw: Option<&Value>, parent_font_size: f32, root_font_size:
 fn specified_values(
     node: &Node,
     stylesheets: &[Stylesheet],
-    ancestors: &[(&Node, bool)],
-    is_hovered: bool,
+    ancestors: &[(&Node, PseudoState)],
+    pseudo: PseudoState,
 ) -> PropertyMap {
     let mut matched = Vec::new();
 
@@ -171,9 +213,7 @@ fn specified_values(
         .flat_map(|sheet| sheet.rules.iter())
         .enumerate()
     {
-        if let Some(specificity) =
-            matching_specificity(node, is_hovered, ancestors, &rule.selectors)
-        {
+        if let Some(specificity) = matching_specificity(node, pseudo, ancestors, &rule.selectors) {
             matched.push((specificity, rule_order, &rule.declarations));
         }
     }
@@ -260,14 +300,14 @@ fn apply_declarations(values: &mut PropertyMap, declarations: &[Declaration]) {
 
 fn matching_specificity(
     node: &Node,
-    is_hovered: bool,
-    ancestors: &[(&Node, bool)],
+    pseudo: PseudoState,
+    ancestors: &[(&Node, PseudoState)],
     selectors: &[Selector],
 ) -> Option<u32> {
     // The highest matching selector wins within a rule group such as `h1, .title`.
     selectors
         .iter()
-        .filter(|selector| matches_selector(node, is_hovered, ancestors, selector))
+        .filter(|selector| matches_selector(node, pseudo, ancestors, selector))
         .map(selector_specificity)
         .max()
 }
@@ -291,8 +331,8 @@ fn simple_specificity(simple: &SimpleSelector) -> u32 {
 
 fn matches_selector(
     node: &Node,
-    is_hovered: bool,
-    ancestors: &[(&Node, bool)],
+    pseudo: PseudoState,
+    ancestors: &[(&Node, PseudoState)],
     selector: &Selector,
 ) -> bool {
     // Right-to-left matching: the rightmost simple selector is the target and must match
@@ -300,12 +340,12 @@ fn matches_selector(
     // combinator that connects it to the part on its right:
     //   - Descendant: walk up until any ancestor matches.
     //   - Child: the very next ancestor must match; no skipping.
-    // Hover state for both the target and each ancestor is carried alongside the node so
+    // Pseudo state for both the target and each ancestor is carried alongside the node so
     // pseudo-classes anchored anywhere on the chain (e.g. `.outer:hover .inner`) work.
     let Some((target, leading)) = selector.parts.split_last() else {
         return false;
     };
-    if !matches_simple(node, is_hovered, target) {
+    if !matches_simple(node, pseudo, target) {
         return false;
     }
 
@@ -315,8 +355,8 @@ fn matches_selector(
         match combinator {
             Combinator::Descendant => loop {
                 match ancestor_iter.next() {
-                    Some((ancestor, ancestor_hover))
-                        if matches_simple(ancestor, *ancestor_hover, part) =>
+                    Some((ancestor, ancestor_pseudo))
+                        if matches_simple(ancestor, *ancestor_pseudo, part) =>
                     {
                         break;
                     }
@@ -325,8 +365,8 @@ fn matches_selector(
                 }
             },
             Combinator::Child => match ancestor_iter.next() {
-                Some((ancestor, ancestor_hover))
-                    if matches_simple(ancestor, *ancestor_hover, part) => {}
+                Some((ancestor, ancestor_pseudo))
+                    if matches_simple(ancestor, *ancestor_pseudo, part) => {}
                 _ => return false,
             },
         }
@@ -334,7 +374,7 @@ fn matches_selector(
     true
 }
 
-fn matches_simple(node: &Node, is_hovered: bool, simple: &SimpleSelector) -> bool {
+fn matches_simple(node: &Node, pseudo: PseudoState, simple: &SimpleSelector) -> bool {
     let element = match &node.node_type {
         NodeType::Element(element) => element,
         // Text nodes never match selectors directly; they only inherit style from parents.
@@ -356,11 +396,9 @@ fn matches_simple(node: &Node, is_hovered: bool, simple: &SimpleSelector) -> boo
 
     match simple.pseudo {
         None => true,
-        Some(PseudoClass::Hover) => is_hovered,
-        // Focus and active state plumbing arrives in the next commit; for now the
-        // matcher just declines to match these pseudos so the surrounding cascade
-        // keeps behaving sensibly.
-        Some(PseudoClass::Focus) | Some(PseudoClass::Active) => false,
+        Some(PseudoClass::Hover) => pseudo.hover,
+        Some(PseudoClass::Focus) => pseudo.focus,
+        Some(PseudoClass::Active) => pseudo.active,
     }
 }
 
@@ -660,6 +698,107 @@ mod tests {
 
         assert_eq!(
             inner.value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn focus_pseudo_class_matches_only_the_focused_node_not_ancestors() {
+        // <div><a class="btn">click</a></div>; mark the .btn at path [0] as focused.
+        // The .btn rule must fire, but focus does NOT bubble: a hypothetical .root:focus
+        // wouldn't match the outer <div>. We assert the positive case here; the negative
+        // is covered by the "no engaged path" test.
+        let root = parse_html(r#"<div><a class="btn">click</a></div>"#);
+        let stylesheet = parse_css(
+            r#"
+                .btn { color: #00ff00; }
+                .btn:focus { color: #ff0000; }
+            "#,
+        );
+        let styled = style::style_tree_with_state(
+            &root,
+            &[stylesheet],
+            style::InteractionState {
+                focus: Some(&[0]),
+                ..Default::default()
+            },
+        );
+        let link = &styled.children[0];
+
+        assert_eq!(
+            link.value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn focus_pseudo_class_does_not_propagate_to_ancestors() {
+        // Hover the deepest text under .outer; .outer:focus should NOT match because
+        // focus is anchored to the focused node alone, not its ancestor chain. We use
+        // the focus path of the deeper text node and verify .outer keeps its non-focus color.
+        let root = parse_html(r#"<div class="outer"><span class="inner">x</span></div>"#);
+        let stylesheet = parse_css(
+            r#"
+                .outer { color: #00ff00; }
+                .outer:focus { color: #ff0000; }
+            "#,
+        );
+        // Focus path [0, 0] = the text node inside .inner. .outer is the root.
+        let styled = style::style_tree_with_state(
+            &root,
+            &[stylesheet],
+            style::InteractionState {
+                focus: Some(&[0, 0]),
+                ..Default::default()
+            },
+        );
+
+        // .outer keeps the green non-focus color even though the focused node is its
+        // grand-descendant. The :hover equivalent would have matched here.
+        assert_eq!(
+            styled.value("color"),
+            Some(&Value::Color(Color {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn active_pseudo_class_propagates_like_hover() {
+        // .active matches both the deepest active node and its ancestors, mirroring
+        // :hover semantics.
+        let root = parse_html(r#"<div class="outer"><span class="inner">x</span></div>"#);
+        let stylesheet = parse_css(
+            r#"
+                .outer { color: #00ff00; }
+                .outer:active { color: #ff0000; }
+            "#,
+        );
+        // Active path [0, 0] = the text node; .outer (path []) is its ancestor.
+        let styled = style::style_tree_with_state(
+            &root,
+            &[stylesheet],
+            style::InteractionState {
+                active: Some(&[0, 0]),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            styled.value("color"),
             Some(&Value::Color(Color {
                 r: 255,
                 g: 0,
