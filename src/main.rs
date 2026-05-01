@@ -90,6 +90,7 @@ struct ChromeState<'a> {
 enum ChromeAction {
     Back,
     Forward,
+    Menu,
 }
 
 #[derive(Debug, Clone)]
@@ -175,7 +176,7 @@ impl BrowserState {
         let hovered_href = self
             .hovered_link(input, &document_view.links)
             .map(|link| link.href.as_str());
-        let hovered_action = self.hovered_chrome_action(input);
+        let hovered_action = self.hovered_chrome_action(input, viewport_width);
 
         let tab_title = self
             .current_url
@@ -223,10 +224,22 @@ impl BrowserState {
         }
 
         if input.left_mouse_pressed {
-            if let Some(action) = self.hovered_chrome_action(input) {
+            if let Some(action) = self.hovered_chrome_action(input, viewport_width) {
                 match action {
                     ChromeAction::Back => self.go_back(),
                     ChromeAction::Forward => self.go_forward(),
+                    // The dropdown itself is not implemented yet, but acknowledging the click
+                    // proves the hit region works and prevents the click from falling through
+                    // to the page underneath.
+                    ChromeAction::Menu => self.set_status(
+                        "menu (todo)",
+                        css::Color {
+                            r: 60,
+                            g: 64,
+                            b: 67,
+                            a: 255,
+                        },
+                    ),
                 }
                 self.address_bar_focused = false;
                 self.address_bar_selected = false;
@@ -487,7 +500,11 @@ impl BrowserState {
         !self.forward_stack.is_empty()
     }
 
-    fn hovered_chrome_action(&self, input: &window::WindowInput) -> Option<ChromeAction> {
+    fn hovered_chrome_action(
+        &self,
+        input: &window::WindowInput,
+        viewport_width: usize,
+    ) -> Option<ChromeAction> {
         let (mouse_x, mouse_y) = input.mouse_position?;
 
         if point_in_rect(mouse_x, mouse_y, back_button_rect()) && self.can_go_back() {
@@ -495,6 +512,11 @@ impl BrowserState {
         }
         if point_in_rect(mouse_x, mouse_y, forward_button_rect()) && self.can_go_forward() {
             return Some(ChromeAction::Forward);
+        }
+        // The menu button always reports as hover-able even though its action is still a stub,
+        // so the user gets visual feedback that the hit region is wired up.
+        if point_in_rect(mouse_x, mouse_y, menu_button_rect(viewport_width as f32)) {
+            return Some(ChromeAction::Menu);
         }
 
         None
@@ -698,7 +720,10 @@ fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
         chrome.can_go_forward,
         chrome.hovered_action == Some(ChromeAction::Forward),
     ));
-    commands.extend(menu_button_commands(menu_button_rect(width)));
+    commands.extend(menu_button_commands(
+        menu_button_rect(width),
+        chrome.hovered_action == Some(ChromeAction::Menu),
+    ));
 
     if chrome.address_bar_selected {
         commands.push(render::DisplayCommand::SolidRect(
@@ -808,8 +833,23 @@ fn chevron_commands(
         .collect()
 }
 
-fn menu_button_commands(rect: layout::Rect) -> Vec<render::DisplayCommand> {
-    // Three vertical dots stand in for the overflow menu; the button is decorative for now.
+fn menu_button_commands(rect: layout::Rect, hovered: bool) -> Vec<render::DisplayCommand> {
+    // Three vertical dots stand in for the overflow menu. The dropdown is still a stub,
+    // but the hover wash and click hit-test are wired so the button feels real.
+    let mut commands = Vec::new();
+    if hovered {
+        commands.push(render::DisplayCommand::RoundedRect(
+            css::Color {
+                r: 232,
+                g: 234,
+                b: 237,
+                a: 255,
+            },
+            rect,
+            render::CornerRadii::uniform(rect.height.min(rect.width) / 2.0),
+        ));
+    }
+
     let cx = rect.x + rect.width / 2.0;
     let cy = rect.y + rect.height / 2.0;
     let dot_size = 3.0;
@@ -821,20 +861,19 @@ fn menu_button_commands(rect: layout::Rect) -> Vec<render::DisplayCommand> {
         a: 255,
     };
 
-    (-1..=1i32)
-        .map(|i| {
-            render::DisplayCommand::RoundedRect(
-                icon_color,
-                layout::Rect {
-                    x: cx - dot_size / 2.0,
-                    y: cy + (i as f32 * spacing) - dot_size / 2.0,
-                    width: dot_size,
-                    height: dot_size,
-                },
-                render::CornerRadii::uniform(dot_size / 2.0),
-            )
-        })
-        .collect()
+    commands.extend((-1..=1i32).map(|i| {
+        render::DisplayCommand::RoundedRect(
+            icon_color,
+            layout::Rect {
+                x: cx - dot_size / 2.0,
+                y: cy + (i as f32 * spacing) - dot_size / 2.0,
+                width: dot_size,
+                height: dot_size,
+            },
+            render::CornerRadii::uniform(dot_size / 2.0),
+        )
+    }));
+    commands
 }
 
 fn address_bar_rect(viewport_width: f32) -> layout::Rect {
@@ -1647,17 +1686,76 @@ mod tests {
             "loaded",
         );
 
-        let hover = browser.hovered_chrome_action(&window::WindowInput {
-            mouse_position: Some((BACK_BUTTON_X + 2.0, NAV_BUTTON_Y + 2.0)),
-            ..window::WindowInput::default()
-        });
+        let hover = browser.hovered_chrome_action(
+            &window::WindowInput {
+                mouse_position: Some((BACK_BUTTON_X + 2.0, NAV_BUTTON_Y + 2.0)),
+                ..window::WindowInput::default()
+            },
+            800,
+        );
         assert_eq!(hover, None);
 
         browser.back_stack.push(browser.snapshot());
-        let hover = browser.hovered_chrome_action(&window::WindowInput {
-            mouse_position: Some((back_button_rect().x + 2.0, back_button_rect().y + 2.0)),
-            ..window::WindowInput::default()
-        });
+        let hover = browser.hovered_chrome_action(
+            &window::WindowInput {
+                mouse_position: Some((back_button_rect().x + 2.0, back_button_rect().y + 2.0)),
+                ..window::WindowInput::default()
+            },
+            800,
+        );
         assert_eq!(hover, Some(super::ChromeAction::Back));
+    }
+
+    #[test]
+    fn menu_button_hover_is_independent_of_history() {
+        let browser = BrowserState::new(
+            "http://first.test".into(),
+            "<div>first</div>".into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            None,
+            "loaded",
+        );
+
+        let menu_rect = super::menu_button_rect(800.0);
+        let hover = browser.hovered_chrome_action(
+            &window::WindowInput {
+                mouse_position: Some((menu_rect.x + 2.0, menu_rect.y + 2.0)),
+                ..window::WindowInput::default()
+            },
+            800,
+        );
+        assert_eq!(hover, Some(super::ChromeAction::Menu));
+    }
+
+    #[test]
+    fn clicking_menu_button_sets_status_and_does_not_navigate() {
+        let mut browser = BrowserState::new(
+            "http://first.test".into(),
+            "<div>first</div>".into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            None,
+            "loaded",
+        );
+        let original_html = browser.document_html.clone();
+        let menu_rect = super::menu_button_rect(800.0);
+
+        browser.apply_input(
+            &window::WindowInput {
+                mouse_position: Some((menu_rect.x + 2.0, menu_rect.y + 2.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        // Menu click registers as a chrome action: status flips to the stub label and the
+        // current document is left untouched (no fall-through to page link handling).
+        assert_eq!(browser.status_text, "menu (todo)");
+        assert_eq!(browser.document_html, original_html);
     }
 }
