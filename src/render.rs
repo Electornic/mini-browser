@@ -15,6 +15,16 @@ pub enum DisplayCommand {
     /// positions in 0..1 along the gradient axis so the rasterizer doesn't
     /// have to redo the auto-position math.
     Gradient(GradientCommand),
+    /// Outset box-shadow: a colored rectangle (already shifted by offset and
+    /// inflated by spread) with a linear-ramp blur band around the edges.
+    BoxShadow(ShadowCommand),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShadowCommand {
+    pub rect: Rect,
+    pub blur_radius: f32,
+    pub color: Color,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -104,6 +114,10 @@ pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<Dis
                 gradient.rect.x += dx;
                 gradient.rect.y += dy;
             }
+            DisplayCommand::BoxShadow(shadow) => {
+                shadow.rect.x += dx;
+                shadow.rect.y += dy;
+            }
         }
     }
 
@@ -130,6 +144,9 @@ pub fn rasterize(
             DisplayCommand::Image(image) => draw_image(&mut buffer, width, height, image),
             DisplayCommand::Gradient(gradient) => {
                 fill_gradient(&mut buffer, width, height, gradient)
+            }
+            DisplayCommand::BoxShadow(shadow) => {
+                fill_box_shadow(&mut buffer, width, height, shadow)
             }
         }
     }
@@ -212,8 +229,13 @@ fn paint_non_positioned(
 }
 
 fn paint_self(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>, alpha: f32) {
-    // Per-box paint order is background-color -> background-image (gradient)
-    // -> border -> text, matching CSS spec stacking within a single element.
+    // Per-box paint order is shadow -> background-color -> background-image
+    // (gradient) -> border -> text, matching CSS spec stacking within a
+    // single element. Shadow is emitted first so the box's own bg covers
+    // the part of the shadow that overlaps with the box.
+    if let Some(command) = shadow_command(layout_box, alpha) {
+        commands.push(command);
+    }
     if let Some(command) = background_command(layout_box, alpha) {
         commands.push(command);
     }
@@ -295,6 +317,28 @@ fn z_index_of(layout_box: &LayoutBox) -> i32 {
         Some(Value::Length(value, _)) => *value as i32,
         _ => 0,
     }
+}
+
+fn shadow_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
+    let node = layout_box.styled_node()?;
+    let shadow = match node.value("box-shadow") {
+        Some(Value::BoxShadow(shadow)) => *shadow,
+        _ => return None,
+    };
+    // The shadow is anchored to the *border* box, then offset and inflated by
+    // the spread. Negative spread shrinks; positive spread grows symmetrically.
+    let border = layout_box.dimensions.border_box();
+    let rect = Rect {
+        x: border.x + shadow.offset_x - shadow.spread_radius,
+        y: border.y + shadow.offset_y - shadow.spread_radius,
+        width: (border.width + 2.0 * shadow.spread_radius).max(0.0),
+        height: (border.height + 2.0 * shadow.spread_radius).max(0.0),
+    };
+    Some(DisplayCommand::BoxShadow(ShadowCommand {
+        rect,
+        blur_radius: shadow.blur_radius,
+        color: apply_alpha(shadow.color, alpha),
+    }))
 }
 
 fn background_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
@@ -587,6 +631,62 @@ fn fill_rect(buffer: &mut [u32], width: usize, height: usize, color: Color, rect
             let g = (a * cg + inv * ((bg >> 8) & 0xFF)) / 255;
             let b = (a * cb + inv * (bg & 0xFF)) / 255;
             buffer[row + x] = (r << 16) | (g << 8) | b;
+        }
+    }
+}
+
+fn fill_box_shadow(buffer: &mut [u32], width: usize, height: usize, shadow: &ShadowCommand) {
+    if shadow.color.a == 0 {
+        return;
+    }
+    if shadow.rect.width <= 0.0 || shadow.rect.height <= 0.0 {
+        return;
+    }
+
+    let blur = shadow.blur_radius;
+    // Affected region = shadow rect inflated by `blur` on every side. Anything
+    // farther than `blur` from the rect edge has zero coverage.
+    let x_start = (shadow.rect.x - blur).max(0.0).floor() as usize;
+    let y_start = (shadow.rect.y - blur).max(0.0).floor() as usize;
+    let x_end = (((shadow.rect.x + shadow.rect.width + blur).ceil()).max(0.0) as usize).min(width);
+    let y_end =
+        (((shadow.rect.y + shadow.rect.height + blur).ceil()).max(0.0) as usize).min(height);
+
+    let left = shadow.rect.x;
+    let top = shadow.rect.y;
+    let right = shadow.rect.x + shadow.rect.width;
+    let bottom = shadow.rect.y + shadow.rect.height;
+
+    for y in y_start..y_end {
+        for x in x_start..x_end {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            // Distance from this pixel to the *closest* point inside the
+            // shadow rect. Pixels inside the rect score zero distance and
+            // therefore full coverage — outside, the linear ramp falls off
+            // over `blur` distance and clamps to 0 beyond that.
+            let dx = (left - px).max(0.0).max(px - right);
+            let dy = (top - py).max(0.0).max(py - bottom);
+            let dist = (dx * dx + dy * dy).sqrt();
+            let coverage = if blur > 0.0 {
+                (1.0 - dist / blur).clamp(0.0, 1.0)
+            } else if dist == 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            let combined_alpha = ((shadow.color.a as f32) * coverage) as u32;
+            if combined_alpha == 0 {
+                continue;
+            }
+
+            let idx = y * width + x;
+            let bg = buffer[idx];
+            let inv = 255 - combined_alpha;
+            let r = (combined_alpha * shadow.color.r as u32 + inv * ((bg >> 16) & 0xFF)) / 255;
+            let g = (combined_alpha * shadow.color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
+            let b = (combined_alpha * shadow.color.b as u32 + inv * (bg & 0xFF)) / 255;
+            buffer[idx] = (r << 16) | (g << 8) | b;
         }
     }
 }
@@ -2014,6 +2114,68 @@ mod tests {
         assert_eq!(pixels[1], 0x000000FF);
         assert_eq!(pixels[2], 0x000000FF);
         assert_eq!(pixels[3], 0x000000FF);
+    }
+
+    #[test]
+    fn box_shadow_offset_paints_solid_outside_box_with_no_blur() {
+        // 2×2 box at (0, 0) with `box-shadow: 2px 2px 0 0 red`. Shadow lands
+        // at (2, 2)–(4, 4) with no blur, so pixels there should be solid red
+        // and pixels inside the box itself stay covered by its own bg.
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 2px;
+                    height: 2px;
+                    background-color: white;
+                    box-shadow: 2px 2px 0 0 red;
+                }
+            "#,
+        );
+        let pixels = render::rasterize(&commands, 4, 4, &[]);
+
+        // (3, 3): inside the shadow, fully red.
+        assert_eq!(pixels[3 * 4 + 3], 0x00FF0000);
+        // (0, 0): inside the box's own white background — shadow not visible there.
+        assert_eq!(pixels[0], 0x00FFFFFF);
+    }
+
+    #[test]
+    fn box_shadow_blur_softens_alpha_outside_rect() {
+        // `box-shadow: 0 0 4px black` with no offset. Inside the rect the
+        // box's own white bg paints over the shadow, so the test focuses on
+        // pixels OUTSIDE: ones close to the edge get a soft darken from the
+        // linear-ramp blur, ones beyond the blur radius are untouched.
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 4px;
+                    height: 4px;
+                    background-color: white;
+                    box-shadow: 0 0 4px black;
+                }
+            "#,
+        );
+        // 12×12 buffer leaves at least a 4px margin on every side of the box.
+        let pixels = render::rasterize(&commands, 12, 12, &[]);
+
+        // (5, 2): 1.5px past the right edge → coverage 1 - 1.5/4 = 0.625,
+        // pixel reads roughly mid-gray.
+        let near = pixels[2 * 12 + 5];
+        let near_r = (near >> 16) & 0xFF;
+        assert!(
+            near_r < 200,
+            "near-edge pixel should be visibly darkened, got r={near_r}"
+        );
+
+        // (8, 2): 4.5px past the right edge — beyond the blur radius, so
+        // coverage clamps to 0 and the pixel stays full white.
+        let far = pixels[2 * 12 + 8];
+        assert_eq!(
+            far, 0x00FFFFFF,
+            "pixel beyond the blur radius should be untouched"
+        );
     }
 
     #[test]

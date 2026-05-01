@@ -112,6 +112,18 @@ pub enum Value {
     // as a `background-image`. The shared `Gradient` carries the stops and
     // a `kind` enum that distinguishes the variant.
     Gradient(Gradient),
+    // `box-shadow` value. MVP supports a single outset shadow with optional
+    // blur, spread, and color — no inset, no comma-separated shadow lists.
+    BoxShadow(BoxShadow),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxShadow {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub blur_radius: f32,
+    pub spread_radius: f32,
+    pub color: Color,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -475,8 +487,96 @@ impl<'a> Parser<'a> {
             return self.parse_border_radius_shorthand();
         }
 
+        if name == "box-shadow" {
+            let value = self.parse_box_shadow_value()?;
+            return Ok(vec![Declaration { name, value }]);
+        }
+
         let value = self.parse_value()?;
         Ok(vec![Declaration { name, value }])
+    }
+
+    fn parse_box_shadow_value(&mut self) -> Result<Value, ParseError> {
+        // Grammar (MVP): <offset-x> <offset-y> [<blur>] [<spread>] [<color>].
+        // We greedily consume up to four leading lengths (offset-x, offset-y,
+        // blur, spread) and then anything left over is the color. `inset` and
+        // multi-shadow comma lists are out of scope here.
+        let offset_x = self.parse_length_token()?;
+        self.consume_whitespace();
+        let offset_y = self.parse_length_token()?;
+        self.consume_whitespace();
+
+        let mut blur_radius = 0.0;
+        let mut spread_radius = 0.0;
+        for slot in 0..2 {
+            if !self.peek_starts_length() {
+                break;
+            }
+            let value = self.parse_length_token()?;
+            if slot == 0 {
+                blur_radius = value.max(0.0);
+            } else {
+                spread_radius = value;
+            }
+            self.consume_whitespace();
+        }
+
+        let color = if matches!(self.next_char(), Some(';') | Some('}') | None) {
+            // Default shadow color: opaque black, matching the common toy use.
+            Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }
+        } else {
+            match self.parse_value()? {
+                Value::Color(color) => color,
+                other => {
+                    return Err(ParseError::new(
+                        self.pos,
+                        format!("expected color in box-shadow, got {other:?}"),
+                    ));
+                }
+            }
+        };
+
+        Ok(Value::BoxShadow(BoxShadow {
+            offset_x,
+            offset_y,
+            blur_radius,
+            spread_radius,
+            color,
+        }))
+    }
+
+    fn parse_length_token(&mut self) -> Result<f32, ParseError> {
+        // Reuse the generic value parser so a leading minus / unitless number
+        // path is handled exactly like elsewhere, then narrow the result to a
+        // numeric component.
+        let value = self.parse_value()?;
+        match value {
+            Value::Length(v, _) => Ok(v),
+            Value::Number(v) => Ok(v),
+            other => Err(ParseError::new(
+                self.pos,
+                format!("expected a length token, got {other:?}"),
+            )),
+        }
+    }
+
+    fn peek_starts_length(&self) -> bool {
+        // Token that can start a numeric value: digit, decimal point, or a
+        // minus sign followed by either of those.
+        match self.next_char() {
+            Some(ch) if ch.is_ascii_digit() || ch == '.' => true,
+            Some('-') => {
+                let mut chars = self.input[self.pos..].chars();
+                chars.next();
+                matches!(chars.next(), Some(ch) if ch.is_ascii_digit() || ch == '.')
+            }
+            _ => false,
+        }
     }
 
     fn parse_border_radius_shorthand(&mut self) -> Result<Vec<Declaration>, ParseError> {
@@ -870,8 +970,8 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Color, Combinator, GradientDirection, GradientKind, PseudoClass, Selector, SimpleSelector,
-        SimpleSelectorKind, Unit, Value, parse,
+        BoxShadow, Color, Combinator, GradientDirection, GradientKind, PseudoClass, Selector,
+        SimpleSelector, SimpleSelectorKind, Unit, Value, parse,
     };
 
     #[test]
@@ -1331,6 +1431,68 @@ mod tests {
             gradient.kind,
             GradientKind::Linear(GradientDirection::ToRight)
         );
+    }
+
+    #[test]
+    fn parses_box_shadow_full_form() {
+        // `5px 10px 15px 2px black` populates every component in order.
+        let stylesheet = parse(".a { box-shadow: 5px 10px 15px 2px black; }").unwrap();
+        let value = &stylesheet.rules[0].declarations[0].value;
+        let shadow = match value {
+            Value::BoxShadow(shadow) => *shadow,
+            other => panic!("expected BoxShadow, got {other:?}"),
+        };
+        assert_eq!(
+            shadow,
+            BoxShadow {
+                offset_x: 5.0,
+                offset_y: 10.0,
+                blur_radius: 15.0,
+                spread_radius: 2.0,
+                color: Color {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parses_box_shadow_minimal_form_uses_defaults() {
+        // Just two offsets — blur/spread default to 0, color defaults to opaque black.
+        let stylesheet = parse(".a { box-shadow: 5px 10px; }").unwrap();
+        let shadow = match &stylesheet.rules[0].declarations[0].value {
+            Value::BoxShadow(shadow) => *shadow,
+            other => panic!("expected BoxShadow, got {other:?}"),
+        };
+        assert_eq!(shadow.offset_x, 5.0);
+        assert_eq!(shadow.offset_y, 10.0);
+        assert_eq!(shadow.blur_radius, 0.0);
+        assert_eq!(shadow.spread_radius, 0.0);
+        assert_eq!(
+            shadow.color,
+            Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
+    }
+
+    #[test]
+    fn parses_box_shadow_with_negative_offsets() {
+        let stylesheet = parse(".a { box-shadow: -3px -4px 8px red; }").unwrap();
+        let shadow = match &stylesheet.rules[0].declarations[0].value {
+            Value::BoxShadow(shadow) => *shadow,
+            other => panic!("expected BoxShadow, got {other:?}"),
+        };
+        assert_eq!(shadow.offset_x, -3.0);
+        assert_eq!(shadow.offset_y, -4.0);
+        assert_eq!(shadow.blur_radius, 8.0);
+        assert_eq!(shadow.color.r, 255);
     }
 
     #[test]

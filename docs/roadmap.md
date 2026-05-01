@@ -9,7 +9,7 @@
 | 0 | Done | Block layout + Chrome-style UI | URL 인자 없이 실행 시 Chrome NTP 모양의 시작 페이지가 보인다 |
 | 1A | Done | Values & Selectors | %/em/rem 단위, named/rgb/rgba 색상, descendant/child 셀렉터, :hover/:focus/:active |
 | 1B | Done | Layout Modes | inline-block ✅, position: relative/absolute/fixed ✅, stacking/z-index ✅, margin collapse ✅, line-height ✅, float ✅ |
-| 1C | In progress | Paint | opacity ✅, linear-gradient ✅, radial-gradient ✅, box-shadow, transform |
+| 1C | In progress | Paint | opacity ✅, linear-gradient ✅, radial-gradient ✅, box-shadow ✅, text-shadow, transform |
 | 1D | Backlog | Big Layout | Flexbox / Grid |
 | 2 | Backlog | JS Engine Integration | Boa 엔진 임베드 + DOM 바인딩, 단순 JS 동작 페이지 렌더 |
 
@@ -100,7 +100,7 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 | `opacity` / alpha compositing | Done | render.rs | 3-5d | ★★ | paint pass에 inherited alpha 스레딩, 각 노드의 effective = inherited × own. positioned 자손은 collect 시점에 ancestor chain의 cumulative alpha를 함께 저장해 stacking context 분리에도 chain 보존. fill_rect/fill_rounded_rect에 source-over 블렌딩 추가, fontdue 글리프 coverage에 color.a 곱해 글리프 자체도 attenuate. **간이화**: 부모 단위 compositing group(offscreen buffer)이 아닌 노드별 곱셈이라 겹친 자식들은 진짜 한 그룹으로 합쳐지지 않음 |
 | Linear gradient | Done | render.rs, css.rs | 1w | ★★ | css 파서에 `linear-gradient(...)` 함수 인식 + `Value::Gradient` 추가. `LinearGradient { direction, stops }`, stop은 `(color, Option<f32> position)`. 방향은 `to top/bottom/left/right`(default bottom). render에 `DisplayCommand::LinearGradient` + `gradient_command` emitter (background-image 읽음). 파라미터 alpha까지 적용. raster는 픽셀별 progress 계산 → 인접 stop 사이 RGB lerp → source-over 블렌드. auto position은 paint emit 시점에 spec 룰대로 분배 (1번/마지막 0/1, 사이 빠진 곳 균등). **간이화**: angle/corner direction, conic/radial은 미구현 |
 | Radial gradient | Done | render.rs, css.rs | 3-5d | ★ | css에 `radial-gradient(<stops>)` 파서 추가, 기존 `LinearGradient` 타입을 `Gradient { kind, stops }` + `GradientKind { Linear(direction), Radial }`로 일반화. render의 `DisplayCommand::LinearGradient`도 `Gradient`로 통합되어 single fill_gradient 함수가 kind에 따라 progress 계산 분기. radial은 ellipse(rect 중앙, 반지름 rect/2) 기준 normalised distance √((nx)²+(ny)²)를 progress로 사용. **간이화**: shape/size/position 인자는 미파싱 — 항상 ellipse-at-center, farthest-corner |
-| `box-shadow` | Backlog | render.rs | 1w | ★★ | |
+| `box-shadow` | Done | render.rs, css.rs | 1w | ★★ | css에 `Value::BoxShadow`(offset/blur/spread/color) + `parse_box_shadow_value`. parse_declaration에서 `box-shadow` 이름이면 special-case로 dispatch (border-radius와 동일 패턴). render는 `DisplayCommand::BoxShadow` + `shadow_command` (border-box를 offset+spread로 변형) + paint_self가 shadow → bg → gradient → border → text 순서로 emit. raster는 픽셀별 distance-to-rect 기반 linear-ramp coverage, source-over blend. **간이화**: outset only(no inset), single shadow only(no comma list), Gaussian 대신 linear-ramp 근사, border-radius와 무관한 sharp corner |
 | `text-shadow` | Backlog | render.rs | 3d | ★ | |
 | `transform: translate/scale/rotate` | Backlog | render.rs, layout.rs | 2-3w | ★★★ | affine matrix, hit-test 재설계 |
 

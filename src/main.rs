@@ -1107,6 +1107,7 @@ fn document_height(commands: &[render::DisplayCommand]) -> f32 {
             render::DisplayCommand::Text(text) => text.y + text.font_size,
             render::DisplayCommand::Image(image) => image.y + image.height,
             render::DisplayCommand::Gradient(gradient) => gradient.rect.y + gradient.rect.height,
+            render::DisplayCommand::BoxShadow(shadow) => shadow.rect.y + shadow.rect.height,
         };
         max_bottom.max(bottom)
     })
