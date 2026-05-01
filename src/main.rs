@@ -1102,7 +1102,7 @@ fn sample_css() -> &'static str {
             margin-right: auto;
         }
         .tile {
-            width: 48px;
+            width: 96px;
             height: 16px;
             padding-top: 36px;
             padding-bottom: 12px;

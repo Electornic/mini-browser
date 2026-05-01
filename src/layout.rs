@@ -221,10 +221,13 @@ fn layout_inline_node(node: &StyledNode, x: f32, y: f32) -> LayoutBox {
     let content_x = x + margin.left + border.left + padding.left;
     let content_y = y + margin.top + border.top + padding.top;
 
-    // Nested inline children are positioned relative to their inline parent's content box.
+    // Nested inline children are positioned relative to their inline parent's content box,
+    // honoring text-align so labels inside an inline element (e.g. <a class="tile">) can
+    // be centered instead of always sticking to the left edge.
     let children = if matches!(&node.node.node_type, NodeType::Element(element) if element.tag_name != "img")
     {
-        layout_inline_sequence_no_wrap(&node.children, content_x, content_y)
+        let align = inline_align_for(node);
+        layout_inline_sequence_no_wrap(&node.children, content_x, content_y, content_width, align)
     } else {
         Vec::new()
     };
@@ -246,8 +249,25 @@ fn layout_inline_node(node: &StyledNode, x: f32, y: f32) -> LayoutBox {
     }
 }
 
-fn layout_inline_sequence_no_wrap(children: &[StyledNode], x: f32, y: f32) -> Vec<LayoutBox> {
-    let mut cursor_x = x;
+fn layout_inline_sequence_no_wrap(
+    children: &[StyledNode],
+    content_x: f32,
+    y: f32,
+    content_width: f32,
+    align: InlineAlign,
+) -> Vec<LayoutBox> {
+    // Sum widths first so we know how much horizontal slack the line has before placing boxes.
+    let total_width: f32 = children
+        .iter()
+        .map(|child| inline_total_size(child).width)
+        .sum();
+    let line_offset = match align {
+        InlineAlign::Left => 0.0,
+        InlineAlign::Center => ((content_width - total_width) / 2.0).max(0.0),
+        InlineAlign::Right => (content_width - total_width).max(0.0),
+    };
+
+    let mut cursor_x = content_x + line_offset;
     let mut boxes = Vec::new();
 
     for child in children {
@@ -594,6 +614,28 @@ mod tests {
 
         // No alignment override means the line still starts at content_x = 0.
         assert_eq!(link.dimensions.content.x, 0.0);
+    }
+
+    #[test]
+    fn text_align_center_offsets_inline_children_inside_inline_element() {
+        // text-align is inherited, so the <span> inside the <a> picks up the centered
+        // alignment from <p> and offsets within the <a>'s own content box.
+        let styled = styled_root(
+            r#"<p><a href="/x"><span>Go</span></a></p>"#,
+            r#"
+                p { width: 200px; text-align: center; }
+                a { width: 100px; }
+                span { width: 40px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 400.0);
+        let link = &layout.children[0];
+        let span = &link.children[0];
+
+        // <a> centers within <p>: (200 - 100) / 2 = 50.
+        assert_eq!(link.dimensions.content.x, 50.0);
+        // <span> centers within <a>: (100 - 40) / 2 = 30, plus the link's content_x = 80.
+        assert_eq!(span.dimensions.content.x, 80.0);
     }
 
     #[test]
