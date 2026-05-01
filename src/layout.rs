@@ -1,5 +1,5 @@
 use crate::{
-    css::{TrackSize, Unit, Value},
+    css::{GridLine, TrackSize, Unit, Value},
     dom::{ElementData, NodeType},
     style::StyledNode,
 };
@@ -739,6 +739,20 @@ fn container_box_type(node: &StyledNode) -> BoxType {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct GridArea {
+    row_start: usize,
+    row_end: usize, // exclusive
+    col_start: usize,
+    col_end: usize, // exclusive
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AxisHint {
+    explicit_start: Option<usize>, // 0-indexed cell
+    span: usize,                   // always >= 1
+}
+
 fn layout_grid_children<'a>(
     container: &'a StyledNode,
     children: &'a [StyledNode],
@@ -747,17 +761,21 @@ fn layout_grid_children<'a>(
     content_width: f32,
 ) -> (Vec<LayoutBox>, f32) {
     // Four-pass placement.
-    //   Pass 0: lay each in-flow item out at the container origin with the
-    //           full container width as available_width, just to measure
-    //           natural outer widths. Auto tracks need these; Length/fr
-    //           tracks ignore them. Auto-flow is row-major: item k goes to
-    //           (row = k / n_cols, col = k % n_cols).
-    //   Pass 1: resolve column tracks to pixel widths using the natural-width
-    //           samples (auto tracks pick the column max).
-    //   Pass 2: shift each item to its track's x and grow its content to
-    //           fill the track when no explicit width was declared.
-    //   Pass 3: compute each row's height (max outer height) and shift each
-    //           item down by its row's cumulative y offset.
+    //   Pass 0: assign each in-flow item a GridArea via grid-column/grid-row
+    //           (when explicit) plus row-major auto-flow filling around the
+    //           explicit cells. Items spanning multiple cells claim a
+    //           rectangular block. Then lay each item out at the container
+    //           origin to measure natural outer widths.
+    //   Pass 1: resolve column tracks. Auto tracks pick the per-column max
+    //           natural width (spanned items contribute to col_start only —
+    //           a known toy simplification of spec's "distribute across
+    //           spanned tracks" rule).
+    //   Pass 2: shift each item to its column-start track and grow its
+    //           content to fill the spanned columns when no explicit width
+    //           was declared.
+    //   Pass 3: resolve row heights via grid-template-rows + natural per-row
+    //           max. Shift each item down by its row-start offset and grow
+    //           content height to fill spanned rows when no explicit height.
     //
     // Out-of-flow children skip the grid entirely — they sit at the container
     // origin during pass 0 and the absolute reposition pass at the tree root
@@ -769,9 +787,10 @@ fn layout_grid_children<'a>(
     let n_cols = track_decls.map(|t| t.len()).unwrap_or(1).max(1);
 
     let mut boxes: Vec<LayoutBox> = Vec::with_capacity(children.len());
-    // Each entry: (row, col, boxes index, source styled node) for one in-flow item.
-    let mut cell_assignments: Vec<(usize, usize, usize, &'a StyledNode)> = Vec::new();
-    let mut next_cell = 0usize;
+    // For each in-flow item: its area + boxes index + source styled node.
+    let mut cell_assignments: Vec<(GridArea, usize, &'a StyledNode)> = Vec::new();
+    let mut occupancy = Occupancy::new(n_cols);
+    let mut cursor = (0usize, 0usize);
 
     for child in children {
         if is_out_of_flow(child) {
@@ -779,11 +798,11 @@ fn layout_grid_children<'a>(
             boxes.push(abs_box);
             continue;
         }
-        let col = next_cell % n_cols;
-        let row = next_cell / n_cols;
-        next_cell += 1;
+        let col_hint = axis_hint_from(child.value("grid-column"));
+        let row_hint = axis_hint_from(child.value("grid-row"));
+        let area = place_grid_item(&mut occupancy, &mut cursor, n_cols, col_hint, row_hint);
         let box_idx = boxes.len();
-        cell_assignments.push((row, col, box_idx, child));
+        cell_assignments.push((area, box_idx, child));
         // Pre-pass: lay out at the container origin so we can read the
         // item's natural outer width before knowing its track width.
         boxes.push(layout_inline_block_node(
@@ -794,12 +813,13 @@ fn layout_grid_children<'a>(
         ));
     }
 
-    // Per-column natural max outer width — feeds auto track sizing.
+    // Per-column natural max outer width — feeds auto track sizing. Spanned
+    // items contribute to col_start only (toy simplification).
     let mut natural_max_per_col = vec![0.0_f32; n_cols];
-    for &(_, col, box_idx, _) in &cell_assignments {
+    for &(area, box_idx, _) in &cell_assignments {
         let w = outer_rect(&boxes[box_idx]).width;
-        if w > natural_max_per_col[col] {
-            natural_max_per_col[col] = w;
+        if w > natural_max_per_col[area.col_start] {
+            natural_max_per_col[area.col_start] = w;
         }
     }
 
@@ -811,40 +831,43 @@ fn layout_grid_children<'a>(
         acc += w;
     }
 
-    // Pass 2: shift each item to its track and grow content to fill.
-    for &(_, col, box_idx, child) in &cell_assignments {
-        let target_outer_x = content_x + col_offsets[col];
+    // Pass 2: shift each item to its track-start x and grow content to fill
+    // the spanned columns (sum of widths from col_start..col_end).
+    for &(area, box_idx, child) in &cell_assignments {
+        let target_outer_x = content_x + col_offsets[area.col_start];
         let current_outer_x = outer_rect(&boxes[box_idx]).x;
         let dx = target_outer_x - current_outer_x;
         if dx != 0.0 {
             shift_layout_subtree(&mut boxes[box_idx], dx, 0.0);
         }
         if !matches!(child.value("width"), Some(Value::Length(_, _))) {
+            let span_width: f32 = columns[area.col_start..area.col_end.min(columns.len())]
+                .iter()
+                .sum();
             let edges =
                 outer_rect(&boxes[box_idx]).width - boxes[box_idx].dimensions.content.width;
-            let target = (columns[col] - edges).max(0.0);
+            let target = (span_width - edges).max(0.0);
             if boxes[box_idx].dimensions.content.width < target {
                 boxes[box_idx].dimensions.content.width = target;
             }
         }
     }
 
-    // Pass 3: natural row heights = max(item outer height) per row.
+    // Pass 3: natural row heights = max(item outer height) per row, with
+    // spanned items contributing to row_start only.
     let n_rows = cell_assignments
         .iter()
-        .map(|&(row, _, _, _)| row + 1)
+        .map(|&(area, _, _)| area.row_end)
         .max()
         .unwrap_or(0);
     let mut natural_row_heights = vec![0.0_f32; n_rows];
-    for &(row, _, box_idx, _) in &cell_assignments {
+    for &(area, box_idx, _) in &cell_assignments {
         let h = outer_rect(&boxes[box_idx]).height;
-        if h > natural_row_heights[row] {
-            natural_row_heights[row] = h;
+        if h > natural_row_heights[area.row_start] {
+            natural_row_heights[area.row_start] = h;
         }
     }
 
-    // Resolve `grid-template-rows` against the natural heights. Rows the
-    // template doesn't cover fall back to natural max.
     let row_track_decls = match container.value("grid-template-rows") {
         Some(Value::TrackList(tracks)) if !tracks.is_empty() => Some(tracks.as_slice()),
         _ => None,
@@ -862,15 +885,187 @@ fn layout_grid_children<'a>(
         row_offsets.push(acc);
         acc += h;
     }
-    for &(row, _, box_idx, _) in &cell_assignments {
-        let dy = row_offsets[row];
+    for &(area, box_idx, child) in &cell_assignments {
+        let dy = row_offsets[area.row_start];
         if dy != 0.0 {
             shift_layout_subtree(&mut boxes[box_idx], 0.0, dy);
+        }
+        // Row-span fill: when no explicit height, grow content to span the
+        // declared rows (sum of row_heights from row_start..row_end). Items
+        // with explicit height are left alone.
+        if area.row_end > area.row_start + 1
+            && !matches!(child.value("height"), Some(Value::Length(_, _)))
+        {
+            let span_height: f32 = row_heights[area.row_start..area.row_end.min(row_heights.len())]
+                .iter()
+                .sum();
+            let edges = outer_rect(&boxes[box_idx]).height
+                - boxes[box_idx].dimensions.content.height;
+            let target = (span_height - edges).max(0.0);
+            if boxes[box_idx].dimensions.content.height < target {
+                boxes[box_idx].dimensions.content.height = target;
+            }
         }
     }
 
     let auto_content_height: f32 = row_heights.iter().sum();
     (boxes, auto_content_height)
+}
+
+fn axis_hint_from(value: Option<&Value>) -> AxisHint {
+    let placement = match value {
+        Some(Value::GridPlacement(p)) => *p,
+        _ => {
+            return AxisHint {
+                explicit_start: None,
+                span: 1,
+            };
+        }
+    };
+    match (placement.start, placement.end) {
+        (GridLine::Index(s), GridLine::Index(e)) if e > s => AxisHint {
+            explicit_start: Some((s - 1) as usize),
+            span: (e - s) as usize,
+        },
+        (GridLine::Index(s), GridLine::Span(n)) => AxisHint {
+            explicit_start: Some((s - 1) as usize),
+            span: n.max(1) as usize,
+        },
+        (GridLine::Index(s), GridLine::Auto) => AxisHint {
+            explicit_start: Some((s - 1) as usize),
+            span: 1,
+        },
+        // `span <n>` as the start side: no explicit anchor, but the item
+        // claims n cells when auto-placed.
+        (GridLine::Span(n), _) => AxisHint {
+            explicit_start: None,
+            span: n.max(1) as usize,
+        },
+        // Anything else (e.g. `auto / 3` — end-only) falls back to a
+        // single-cell auto placement. Toy doesn't try to honor end-only
+        // line constraints because they need a back-search through the
+        // already-placed items.
+        _ => AxisHint {
+            explicit_start: None,
+            span: 1,
+        },
+    }
+}
+
+#[derive(Debug)]
+struct Occupancy {
+    cells: Vec<Vec<bool>>,
+    n_cols: usize,
+}
+
+impl Occupancy {
+    fn new(n_cols: usize) -> Self {
+        Self {
+            cells: Vec::new(),
+            n_cols,
+        }
+    }
+
+    fn ensure_rows(&mut self, target_rows: usize) {
+        while self.cells.len() < target_rows {
+            self.cells.push(vec![false; self.n_cols]);
+        }
+    }
+
+    fn is_free(&self, row: usize, row_span: usize, col: usize, col_span: usize) -> bool {
+        for r in row..row + row_span {
+            for c in col..col + col_span {
+                if r < self.cells.len() && c < self.n_cols && self.cells[r][c] {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn mark(&mut self, row: usize, row_span: usize, col: usize, col_span: usize) {
+        self.ensure_rows(row + row_span);
+        for r in row..row + row_span {
+            for c in col..col + col_span {
+                if c < self.n_cols {
+                    self.cells[r][c] = true;
+                }
+            }
+        }
+    }
+}
+
+fn place_grid_item(
+    occupancy: &mut Occupancy,
+    cursor: &mut (usize, usize),
+    n_cols: usize,
+    col_hint: AxisHint,
+    row_hint: AxisHint,
+) -> GridArea {
+    // Clamp spans to the declared track count: a cell range overflowing the
+    // explicit grid would create implicit tracks per spec, but the toy
+    // ignores those.
+    let col_span = col_hint.span.clamp(1, n_cols.max(1));
+    let row_span = row_hint.span.max(1);
+
+    let (row_s, col_s) = match (row_hint.explicit_start, col_hint.explicit_start) {
+        // Both axes anchored — drop the item exactly at (rs, cs), clamped.
+        (Some(rs), Some(cs)) => {
+            let cs = cs.min(n_cols.saturating_sub(col_span));
+            (rs, cs)
+        }
+        // Column anchored — scan rows for one where the item's spanned
+        // columns are all free for `row_span` rows.
+        (None, Some(cs)) => {
+            let cs = cs.min(n_cols.saturating_sub(col_span));
+            let mut row = 0usize;
+            while !occupancy.is_free(row, row_span, cs, col_span) {
+                row += 1;
+            }
+            (row, cs)
+        }
+        // Row anchored — scan columns at that row for the first free run.
+        (Some(rs), None) => {
+            let mut col = 0usize;
+            while col + col_span <= n_cols && !occupancy.is_free(rs, row_span, col, col_span) {
+                col += 1;
+            }
+            // Items wider than n_cols overflow at col 0 (toy fallback).
+            let col = col.min(n_cols.saturating_sub(col_span));
+            (rs, col)
+        }
+        // No anchors — walk the auto-flow cursor row-major, wrapping when
+        // we'd exceed n_cols and skipping cells already occupied by the
+        // explicit-placed items above.
+        (None, None) => {
+            let (mut row, mut col) = *cursor;
+            loop {
+                if col + col_span > n_cols {
+                    row += 1;
+                    col = 0;
+                    continue;
+                }
+                if occupancy.is_free(row, row_span, col, col_span) {
+                    break;
+                }
+                col += 1;
+            }
+            *cursor = (row, col + col_span);
+            if cursor.1 >= n_cols {
+                cursor.0 += 1;
+                cursor.1 = 0;
+            }
+            (row, col)
+        }
+    };
+
+    occupancy.mark(row_s, row_span, col_s, col_span);
+    GridArea {
+        row_start: row_s,
+        row_end: row_s + row_span,
+        col_start: col_s,
+        col_end: col_s + col_span,
+    }
 }
 
 fn resolve_grid_rows(
@@ -3546,6 +3741,115 @@ mod tests {
         assert_eq!(e.dimensions.content.y, 100.0);
         // Container height = 50 + 50 + 70 = 170.
         assert_eq!(layout.dimensions.content.height, 170.0);
+    }
+
+    #[test]
+    fn grid_column_explicit_placement_anchors_item_to_specified_track() {
+        // 4-column grid, single item with grid-column: 3 → item lands at
+        // col 2 (line 3 - 1), not col 0.
+        let styled = styled_root(
+            r#"<div id="g"><div class="a"></div></div>"#,
+            r#"
+                #g { display: grid; grid-template-columns: 50px 50px 50px 50px; width: 200px; }
+                .a { height: 30px; }
+                .a { grid-column: 3; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        // col 2 starts at x = 100 (50 + 50).
+        assert_eq!(a.dimensions.content.x, 100.0);
+        // Single-cell span keeps width at the track width = 50.
+        assert_eq!(a.dimensions.content.width, 50.0);
+    }
+
+    #[test]
+    fn grid_column_span_widens_item_across_multiple_tracks() {
+        // grid-column: 1 / span 3 → cells 0..3, sum widths = 50+50+50 = 150.
+        let styled = styled_root(
+            r#"<div id="g"><div class="a"></div></div>"#,
+            r#"
+                #g { display: grid; grid-template-columns: 50px 50px 50px 50px; width: 200px; }
+                .a { height: 30px; grid-column: 1 / span 3; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        assert_eq!(a.dimensions.content.x, 0.0);
+        assert_eq!(a.dimensions.content.width, 150.0);
+    }
+
+    #[test]
+    fn grid_row_span_grows_height_to_cover_span() {
+        // 2 columns, items #1 spans both rows. Items #2 and #3 fill row 0
+        // col 1 and row 1 col 1 via auto-flow.
+        let styled = styled_root(
+            r#"<div id="g">
+                <div class="span"></div>
+                <div class="b"></div>
+                <div class="c"></div>
+            </div>"#,
+            r#"
+                #g {
+                    display: grid;
+                    grid-template-columns: 100px 100px;
+                    grid-template-rows: 40px 60px;
+                    width: 200px;
+                }
+                .span { grid-row: 1 / span 2; }
+                .b { height: 20px; }
+                .c { height: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let span_box = &layout.children[0];
+        let b = &layout.children[1];
+        let c = &layout.children[2];
+
+        // Spanning item lives at (0, 0) and grows to row 0 + row 1 = 100 high.
+        assert_eq!(span_box.dimensions.content.x, 0.0);
+        assert_eq!(span_box.dimensions.content.y, 0.0);
+        assert_eq!(span_box.dimensions.content.height, 100.0);
+        // Auto-flow lands b at (0, 1) and c at (1, 1) — column 0 of row 1
+        // is occupied by the spanning item.
+        assert_eq!(b.dimensions.content.x, 100.0);
+        assert_eq!(b.dimensions.content.y, 0.0);
+        assert_eq!(c.dimensions.content.x, 100.0);
+        assert_eq!(c.dimensions.content.y, 40.0);
+    }
+
+    #[test]
+    fn grid_auto_flow_skips_cells_occupied_by_explicit_placement() {
+        // Item .first explicitly occupies col 0 / row 1. Auto-flow items go
+        // around it: a → (0, 0), b → (0, 1), .first → (1, 0), c → (1, 1).
+        let styled = styled_root(
+            r#"<div id="g">
+                <div class="a"></div>
+                <div class="b"></div>
+                <div class="first"></div>
+                <div class="c"></div>
+            </div>"#,
+            r#"
+                #g {
+                    display: grid;
+                    grid-template-columns: 50px 50px;
+                    grid-template-rows: 30px 30px;
+                    width: 100px;
+                }
+                .a, .b, .c { height: 20px; }
+                .first { grid-column: 1; grid-row: 2; height: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+        let first = &layout.children[2];
+        let c = &layout.children[3];
+
+        assert_eq!((a.dimensions.content.x, a.dimensions.content.y), (0.0, 0.0));
+        assert_eq!((b.dimensions.content.x, b.dimensions.content.y), (50.0, 0.0));
+        assert_eq!((first.dimensions.content.x, first.dimensions.content.y), (0.0, 30.0));
+        assert_eq!((c.dimensions.content.x, c.dimensions.content.y), (50.0, 30.0));
     }
 
     #[test]

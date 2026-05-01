@@ -128,6 +128,31 @@ pub enum Value {
     // (it has no meaning as a stand-alone length), so it lives on `TrackSize`
     // instead of growing the global `Unit` enum.
     TrackList(Vec<TrackSize>),
+    // CSS Grid `grid-column` / `grid-row` placement. Encodes a (start, end)
+    // pair of grid lines or spans; the layout pass turns this into a
+    // (cell_start, cell_end) cell range that may be auto-resolved against the
+    // running grid cursor.
+    GridPlacement(GridPlacement),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridPlacement {
+    pub start: GridLine,
+    pub end: GridLine,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridLine {
+    /// Auto: the layout pass either picks the next available line via
+    /// auto-flow (when used as `start`) or treats the placement as span-1
+    /// (when used as `end`).
+    Auto,
+    /// Explicit grid line, 1-based per CSS spec. Layout subtracts 1 to map
+    /// to a 0-based cell index.
+    Index(u32),
+    /// `span <n>` form. Used for `start` ("auto-place but with span n") or
+    /// `end` ("starts wherever, ends n cells later").
+    Span(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -567,8 +592,70 @@ impl<'a> Parser<'a> {
             return Ok(vec![Declaration { name, value }]);
         }
 
+        if name == "grid-column" || name == "grid-row" {
+            let value = self.parse_grid_placement()?;
+            return Ok(vec![Declaration { name, value }]);
+        }
+
         let value = self.parse_value()?;
         Ok(vec![Declaration { name, value }])
+    }
+
+    fn parse_grid_placement(&mut self) -> Result<Value, ParseError> {
+        // `grid-column: <line> [/ <line>]?`. Each side is one of:
+        //   - `auto`
+        //   - `<integer>` (1-based grid line; negatives skipped for now)
+        //   - `span <integer>`
+        // Missing `/ <line>` defaults the end side to `auto`, which the
+        // layout pass interprets as span-1.
+        self.consume_whitespace();
+        let start = self.parse_grid_line()?;
+        self.consume_whitespace();
+        let end = if self.next_char() == Some('/') {
+            self.consume_char();
+            self.consume_whitespace();
+            self.parse_grid_line()?
+        } else {
+            GridLine::Auto
+        };
+        Ok(Value::GridPlacement(GridPlacement { start, end }))
+    }
+
+    fn parse_grid_line(&mut self) -> Result<GridLine, ParseError> {
+        // `auto` / `span <n>` come first because they're keyword-led.
+        if matches!(self.next_char(), Some(ch) if ch.is_ascii_alphabetic()) {
+            let keyword = self.parse_identifier()?;
+            return match keyword.as_str() {
+                "auto" => Ok(GridLine::Auto),
+                "span" => {
+                    self.consume_whitespace();
+                    let n = self.parse_grid_line_integer()?;
+                    if n == 0 {
+                        return Err(ParseError::new(self.pos, "span must be >= 1"));
+                    }
+                    Ok(GridLine::Span(n))
+                }
+                other => Err(ParseError::new(
+                    self.pos,
+                    format!("unsupported grid-line keyword '{other}'"),
+                )),
+            };
+        }
+        let n = self.parse_grid_line_integer()?;
+        if n == 0 {
+            return Err(ParseError::new(self.pos, "grid line must be >= 1"));
+        }
+        Ok(GridLine::Index(n))
+    }
+
+    fn parse_grid_line_integer(&mut self) -> Result<u32, ParseError> {
+        let digits = self.consume_while(|ch| ch.is_ascii_digit());
+        digits.parse::<u32>().map_err(|_| {
+            ParseError::new(
+                self.pos,
+                format!("invalid grid line integer '{digits}'"),
+            )
+        })
     }
 
     fn parse_grid_track_list(&mut self) -> Result<Value, ParseError> {
@@ -1379,8 +1466,9 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoxShadow, Color, Combinator, GradientDirection, GradientKind, PseudoClass, Selector,
-        SimpleSelector, SimpleSelectorKind, TextShadow, TrackSize, TransformOp, Unit, Value, parse,
+        BoxShadow, Color, Combinator, GradientDirection, GradientKind, GridLine, PseudoClass,
+        Selector, SimpleSelector, SimpleSelectorKind, TextShadow, TrackSize, TransformOp, Unit,
+        Value, parse,
     };
 
     #[test]
@@ -2087,6 +2175,43 @@ mod tests {
         };
         let positions: Vec<_> = gradient.stops.iter().map(|s| s.position).collect();
         assert_eq!(positions, vec![Some(0.0), Some(0.5), Some(1.0)]);
+    }
+
+    #[test]
+    fn grid_column_parses_index_slash_index() {
+        let stylesheet = parse(".a { grid-column: 1 / 3; }").unwrap();
+        let value = &stylesheet.rules[0].declarations[0].value;
+        match value {
+            Value::GridPlacement(p) => {
+                assert_eq!(p.start, GridLine::Index(1));
+                assert_eq!(p.end, GridLine::Index(3));
+            }
+            other => panic!("expected GridPlacement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grid_column_parses_span_form() {
+        let stylesheet = parse(".a { grid-column: 2 / span 4; }").unwrap();
+        match &stylesheet.rules[0].declarations[0].value {
+            Value::GridPlacement(p) => {
+                assert_eq!(p.start, GridLine::Index(2));
+                assert_eq!(p.end, GridLine::Span(4));
+            }
+            other => panic!("expected GridPlacement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grid_row_single_index_defaults_end_to_auto() {
+        let stylesheet = parse(".a { grid-row: 5; }").unwrap();
+        match &stylesheet.rules[0].declarations[0].value {
+            Value::GridPlacement(p) => {
+                assert_eq!(p.start, GridLine::Index(5));
+                assert_eq!(p.end, GridLine::Auto);
+            }
+            other => panic!("expected GridPlacement, got {other:?}"),
+        }
     }
 
     #[test]
