@@ -661,7 +661,7 @@ fn build_document_view(
     let layout = layout::layout_tree(&styled, viewport_width as f32);
     let mut commands = render::build_display_list(&layout);
     commands.extend(collect_image_commands(&layout, current_url, images));
-    let links = collect_link_targets(&layout, None, false);
+    let links = collect_link_targets(&layout, None, false, render::Affine::IDENTITY);
     Ok(DocumentView {
         commands,
         links,
@@ -1117,26 +1117,44 @@ fn collect_link_targets(
     layout_box: &layout::LayoutBox,
     inherited_href: Option<&str>,
     inherited_no_underline: bool,
+    inherited_transform: render::Affine,
 ) -> Vec<LinkTarget> {
     let own_href = href_for_layout_box(layout_box);
     let current_href = own_href.or(inherited_href);
     // text-decoration: none on any ancestor (typically the <a> itself) suppresses
     // underlines for everything below it.
     let no_underline = inherited_no_underline || has_text_decoration_none(layout_box);
+    // Compose this box's own `transform` onto the inherited matrix the same
+    // way the paint pass does. The link rect is stored in screen space so
+    // click hit-testing and underline drawing can stay axis-aligned for the
+    // translate-only support shipping in this commit.
+    let effective_transform = inherited_transform.compose(render::transform_for(layout_box));
     let mut targets = Vec::new();
 
     // Link targets are collected separately from display commands because clicking needs rectangles,
     // not just painted pixels.
     if let Some(href) = current_href.filter(|_| should_collect_link_target(layout_box, own_href)) {
+        let content = layout_box.dimensions.content;
+        let (x, y) = effective_transform.apply_point(content.x, content.y);
         targets.push(LinkTarget {
             href: href.to_string(),
-            rect: layout_box.dimensions.content,
+            rect: layout::Rect {
+                x,
+                y,
+                width: content.width,
+                height: content.height,
+            },
             underline: own_href.is_none() && !no_underline,
         });
     }
 
     for child in &layout_box.children {
-        targets.extend(collect_link_targets(child, current_href, no_underline));
+        targets.extend(collect_link_targets(
+            child,
+            current_href,
+            no_underline,
+            effective_transform,
+        ));
     }
 
     targets
@@ -1252,7 +1270,14 @@ fn compute_hovered_dom_path(
     // visited last.
     let mut best: Option<Vec<usize>> = None;
     let mut path: Vec<usize> = Vec::new();
-    walk_for_hover(layout_root, mouse_x, doc_y, &mut path, &mut best);
+    walk_for_hover(
+        layout_root,
+        mouse_x,
+        doc_y,
+        render::Affine::IDENTITY,
+        &mut path,
+        &mut best,
+    );
     best
 }
 
@@ -1260,16 +1285,23 @@ fn walk_for_hover(
     layout_box: &layout::LayoutBox,
     mouse_x: f32,
     doc_y: f32,
+    inherited_transform: render::Affine,
     path: &mut Vec<usize>,
     best: &mut Option<Vec<usize>>,
 ) {
+    // Compose this box's own `transform` onto the inherited matrix, then map
+    // the screen-space cursor back into the box's logical coordinates so the
+    // padding-box compare can stay axis-aligned. Pages without `transform`
+    // keep the matrix at identity, so the inverse + apply collapse to a no-op.
+    let effective_transform = inherited_transform.compose(render::transform_for(layout_box));
+    let (logical_x, logical_y) = effective_transform.inverse().apply_point(mouse_x, doc_y);
     let outer = padding_box(layout_box);
-    if point_in_rect(mouse_x, doc_y, outer) {
+    if point_in_rect(logical_x, logical_y, outer) {
         *best = Some(path.clone());
     }
     for (idx, child) in layout_box.children.iter().enumerate() {
         path.push(idx);
-        walk_for_hover(child, mouse_x, doc_y, path, best);
+        walk_for_hover(child, mouse_x, doc_y, effective_transform, path, best);
         path.pop();
     }
 }
@@ -1711,7 +1743,7 @@ mod tests {
             .unwrap();
         let styled = style::style_tree(&node, &[]);
         let layout_tree = layout::layout_tree(&styled, 300.0);
-        let links = collect_link_targets(&layout_tree, None, false);
+        let links = collect_link_targets(&layout_tree, None, false, render::Affine::IDENTITY);
 
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].href, "/next");
@@ -1730,7 +1762,7 @@ mod tests {
         let stylesheet = css::parse(".tile { text-decoration: none; }").unwrap();
         let styled = style::style_tree(&node, &[stylesheet]);
         let layout_tree = layout::layout_tree(&styled, 300.0);
-        let links = collect_link_targets(&layout_tree, None, false);
+        let links = collect_link_targets(&layout_tree, None, false, render::Affine::IDENTITY);
 
         // Both the <a> target and the inherited text target keep their click rects, but the
         // text-decoration declaration on the <a> suppresses the underline that would normally
@@ -1988,6 +2020,53 @@ mod tests {
         // text "hi" is laid out as the next inline child ([0, 0]). The hit-test descends
         // to the deepest containing box, so the text node wins.
         assert_eq!(path, Some(vec![0, 0]));
+    }
+
+    #[test]
+    fn hovered_dom_path_accounts_for_transform_translate() {
+        // The leaf is shifted right by 50px via `transform: translate`. A pointer
+        // at the leaf's *original* logical x should now MISS, while a pointer at
+        // the post-translate screen x should HIT the leaf.
+        let html_source = r#"<div id="root"><span class="leaf">hi</span></div>"#;
+        let css_source = r#"
+            #root { width: 200px; height: 80px; }
+            .leaf { width: 40px; height: 20px; transform: translate(50px, 0); }
+        "#;
+        let node = mini_browser::html::parse(html_source)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let stylesheet = mini_browser::css::parse(css_source).unwrap();
+        let styled = mini_browser::style::style_tree(&node, &[stylesheet]);
+        let layout = mini_browser::layout::layout_tree(&styled, 800.0);
+
+        // Logical x = 10 (inside leaf's untransformed box) but cursor is in
+        // *screen* space — after the leaf is translated by 50, screen x=10
+        // no longer overlaps the leaf, only the root.
+        let leaf_window_y = super::CHROME_HEIGHT + 5.0;
+        let logical_path = super::compute_hovered_dom_path(
+            &window::WindowInput {
+                mouse_position: Some((10.0, leaf_window_y)),
+                ..window::WindowInput::default()
+            },
+            &layout,
+            0.0,
+        );
+        // Root still covers the area around (10, 5); leaf does not. The
+        // hit-test should pick the root, not the now-shifted leaf.
+        assert_eq!(logical_path, Some(vec![]));
+
+        // Cursor at screen x=60 lands on the post-translate leaf box.
+        let translated_path = super::compute_hovered_dom_path(
+            &window::WindowInput {
+                mouse_position: Some((60.0, leaf_window_y)),
+                ..window::WindowInput::default()
+            },
+            &layout,
+            0.0,
+        );
+        assert_eq!(translated_path, Some(vec![0, 0]));
     }
 
     #[test]

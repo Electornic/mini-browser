@@ -119,6 +119,20 @@ pub enum Value {
     // The blur radius is parsed but not applied to glyph rendering yet;
     // sharpness vs softness on glyphs needs a real blur kernel.
     TextShadow(TextShadow),
+    // `transform` value: an ordered list of transform functions applied
+    // right-to-left to the box. The list grows by appending more variants
+    // to `TransformOp` (translate first; scale/rotate land in later commits).
+    TransformList(Vec<TransformOp>),
+}
+
+/// Single function in a `transform: ...` list. Stored in source order so the
+/// renderer can compose them right-to-left when building the affine matrix.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransformOp {
+    /// `translate(x[, y])` / `translateX(x)` / `translateY(y)`. Both axes
+    /// are absolute pixel offsets — percent / em are deferred until the
+    /// renderer carries the box's own size into the transform pass.
+    Translate { x: f32, y: f32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -509,8 +523,75 @@ impl<'a> Parser<'a> {
             return Ok(vec![Declaration { name, value }]);
         }
 
+        if name == "transform" {
+            let value = self.parse_transform_value()?;
+            return Ok(vec![Declaration { name, value }]);
+        }
+
         let value = self.parse_value()?;
         Ok(vec![Declaration { name, value }])
+    }
+
+    fn parse_transform_value(&mut self) -> Result<Value, ParseError> {
+        // CSS transform is a whitespace-separated function list; each entry is
+        // one of `translate(...)`, `translateX(...)`, `translateY(...)` for now.
+        // The list ends at ';' or '}'. An empty list parses as keyword `none`
+        // up the stack, so we require at least one function here.
+        let mut ops = Vec::new();
+        loop {
+            self.consume_whitespace();
+            match self.next_char() {
+                Some(';') | Some('}') | None => break,
+                _ => {}
+            }
+            let name = self.parse_identifier()?;
+            self.expect_char('(')?;
+            let op = match name.as_str() {
+                "translate" => {
+                    self.consume_whitespace();
+                    let x = self.parse_length_token()?;
+                    self.consume_whitespace();
+                    let y = if self.next_char() == Some(',') {
+                        self.consume_char();
+                        self.consume_whitespace();
+                        let value = self.parse_length_token()?;
+                        self.consume_whitespace();
+                        value
+                    } else {
+                        // Single-arg form keeps the y component at 0.
+                        0.0
+                    };
+                    TransformOp::Translate { x, y }
+                }
+                "translateX" => {
+                    self.consume_whitespace();
+                    let x = self.parse_length_token()?;
+                    self.consume_whitespace();
+                    TransformOp::Translate { x, y: 0.0 }
+                }
+                "translateY" => {
+                    self.consume_whitespace();
+                    let y = self.parse_length_token()?;
+                    self.consume_whitespace();
+                    TransformOp::Translate { x: 0.0, y }
+                }
+                other => {
+                    return Err(ParseError::new(
+                        self.pos,
+                        format!("unsupported transform function '{other}'"),
+                    ));
+                }
+            };
+            self.expect_char(')')?;
+            ops.push(op);
+        }
+        if ops.is_empty() {
+            return Err(ParseError::new(
+                self.pos,
+                "transform requires at least one function",
+            ));
+        }
+        Ok(Value::TransformList(ops))
     }
 
     fn parse_text_shadow_value(&mut self) -> Result<Value, ParseError> {
@@ -1032,7 +1113,7 @@ impl<'a> Parser<'a> {
 mod tests {
     use super::{
         BoxShadow, Color, Combinator, GradientDirection, GradientKind, PseudoClass, Selector,
-        SimpleSelector, SimpleSelectorKind, TextShadow, Unit, Value, parse,
+        SimpleSelector, SimpleSelectorKind, TextShadow, TransformOp, Unit, Value, parse,
     };
 
     #[test]
@@ -1613,6 +1694,51 @@ mod tests {
         };
         assert_eq!(gradient.kind, GradientKind::Radial);
         assert_eq!(gradient.stops.len(), 2);
+    }
+
+    #[test]
+    fn parses_transform_translate_two_args() {
+        // `translate(10px, 20px)` lands as a single-op list with both axes set.
+        let stylesheet = parse(".a { transform: translate(10px, 20px); }").unwrap();
+        let value = &stylesheet.rules[0].declarations[0].value;
+        let ops = match value {
+            Value::TransformList(ops) => ops,
+            other => panic!("expected TransformList, got {other:?}"),
+        };
+        assert_eq!(
+            ops.as_slice(),
+            &[TransformOp::Translate { x: 10.0, y: 20.0 }]
+        );
+    }
+
+    #[test]
+    fn parses_transform_translate_one_arg_defaults_y_to_zero() {
+        let stylesheet = parse(".a { transform: translate(10px); }").unwrap();
+        let ops = match &stylesheet.rules[0].declarations[0].value {
+            Value::TransformList(ops) => ops.clone(),
+            other => panic!("expected TransformList, got {other:?}"),
+        };
+        assert_eq!(
+            ops.as_slice(),
+            &[TransformOp::Translate { x: 10.0, y: 0.0 }]
+        );
+    }
+
+    #[test]
+    fn parses_transform_translate_axis_helpers() {
+        // translateX/translateY are sugar for the corresponding 1-axis translate.
+        let stylesheet = parse(".a { transform: translateX(5px) translateY(-7px); }").unwrap();
+        let ops = match &stylesheet.rules[0].declarations[0].value {
+            Value::TransformList(ops) => ops.clone(),
+            other => panic!("expected TransformList, got {other:?}"),
+        };
+        assert_eq!(
+            ops.as_slice(),
+            &[
+                TransformOp::Translate { x: 5.0, y: 0.0 },
+                TransformOp::Translate { x: 0.0, y: -7.0 },
+            ]
+        );
     }
 
     #[test]

@@ -1,8 +1,100 @@
 use crate::{
-    css::{Color, ColorStop, GradientDirection, GradientKind, Unit, Value},
+    css::{Color, ColorStop, GradientDirection, GradientKind, TransformOp, Unit, Value},
     dom::NodeType,
     layout::{Dimensions, LayoutBox, Rect},
 };
+
+/// 2-D affine transform stored as the six matrix entries of
+/// ```text
+/// | a c e |
+/// | b d f |
+/// | 0 0 1 |
+/// ```
+/// `apply_point` premultiplies a column vector `(x, y, 1)`. `compose` matches
+/// CSS semantics: `parent.compose(child).apply_point(p)` is the same as
+/// `parent.apply_point(child.apply_point(p))`, so transforms inherit naturally
+/// down the tree just like `inherited_alpha`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Affine {
+    pub a: f32,
+    pub b: f32,
+    pub c: f32,
+    pub d: f32,
+    pub e: f32,
+    pub f: f32,
+}
+
+impl Affine {
+    pub const IDENTITY: Self = Self {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: 0.0,
+        f: 0.0,
+    };
+
+    pub fn translate(tx: f32, ty: f32) -> Self {
+        Self {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: tx,
+            f: ty,
+        }
+    }
+
+    /// Standard 3x3 matrix multiply, restricted to the affine submatrix.
+    pub fn compose(&self, other: Self) -> Self {
+        Self {
+            a: self.a * other.a + self.c * other.b,
+            b: self.b * other.a + self.d * other.b,
+            c: self.a * other.c + self.c * other.d,
+            d: self.b * other.c + self.d * other.d,
+            e: self.a * other.e + self.c * other.f + self.e,
+            f: self.b * other.e + self.d * other.f + self.f,
+        }
+    }
+
+    pub fn apply_point(&self, x: f32, y: f32) -> (f32, f32) {
+        (
+            self.a * x + self.c * y + self.e,
+            self.b * x + self.d * y + self.f,
+        )
+    }
+
+    /// Strict equality is fine because every non-identity matrix in the system
+    /// is built from explicit constructors — no floating-point drift sneaks in
+    /// when the page declares no transform at all.
+    pub fn is_identity(&self) -> bool {
+        self.a == 1.0
+            && self.b == 0.0
+            && self.c == 0.0
+            && self.d == 1.0
+            && self.e == 0.0
+            && self.f == 0.0
+    }
+
+    /// Returns the matrix that undoes this one, or identity if the linear part
+    /// is degenerate (zero determinant). The hit-test path uses this to map a
+    /// screen-space cursor back into the layout-tree's logical coordinates so
+    /// it can compare against the un-transformed `padding_box` rectangles.
+    pub fn inverse(&self) -> Self {
+        let det = self.a * self.d - self.b * self.c;
+        if det == 0.0 {
+            return Self::IDENTITY;
+        }
+        let inv_det = 1.0 / det;
+        let a = self.d * inv_det;
+        let b = -self.b * inv_det;
+        let c = -self.c * inv_det;
+        let d = self.a * inv_det;
+        let e = -(a * self.e + c * self.f);
+        let f = -(b * self.e + d * self.f);
+        Self { a, b, c, d, e, f }
+    }
+}
 
 // Rendering is two-stage: layout boxes become display commands, then commands rasterize to pixels.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,8 +177,10 @@ pub fn build_display_list(layout_root: &LayoutBox) -> Vec<DisplayCommand> {
     // The root layout box is treated as the initial stacking context: every
     // positioned descendant ends up sorted into z-layers under it. The
     // initial inherited alpha is 1.0 — every non-1 opacity in the tree
-    // multiplies into the alpha passed to descendants.
-    paint_stacking_context(layout_root, &mut commands, 1.0);
+    // multiplies into the alpha passed to descendants. The inherited
+    // transform starts as identity and accumulates per `transform`
+    // declaration on the way down.
+    paint_stacking_context(layout_root, &mut commands, 1.0, Affine::IDENTITY);
     commands
 }
 
@@ -158,56 +252,59 @@ fn paint_stacking_context(
     layout_box: &LayoutBox,
     commands: &mut Vec<DisplayCommand>,
     inherited_alpha: f32,
+    inherited_transform: Affine,
 ) {
     let effective_alpha = inherited_alpha * opacity_of(layout_box);
+    let effective_transform = inherited_transform.compose(transform_for(layout_box));
 
     // 1. Paint this stacking-context-creator's own bg/border/text.
-    paint_self(layout_box, commands, effective_alpha);
+    paint_self(layout_box, commands, effective_alpha, effective_transform);
 
     // Walk descendants and pluck out the positioned subtrees — each becomes
     // its own atomic z-layer. Non-positioned content is painted between the
     // negative and zero/positive z-layers, so we need both groups separately.
-    // The alpha stored alongside each entry is the *inherited* alpha from
-    // the actual ancestor chain, before the positioned box's own opacity is
-    // applied — paint_stacking_context will apply that itself.
-    let mut positioned: Vec<(&LayoutBox, f32)> = Vec::new();
+    // The alpha and transform stored alongside each entry are the *inherited*
+    // values from the actual ancestor chain, before the positioned box's own
+    // opacity / own transform are applied — paint_stacking_context applies
+    // those itself.
+    let mut positioned: Vec<(&LayoutBox, f32, Affine)> = Vec::new();
     for child in &layout_box.children {
-        collect_positioned_into(child, &mut positioned, effective_alpha);
+        collect_positioned_into(child, &mut positioned, effective_alpha, effective_transform);
     }
 
-    let mut negative: Vec<(&LayoutBox, f32)> = positioned
+    let mut negative: Vec<(&LayoutBox, f32, Affine)> = positioned
         .iter()
         .copied()
-        .filter(|(b, _)| z_index_of(b) < 0)
+        .filter(|(b, _, _)| z_index_of(b) < 0)
         .collect();
-    let zero_or_auto: Vec<(&LayoutBox, f32)> = positioned
+    let zero_or_auto: Vec<(&LayoutBox, f32, Affine)> = positioned
         .iter()
         .copied()
-        .filter(|(b, _)| z_index_of(b) == 0)
+        .filter(|(b, _, _)| z_index_of(b) == 0)
         .collect();
-    let mut positive: Vec<(&LayoutBox, f32)> = positioned
+    let mut positive: Vec<(&LayoutBox, f32, Affine)> = positioned
         .iter()
         .copied()
-        .filter(|(b, _)| z_index_of(b) > 0)
+        .filter(|(b, _, _)| z_index_of(b) > 0)
         .collect();
     // Stable sort preserves tree order among siblings sharing a z-index.
-    negative.sort_by_key(|(b, _)| z_index_of(b));
-    positive.sort_by_key(|(b, _)| z_index_of(b));
+    negative.sort_by_key(|(b, _, _)| z_index_of(b));
+    positive.sort_by_key(|(b, _, _)| z_index_of(b));
 
     // 2. Negative-z layers paint first → they sit BEHIND non-positioned content.
-    for (child, alpha) in &negative {
-        paint_stacking_context(child, commands, *alpha);
+    for (child, alpha, transform) in &negative {
+        paint_stacking_context(child, commands, *alpha, *transform);
     }
 
     // 3. Non-positioned descendants in tree order. Positioned subtrees are
     //    skipped here because they already belong to a z-layer.
     for child in &layout_box.children {
-        paint_non_positioned(child, commands, effective_alpha);
+        paint_non_positioned(child, commands, effective_alpha, effective_transform);
     }
 
     // 4 & 5. Zero/auto layers in tree order, then positive-z (sorted asc).
-    for (child, alpha) in zero_or_auto.iter().chain(positive.iter()) {
-        paint_stacking_context(child, commands, *alpha);
+    for (child, alpha, transform) in zero_or_auto.iter().chain(positive.iter()) {
+        paint_stacking_context(child, commands, *alpha, *transform);
     }
 }
 
@@ -215,6 +312,7 @@ fn paint_non_positioned(
     layout_box: &LayoutBox,
     commands: &mut Vec<DisplayCommand>,
     inherited_alpha: f32,
+    inherited_transform: Affine,
 ) {
     // Stop at any positioned box — its painting belongs to its enclosing
     // stacking context, where z-order is decided.
@@ -222,17 +320,24 @@ fn paint_non_positioned(
         return;
     }
     let effective_alpha = inherited_alpha * opacity_of(layout_box);
-    paint_self(layout_box, commands, effective_alpha);
+    let effective_transform = inherited_transform.compose(transform_for(layout_box));
+    paint_self(layout_box, commands, effective_alpha, effective_transform);
     for child in &layout_box.children {
-        paint_non_positioned(child, commands, effective_alpha);
+        paint_non_positioned(child, commands, effective_alpha, effective_transform);
     }
 }
 
-fn paint_self(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>, alpha: f32) {
+fn paint_self(
+    layout_box: &LayoutBox,
+    commands: &mut Vec<DisplayCommand>,
+    alpha: f32,
+    transform: Affine,
+) {
     // Per-box paint order is shadow -> background-color -> background-image
     // (gradient) -> border -> text, matching CSS spec stacking within a
     // single element. Shadow is emitted first so the box's own bg covers
     // the part of the shadow that overlaps with the box.
+    let start = commands.len();
     if let Some(command) = shadow_command(layout_box, alpha) {
         commands.push(command);
     }
@@ -249,25 +354,102 @@ fn paint_self(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>, alpha:
     if let Some(command) = text_command(layout_box, alpha) {
         commands.push(command);
     }
+    // Push the inherited+own transform onto the commands this box just emitted.
+    // The emitters work in logical (untransformed) coordinates; the affine
+    // matrix is the only thing that maps logical → screen pixels.
+    apply_transform(&mut commands[start..], transform);
 }
 
 fn collect_positioned_into<'a>(
     layout_box: &'a LayoutBox,
-    out: &mut Vec<(&'a LayoutBox, f32)>,
+    out: &mut Vec<(&'a LayoutBox, f32, Affine)>,
     inherited_alpha: f32,
+    inherited_transform: Affine,
 ) {
     if is_positioned_box(layout_box) {
-        // Stash the *inherited* alpha (before this box's own opacity); the
-        // recipient paint_stacking_context applies the box's own opacity itself.
-        out.push((layout_box, inherited_alpha));
+        // Stash the *inherited* alpha and *inherited* transform (before this
+        // box's own opacity / own transform); the recipient paint_stacking_context
+        // applies the box's own contributions itself.
+        out.push((layout_box, inherited_alpha, inherited_transform));
         // Don't recurse: the positioned box's own descendants live inside its
         // own stacking context and are handled when we paint it.
         return;
     }
     let effective_alpha = inherited_alpha * opacity_of(layout_box);
+    let effective_transform = inherited_transform.compose(transform_for(layout_box));
     for child in &layout_box.children {
-        collect_positioned_into(child, out, effective_alpha);
+        collect_positioned_into(child, out, effective_alpha, effective_transform);
     }
+}
+
+pub fn transform_for(layout_box: &LayoutBox) -> Affine {
+    // Compose every `transform: ...` op of *this* box into a single affine.
+    // For commit 1 the only op is translate; the wrapping with the box centre
+    // is a no-op for translates (they commute with the conjugating translates),
+    // but it is exactly what scale/rotate need so it lands correctly here.
+    let node = match layout_box.styled_node() {
+        Some(node) => node,
+        None => return Affine::IDENTITY,
+    };
+    let ops = match node.value("transform") {
+        Some(Value::TransformList(ops)) => ops,
+        _ => return Affine::IDENTITY,
+    };
+    if ops.is_empty() {
+        return Affine::IDENTITY;
+    }
+    let mut raw = Affine::IDENTITY;
+    for op in ops {
+        let m = match op {
+            TransformOp::Translate { x, y } => Affine::translate(*x, *y),
+        };
+        raw = raw.compose(m);
+    }
+    let border = layout_box.dimensions.border_box();
+    let cx = border.x + border.width * 0.5;
+    let cy = border.y + border.height * 0.5;
+    Affine::translate(cx, cy)
+        .compose(raw)
+        .compose(Affine::translate(-cx, -cy))
+}
+
+fn apply_transform(commands: &mut [DisplayCommand], transform: Affine) {
+    // Skipping the walk when there is nothing to do keeps the painted output
+    // bit-identical for pages that do not use `transform`.
+    if transform.is_identity() {
+        return;
+    }
+    for command in commands {
+        match command {
+            DisplayCommand::SolidRect(_, rect) => transform_rect_in_place(rect, transform),
+            DisplayCommand::RoundedRect(_, rect, _) => transform_rect_in_place(rect, transform),
+            DisplayCommand::Text(text) => {
+                let (x, y) = transform.apply_point(text.x, text.y);
+                text.x = x;
+                text.y = y;
+            }
+            DisplayCommand::Image(image) => {
+                let (x, y) = transform.apply_point(image.x, image.y);
+                image.x = x;
+                image.y = y;
+            }
+            DisplayCommand::Gradient(gradient) => {
+                transform_rect_in_place(&mut gradient.rect, transform)
+            }
+            DisplayCommand::BoxShadow(shadow) => {
+                transform_rect_in_place(&mut shadow.rect, transform)
+            }
+        }
+    }
+}
+
+fn transform_rect_in_place(rect: &mut Rect, transform: Affine) {
+    // Translate-only transforms keep an axis-aligned rect axis-aligned, so
+    // we only have to push the origin through the matrix. When scale and
+    // rotate land later, the rect itself will need to grow into a quad.
+    let (x, y) = transform.apply_point(rect.x, rect.y);
+    rect.x = x;
+    rect.y = y;
 }
 
 fn is_positioned_box(layout_box: &LayoutBox) -> bool {
@@ -2343,5 +2525,76 @@ mod tests {
 
         // Expected: r ≈ 255, g and b ≈ 127. Single u32 = 0xFF7F7F.
         assert_eq!(pixels[0], 0x00FF7F7F);
+    }
+
+    #[test]
+    fn transform_translate_shifts_emitted_solid_rect() {
+        // `transform: translate(5px, 10px)` should leave the box's logical
+        // size alone but move the painted rect by (5, 10).
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 20px;
+                    height: 8px;
+                    background-color: red;
+                    transform: translate(5px, 10px);
+                }
+            "#,
+        );
+
+        let rect = match commands.as_slice() {
+            [DisplayCommand::SolidRect(_, rect)] => *rect,
+            other => panic!("expected one SolidRect, got {other:?}"),
+        };
+        // Logical box was at (0, 0) with width 20, height 8. The translate
+        // shifts the origin only — width and height stay invariant for now.
+        assert_eq!(rect.x, 5.0);
+        assert_eq!(rect.y, 10.0);
+        assert_eq!(rect.width, 20.0);
+        assert_eq!(rect.height, 8.0);
+    }
+
+    #[test]
+    fn transform_translate_inherits_to_descendant() {
+        // The parent's translate should compose into the child's emitted
+        // commands as well (paint-pass thread of `inherited_transform`).
+        let commands = display_list(
+            r#"<div id="outer"><div id="inner"></div></div>"#,
+            r#"
+                #outer { transform: translate(50px, 0); }
+                #inner {
+                    width: 10px;
+                    height: 4px;
+                    background-color: blue;
+                }
+            "#,
+        );
+
+        let inner_rect = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DisplayCommand::SolidRect(_, rect) if rect.width == 10.0 => Some(*rect),
+                _ => None,
+            })
+            .expect("inner rect must be emitted");
+        assert_eq!(inner_rect.x, 50.0);
+        assert_eq!(inner_rect.y, 0.0);
+    }
+
+    #[test]
+    fn affine_inverse_undoes_translate() {
+        // Round-trip: applying a translate then its inverse to a point must
+        // return the original point. This is the operation hit-test relies on.
+        let t = super::Affine::translate(7.0, -3.5);
+        let (x, y) = t.compose(t.inverse()).apply_point(11.0, 22.0);
+        assert!((x - 11.0).abs() < 1e-5);
+        assert!((y - 22.0).abs() < 1e-5);
+
+        // The inverse of a translate is just the negation of the offsets.
+        let inv = t.inverse();
+        let (x, y) = inv.apply_point(10.0, 10.0);
+        assert!((x - 3.0).abs() < 1e-5);
+        assert!((y - 13.5).abs() < 1e-5);
     }
 }
