@@ -61,6 +61,10 @@ struct BrowserState {
     // and fed into the next frame's style pass so :hover rules light up. Carries one frame
     // of latency, which is invisible at 60fps.
     hovered_dom_path: Option<Vec<usize>>,
+    // DOM path of the most recently clicked page element. Persists across frames so
+    // :focus rules keep matching after the click; cleared when the user clicks anywhere
+    // outside the page (chrome buttons, the address bar, off-window).
+    focused_dom_path: Option<Vec<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +145,7 @@ impl BrowserState {
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             hovered_dom_path: None,
+            focused_dom_path: None,
         }
     }
 
@@ -154,13 +159,25 @@ impl BrowserState {
         self.frame_index = self.frame_index.wrapping_add(1);
         self.apply_input(input, viewport_width, viewport_height);
 
+        // Interaction state piped into the style pass. Hover and focus are tracked
+        // across frames (one-frame lag); active is purely transient — true only while
+        // the left mouse is currently held over the previously-hovered element.
+        let interaction = style::InteractionState {
+            hover: self.hovered_dom_path.as_deref(),
+            focus: self.focused_dom_path.as_deref(),
+            active: if input.left_mouse_held {
+                self.hovered_dom_path.as_deref()
+            } else {
+                None
+            },
+        };
         let document_view = build_document_view(
             &self.document_html,
             &self.stylesheet,
             viewport_width,
             self.current_url.as_ref(),
             &self.images,
-            self.hovered_dom_path.as_deref(),
+            interaction,
         )
         .unwrap_or_else(|build_error| {
             eprintln!("{build_error}");
@@ -196,6 +213,15 @@ impl BrowserState {
         // strictly forward, no double-pass per frame required.
         self.hovered_dom_path =
             compute_hovered_dom_path(input, &document_view.layout_root, self.scroll_offset);
+
+        // A page-area click moves :focus to the just-hovered element; clicks anywhere
+        // outside the page (chrome buttons, the address bar, off-window) clear it.
+        if input.left_mouse_pressed {
+            self.focused_dom_path = match input.mouse_position {
+                Some((_, mouse_y)) if mouse_y >= CHROME_HEIGHT => self.hovered_dom_path.clone(),
+                _ => None,
+            };
+        }
         let hovered_href = self
             .hovered_link(input, &document_view.links)
             .map(|link| link.href.as_str());
@@ -620,7 +646,7 @@ fn build_document_view(
     viewport_width: usize,
     current_url: Option<&net::Url>,
     images: &HashMap<String, resource::LoadedImage>,
-    hovered_dom_path: Option<&[usize]>,
+    interaction: style::InteractionState<'_>,
 ) -> Result<DocumentView, String> {
     // This is the full browser pipeline in one place:
     // HTML/CSS text -> styled tree -> layout tree -> display commands + clickable metadata.
@@ -631,7 +657,7 @@ fn build_document_view(
     let root = nodes
         .pop()
         .ok_or_else(|| "document did not produce a root node".to_string())?;
-    let styled = style::style_tree_with_hover(&root, &[stylesheet], hovered_dom_path);
+    let styled = style::style_tree_with_state(&root, &[stylesheet], interaction);
     let layout = layout::layout_tree(&styled, viewport_width as f32);
     let mut commands = render::build_display_list(&layout);
     commands.extend(collect_image_commands(&layout, current_url, images));
@@ -1371,6 +1397,9 @@ fn sample_css() -> &'static str {
         }
         .tile:hover {
             background-color: #e8eaed;
+        }
+        .tile:active {
+            background-color: #dadce0;
         }
     "#
 }

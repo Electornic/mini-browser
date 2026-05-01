@@ -17,7 +17,11 @@ pub struct WindowInput {
     pub page_up_pressed: bool,
     pub page_down_pressed: bool,
     pub mouse_position: Option<(f32, f32)>,
+    // `left_mouse_pressed` is the *edge* (true only on the frame the button transitions
+    // from up to down). `left_mouse_held` is the *level* (true for every frame the button
+    // is currently down), which is what :active needs.
     pub left_mouse_pressed: bool,
+    pub left_mouse_held: bool,
 }
 
 struct TextCollector {
@@ -82,6 +86,7 @@ where
             page_down_pressed: window.is_key_pressed(Key::PageDown, KeyRepeat::No),
             mouse_position: window.get_mouse_pos(MouseMode::Clamp),
             left_mouse_pressed: left_down && !last_left_down,
+            left_mouse_held: left_down,
         };
         let buffer = build_scene(size.0, size.1, &input);
 
