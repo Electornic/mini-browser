@@ -56,6 +56,11 @@ struct BrowserState {
     // History stores whole snapshots so back/forward can restore instantly without refetching.
     back_stack: Vec<HistoryEntry>,
     forward_stack: Vec<HistoryEntry>,
+
+    // DOM path of the element under the mouse, computed from the previous frame's layout
+    // and fed into the next frame's style pass so :hover rules light up. Carries one frame
+    // of latency, which is invisible at 60fps.
+    hovered_dom_path: Option<Vec<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,8 +73,11 @@ struct LinkTarget {
 #[derive(Debug, Clone)]
 struct DocumentView {
     // `commands` are what get painted, `links` are the separately tracked clickable regions.
+    // `layout_root` is kept around so post-render hit-testing (e.g. computing :hover paths
+    // from the mouse position) can walk the same boxes the painter saw.
     commands: Vec<render::DisplayCommand>,
     links: Vec<LinkTarget>,
+    layout_root: layout::LayoutBox,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -132,6 +140,7 @@ impl BrowserState {
             scroll_offset: 0.0,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
+            hovered_dom_path: None,
         }
     }
 
@@ -151,6 +160,7 @@ impl BrowserState {
             viewport_width,
             self.current_url.as_ref(),
             &self.images,
+            self.hovered_dom_path.as_deref(),
         )
         .unwrap_or_else(|build_error| {
             eprintln!("{build_error}");
@@ -166,6 +176,12 @@ impl BrowserState {
             DocumentView {
                 commands: Vec::new(),
                 links: Vec::new(),
+                // Empty fallback root so downstream hit-testing can run safely.
+                layout_root: layout::LayoutBox {
+                    box_type: layout::BoxType::AnonymousBlock,
+                    dimensions: layout::Dimensions::default(),
+                    children: Vec::new(),
+                },
             }
         });
 
@@ -175,6 +191,11 @@ impl BrowserState {
         }
 
         self.clamp_scroll(viewport_height, document_height(&document_view.commands));
+        // Recompute the hovered DOM path from this frame's layout. The next frame's style
+        // pass will pick it up — a deliberate one-frame lag that keeps style and layout
+        // strictly forward, no double-pass per frame required.
+        self.hovered_dom_path =
+            compute_hovered_dom_path(input, &document_view.layout_root, self.scroll_offset);
         let hovered_href = self
             .hovered_link(input, &document_view.links)
             .map(|link| link.href.as_str());
@@ -599,6 +620,7 @@ fn build_document_view(
     viewport_width: usize,
     current_url: Option<&net::Url>,
     images: &HashMap<String, resource::LoadedImage>,
+    hovered_dom_path: Option<&[usize]>,
 ) -> Result<DocumentView, String> {
     // This is the full browser pipeline in one place:
     // HTML/CSS text -> styled tree -> layout tree -> display commands + clickable metadata.
@@ -609,13 +631,15 @@ fn build_document_view(
     let root = nodes
         .pop()
         .ok_or_else(|| "document did not produce a root node".to_string())?;
-    let styled = style::style_tree(&root, &[stylesheet]);
+    let styled = style::style_tree_with_hover(&root, &[stylesheet], hovered_dom_path);
     let layout = layout::layout_tree(&styled, viewport_width as f32);
     let mut commands = render::build_display_list(&layout);
     commands.extend(collect_image_commands(&layout, current_url, images));
+    let links = collect_link_targets(&layout, None, false);
     Ok(DocumentView {
         commands,
-        links: collect_link_targets(&layout, None, false),
+        links,
+        layout_root: layout,
     })
 }
 
@@ -1180,6 +1204,60 @@ fn point_in_rect(x: f32, y: f32, rect: layout::Rect) -> bool {
     x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height
 }
 
+fn compute_hovered_dom_path(
+    input: &window::WindowInput,
+    layout_root: &layout::LayoutBox,
+    scroll_offset: f32,
+) -> Option<Vec<usize>> {
+    // Hover is only meaningful when the pointer is over the page area (i.e. below the
+    // chrome). Anywhere else — chrome, off-window — leaves the styled tree in its
+    // "nothing hovered" state.
+    let (mouse_x, mouse_y) = input.mouse_position?;
+    if mouse_y < CHROME_HEIGHT {
+        return None;
+    }
+    let doc_y = mouse_y - CHROME_HEIGHT + scroll_offset;
+
+    // Walk the layout tree depth-first, tracking the path of child indices. Layout child
+    // positions mirror DOM child positions (no anonymous boxes are created today), so the
+    // path doubles as a DOM path. The deepest containing box wins by virtue of being
+    // visited last.
+    let mut best: Option<Vec<usize>> = None;
+    let mut path: Vec<usize> = Vec::new();
+    walk_for_hover(layout_root, mouse_x, doc_y, &mut path, &mut best);
+    best
+}
+
+fn walk_for_hover(
+    layout_box: &layout::LayoutBox,
+    mouse_x: f32,
+    doc_y: f32,
+    path: &mut Vec<usize>,
+    best: &mut Option<Vec<usize>>,
+) {
+    let outer = padding_box(layout_box);
+    if point_in_rect(mouse_x, doc_y, outer) {
+        *best = Some(path.clone());
+    }
+    for (idx, child) in layout_box.children.iter().enumerate() {
+        path.push(idx);
+        walk_for_hover(child, mouse_x, doc_y, path, best);
+        path.pop();
+    }
+}
+
+fn padding_box(layout_box: &layout::LayoutBox) -> layout::Rect {
+    let dims = &layout_box.dimensions;
+    let content = dims.content;
+    let pad = dims.padding;
+    layout::Rect {
+        x: content.x - pad.left,
+        y: content.y - pad.top,
+        width: content.width + pad.left + pad.right,
+        height: content.height + pad.top + pad.bottom,
+    }
+}
+
 fn link_decoration_commands(
     links: &[LinkTarget],
     hovered_href: Option<&str>,
@@ -1290,6 +1368,9 @@ fn sample_css() -> &'static str {
             color: #3c4043;
             font-size: 12px;
             text-decoration: none;
+        }
+        .tile:hover {
+            background-color: #e8eaed;
         }
     "#
 }
@@ -1840,6 +1921,65 @@ mod tests {
             800,
         );
         assert_eq!(hover, Some(super::ChromeAction::Back));
+    }
+
+    #[test]
+    fn hovered_dom_path_picks_deepest_layout_box_under_mouse() {
+        // Build a tiny tree where only one nested element exists; the hit-test should walk
+        // down to it. <div id="root"><span class="leaf">x</span></div>
+        let html_source = r#"<div id="root"><span class="leaf">hi</span></div>"#;
+        let css_source = r#"
+            #root { width: 100px; height: 80px; }
+            .leaf { width: 40px; height: 20px; }
+        "#;
+        let node = mini_browser::html::parse(html_source)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let stylesheet = mini_browser::css::parse(css_source).unwrap();
+        let styled = mini_browser::style::style_tree(&node, &[stylesheet]);
+        let layout = mini_browser::layout::layout_tree(&styled, 800.0);
+
+        // Mouse coordinates: window-space pointer over the leaf, accounting for the
+        // chrome strip we subtract inside compute_hovered_dom_path.
+        let leaf_window_y = super::CHROME_HEIGHT + 5.0;
+        let path = super::compute_hovered_dom_path(
+            &window::WindowInput {
+                mouse_position: Some((10.0, leaf_window_y)),
+                ..window::WindowInput::default()
+            },
+            &layout,
+            0.0,
+        );
+
+        // Layout root is #root, its first child is the .leaf span ([0]), and the span's
+        // text "hi" is laid out as the next inline child ([0, 0]). The hit-test descends
+        // to the deepest containing box, so the text node wins.
+        assert_eq!(path, Some(vec![0, 0]));
+    }
+
+    #[test]
+    fn hovered_dom_path_returns_none_when_pointer_is_in_chrome() {
+        let html_source = r#"<div id="root"><span class="leaf">hi</span></div>"#;
+        let node = mini_browser::html::parse(html_source)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let styled = mini_browser::style::style_tree(&node, &[]);
+        let layout = mini_browser::layout::layout_tree(&styled, 800.0);
+
+        // Pointer parked above the chrome cutoff — there is no page element to hover.
+        let path = super::compute_hovered_dom_path(
+            &window::WindowInput {
+                mouse_position: Some((10.0, super::CHROME_HEIGHT - 1.0)),
+                ..window::WindowInput::default()
+            },
+            &layout,
+            0.0,
+        );
+        assert_eq!(path, None);
     }
 
     #[test]

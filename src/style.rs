@@ -71,7 +71,10 @@ fn style_tree_inner<'a>(
     current_path: &[usize],
     hovered_path: Option<&[usize]>,
 ) -> StyledNode {
-    let is_hovered = hovered_path == Some(current_path);
+    // CSS spec: when the cursor is over a descendant, every ancestor on the way down
+    // also enters its :hover state. So treat any prefix of the deepest hovered path
+    // as hovered, not just the leaf itself.
+    let is_hovered = matches!(hovered_path, Some(target) if target.starts_with(current_path));
     let mut specified_values = specified_values(node, stylesheets, ancestors, is_hovered);
 
     // Real browsers inherit many properties. Here we only inherit a few text-related ones
@@ -653,6 +656,31 @@ mod tests {
 
         assert_eq!(
             inner.value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn hover_propagates_from_deeply_hovered_descendant_to_ancestors() {
+        // Deepest hovered node is the text inside .btn (path [0, 0]). The CSS spec says
+        // every ancestor on the way down also enters :hover, so the .btn rule should
+        // apply even though the cursor is over its text child.
+        let root = parse_html(r#"<a class="btn">click</a>"#);
+        let stylesheet = parse_css(
+            r#"
+                .btn { color: #00ff00; }
+                .btn:hover { color: #ff0000; }
+            "#,
+        );
+        let styled = style::style_tree_with_hover(&root, &[stylesheet], Some(&[0]));
+
+        assert_eq!(
+            styled.value("color"),
             Some(&Value::Color(Color {
                 r: 255,
                 g: 0,
