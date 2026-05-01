@@ -1,5 +1,5 @@
 use crate::{
-    css::{Color, ColorStop, GradientDirection, Unit, Value},
+    css::{Color, ColorStop, GradientDirection, GradientKind, Unit, Value},
     dom::NodeType,
     layout::{Dimensions, LayoutBox, Rect},
 };
@@ -11,16 +11,16 @@ pub enum DisplayCommand {
     RoundedRect(Color, Rect, CornerRadii),
     Text(TextCommand),
     Image(ImageCommand),
-    /// Linear gradient fill. Stops are pre-resolved to absolute positions in
-    /// 0..1 along the gradient axis so the rasterizer doesn't have to redo
-    /// the auto-position math.
-    LinearGradient(GradientCommand),
+    /// Linear or radial gradient fill. Stops are pre-resolved to absolute
+    /// positions in 0..1 along the gradient axis so the rasterizer doesn't
+    /// have to redo the auto-position math.
+    Gradient(GradientCommand),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GradientCommand {
     pub rect: Rect,
-    pub direction: GradientDirection,
+    pub kind: GradientKind,
     pub stops: Vec<ResolvedStop>,
 }
 
@@ -100,7 +100,7 @@ pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<Dis
                 image.x += dx;
                 image.y += dy;
             }
-            DisplayCommand::LinearGradient(gradient) => {
+            DisplayCommand::Gradient(gradient) => {
                 gradient.rect.x += dx;
                 gradient.rect.y += dy;
             }
@@ -128,8 +128,8 @@ pub fn rasterize(
             }
             DisplayCommand::Text(text) => draw_text(&mut buffer, width, height, text, fonts),
             DisplayCommand::Image(image) => draw_image(&mut buffer, width, height, image),
-            DisplayCommand::LinearGradient(gradient) => {
-                fill_linear_gradient(&mut buffer, width, height, gradient)
+            DisplayCommand::Gradient(gradient) => {
+                fill_gradient(&mut buffer, width, height, gradient)
             }
         }
     }
@@ -323,9 +323,9 @@ fn gradient_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand
     if stops.len() < 2 {
         return None;
     }
-    Some(DisplayCommand::LinearGradient(GradientCommand {
+    Some(DisplayCommand::Gradient(GradientCommand {
         rect: layout_box.dimensions.padding_box(),
-        direction: gradient.direction,
+        kind: gradient.kind,
         stops,
     }))
 }
@@ -591,12 +591,7 @@ fn fill_rect(buffer: &mut [u32], width: usize, height: usize, color: Color, rect
     }
 }
 
-fn fill_linear_gradient(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
-    gradient: &GradientCommand,
-) {
+fn fill_gradient(buffer: &mut [u32], width: usize, height: usize, gradient: &GradientCommand) {
     let rect = gradient.rect;
     let x_start = rect.x.max(0.0).floor() as usize;
     let y_start = rect.y.max(0.0).floor() as usize;
@@ -610,13 +605,29 @@ fn fill_linear_gradient(
         return;
     }
 
+    // Radial uses the ellipse with semi-axes = half the rect, centered on the
+    // padding box. Sampling each pixel reduces to normalised distance from the
+    // centre, which already lies in the same 0..1 progress space the linear
+    // path uses, so stop sampling and source-over blending are shared.
+    let cx = rect.x + rect.width * 0.5;
+    let cy = rect.y + rect.height * 0.5;
+    let rx = rect.width * 0.5;
+    let ry = rect.height * 0.5;
+
     for y in y_start..y_end {
         for x in x_start..x_end {
-            let progress = match gradient.direction {
-                GradientDirection::ToBottom => (y as f32 + 0.5 - rect.y) / rect.height,
-                GradientDirection::ToTop => 1.0 - (y as f32 + 0.5 - rect.y) / rect.height,
-                GradientDirection::ToRight => (x as f32 + 0.5 - rect.x) / rect.width,
-                GradientDirection::ToLeft => 1.0 - (x as f32 + 0.5 - rect.x) / rect.width,
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let progress = match gradient.kind {
+                GradientKind::Linear(GradientDirection::ToBottom) => (py - rect.y) / rect.height,
+                GradientKind::Linear(GradientDirection::ToTop) => 1.0 - (py - rect.y) / rect.height,
+                GradientKind::Linear(GradientDirection::ToRight) => (px - rect.x) / rect.width,
+                GradientKind::Linear(GradientDirection::ToLeft) => 1.0 - (px - rect.x) / rect.width,
+                GradientKind::Radial => {
+                    let nx = (px - cx) / rx;
+                    let ny = (py - cy) / ry;
+                    (nx * nx + ny * ny).sqrt()
+                }
             };
             let progress = progress.clamp(0.0, 1.0);
             let color = sample_gradient(&gradient.stops, progress);
@@ -2003,6 +2014,50 @@ mod tests {
         assert_eq!(pixels[1], 0x000000FF);
         assert_eq!(pixels[2], 0x000000FF);
         assert_eq!(pixels[3], 0x000000FF);
+    }
+
+    #[test]
+    fn radial_gradient_centers_inner_color_with_outer_at_corners() {
+        // 5×5 box with `radial-gradient(red, blue)` (ellipse, farthest-corner).
+        // Center pixel should be the inner stop (red); corner pixels should
+        // sample close to the outer stop (blue) since their normalised
+        // distance from the centre approaches 1.
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 5px;
+                    height: 5px;
+                    background-image: radial-gradient(red, blue);
+                }
+            "#,
+        );
+        let pixels = render::rasterize(&commands, 5, 5, &[]);
+
+        let center = pixels[2 * 5 + 2];
+        let center_r = (center >> 16) & 0xFF;
+        let center_b = center & 0xFF;
+        assert!(
+            center_r > 200,
+            "center should be near red, got r={center_r}"
+        );
+        assert!(
+            center_b < 50,
+            "center should have little blue, got b={center_b}"
+        );
+
+        // Top-left corner: distance ≈ sqrt(2)/2·diag → progress ≈ 1 → blue.
+        let corner = pixels[0];
+        let corner_r = (corner >> 16) & 0xFF;
+        let corner_b = corner & 0xFF;
+        assert!(
+            corner_b > 200,
+            "corner should be near blue, got b={corner_b}"
+        );
+        assert!(
+            corner_r < 50,
+            "corner should have little red, got r={corner_r}"
+        );
     }
 
     #[test]

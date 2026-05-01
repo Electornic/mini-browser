@@ -108,14 +108,24 @@ pub enum Value {
     // Unitless number — used for properties like `z-index`, `line-height`,
     // `opacity` where the value is a bare number rather than a length.
     Number(f32),
-    // Functional `linear-gradient(...)` value, used as a `background-image`.
-    Gradient(LinearGradient),
+    // Functional `linear-gradient(...)` / `radial-gradient(...)` value, used
+    // as a `background-image`. The shared `Gradient` carries the stops and
+    // a `kind` enum that distinguishes the variant.
+    Gradient(Gradient),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct LinearGradient {
-    pub direction: GradientDirection,
+pub struct Gradient {
+    pub kind: GradientKind,
     pub stops: Vec<ColorStop>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GradientKind {
+    Linear(GradientDirection),
+    /// MVP radial: ellipse sized to farthest-corner, centered. No explicit
+    /// shape/size/position support yet — extend this variant when adding it.
+    Radial,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -543,6 +553,9 @@ impl<'a> Parser<'a> {
                     if ident.eq_ignore_ascii_case("linear-gradient") {
                         return self.parse_linear_gradient();
                     }
+                    if ident.eq_ignore_ascii_case("radial-gradient") {
+                        return self.parse_radial_gradient();
+                    }
                 }
                 Ok(named_color(&ident)
                     .map(Value::Color)
@@ -619,6 +632,29 @@ impl<'a> Parser<'a> {
             GradientDirection::ToBottom
         };
 
+        let stops = self.parse_gradient_stops("linear-gradient")?;
+        Ok(Value::Gradient(Gradient {
+            kind: GradientKind::Linear(direction),
+            stops,
+        }))
+    }
+
+    fn parse_radial_gradient(&mut self) -> Result<Value, ParseError> {
+        // MVP form: `radial-gradient(<stops>)`. The renderer treats it as an
+        // ellipse sized to the farthest corner, centered in the box. Shape /
+        // size / position prefixes (`circle at 30% 70%`, etc.) are deferred.
+        self.expect_char('(')?;
+        self.consume_whitespace();
+        let stops = self.parse_gradient_stops("radial-gradient")?;
+        Ok(Value::Gradient(Gradient {
+            kind: GradientKind::Radial,
+            stops,
+        }))
+    }
+
+    fn parse_gradient_stops(&mut self, label: &str) -> Result<Vec<ColorStop>, ParseError> {
+        // Shared by linear and radial: comma-separated `<color> [<%>]?` pairs
+        // until the closing paren. Both gradients require at least two stops.
         let mut stops = Vec::new();
         loop {
             self.consume_whitespace();
@@ -632,21 +668,19 @@ impl<'a> Parser<'a> {
                 _ => {
                     return Err(ParseError::new(
                         self.pos,
-                        "expected ',' or ')' in linear-gradient",
+                        format!("expected ',' or ')' in {label}"),
                     ));
                 }
             }
         }
         self.expect_char(')')?;
-
         if stops.len() < 2 {
             return Err(ParseError::new(
                 self.pos,
-                "linear-gradient requires at least two color stops",
+                format!("{label} requires at least two color stops"),
             ));
         }
-
-        Ok(Value::Gradient(LinearGradient { direction, stops }))
+        Ok(stops)
     }
 
     fn parse_color_stop(&mut self) -> Result<ColorStop, ParseError> {
@@ -836,7 +870,7 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Color, Combinator, GradientDirection, PseudoClass, Selector, SimpleSelector,
+        Color, Combinator, GradientDirection, GradientKind, PseudoClass, Selector, SimpleSelector,
         SimpleSelectorKind, Unit, Value, parse,
     };
 
@@ -1272,7 +1306,10 @@ mod tests {
             Value::Gradient(gradient) => gradient,
             other => panic!("expected Gradient, got {other:?}"),
         };
-        assert_eq!(gradient.direction, GradientDirection::ToBottom);
+        assert_eq!(
+            gradient.kind,
+            GradientKind::Linear(GradientDirection::ToBottom)
+        );
         assert_eq!(gradient.stops.len(), 2);
         assert_eq!(gradient.stops[0].position, None);
         assert_eq!(gradient.stops[1].position, None);
@@ -1290,7 +1327,23 @@ mod tests {
             Value::Gradient(gradient) => gradient,
             other => panic!("expected Gradient, got {other:?}"),
         };
-        assert_eq!(gradient.direction, GradientDirection::ToRight);
+        assert_eq!(
+            gradient.kind,
+            GradientKind::Linear(GradientDirection::ToRight)
+        );
+    }
+
+    #[test]
+    fn parses_radial_gradient_as_radial_kind() {
+        // MVP `radial-gradient(<stops>)` — no shape/size/position prefix.
+        // Should land in `Value::Gradient` with `GradientKind::Radial`.
+        let stylesheet = parse(".a { background-image: radial-gradient(red, blue); }").unwrap();
+        let gradient = match &stylesheet.rules[0].declarations[0].value {
+            Value::Gradient(gradient) => gradient,
+            other => panic!("expected Gradient, got {other:?}"),
+        };
+        assert_eq!(gradient.kind, GradientKind::Radial);
+        assert_eq!(gradient.stops.len(), 2);
     }
 
     #[test]
