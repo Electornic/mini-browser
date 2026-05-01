@@ -12,10 +12,55 @@ pub struct Rule {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SimpleSelector {
+pub enum SimpleSelectorKind {
     Tag(String),
     Class(String),
     Id(String),
+}
+
+/// Pseudo-classes attached to a simple selector, e.g. the `:hover` in `.btn:hover`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PseudoClass {
+    Hover,
+}
+
+/// A single simple selector position: a tag/class/id base plus an optional
+/// pseudo-class. `.btn:hover` parses to one SimpleSelector with
+/// `kind = Class("btn")` and `pseudo = Some(Hover)`. Standalone pseudo-classes
+/// (a bare `:hover`) are not supported yet — every simple selector still needs
+/// a tag/class/id base.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimpleSelector {
+    pub kind: SimpleSelectorKind,
+    pub pseudo: Option<PseudoClass>,
+}
+
+impl SimpleSelector {
+    pub fn tag(name: impl Into<String>) -> Self {
+        Self {
+            kind: SimpleSelectorKind::Tag(name.into()),
+            pseudo: None,
+        }
+    }
+
+    pub fn class(name: impl Into<String>) -> Self {
+        Self {
+            kind: SimpleSelectorKind::Class(name.into()),
+            pseudo: None,
+        }
+    }
+
+    pub fn id(name: impl Into<String>) -> Self {
+        Self {
+            kind: SimpleSelectorKind::Id(name.into()),
+            pseudo: None,
+        }
+    }
+
+    pub fn with_pseudo(mut self, pseudo: PseudoClass) -> Self {
+        self.pseudo = Some(pseudo);
+        self
+    }
 }
 
 /// How two adjacent simple selectors in a complex selector are related.
@@ -302,21 +347,39 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_simple_selector(&mut self) -> Result<SimpleSelector, ParseError> {
-        match self.next_char() {
+        let kind = match self.next_char() {
             Some('.') => {
                 self.consume_char();
-                Ok(SimpleSelector::Class(self.parse_identifier()?))
+                SimpleSelectorKind::Class(self.parse_identifier()?)
             }
             Some('#') => {
                 self.consume_char();
-                Ok(SimpleSelector::Id(self.parse_identifier()?))
+                SimpleSelectorKind::Id(self.parse_identifier()?)
             }
-            Some(_) => Ok(SimpleSelector::Tag(self.parse_identifier()?)),
-            None => Err(ParseError::new(
-                self.pos,
-                "unexpected end of input while parsing selector",
-            )),
-        }
+            Some(_) => SimpleSelectorKind::Tag(self.parse_identifier()?),
+            None => {
+                return Err(ParseError::new(
+                    self.pos,
+                    "unexpected end of input while parsing selector",
+                ));
+            }
+        };
+
+        // Optional pseudo-class suffix glued directly to the kind (e.g. `.btn:hover`).
+        let pseudo = if self.next_char() == Some(':') {
+            self.consume_char();
+            let name = self.parse_identifier()?;
+            match name.as_str() {
+                "hover" => Some(PseudoClass::Hover),
+                // Unknown pseudo-classes parse silently to None so the surrounding rule
+                // is still applied; the selector just never matches `:unknown` cases.
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        Ok(SimpleSelector { kind, pseudo })
     }
 
     fn parse_declarations(&mut self) -> Result<Vec<Declaration>, ParseError> {
@@ -613,7 +676,10 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Color, Combinator, Selector, SimpleSelector, Unit, Value, parse};
+    use super::{
+        Color, Combinator, PseudoClass, Selector, SimpleSelector, SimpleSelectorKind, Unit, Value,
+        parse,
+    };
 
     #[test]
     fn parses_multiple_rules_and_selectors() {
@@ -635,8 +701,8 @@ mod tests {
         assert_eq!(
             stylesheet.rules[0].selectors,
             vec![
-                Selector::simple(SimpleSelector::Tag("h1".into())),
-                Selector::simple(SimpleSelector::Class("title".into())),
+                Selector::simple(SimpleSelector::tag("h1")),
+                Selector::simple(SimpleSelector::class("title")),
             ]
         );
         assert_eq!(
@@ -654,7 +720,7 @@ mod tests {
         );
         assert_eq!(
             stylesheet.rules[1].selectors,
-            vec![Selector::simple(SimpleSelector::Id("app".into()))]
+            vec![Selector::simple(SimpleSelector::id("app"))]
         );
     }
 
@@ -668,10 +734,41 @@ mod tests {
         assert_eq!(
             selector.parts,
             vec![
-                SimpleSelector::Class("outer".into()),
-                SimpleSelector::Class("inner".into()),
+                SimpleSelector::class("outer"),
+                SimpleSelector::class("inner"),
             ]
         );
+    }
+
+    #[test]
+    fn parses_hover_pseudo_class_attached_to_simple_selector() {
+        let stylesheet = parse(".btn:hover { color: red; }").unwrap();
+        let part = &stylesheet.rules[0].selectors[0].parts[0];
+
+        assert_eq!(part.kind, SimpleSelectorKind::Class("btn".into()));
+        assert_eq!(part.pseudo, Some(PseudoClass::Hover));
+    }
+
+    #[test]
+    fn pseudo_class_carries_through_descendant_chain() {
+        let stylesheet = parse(".outer .item:hover { color: red; }").unwrap();
+        let parts = &stylesheet.rules[0].selectors[0].parts;
+
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].pseudo, None);
+        assert_eq!(parts[1].kind, SimpleSelectorKind::Class("item".into()));
+        assert_eq!(parts[1].pseudo, Some(PseudoClass::Hover));
+    }
+
+    #[test]
+    fn unknown_pseudo_class_falls_back_to_no_pseudo() {
+        // The parser stays permissive: an unknown pseudo just clears the slot rather
+        // than failing the whole rule. The selector then matches its non-pseudo form.
+        let stylesheet = parse(".btn:totally-fake { color: red; }").unwrap();
+        let part = &stylesheet.rules[0].selectors[0].parts[0];
+
+        assert_eq!(part.kind, SimpleSelectorKind::Class("btn".into()));
+        assert_eq!(part.pseudo, None);
     }
 
     #[test]
@@ -681,8 +778,8 @@ mod tests {
         let no_spaces = parse(".outer>.inner { color: red; }").unwrap();
 
         let expected_parts = vec![
-            SimpleSelector::Class("outer".into()),
-            SimpleSelector::Class("inner".into()),
+            SimpleSelector::class("outer"),
+            SimpleSelector::class("inner"),
         ];
         let expected_combinators = vec![Combinator::Child];
 
@@ -706,9 +803,9 @@ mod tests {
         assert_eq!(
             selector.parts,
             vec![
-                SimpleSelector::Tag("nav".into()),
-                SimpleSelector::Tag("ul".into()),
-                SimpleSelector::Tag("li".into()),
+                SimpleSelector::tag("nav"),
+                SimpleSelector::tag("ul"),
+                SimpleSelector::tag("li"),
             ]
         );
         assert_eq!(
@@ -723,9 +820,9 @@ mod tests {
         assert_eq!(
             stylesheet.rules[0].selectors[0].parts,
             vec![
-                SimpleSelector::Tag("nav".into()),
-                SimpleSelector::Tag("ul".into()),
-                SimpleSelector::Tag("li".into()),
+                SimpleSelector::tag("nav"),
+                SimpleSelector::tag("ul"),
+                SimpleSelector::tag("li"),
             ]
         );
     }

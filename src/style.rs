@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    css::{Combinator, Declaration, Selector, SimpleSelector, Stylesheet, Unit, Value},
+    css::{
+        Combinator, Declaration, Selector, SimpleSelector, SimpleSelectorKind, Stylesheet, Unit,
+        Value,
+    },
     dom::{ElementData, Node, NodeType},
 };
 
@@ -230,11 +233,14 @@ fn selector_specificity(selector: &Selector) -> u32 {
 }
 
 fn simple_specificity(simple: &SimpleSelector) -> u32 {
-    match simple {
-        SimpleSelector::Tag(_) => 1,
-        SimpleSelector::Class(_) => 10,
-        SimpleSelector::Id(_) => 100,
-    }
+    let kind_specificity = match &simple.kind {
+        SimpleSelectorKind::Tag(_) => 1,
+        SimpleSelectorKind::Class(_) => 10,
+        SimpleSelectorKind::Id(_) => 100,
+    };
+    // Each pseudo-class adds 10 (CSS spec aligns it with class specificity).
+    let pseudo_specificity = if simple.pseudo.is_some() { 10 } else { 0 };
+    kind_specificity + pseudo_specificity
 }
 
 fn matches_selector(node: &Node, ancestors: &[&Node], selector: &Selector) -> bool {
@@ -277,14 +283,23 @@ fn matches_simple(node: &Node, simple: &SimpleSelector) -> bool {
         NodeType::Text(_) => return false,
     };
 
-    match simple {
-        SimpleSelector::Tag(tag_name) => element.tag_name == *tag_name,
-        SimpleSelector::Class(class_name) => has_class(element, class_name),
-        SimpleSelector::Id(id) => element
+    let kind_match = match &simple.kind {
+        SimpleSelectorKind::Tag(tag_name) => element.tag_name == *tag_name,
+        SimpleSelectorKind::Class(class_name) => has_class(element, class_name),
+        SimpleSelectorKind::Id(id) => element
             .attributes
             .get("id")
             .is_some_and(|value| value == id),
+    };
+
+    if !kind_match {
+        return false;
     }
+
+    // Pseudo-class matching is inert in this commit — hover state isn't plumbed through
+    // the style pass yet, so any pseudo on the selector causes the rule to silently fail
+    // to match. The follow-up commit threads hover identity through and lights this up.
+    simple.pseudo.is_none()
 }
 
 fn has_class(element: &ElementData, class_name: &str) -> bool {
@@ -499,6 +514,32 @@ mod tests {
             Some(&Value::Color(Color {
                 r: 255,
                 g: 0,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn hover_pseudo_class_does_not_match_yet_without_hover_state() {
+        // Until hover identity is plumbed through the style pass, any pseudo on the
+        // selector causes the rule to silently fail to match. A bare-class fallback
+        // confirms the surrounding cascade still works.
+        let root = parse_html(r#"<a class="btn">click</a>"#);
+        let stylesheet = parse_css(
+            r#"
+                .btn { color: #00ff00; }
+                .btn:hover { color: #ff0000; }
+            "#,
+        );
+        let styled = style::style_tree(&root, &[stylesheet]);
+
+        // The non-hover rule wins because the hover rule never matches.
+        assert_eq!(
+            styled.value("color"),
+            Some(&Value::Color(Color {
+                r: 0,
+                g: 255,
                 b: 0,
                 a: 255,
             }))
