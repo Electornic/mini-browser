@@ -263,7 +263,7 @@ fn layout_node(
     // Otherwise: parents with only inline children lay them out left-to-right;
     // everything else stays block.
     let (children, auto_content_height) = if is_flex_container(node) {
-        layout_flex_children(&node.children, content_x, content_y, content_width)
+        layout_flex_children(node, &node.children, content_x, content_y, content_width)
     } else if uses_inline_flow(node) {
         let align = inline_align_for(node);
         layout_inline_children(&node.children, content_x, content_y, content_width, align)
@@ -389,41 +389,123 @@ fn layout_node(
     layout_box
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlexDirection {
+    Row,
+    Column,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JustifyContent {
+    FlexStart,
+    Center,
+    FlexEnd,
+    SpaceBetween,
+}
+
 fn layout_flex_children(
+    container: &StyledNode,
     children: &[StyledNode],
     content_x: f32,
     content_y: f32,
     content_width: f32,
 ) -> (Vec<LayoutBox>, f32) {
-    // Commit 1 minimal flex: row direction, flex-start, no wrap, no grow/shrink.
-    // Each child is sized like an inline-block (explicit width wins, otherwise
-    // shrink-to-fit) and placed at the running main-axis cursor. The container
-    // content_height becomes the tallest child's outer height — flex flow does
-    // not stack vertically, so child heights sum on the cross axis as max, not
-    // sum.
+    // Two-pass placement: pass 1 lays out every in-flow item at the container's
+    // content origin so we can measure each item's outer main/cross size
+    // without committing to a final position. Pass 2 reads `justify-content`
+    // and shifts each item along the main axis by its computed cursor offset.
     //
-    // Margin collapse and floats are deliberately skipped: per CSS flexbox
-    // spec, items inside a flex container do not collapse margins with their
-    // siblings, and `float` is ignored on flex items.
+    // Sizing comes from the inline-block path (explicit width wins, otherwise
+    // shrink-to-fit). Margin collapse and floats are skipped on flex items
+    // per spec.
+    let direction = flex_direction(container);
+    let justify = justify_content(container);
+
     let mut boxes: Vec<LayoutBox> = Vec::with_capacity(children.len());
-    let mut cursor_x = content_x;
-    let mut max_outer_height: f32 = 0.0;
+    let mut in_flow_indices: Vec<usize> = Vec::new();
+
     for child in children {
         if is_out_of_flow(child) {
             // Static-position approximation, same trick as inline flow: drop
             // the absolute child at the container's content origin and let
-            // pass 2 reposition it against its containing block.
+            // pass 2 (the absolute reposition pass at the tree root) move it.
             let abs_box = layout_inline_or_inline_block(child, content_x, content_y, content_width);
             boxes.push(abs_box);
             continue;
         }
-        let child_box = layout_flex_item(child, cursor_x, content_y, content_width);
-        let outer = outer_rect(&child_box);
-        cursor_x += outer.width;
-        max_outer_height = max_outer_height.max(outer.height);
-        boxes.push(child_box);
+        in_flow_indices.push(boxes.len());
+        boxes.push(layout_flex_item(child, content_x, content_y, content_width));
     }
-    (boxes, max_outer_height)
+
+    let total_used: f32 = in_flow_indices
+        .iter()
+        .map(|&i| main_axis_outer(&boxes[i], direction))
+        .sum();
+
+    // Container's main-axis content size. Row direction is anchored to the
+    // already-resolved content_width. Column direction needs an explicit
+    // height for `justify-content` to have any leftover to distribute —
+    // height: auto means container_main_size == total_used and leftover is 0.
+    let container_main_size = match direction {
+        FlexDirection::Row => content_width,
+        FlexDirection::Column => {
+            length_value(container, "height", content_width).unwrap_or(total_used)
+        }
+    };
+    let leftover = (container_main_size - total_used).max(0.0);
+    let item_count = in_flow_indices.len();
+
+    let (start_offset, between_gap) = match justify {
+        JustifyContent::FlexStart => (0.0, 0.0),
+        JustifyContent::Center => (leftover / 2.0, 0.0),
+        JustifyContent::FlexEnd => (leftover, 0.0),
+        JustifyContent::SpaceBetween if item_count > 1 => {
+            (0.0, leftover / (item_count - 1) as f32)
+        }
+        // Single-item space-between collapses to flex-start (no gap to distribute).
+        JustifyContent::SpaceBetween => (0.0, 0.0),
+    };
+
+    let mut cursor = start_offset;
+    let mut max_cross: f32 = 0.0;
+    for (idx_in_flow, &i) in in_flow_indices.iter().enumerate() {
+        let main_size = main_axis_outer(&boxes[i], direction);
+        let cross_size = cross_axis_outer(&boxes[i], direction);
+        max_cross = max_cross.max(cross_size);
+        match direction {
+            FlexDirection::Row => shift_layout_subtree(&mut boxes[i], cursor, 0.0),
+            FlexDirection::Column => shift_layout_subtree(&mut boxes[i], 0.0, cursor),
+        }
+        cursor += main_size;
+        if idx_in_flow + 1 < item_count {
+            cursor += between_gap;
+        }
+    }
+
+    // Auto height for the container depends on direction:
+    // - row:    cross axis = height, so it grows to the tallest item
+    // - column: main axis  = height, so it grows to the cumulative cursor
+    let auto_content_height = match direction {
+        FlexDirection::Row => max_cross,
+        FlexDirection::Column => cursor,
+    };
+    (boxes, auto_content_height)
+}
+
+fn main_axis_outer(layout_box: &LayoutBox, direction: FlexDirection) -> f32 {
+    let outer = outer_rect(layout_box);
+    match direction {
+        FlexDirection::Row => outer.width,
+        FlexDirection::Column => outer.height,
+    }
+}
+
+fn cross_axis_outer(layout_box: &LayoutBox, direction: FlexDirection) -> f32 {
+    let outer = outer_rect(layout_box);
+    match direction {
+        FlexDirection::Row => outer.height,
+        FlexDirection::Column => outer.width,
+    }
 }
 
 fn layout_flex_item(node: &StyledNode, x: f32, y: f32, available_width: f32) -> LayoutBox {
@@ -437,6 +519,24 @@ fn layout_flex_item(node: &StyledNode, x: f32, y: f32, available_width: f32) -> 
 
 fn is_flex_container(node: &StyledNode) -> bool {
     matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "flex")
+}
+
+fn flex_direction(node: &StyledNode) -> FlexDirection {
+    match node.value("flex-direction") {
+        Some(Value::Keyword(keyword)) if keyword == "column" => FlexDirection::Column,
+        _ => FlexDirection::Row,
+    }
+}
+
+fn justify_content(node: &StyledNode) -> JustifyContent {
+    match node.value("justify-content") {
+        Some(Value::Keyword(keyword)) if keyword == "center" => JustifyContent::Center,
+        Some(Value::Keyword(keyword)) if keyword == "flex-end" => JustifyContent::FlexEnd,
+        Some(Value::Keyword(keyword)) if keyword == "space-between" => {
+            JustifyContent::SpaceBetween
+        }
+        _ => JustifyContent::FlexStart,
+    }
 }
 
 fn layout_inline_children(
@@ -746,7 +846,7 @@ fn layout_inline_block_node(node: &StyledNode, x: f32, y: f32, available_width: 
     // else if every child is inline, run inline flow; otherwise stack block
     // children top-to-bottom inside our content box.
     let (children, auto_content_height) = if is_flex_container(node) {
-        layout_flex_children(&node.children, content_x, content_y, content_width)
+        layout_flex_children(node, &node.children, content_x, content_y, content_width)
     } else if uses_inline_flow(node) {
         let align = inline_align_for(node);
         layout_inline_children(&node.children, content_x, content_y, content_width, align)
@@ -2299,6 +2399,115 @@ mod tests {
         assert_eq!(c.dimensions.content.y, 0.0);
         // Container's auto height = tallest child outer height = 50.
         assert_eq!(layout.dimensions.content.height, 50.0);
+    }
+
+    #[test]
+    fn flex_direction_column_stacks_children_vertically() {
+        // With flex-direction: column the main axis flips to y. Items still
+        // pack at flex-start by default, so they stack at increasing content_y
+        // and share content_x. Container's auto height becomes the cumulative
+        // main-axis size (sum of children), not the max.
+        let styled = styled_root(
+            r#"<div id="col"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #col { display: flex; flex-direction: column; width: 200px; }
+                .a { width: 80px; height: 30px; }
+                .b { width: 60px; height: 40px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+
+        assert_eq!(a.dimensions.content.x, 0.0);
+        assert_eq!(b.dimensions.content.x, 0.0);
+        assert_eq!(a.dimensions.content.y, 0.0);
+        assert_eq!(b.dimensions.content.y, 30.0);
+        // Auto height in column flow = sum of children outer heights = 70.
+        assert_eq!(layout.dimensions.content.height, 70.0);
+    }
+
+    #[test]
+    fn justify_content_center_offsets_items_by_half_leftover() {
+        // 3 items totaling 180px in a 400px row → 220px leftover. center
+        // pushes the start of the run by half (110px) so the cluster sits
+        // centered; items remain shoulder-to-shoulder within the cluster.
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div><div class="c"></div></div>"#,
+            r#"
+                #row { display: flex; justify-content: center; width: 400px; }
+                .a { width: 60px; height: 20px; }
+                .b { width: 60px; height: 20px; }
+                .c { width: 60px; height: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        assert_eq!(layout.children[0].dimensions.content.x, 110.0);
+        assert_eq!(layout.children[1].dimensions.content.x, 170.0);
+        assert_eq!(layout.children[2].dimensions.content.x, 230.0);
+    }
+
+    #[test]
+    fn justify_content_flex_end_pins_run_to_main_axis_end() {
+        // 100 + 80 + 60 = 240 used; 400 - 240 = 160 leftover all up front so
+        // the run ends at the container's right edge.
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div><div class="c"></div></div>"#,
+            r#"
+                #row { display: flex; justify-content: flex-end; width: 400px; }
+                .a { width: 100px; height: 20px; }
+                .b { width: 80px; height: 20px; }
+                .c { width: 60px; height: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        assert_eq!(layout.children[0].dimensions.content.x, 160.0);
+        assert_eq!(layout.children[1].dimensions.content.x, 260.0);
+        assert_eq!(layout.children[2].dimensions.content.x, 340.0);
+    }
+
+    #[test]
+    fn justify_content_space_between_distributes_leftover_into_n_minus_1_gaps() {
+        // 3 items × 60px = 180 used; 400 - 180 = 220 leftover; n-1 = 2 gaps;
+        // each gap = 110. First item pinned to start, last to end.
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div><div class="c"></div></div>"#,
+            r#"
+                #row { display: flex; justify-content: space-between; width: 400px; }
+                .a { width: 60px; height: 20px; }
+                .b { width: 60px; height: 20px; }
+                .c { width: 60px; height: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        assert_eq!(layout.children[0].dimensions.content.x, 0.0);
+        assert_eq!(layout.children[1].dimensions.content.x, 170.0);
+        assert_eq!(layout.children[2].dimensions.content.x, 340.0);
+    }
+
+    #[test]
+    fn justify_content_center_works_in_column_direction_with_explicit_height() {
+        // Column flex needs an explicit container height for justify-content
+        // to mean anything — without it, container height = total used and
+        // there is no leftover to distribute. With height: 200 and total = 100,
+        // leftover = 100, center offsets the run by 50.
+        let styled = styled_root(
+            r#"<div id="col"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #col {
+                    display: flex;
+                    flex-direction: column;
+                    justify-content: center;
+                    width: 200px;
+                    height: 200px;
+                }
+                .a { width: 50px; height: 40px; }
+                .b { width: 50px; height: 60px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        assert_eq!(layout.children[0].dimensions.content.y, 50.0);
+        assert_eq!(layout.children[1].dimensions.content.y, 90.0);
     }
 
     #[test]
