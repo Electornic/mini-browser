@@ -1,11 +1,15 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    css::{Declaration, Selector, Stylesheet, Value},
+    css::{Declaration, Selector, Stylesheet, Unit, Value},
     dom::{ElementData, Node, NodeType},
 };
 
 pub type PropertyMap = BTreeMap<String, Value>;
+
+// Mirrors a real browser's user-agent default for fonts. Used as the baseline whenever
+// no font-size is in scope (root with no font-size declaration, em/rem on the root, etc.).
+const DEFAULT_FONT_SIZE: f32 = 16.0;
 
 // StyledNode mirrors the DOM tree but replaces raw attributes with resolved CSS properties.
 // If you want to know "what style does this node end up with?", this is the structure to inspect.
@@ -23,13 +27,22 @@ impl StyledNode {
 }
 
 pub fn style_tree(root: &Node, stylesheets: &[Stylesheet]) -> StyledNode {
-    style_tree_with_parent(root, stylesheets, None)
+    // The root font-size feeds rem resolution for every descendant. Compute it up front
+    // by treating the root as if it lived inside the user-agent default font-size.
+    let raw_root = specified_values(root, stylesheets);
+    let root_font_size = resolve_font_size(
+        raw_root.get("font-size"),
+        DEFAULT_FONT_SIZE,
+        DEFAULT_FONT_SIZE,
+    );
+    style_tree_with_parent(root, stylesheets, None, root_font_size)
 }
 
 fn style_tree_with_parent(
     node: &Node,
     stylesheets: &[Stylesheet],
     parent_values: Option<&PropertyMap>,
+    root_font_size: f32,
 ) -> StyledNode {
     let mut specified_values = specified_values(node, stylesheets);
 
@@ -43,16 +56,57 @@ fn style_tree_with_parent(
         }
     }
 
+    // Font-size is resolved first because every other em-based length on this node depends
+    // on it. Parent font-size has already been resolved to Px during the parent's pass, so
+    // looking it up here is a straightforward read.
+    let parent_font_size = parent_values
+        .and_then(|values| values.get("font-size"))
+        .and_then(|value| match value {
+            Value::Length(v, Unit::Px) => Some(*v),
+            _ => None,
+        })
+        .unwrap_or(DEFAULT_FONT_SIZE);
+    let own_font_size = resolve_font_size(
+        specified_values.get("font-size"),
+        parent_font_size,
+        root_font_size,
+    );
+
+    // Replace own font-size with the resolved Px value so descendants see the cascaded
+    // value, then resolve every other em/rem to Px in place. Percent stays untouched —
+    // it depends on layout-time containing-block dimensions.
+    specified_values.insert("font-size".into(), Value::Length(own_font_size, Unit::Px));
+    for value in specified_values.values_mut() {
+        match value {
+            Value::Length(v, Unit::Em) => *value = Value::Length(*v * own_font_size, Unit::Px),
+            Value::Length(v, Unit::Rem) => *value = Value::Length(*v * root_font_size, Unit::Px),
+            _ => {}
+        }
+    }
+
     let children = node
         .children
         .iter()
-        .map(|child| style_tree_with_parent(child, stylesheets, Some(&specified_values)))
+        .map(|child| {
+            style_tree_with_parent(child, stylesheets, Some(&specified_values), root_font_size)
+        })
         .collect();
 
     StyledNode {
         node: node.clone(),
         specified_values,
         children,
+    }
+}
+
+fn resolve_font_size(raw: Option<&Value>, parent_font_size: f32, root_font_size: f32) -> f32 {
+    match raw {
+        Some(Value::Length(v, Unit::Px)) => *v,
+        Some(Value::Length(v, Unit::Em)) => *v * parent_font_size,
+        Some(Value::Length(v, Unit::Rem)) => *v * root_font_size,
+        // CSS spec resolves font-size: <percent> against the parent's font-size, just like em.
+        Some(Value::Length(v, Unit::Percent)) => *v / 100.0 * parent_font_size,
+        _ => parent_font_size,
     }
 }
 
@@ -314,6 +368,81 @@ mod tests {
                 b: 204,
                 a: 255,
             }))
+        );
+    }
+
+    #[test]
+    fn em_resolves_against_parent_font_size_for_font_size_itself() {
+        let root = parse_html(r#"<div id="outer"><div id="inner"></div></div>"#);
+        let stylesheet = parse_css(
+            r#"
+                #outer { font-size: 20px; }
+                #inner { font-size: 1.5em; }
+            "#,
+        );
+        let styled = style::style_tree(&root, &[stylesheet]);
+        let inner = &styled.children[0];
+
+        // 1.5em on a 20px parent resolves to 30px and is stored as a Px length so children
+        // see it during their own cascade.
+        assert_eq!(
+            inner.value("font-size"),
+            Some(&Value::Length(30.0, Unit::Px))
+        );
+    }
+
+    #[test]
+    fn em_on_other_properties_uses_own_resolved_font_size() {
+        let root = parse_html(r#"<div id="outer"><div id="inner"></div></div>"#);
+        let stylesheet = parse_css(
+            r#"
+                #outer { font-size: 20px; }
+                #inner { font-size: 1.5em; padding-left: 2em; }
+            "#,
+        );
+        let styled = style::style_tree(&root, &[stylesheet]);
+        let inner = &styled.children[0];
+
+        // padding 2em uses inner's resolved font-size (30px), not the parent's: 60px.
+        assert_eq!(
+            inner.value("padding-left"),
+            Some(&Value::Length(60.0, Unit::Px))
+        );
+    }
+
+    #[test]
+    fn rem_resolves_against_root_font_size_regardless_of_depth() {
+        let root = parse_html(
+            r#"<div id="root"><div class="middle"><div class="leaf"></div></div></div>"#,
+        );
+        let stylesheet = parse_css(
+            r#"
+                #root { font-size: 24px; }
+                .middle { font-size: 12px; }
+                .leaf { padding-left: 0.5rem; }
+            "#,
+        );
+        let styled = style::style_tree(&root, &[stylesheet]);
+        let leaf = &styled.children[0].children[0];
+
+        // 0.5rem references the root font-size (24px), independent of the .middle ancestor.
+        assert_eq!(
+            leaf.value("padding-left"),
+            Some(&Value::Length(12.0, Unit::Px))
+        );
+    }
+
+    #[test]
+    fn percent_on_non_font_properties_stays_unresolved_until_layout() {
+        let root = parse_html(r#"<div class="card"></div>"#);
+        let stylesheet = parse_css(".card { width: 50%; }");
+        let styled = style::style_tree(&root, &[stylesheet]);
+
+        // Percent on width is held back for the layout layer to resolve against the
+        // containing block's content width.
+        assert_eq!(
+            styled.value("width"),
+            Some(&Value::Length(50.0, Unit::Percent))
         );
     }
 
