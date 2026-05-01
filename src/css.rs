@@ -34,6 +34,13 @@ pub enum Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unit {
     Px,
+    // Em and Rem are font-relative; resolution happens at style time once font-size
+    // for the current node and the document root is known.
+    Em,
+    Rem,
+    // Percent is containing-block-relative; resolution happens at layout time once
+    // the parent's content box is known.
+    Percent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,9 +362,18 @@ impl<'a> Parser<'a> {
             )
         })?;
 
+        // Percent uses a non-identifier suffix, so check it before falling through to the
+        // alphabetic unit lookup.
+        if self.next_char() == Some('%') {
+            self.consume_char();
+            return Ok(Value::Length(value, Unit::Percent));
+        }
+
         let unit = self.parse_identifier()?;
         match unit.as_str() {
             "px" => Ok(Value::Length(value, Unit::Px)),
+            "em" => Ok(Value::Length(value, Unit::Em)),
+            "rem" => Ok(Value::Length(value, Unit::Rem)),
             // Unsupported units fall back to plain keywords instead of hard-failing.
             _ => Ok(Value::Keyword(format!("{value}{unit}"))),
         }
@@ -575,6 +591,28 @@ mod tests {
         assert_eq!(decls.len(), 5);
         assert_eq!(decls[4].name, "border-top-left-radius");
         assert_eq!(decls[4].value, Value::Length(12.0, Unit::Px));
+    }
+
+    #[test]
+    fn parses_percent_em_and_rem_length_units() {
+        let stylesheet = parse(
+            r#"
+                .a {
+                    width: 50%;
+                    padding: 1.5em;
+                    font-size: 0.875rem;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let decls = &stylesheet.rules[0].declarations;
+        assert_eq!(decls[0].name, "width");
+        assert_eq!(decls[0].value, Value::Length(50.0, Unit::Percent));
+        assert_eq!(decls[1].name, "padding");
+        assert_eq!(decls[1].value, Value::Length(1.5, Unit::Em));
+        assert_eq!(decls[2].name, "font-size");
+        assert_eq!(decls[2].value, Value::Length(0.875, Unit::Rem));
     }
 
     #[test]
