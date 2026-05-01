@@ -72,6 +72,38 @@ pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
     Ok(stylesheet)
 }
 
+/// Returns the rgba color associated with a CSS named color keyword, if any.
+/// Currently covers the HTML4 basic palette plus a handful of common extras and
+/// `transparent`. Anything outside this set falls through to the generic keyword path.
+pub fn named_color(name: &str) -> Option<Color> {
+    let rgba = |r: u8, g: u8, b: u8, a: u8| Color { r, g, b, a };
+    match name.to_ascii_lowercase().as_str() {
+        // HTML4 basic 16.
+        "black" => Some(rgba(0, 0, 0, 255)),
+        "silver" => Some(rgba(192, 192, 192, 255)),
+        "gray" | "grey" => Some(rgba(128, 128, 128, 255)),
+        "white" => Some(rgba(255, 255, 255, 255)),
+        "maroon" => Some(rgba(128, 0, 0, 255)),
+        "red" => Some(rgba(255, 0, 0, 255)),
+        "purple" => Some(rgba(128, 0, 128, 255)),
+        "fuchsia" | "magenta" => Some(rgba(255, 0, 255, 255)),
+        "green" => Some(rgba(0, 128, 0, 255)),
+        "lime" => Some(rgba(0, 255, 0, 255)),
+        "olive" => Some(rgba(128, 128, 0, 255)),
+        "yellow" => Some(rgba(255, 255, 0, 255)),
+        "navy" => Some(rgba(0, 0, 128, 255)),
+        "blue" => Some(rgba(0, 0, 255, 255)),
+        "teal" => Some(rgba(0, 128, 128, 255)),
+        "aqua" | "cyan" => Some(rgba(0, 255, 255, 255)),
+        // Common extras worth shipping early since toy pages reach for them.
+        "orange" => Some(rgba(255, 165, 0, 255)),
+        "pink" => Some(rgba(255, 192, 203, 255)),
+        "brown" => Some(rgba(165, 42, 42, 255)),
+        "transparent" => Some(rgba(0, 0, 0, 0)),
+        _ => None,
+    }
+}
+
 struct Parser<'a> {
     pos: usize,
     input: &'a str,
@@ -315,8 +347,15 @@ impl<'a> Parser<'a> {
         match self.next_char() {
             Some('#') => self.parse_hex_color(),
             Some(ch) if ch.is_ascii_digit() => self.parse_length_or_number(),
-            // Everything else is treated as a keyword to keep the engine permissive.
-            Some(_) => Ok(Value::Keyword(self.parse_identifier()?)),
+            // Identifier-shaped values cover both plain keywords (block, auto, ...) and
+            // named colors. Named colors take precedence so `color: red` lands as a real
+            // Color value rather than an unrecognised keyword the renderer would ignore.
+            Some(_) => {
+                let ident = self.parse_identifier()?;
+                Ok(named_color(&ident)
+                    .map(Value::Color)
+                    .unwrap_or(Value::Keyword(ident)))
+            }
             None => Err(ParseError::new(
                 self.pos,
                 "unexpected end of input while parsing value",
@@ -591,6 +630,52 @@ mod tests {
         assert_eq!(decls.len(), 5);
         assert_eq!(decls[4].name, "border-top-left-radius");
         assert_eq!(decls[4].value, Value::Length(12.0, Unit::Px));
+    }
+
+    #[test]
+    fn parses_named_colors_into_color_values() {
+        let stylesheet = parse(
+            r#"
+                .a { color: red; background-color: transparent; }
+                .b { color: SkyBlue; border-color: cyan; }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            stylesheet.rules[0].declarations[0].value,
+            Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            })
+        );
+        assert_eq!(
+            stylesheet.rules[0].declarations[1].value,
+            Value::Color(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0,
+            })
+        );
+        // Unknown named color (SkyBlue not in our shipped subset) falls back to a keyword
+        // so the parser stays permissive.
+        assert_eq!(
+            stylesheet.rules[1].declarations[0].value,
+            Value::Keyword("SkyBlue".into())
+        );
+        // `cyan` is an alias for `aqua` — case-insensitive lookup picks it up.
+        assert_eq!(
+            stylesheet.rules[1].declarations[1].value,
+            Value::Color(Color {
+                r: 0,
+                g: 255,
+                b: 255,
+                a: 255,
+            })
+        );
     }
 
     #[test]
