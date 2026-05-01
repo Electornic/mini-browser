@@ -538,8 +538,84 @@ impl<'a> Parser<'a> {
             return Ok(vec![Declaration { name, value }]);
         }
 
+        if name == "flex" {
+            return self.parse_flex_shorthand();
+        }
+
         let value = self.parse_value()?;
         Ok(vec![Declaration { name, value }])
+    }
+
+    fn parse_flex_shorthand(&mut self) -> Result<Vec<Declaration>, ParseError> {
+        // CSS `flex` shorthand sets flex-grow / flex-shrink / flex-basis.
+        // Toy support is the common forms only:
+        //   flex: <number>                       → grow:<n>, shrink:1
+        //   flex: <number> <number>              → grow, shrink
+        //   flex: <number> <number> <length>     → grow, shrink, basis
+        //   flex: <length>                       → grow:1, shrink:1, basis
+        //   flex: <number> <length>              → grow, shrink:1, basis
+        // Keywords (`auto`, `none`, `initial`) are not recognised — author
+        // must spell out longhands or use a numeric form. Implicit basis is
+        // left unset, which means flex children fall back to width-based
+        // (or shrink-to-fit) sizing in the layout pass.
+        let mut grow: Option<f32> = None;
+        let mut shrink: Option<f32> = None;
+        let mut basis: Option<Value> = None;
+
+        for _slot in 0..3 {
+            self.consume_whitespace();
+            match self.next_char() {
+                Some(';') | Some('}') | None => break,
+                Some(ch) if !(ch.is_ascii_digit() || ch == '.' || ch == '-') => break,
+                _ => {}
+            }
+            match self.parse_length_or_number()? {
+                Value::Number(n) => {
+                    if grow.is_none() {
+                        grow = Some(n);
+                    } else if shrink.is_none() {
+                        shrink = Some(n);
+                    } else {
+                        return Err(ParseError::new(
+                            self.pos,
+                            "flex shorthand: third value must be a length",
+                        ));
+                    }
+                }
+                length @ Value::Length(_, _) => {
+                    basis = Some(length);
+                    break;
+                }
+                _ => break,
+            }
+        }
+
+        if grow.is_none() && basis.is_none() {
+            return Err(ParseError::new(
+                self.pos,
+                "flex shorthand requires at least one number or length",
+            ));
+        }
+
+        let grow_value = grow.unwrap_or(1.0);
+        let shrink_value = shrink.unwrap_or(1.0);
+        let mut decls = vec![
+            Declaration {
+                name: "flex-grow".into(),
+                value: Value::Number(grow_value),
+            },
+            Declaration {
+                name: "flex-shrink".into(),
+                value: Value::Number(shrink_value),
+            },
+        ];
+        if let Some(basis_value) = basis {
+            decls.push(Declaration {
+                name: "flex-basis".into(),
+                value: basis_value,
+            });
+        }
+        Ok(decls)
     }
 
     fn parse_transform_value(&mut self) -> Result<Value, ParseError> {
@@ -1906,5 +1982,35 @@ mod tests {
         };
         let positions: Vec<_> = gradient.stops.iter().map(|s| s.position).collect();
         assert_eq!(positions, vec![Some(0.0), Some(0.5), Some(1.0)]);
+    }
+
+    #[test]
+    fn flex_shorthand_one_number_emits_grow_with_default_shrink() {
+        let stylesheet = parse(".a { flex: 2; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+        assert_eq!(decls.len(), 2);
+        assert_eq!(decls[0].name, "flex-grow");
+        assert_eq!(decls[0].value, Value::Number(2.0));
+        assert_eq!(decls[1].name, "flex-shrink");
+        assert_eq!(decls[1].value, Value::Number(1.0));
+    }
+
+    #[test]
+    fn flex_shorthand_three_values_emits_all_longhands() {
+        let stylesheet = parse(".a { flex: 1 0 80px; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+        assert_eq!(decls.len(), 3);
+        assert_eq!(
+            (&decls[0].name, &decls[0].value),
+            (&"flex-grow".to_string(), &Value::Number(1.0))
+        );
+        assert_eq!(
+            (&decls[1].name, &decls[1].value),
+            (&"flex-shrink".to_string(), &Value::Number(0.0))
+        );
+        assert_eq!(
+            (&decls[2].name, &decls[2].value),
+            (&"flex-basis".to_string(), &Value::Length(80.0, Unit::Px))
+        );
     }
 }

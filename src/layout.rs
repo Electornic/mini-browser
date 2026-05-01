@@ -452,21 +452,76 @@ fn layout_flex_children(
         boxes.push(layout_flex_item(child, content_x, content_y, content_width));
     }
 
-    let total_used: f32 = in_flow
+    // Apply explicit `flex-basis: <length>` as a content-axis override on
+    // top of pass-1 sizing. CSS spec: flex-basis takes precedence over the
+    // item's `width`/`height` along the main axis, so the override happens
+    // after pass 1 even though it would also have been valid to substitute
+    // the basis upstream.
+    for &(i, child) in &in_flow {
+        if let Some(basis) = flex_basis_content_main(child) {
+            force_item_content_main(&mut boxes[i], basis, direction);
+        }
+    }
+
+    let total_basis: f32 = in_flow
         .iter()
         .map(|&(i, _)| main_axis_outer(&boxes[i], direction))
         .sum();
 
     // Container's main-axis content size. Row direction is anchored to the
     // already-resolved content_width. Column direction needs an explicit
-    // height for `justify-content` to have any leftover to distribute —
-    // height: auto means container_main_size == total_used and leftover is 0.
+    // height for `justify-content`/grow to have any leftover to distribute —
+    // height: auto falls back to total_basis so free space is zero.
     let container_main_size = match direction {
         FlexDirection::Row => content_width,
         FlexDirection::Column => {
-            length_value(container, "height", content_width).unwrap_or(total_used)
+            length_value(container, "height", content_width).unwrap_or(total_basis)
         }
     };
+
+    // Distribute free space along the main axis. Positive free space goes to
+    // flex-grow (proportional to grow weight). Negative free space goes to
+    // flex-shrink (proportional to shrink weight × basis, per spec, so larger
+    // items absorb more shrinkage). Items with zero weight are skipped on
+    // their respective passes.
+    let free = container_main_size - total_basis;
+    if free > 0.0 {
+        let total_grow: f32 = in_flow.iter().map(|&(_, child)| flex_grow(child)).sum();
+        if total_grow > 0.0 {
+            for &(i, child) in &in_flow {
+                let grow = flex_grow(child);
+                if grow > 0.0 {
+                    let delta = free * grow / total_grow;
+                    grow_item_main(&mut boxes[i], delta, direction);
+                }
+            }
+        }
+    } else if free < 0.0 {
+        let total_shrink_weight: f32 = in_flow
+            .iter()
+            .map(|&(i, child)| flex_shrink(child) * main_axis_outer(&boxes[i], direction))
+            .sum();
+        if total_shrink_weight > 0.0 {
+            for &(i, child) in &in_flow {
+                let weight = flex_shrink(child) * main_axis_outer(&boxes[i], direction);
+                if weight > 0.0 {
+                    // free is negative; delta is the (negative) size delta to
+                    // apply to this item, so larger weights shrink more.
+                    let delta = free * weight / total_shrink_weight;
+                    grow_item_main(&mut boxes[i], delta, direction);
+                }
+            }
+        }
+    }
+
+    // After grow/shrink, total_used reflects the actually-occupied main size.
+    // When grow consumed all positive free space (or shrink absorbed all
+    // negative free space) the leftover is zero and justify-content has
+    // nothing to distribute.
+    let total_used: f32 = in_flow
+        .iter()
+        .map(|&(i, _)| main_axis_outer(&boxes[i], direction))
+        .sum();
     let leftover_main = (container_main_size - total_used).max(0.0);
     let item_count = in_flow.len();
 
@@ -581,6 +636,61 @@ fn has_explicit_cross_size(node: &StyledNode, direction: FlexDirection) -> bool 
         FlexDirection::Column => "width",
     };
     matches!(node.value(prop), Some(Value::Length(_, _)))
+}
+
+fn flex_grow(node: &StyledNode) -> f32 {
+    // CSS default is 0 — items don't grow unless the author opts in.
+    match node.value("flex-grow") {
+        Some(Value::Number(value)) if *value >= 0.0 => *value,
+        _ => 0.0,
+    }
+}
+
+fn flex_shrink(node: &StyledNode) -> f32 {
+    // CSS default is 1 — items shrink to fit by default.
+    match node.value("flex-shrink") {
+        Some(Value::Number(value)) if *value >= 0.0 => *value,
+        _ => 1.0,
+    }
+}
+
+fn flex_basis_content_main(node: &StyledNode) -> Option<f32> {
+    // Only the explicit `<length>` form drives the content-axis override.
+    // `auto` (default) leaves layout_flex_item's width/shrink-to-fit logic in
+    // charge, and percent / keyword forms are not yet implemented.
+    match node.value("flex-basis") {
+        Some(Value::Length(value, Unit::Px)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn force_item_content_main(
+    layout_box: &mut LayoutBox,
+    content_main: f32,
+    direction: FlexDirection,
+) {
+    let value = content_main.max(0.0);
+    match direction {
+        FlexDirection::Row => layout_box.dimensions.content.width = value,
+        FlexDirection::Column => layout_box.dimensions.content.height = value,
+    }
+}
+
+fn grow_item_main(layout_box: &mut LayoutBox, delta: f32, direction: FlexDirection) {
+    // Resize is post-hoc on the item's content rect — children that were laid
+    // out in pass 1 keep their original positions, so any extra space appears
+    // as background area at the trailing edge. This is the same simplification
+    // already used by stretch_item_to_cross.
+    match direction {
+        FlexDirection::Row => {
+            layout_box.dimensions.content.width =
+                (layout_box.dimensions.content.width + delta).max(0.0);
+        }
+        FlexDirection::Column => {
+            layout_box.dimensions.content.height =
+                (layout_box.dimensions.content.height + delta).max(0.0);
+        }
+    }
 }
 
 fn main_axis_outer(layout_box: &LayoutBox, direction: FlexDirection) -> f32 {
@@ -2731,6 +2841,163 @@ mod tests {
         // wins.
         assert_eq!(a.dimensions.content.width, 200.0);
         assert_eq!(b.dimensions.content.width, 80.0);
+    }
+
+    #[test]
+    fn flex_grow_distributes_positive_free_space_proportionally() {
+        // Container = 400px. Two items at 50px each → 100px used, 300px free.
+        // .a has flex-grow: 1, .b has flex-grow: 2 → split 100 : 200, so
+        // .a outer becomes 50+100 = 150, .b outer becomes 50+200 = 250.
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #row { display: flex; width: 400px; }
+                .a { width: 50px; height: 30px; flex-grow: 1; }
+                .b { width: 50px; height: 30px; flex-grow: 2; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+
+        assert_eq!(a.dimensions.content.width, 150.0);
+        assert_eq!(b.dimensions.content.width, 250.0);
+        // After grow, items pack shoulder-to-shoulder again from the start.
+        assert_eq!(a.dimensions.content.x, 0.0);
+        assert_eq!(b.dimensions.content.x, 150.0);
+    }
+
+    #[test]
+    fn flex_grow_zero_keeps_item_at_basis() {
+        // Default flex-grow is 0, so an item without an explicit flex-grow
+        // should not absorb any of the 300px free space — only .b grows.
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #row { display: flex; width: 400px; }
+                .a { width: 50px; height: 30px; }
+                .b { width: 50px; height: 30px; flex-grow: 1; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+
+        assert_eq!(a.dimensions.content.width, 50.0);
+        assert_eq!(b.dimensions.content.width, 350.0);
+    }
+
+    #[test]
+    fn flex_shrink_distributes_overflow_weighted_by_basis() {
+        // Container = 200px but items demand 300px (3 × 100). Default shrink
+        // is 1 for each, total weight = sum(1 × 100) = 300. Each item shrinks
+        // by 100 × (100/300) ≈ 33.33 → final width ≈ 66.67.
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div><div class="c"></div></div>"#,
+            r#"
+                #row { display: flex; width: 200px; }
+                .a { width: 100px; height: 20px; }
+                .b { width: 100px; height: 20px; }
+                .c { width: 100px; height: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+
+        // 100 - (100 * (1*100) / (3*100)) = 100 - 33.333 ≈ 66.67
+        let expected = 100.0 - 100.0 / 3.0;
+        assert!((a.dimensions.content.width - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn flex_shrink_zero_pins_item_to_basis_during_shrink() {
+        // flex-shrink: 0 opts out of shrinking. .a stays at 200px and .b
+        // absorbs the entire overflow. With container = 250px, .b has
+        // basis = 100px and overflow = -50px; .b ends up at 100 - 50 = 50.
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #row { display: flex; width: 250px; }
+                .a { width: 200px; height: 20px; flex-shrink: 0; }
+                .b { width: 100px; height: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+
+        assert_eq!(a.dimensions.content.width, 200.0);
+        assert_eq!(b.dimensions.content.width, 50.0);
+    }
+
+    #[test]
+    fn flex_basis_overrides_explicit_width() {
+        // CSS spec: flex-basis takes precedence over width on flex items. With
+        // basis = 80, the item starts at 80 regardless of width = 200, so
+        // free space = 400 - (80 + 50) = 270 and grow:1 makes .a = 80+270=350.
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #row { display: flex; width: 400px; }
+                .a { width: 200px; height: 20px; flex-basis: 80px; flex-grow: 1; }
+                .b { width: 50px; height: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+
+        assert_eq!(a.dimensions.content.width, 350.0);
+        assert_eq!(b.dimensions.content.width, 50.0);
+    }
+
+    #[test]
+    fn flex_shorthand_one_number_sets_grow_only() {
+        // `flex: 2` should expand to flex-grow: 2 (with shrink: 1 default and
+        // basis unset). Verifies the parser-side shorthand handler.
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #row { display: flex; width: 400px; }
+                .a { width: 50px; height: 20px; flex: 2; }
+                .b { width: 50px; height: 20px; flex: 1; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+
+        // Free = 300, total grow = 3, .a gets 200, .b gets 100.
+        assert_eq!(a.dimensions.content.width, 250.0);
+        assert_eq!(b.dimensions.content.width, 150.0);
+    }
+
+    #[test]
+    fn flex_grow_works_in_column_direction_with_explicit_height() {
+        // Column flex needs an explicit container height for grow to find any
+        // free space. Container height = 200, items use 60 total → 140 free,
+        // split equally between two flex-grow:1 items → +70 each.
+        let styled = styled_root(
+            r#"<div id="col"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #col {
+                    display: flex;
+                    flex-direction: column;
+                    width: 200px;
+                    height: 200px;
+                }
+                .a { width: 50px; height: 30px; flex-grow: 1; }
+                .b { width: 50px; height: 30px; flex-grow: 1; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+
+        assert_eq!(a.dimensions.content.height, 100.0);
+        assert_eq!(b.dimensions.content.height, 100.0);
+        assert_eq!(a.dimensions.content.y, 0.0);
+        assert_eq!(b.dimensions.content.y, 100.0);
     }
 
     #[test]
