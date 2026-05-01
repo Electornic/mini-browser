@@ -115,6 +115,10 @@ pub enum Value {
     // `box-shadow` value. MVP supports a single outset shadow with optional
     // blur, spread, and color — no inset, no comma-separated shadow lists.
     BoxShadow(BoxShadow),
+    // `text-shadow` value. Same shape as box-shadow minus the spread.
+    // The blur radius is parsed but not applied to glyph rendering yet;
+    // sharpness vs softness on glyphs needs a real blur kernel.
+    TextShadow(TextShadow),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -123,6 +127,14 @@ pub struct BoxShadow {
     pub offset_y: f32,
     pub blur_radius: f32,
     pub spread_radius: f32,
+    pub color: Color,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextShadow {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub blur_radius: f32,
     pub color: Color,
 }
 
@@ -492,8 +504,57 @@ impl<'a> Parser<'a> {
             return Ok(vec![Declaration { name, value }]);
         }
 
+        if name == "text-shadow" {
+            let value = self.parse_text_shadow_value()?;
+            return Ok(vec![Declaration { name, value }]);
+        }
+
         let value = self.parse_value()?;
         Ok(vec![Declaration { name, value }])
+    }
+
+    fn parse_text_shadow_value(&mut self) -> Result<Value, ParseError> {
+        // Grammar: <offset-x> <offset-y> [<blur>] [<color>]. No spread (the
+        // notion doesn't apply to glyph shadows). Color defaults to opaque
+        // black; blur defaults to 0 and clamps to non-negative.
+        let offset_x = self.parse_length_token()?;
+        self.consume_whitespace();
+        let offset_y = self.parse_length_token()?;
+        self.consume_whitespace();
+
+        let blur_radius = if self.peek_starts_length() {
+            let value = self.parse_length_token()?.max(0.0);
+            self.consume_whitespace();
+            value
+        } else {
+            0.0
+        };
+
+        let color = if matches!(self.next_char(), Some(';') | Some('}') | None) {
+            Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }
+        } else {
+            match self.parse_value()? {
+                Value::Color(color) => color,
+                other => {
+                    return Err(ParseError::new(
+                        self.pos,
+                        format!("expected color in text-shadow, got {other:?}"),
+                    ));
+                }
+            }
+        };
+
+        Ok(Value::TextShadow(TextShadow {
+            offset_x,
+            offset_y,
+            blur_radius,
+            color,
+        }))
     }
 
     fn parse_box_shadow_value(&mut self) -> Result<Value, ParseError> {
@@ -971,7 +1032,7 @@ impl<'a> Parser<'a> {
 mod tests {
     use super::{
         BoxShadow, Color, Combinator, GradientDirection, GradientKind, PseudoClass, Selector,
-        SimpleSelector, SimpleSelectorKind, Unit, Value, parse,
+        SimpleSelector, SimpleSelectorKind, TextShadow, Unit, Value, parse,
     };
 
     #[test]
@@ -1493,6 +1554,52 @@ mod tests {
         assert_eq!(shadow.offset_y, -4.0);
         assert_eq!(shadow.blur_radius, 8.0);
         assert_eq!(shadow.color.r, 255);
+    }
+
+    #[test]
+    fn parses_text_shadow_full_form() {
+        // `2px 3px 4px red` populates every component in order.
+        let stylesheet = parse(".a { text-shadow: 2px 3px 4px red; }").unwrap();
+        let shadow = match &stylesheet.rules[0].declarations[0].value {
+            Value::TextShadow(shadow) => *shadow,
+            other => panic!("expected TextShadow, got {other:?}"),
+        };
+        assert_eq!(
+            shadow,
+            TextShadow {
+                offset_x: 2.0,
+                offset_y: 3.0,
+                blur_radius: 4.0,
+                color: Color {
+                    r: 255,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parses_text_shadow_minimal_form_uses_defaults() {
+        // Just two offsets — blur defaults to 0, color defaults to black.
+        let stylesheet = parse(".a { text-shadow: 2px 3px; }").unwrap();
+        let shadow = match &stylesheet.rules[0].declarations[0].value {
+            Value::TextShadow(shadow) => *shadow,
+            other => panic!("expected TextShadow, got {other:?}"),
+        };
+        assert_eq!(shadow.offset_x, 2.0);
+        assert_eq!(shadow.offset_y, 3.0);
+        assert_eq!(shadow.blur_radius, 0.0);
+        assert_eq!(
+            shadow.color,
+            Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
     }
 
     #[test]

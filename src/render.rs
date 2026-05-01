@@ -243,6 +243,9 @@ fn paint_self(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>, alpha:
         commands.push(command);
     }
     commands.extend(border_commands(layout_box, alpha));
+    if let Some(command) = text_shadow_command(layout_box, alpha) {
+        commands.push(command);
+    }
     if let Some(command) = text_command(layout_box, alpha) {
         commands.push(command);
     }
@@ -440,6 +443,34 @@ fn corner_radius(node: &crate::style::StyledNode, name: &str) -> f32 {
         Some(Value::Length(value, Unit::Px)) => *value,
         _ => 0.0,
     }
+}
+
+fn text_shadow_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
+    // Only the actual text-bearing layout box paints a shadow — Element
+    // boxes never carry text on their own, so they short-circuit here.
+    let node = layout_box.styled_node()?;
+    let text = match &node.node.node_type {
+        NodeType::Text(text) => text.clone(),
+        NodeType::Element(_) => return None,
+    };
+    let shadow = match node.value("text-shadow") {
+        Some(Value::TextShadow(shadow)) => *shadow,
+        _ => return None,
+    };
+
+    let glyph_size = font_size(node);
+    let half_leading = ((layout_box.dimensions.content.height - glyph_size) / 2.0).max(0.0);
+
+    // The shadow is just a second Text command at the offset position with
+    // the shadow color. blur_radius is parsed but ignored for now — proper
+    // glyph blur would need a per-glyph rasterize-then-blur pass.
+    Some(DisplayCommand::Text(TextCommand {
+        text,
+        x: layout_box.dimensions.content.x + shadow.offset_x,
+        y: layout_box.dimensions.content.y + half_leading + shadow.offset_y,
+        color: apply_alpha(shadow.color, alpha),
+        font_size: glyph_size,
+    }))
 }
 
 fn text_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
@@ -2114,6 +2145,70 @@ mod tests {
         assert_eq!(pixels[1], 0x000000FF);
         assert_eq!(pixels[2], 0x000000FF);
         assert_eq!(pixels[3], 0x000000FF);
+    }
+
+    #[test]
+    fn text_shadow_emits_offset_text_command_before_main_text() {
+        // `text-shadow: 2px 3px red` should produce two Text commands: the
+        // shadow at (offset_x, offset_y) under the main glyph in red, and
+        // the regular text on top with the inherited color.
+        let commands = display_list(
+            r#"<p>Hi</p>"#,
+            r#"
+                p {
+                    font-size: 16px;
+                    color: black;
+                    text-shadow: 2px 3px red;
+                    margin-top: 0;
+                    margin-bottom: 0;
+                }
+            "#,
+        );
+
+        let texts: Vec<&TextCommand> = commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DisplayCommand::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 2, "shadow + main = 2 text commands");
+
+        let shadow = texts[0];
+        let main = texts[1];
+
+        // Shadow color = red.
+        assert_eq!(shadow.color.r, 255);
+        assert_eq!(shadow.color.g, 0);
+        assert_eq!(shadow.color.b, 0);
+        // Main color = black (inherited).
+        assert_eq!(main.color.r, 0);
+        assert_eq!(main.color.g, 0);
+        assert_eq!(main.color.b, 0);
+
+        // Shadow sits at +2,+3 relative to the main text.
+        assert!((shadow.x - main.x - 2.0).abs() < f32::EPSILON);
+        assert!((shadow.y - main.y - 3.0).abs() < f32::EPSILON);
+        // Same glyph string and size.
+        assert_eq!(shadow.text, main.text);
+        assert_eq!(shadow.font_size, main.font_size);
+    }
+
+    #[test]
+    fn text_without_text_shadow_emits_only_one_text_command() {
+        // Sanity check: the shadow command shouldn't sneak in when no
+        // text-shadow is declared on the element or any ancestor.
+        let commands = display_list(
+            r#"<p>Hi</p>"#,
+            r#"
+                p { font-size: 16px; }
+            "#,
+        );
+        let text_count = commands
+            .iter()
+            .filter(|cmd| matches!(cmd, DisplayCommand::Text(_)))
+            .count();
+        assert_eq!(text_count, 1);
     }
 
     #[test]

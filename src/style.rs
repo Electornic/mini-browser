@@ -121,7 +121,13 @@ fn style_tree_inner<'a>(
 
     // Real browsers inherit many properties. Here we only inherit a few text-related ones
     // because they make documents readable without making the style system much more complex.
-    for property in ["color", "font-size", "text-align", "line-height"] {
+    for property in [
+        "color",
+        "font-size",
+        "text-align",
+        "line-height",
+        "text-shadow",
+    ] {
         if !specified_values.contains_key(property)
             && let Some(value) = parent_values.and_then(|values| values.get(property))
         {
