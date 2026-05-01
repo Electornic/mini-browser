@@ -9,7 +9,7 @@
 | 0 | Done | Block layout + Chrome-style UI | URL 인자 없이 실행 시 Chrome NTP 모양의 시작 페이지가 보인다 |
 | 1A | Done | Values & Selectors | %/em/rem 단위, named/rgb/rgba 색상, descendant/child 셀렉터, :hover/:focus/:active |
 | 1B | Done | Layout Modes | inline-block ✅, position: relative/absolute/fixed ✅, stacking/z-index ✅, margin collapse ✅, line-height ✅, float ✅ |
-| 1C | In progress | Paint | opacity ✅, linear-gradient ✅, radial-gradient ✅, box-shadow ✅, text-shadow ✅, transform |
+| 1C | Done | Paint | opacity ✅, linear-gradient ✅, radial-gradient ✅, box-shadow ✅, text-shadow ✅, transform ✅ |
 | 1D | Backlog | Big Layout | Flexbox / Grid |
 | 2 | Backlog | JS Engine Integration | Boa 엔진 임베드 + DOM 바인딩, 단순 JS 동작 페이지 렌더 |
 
@@ -102,7 +102,7 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 | Radial gradient | Done | render.rs, css.rs | 3-5d | ★ | css에 `radial-gradient(<stops>)` 파서 추가, 기존 `LinearGradient` 타입을 `Gradient { kind, stops }` + `GradientKind { Linear(direction), Radial }`로 일반화. render의 `DisplayCommand::LinearGradient`도 `Gradient`로 통합되어 single fill_gradient 함수가 kind에 따라 progress 계산 분기. radial은 ellipse(rect 중앙, 반지름 rect/2) 기준 normalised distance √((nx)²+(ny)²)를 progress로 사용. **간이화**: shape/size/position 인자는 미파싱 — 항상 ellipse-at-center, farthest-corner |
 | `box-shadow` | Done | render.rs, css.rs | 1w | ★★ | css에 `Value::BoxShadow`(offset/blur/spread/color) + `parse_box_shadow_value`. parse_declaration에서 `box-shadow` 이름이면 special-case로 dispatch (border-radius와 동일 패턴). render는 `DisplayCommand::BoxShadow` + `shadow_command` (border-box를 offset+spread로 변형) + paint_self가 shadow → bg → gradient → border → text 순서로 emit. raster는 픽셀별 distance-to-rect 기반 linear-ramp coverage, source-over blend. **간이화**: outset only(no inset), single shadow only(no comma list), Gaussian 대신 linear-ramp 근사, border-radius와 무관한 sharp corner |
 | `text-shadow` | Done | render.rs, css.rs, style.rs | 3d | ★ | css에 `Value::TextShadow`(offset/blur/color) + `parse_text_shadow_value`. style 인헤리턴스 화이트리스트에 `text-shadow` 추가 (자식 텍스트가 부모 declaration 받음). render는 `paint_self`에 `text_shadow_command`를 `text_command` 직전에 호출 — 텍스트 노드일 때만 두 번째 Text 커맨드를 offset 위치 + shadow 색으로 push. **간이화**: `blur_radius`는 파싱하지만 라스터에선 무시 (글리프 blur는 별도 raster-then-blur 패스 필요), single shadow only |
-| `transform: translate/scale/rotate` | Backlog | render.rs, layout.rs | 2-3w | ★★★ | affine matrix, hit-test 재설계 |
+| `transform: translate/scale/rotate` | Done | render.rs, css.rs, main.rs | 2-3w | ★★★ | `Affine` 6-entry 매트릭스를 paint pass의 `inherited_alpha`처럼 스레딩, 박스의 `T(centre) * own * T(-centre)`로 `transform-origin: 50% 50%` 구현. translate+scale은 axis-aligned 이라 emit 직후 rect/x/y/width/height에 bake (기존 fast path 유지). rotate가 들어가면 박스의 primitive들을 단일 `DisplayCommand::TransformGroup(matrix, Vec)`로 묶고, raster는 logical bbox의 4 corner를 매트릭스로 투영해 screen AABB를 구한 뒤 픽셀별 inverse-transform sampling으로 SolidRect/RoundedRect/Gradient/BoxShadow/Image/Text 모두 정확히 그린다 (per-glyph로 text까지). hit-test는 layout 트리를 같은 `inherited_transform`으로 걷고 cursor를 effective의 inverse로 logical 공간에 환원해서 비교 — `LinkTarget` rect도 collection 시점에 transform을 apply. CSS는 `Value::TransformList(Vec<TransformOp>)` + `translate(x[,y])`/`translateX/Y`, `scale(x[,y])`/`scaleX/Y`, `rotate(<angle>)`(deg/rad/turn/grad → rad). **간이화**: `transform-origin`은 항상 50% 50%, percent translate, matrix(...) 직접 입력, 3D transform은 미구현 |
 
 ### 1D. Big Layout (마지막)
 
