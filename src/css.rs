@@ -347,11 +347,16 @@ impl<'a> Parser<'a> {
         match self.next_char() {
             Some('#') => self.parse_hex_color(),
             Some(ch) if ch.is_ascii_digit() => self.parse_length_or_number(),
-            // Identifier-shaped values cover both plain keywords (block, auto, ...) and
-            // named colors. Named colors take precedence so `color: red` lands as a real
-            // Color value rather than an unrecognised keyword the renderer would ignore.
+            // Identifier-shaped values cover plain keywords (block, auto, ...), named
+            // colors, and functional color notations like rgb()/rgba(). The functional
+            // form is recognised when an opening paren follows the identifier name.
             Some(_) => {
                 let ident = self.parse_identifier()?;
+                if self.next_char() == Some('(')
+                    && (ident.eq_ignore_ascii_case("rgb") || ident.eq_ignore_ascii_case("rgba"))
+                {
+                    return self.parse_rgb_function(ident.eq_ignore_ascii_case("rgba"));
+                }
                 Ok(named_color(&ident)
                     .map(Value::Color)
                     .unwrap_or(Value::Keyword(ident)))
@@ -361,6 +366,51 @@ impl<'a> Parser<'a> {
                 "unexpected end of input while parsing value",
             )),
         }
+    }
+
+    fn parse_rgb_function(&mut self, has_alpha: bool) -> Result<Value, ParseError> {
+        // We only handle the legacy comma-separated form (`rgb(r, g, b)` and
+        // `rgba(r, g, b, a)`). Modern whitespace + slash syntax and percentage
+        // components are intentionally out of scope for now.
+        self.expect_char('(')?;
+        let r = self.parse_color_byte()?;
+        self.expect_comma()?;
+        let g = self.parse_color_byte()?;
+        self.expect_comma()?;
+        let b = self.parse_color_byte()?;
+        let a = if has_alpha {
+            self.expect_comma()?;
+            // Alpha is authored as a 0..1 float in CSS; we store as u8 by scaling.
+            let alpha = self.parse_unsigned_number()?;
+            (alpha.clamp(0.0, 1.0) * 255.0).round() as u8
+        } else {
+            255
+        };
+        self.consume_whitespace();
+        self.expect_char(')')?;
+
+        Ok(Value::Color(Color { r, g, b, a }))
+    }
+
+    fn parse_color_byte(&mut self) -> Result<u8, ParseError> {
+        let value = self.parse_unsigned_number()?;
+        Ok(value.clamp(0.0, 255.0).round() as u8)
+    }
+
+    fn parse_unsigned_number(&mut self) -> Result<f32, ParseError> {
+        self.consume_whitespace();
+        let number = self.consume_while(|ch| ch.is_ascii_digit() || ch == '.');
+        number.parse::<f32>().map_err(|_| {
+            ParseError::new(
+                self.pos,
+                format!("invalid numeric component '{number}' in color"),
+            )
+        })
+    }
+
+    fn expect_comma(&mut self) -> Result<(), ParseError> {
+        self.consume_whitespace();
+        self.expect_char(',')
     }
 
     fn parse_hex_color(&mut self) -> Result<Value, ParseError> {
@@ -673,6 +723,49 @@ mod tests {
                 r: 0,
                 g: 255,
                 b: 255,
+                a: 255,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_rgb_function_into_opaque_color() {
+        let stylesheet = parse("p { color: rgb(34, 68, 102); }").unwrap();
+        assert_eq!(
+            stylesheet.rules[0].declarations[0].value,
+            Value::Color(Color {
+                r: 34,
+                g: 68,
+                b: 102,
+                a: 255,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_rgba_function_with_fractional_alpha() {
+        let stylesheet = parse("p { background-color: rgba(255, 0, 0, 0.5); }").unwrap();
+        // 0.5 alpha rounds to 128/255 (0.5 * 255 = 127.5 -> 128).
+        assert_eq!(
+            stylesheet.rules[0].declarations[0].value,
+            Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 128,
+            })
+        );
+    }
+
+    #[test]
+    fn rgb_function_clamps_out_of_range_components() {
+        let stylesheet = parse("p { color: rgb(300, 12, 0); }").unwrap();
+        assert_eq!(
+            stylesheet.rules[0].declarations[0].value,
+            Value::Color(Color {
+                r: 255,
+                g: 12,
+                b: 0,
                 a: 255,
             })
         );
