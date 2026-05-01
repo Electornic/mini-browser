@@ -45,17 +45,22 @@
 ### NTP (New Tab Page)
 - URL 인자 없이 실행 시 Chrome NTP 모양: 가운데 로고 + pill 검색창 + 4 단축 타일
 
-## Phase 0 Carryover (Phase 1에서 처리)
+## Phase 0 Carryover (Done)
 
-Phase 0에서 의도적으로 미룬 polish 항목. Phase 1 시작 시 가장 먼저 처리.
+Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일괄 정리됨.
 
-| Task | Effort | Value | Notes |
-|---|---|---|---|
-| 인라인-of-인라인 alignment (`<a>` 안쪽 텍스트 가운데 정렬) | 3d | ★★ | NTP 타일 라벨이 좌상단에 붙는 문제 |
-| `border-radius` 4-value shorthand (`8px 12px ...`) | 1d | ★ | 현재는 단일 uniform만 |
-| 주소창 placeholder 색 차별화 | 1d | ★ | 비어 있을 때 회색으로 표시 |
-| 메뉴 버튼 클릭 hit-test (액션은 TBD) | 1d | ★ | 현재 장식만 |
-| refresh / 홈 아이콘 (arc 프리미티브 또는 대체 디자인) | 3d | ★★ | 회전 화살표 모양 필요 |
+| Task | Status | Notes |
+|---|---|---|
+| 인라인-of-인라인 alignment (`<a>` 안쪽 텍스트 가운데 정렬) | Done | `layout_inline_sequence_no_wrap`이 부모의 `text-align`을 적용하도록 변경. NTP 타일 width를 96px로 키워 가시화 |
+| `border-radius` 4-value shorthand (`8px 12px ...`) | Done | css 파서에서 1/2/3/4-value를 4개 코너 프로퍼티(`border-top-left-radius` 등)로 expansion |
+| 주소창 placeholder 색 차별화 | Done | 비어 있을 때 회색(154,160,166), 입력 시 BLACK |
+| 메뉴 버튼 클릭 hit-test | Done | `ChromeAction::Menu` + hover wash + 임시 status 메시지 (드롭다운 자체는 별도 작업) |
+| refresh 아이콘 / 액션 | Done | 12-stop ring + 화살표 합성 아이콘, `reload_current()`로 history 건드리지 않고 재페치. 홈 버튼은 향후 polish로 이월 |
+
+남은 후속 polish 후보 (Phase 1과 병렬 진행 가능, 우선순위 낮음):
+- 메뉴 드롭다운 실제 구현
+- 홈 버튼
+- refresh 진행 중 spinner 상태
 
 ## Phase 1 — CSS Expansion (Backlog)
 
