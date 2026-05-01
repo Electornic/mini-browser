@@ -133,6 +133,11 @@ pub enum TransformOp {
     /// are absolute pixel offsets — percent / em are deferred until the
     /// renderer carries the box's own size into the transform pass.
     Translate { x: f32, y: f32 },
+    /// `scale(x[, y])` / `scaleX(x)` / `scaleY(y)`. Negative factors are
+    /// allowed in spec land (mirroring); for the rasterizer's axis-aligned
+    /// fast path here, scale-only matrices stay axis-aligned and the rect
+    /// dimensions are multiplied through directly.
+    Scale { x: f32, y: f32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -574,6 +579,35 @@ impl<'a> Parser<'a> {
                     let y = self.parse_length_token()?;
                     self.consume_whitespace();
                     TransformOp::Translate { x: 0.0, y }
+                }
+                "scale" => {
+                    // `scale(x)` is shorthand for `scale(x, x)` (uniform scale);
+                    // the two-arg form sets both axes independently.
+                    self.consume_whitespace();
+                    let x = self.parse_length_token()?;
+                    self.consume_whitespace();
+                    let y = if self.next_char() == Some(',') {
+                        self.consume_char();
+                        self.consume_whitespace();
+                        let value = self.parse_length_token()?;
+                        self.consume_whitespace();
+                        value
+                    } else {
+                        x
+                    };
+                    TransformOp::Scale { x, y }
+                }
+                "scaleX" => {
+                    self.consume_whitespace();
+                    let x = self.parse_length_token()?;
+                    self.consume_whitespace();
+                    TransformOp::Scale { x, y: 1.0 }
+                }
+                "scaleY" => {
+                    self.consume_whitespace();
+                    let y = self.parse_length_token()?;
+                    self.consume_whitespace();
+                    TransformOp::Scale { x: 1.0, y }
                 }
                 other => {
                     return Err(ParseError::new(
@@ -1737,6 +1771,35 @@ mod tests {
             &[
                 TransformOp::Translate { x: 5.0, y: 0.0 },
                 TransformOp::Translate { x: 0.0, y: -7.0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_transform_scale_uniform_one_arg() {
+        // `scale(2)` is shorthand for `scale(2, 2)` — uniform scale on both axes.
+        let stylesheet = parse(".a { transform: scale(2); }").unwrap();
+        let ops = match &stylesheet.rules[0].declarations[0].value {
+            Value::TransformList(ops) => ops.clone(),
+            other => panic!("expected TransformList, got {other:?}"),
+        };
+        assert_eq!(ops.as_slice(), &[TransformOp::Scale { x: 2.0, y: 2.0 }]);
+    }
+
+    #[test]
+    fn parses_transform_scale_two_args_and_axis_helpers() {
+        let stylesheet =
+            parse(".a { transform: scale(1.5, 0.5) scaleX(3) scaleY(0.25); }").unwrap();
+        let ops = match &stylesheet.rules[0].declarations[0].value {
+            Value::TransformList(ops) => ops.clone(),
+            other => panic!("expected TransformList, got {other:?}"),
+        };
+        assert_eq!(
+            ops.as_slice(),
+            &[
+                TransformOp::Scale { x: 1.5, y: 0.5 },
+                TransformOp::Scale { x: 3.0, y: 1.0 },
+                TransformOp::Scale { x: 1.0, y: 0.25 },
             ]
         );
     }

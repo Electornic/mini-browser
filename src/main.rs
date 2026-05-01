@@ -2070,6 +2070,71 @@ mod tests {
     }
 
     #[test]
+    fn hovered_dom_path_accounts_for_transform_scale() {
+        // The leaf is scaled 2x around its centre. Its logical box is
+        // 40x20 at (0, 0) inside the root's content area; after the scale
+        // its visible box becomes 80x40 centered on (20, 10), so screen
+        // x ∈ [-20, 60] and y ∈ [-10, 30] all hit it. (Only the part
+        // overlapping the root will get hovered, since the deepest hit
+        // wins.)
+        let html_source = r#"<div id="root"><span class="leaf">hi</span></div>"#;
+        let css_source = r#"
+            #root { width: 200px; height: 80px; }
+            .leaf { width: 40px; height: 20px; transform: scale(2); }
+        "#;
+        let node = mini_browser::html::parse(html_source)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let stylesheet = mini_browser::css::parse(css_source).unwrap();
+        let styled = mini_browser::style::style_tree(&node, &[stylesheet]);
+        let layout = mini_browser::layout::layout_tree(&styled, 800.0);
+
+        // Cursor at screen x=55: outside the leaf's *logical* 40-wide box,
+        // but well inside the post-scale 80-wide visible box. Hit-test
+        // should walk into the leaf (path [0]). The inner text glyph "hi"
+        // does not extend to logical x=37.5, so we stop at the leaf and
+        // not its text child.
+        let leaf_window_y = super::CHROME_HEIGHT + 5.0;
+        let path = super::compute_hovered_dom_path(
+            &window::WindowInput {
+                mouse_position: Some((55.0, leaf_window_y)),
+                ..window::WindowInput::default()
+            },
+            &layout,
+            0.0,
+        );
+        assert_eq!(path, Some(vec![0]));
+
+        // Sanity: with no transform, screen x=55 lies *outside* the
+        // unscaled 40-wide leaf, so hit-test returns the root path. This
+        // confirms the leaf hit above is genuinely caused by the scale.
+        let no_transform_html = r#"<div id="root"><span class="leaf">hi</span></div>"#;
+        let no_transform_css = r#"
+            #root { width: 200px; height: 80px; }
+            .leaf { width: 40px; height: 20px; }
+        "#;
+        let plain_node = mini_browser::html::parse(no_transform_html)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let plain_sheet = mini_browser::css::parse(no_transform_css).unwrap();
+        let plain_styled = mini_browser::style::style_tree(&plain_node, &[plain_sheet]);
+        let plain_layout = mini_browser::layout::layout_tree(&plain_styled, 800.0);
+        let plain_path = super::compute_hovered_dom_path(
+            &window::WindowInput {
+                mouse_position: Some((55.0, leaf_window_y)),
+                ..window::WindowInput::default()
+            },
+            &plain_layout,
+            0.0,
+        );
+        assert_eq!(plain_path, Some(vec![]));
+    }
+
+    #[test]
     fn hovered_dom_path_returns_none_when_pointer_is_in_chrome() {
         let html_source = r#"<div id="root"><span class="leaf">hi</span></div>"#;
         let node = mini_browser::html::parse(html_source)

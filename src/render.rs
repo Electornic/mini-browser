@@ -45,6 +45,17 @@ impl Affine {
         }
     }
 
+    pub fn scale(sx: f32, sy: f32) -> Self {
+        Self {
+            a: sx,
+            b: 0.0,
+            c: 0.0,
+            d: sy,
+            e: 0.0,
+            f: 0.0,
+        }
+    }
+
     /// Standard 3x3 matrix multiply, restricted to the affine submatrix.
     pub fn compose(&self, other: Self) -> Self {
         Self {
@@ -402,6 +413,7 @@ pub fn transform_for(layout_box: &LayoutBox) -> Affine {
     for op in ops {
         let m = match op {
             TransformOp::Translate { x, y } => Affine::translate(*x, *y),
+            TransformOp::Scale { x, y } => Affine::scale(*x, *y),
         };
         raw = raw.compose(m);
     }
@@ -427,29 +439,62 @@ fn apply_transform(commands: &mut [DisplayCommand], transform: Affine) {
                 let (x, y) = transform.apply_point(text.x, text.y);
                 text.x = x;
                 text.y = y;
+                // Text scales with the diagonal of the matrix. For uniform
+                // scale a == d so this is exact; non-uniform scale is a
+                // compromise (real CSS would distort glyphs along one axis,
+                // which the bitmap rasterizer here doesn't do).
+                text.font_size *= scalar_scale(transform);
             }
             DisplayCommand::Image(image) => {
                 let (x, y) = transform.apply_point(image.x, image.y);
                 image.x = x;
                 image.y = y;
+                image.width *= transform.a;
+                image.height *= transform.d;
             }
             DisplayCommand::Gradient(gradient) => {
                 transform_rect_in_place(&mut gradient.rect, transform)
             }
             DisplayCommand::BoxShadow(shadow) => {
-                transform_rect_in_place(&mut shadow.rect, transform)
+                transform_rect_in_place(&mut shadow.rect, transform);
+                // Blur falloff travels with the box, so its pixel-space
+                // size has to scale with the matrix too — otherwise a 4x
+                // scaled card keeps a tiny shadow that no longer reads
+                // as soft light.
+                shadow.blur_radius *= scalar_scale(transform);
             }
         }
     }
 }
 
+fn scalar_scale(transform: Affine) -> f32 {
+    // The matrix is axis-aligned for translate+scale (b == c == 0), so the
+    // average of the two diagonal entries is the obvious "scalar" scale to
+    // apply to inherently 1-dimensional things like font-size and blur.
+    (transform.a + transform.d) * 0.5
+}
+
 fn transform_rect_in_place(rect: &mut Rect, transform: Affine) {
-    // Translate-only transforms keep an axis-aligned rect axis-aligned, so
-    // we only have to push the origin through the matrix. When scale and
-    // rotate land later, the rect itself will need to grow into a quad.
+    // Translate+scale transforms keep an axis-aligned rect axis-aligned,
+    // so we apply the matrix to the origin and the diagonal scale entries
+    // to the dimensions. When rotate lands the rect will need to widen
+    // into a quad and the rasterizer will pick up polygon scan-conversion.
     let (x, y) = transform.apply_point(rect.x, rect.y);
     rect.x = x;
     rect.y = y;
+    rect.width *= transform.a;
+    rect.height *= transform.d;
+    // Negative scale flips the rect across its origin; normalise so the
+    // existing axis-aligned fillers (which assume positive width/height)
+    // still hit the same screen pixels.
+    if rect.width < 0.0 {
+        rect.x += rect.width;
+        rect.width = -rect.width;
+    }
+    if rect.height < 0.0 {
+        rect.y += rect.height;
+        rect.height = -rect.height;
+    }
 }
 
 fn is_positioned_box(layout_box: &LayoutBox) -> bool {
@@ -2580,6 +2625,73 @@ mod tests {
             .expect("inner rect must be emitted");
         assert_eq!(inner_rect.x, 50.0);
         assert_eq!(inner_rect.y, 0.0);
+    }
+
+    #[test]
+    fn transform_scale_grows_box_around_its_center() {
+        // `scale(2)` doubles the rect dimensions and (because the default
+        // origin is the box centre) the new origin is shifted by half the
+        // growth along each axis. A 20x10 rect at (0, 0) → 40x20 at (-10, -5).
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 20px;
+                    height: 10px;
+                    background-color: red;
+                    transform: scale(2);
+                }
+            "#,
+        );
+
+        let rect = match commands.as_slice() {
+            [DisplayCommand::SolidRect(_, rect)] => *rect,
+            other => panic!("expected one SolidRect, got {other:?}"),
+        };
+        assert!((rect.width - 40.0).abs() < 1e-4);
+        assert!((rect.height - 20.0).abs() < 1e-4);
+        assert!((rect.x - -10.0).abs() < 1e-4);
+        assert!((rect.y - -5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn transform_scale_combines_with_translate_in_source_order() {
+        // `transform: translate(100px, 0) scale(2)` reads left-to-right as
+        // "scale around the box centre, then translate". Composition follows
+        // source order, so the post-scale rect is shifted by (100, 0).
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 10px;
+                    height: 4px;
+                    background-color: blue;
+                    transform: translate(100px, 0) scale(2);
+                }
+            "#,
+        );
+
+        let rect = match commands.as_slice() {
+            [DisplayCommand::SolidRect(_, rect)] => *rect,
+            other => panic!("expected one SolidRect, got {other:?}"),
+        };
+        // Original 10x4 at (0,0). scale(2) around center → 20x8 at (-5,-2).
+        // translate(100,0) → 20x8 at (95,-2).
+        assert!((rect.width - 20.0).abs() < 1e-4);
+        assert!((rect.height - 8.0).abs() < 1e-4);
+        assert!((rect.x - 95.0).abs() < 1e-4);
+        assert!((rect.y - -2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn affine_inverse_undoes_scale_and_compose() {
+        // Round-trip a non-trivial translate+scale: after applying T then T^-1
+        // the point should be unchanged. This is the operation behind hit-test
+        // for scaled boxes.
+        let t = super::Affine::translate(50.0, 10.0).compose(super::Affine::scale(2.0, 4.0));
+        let (x, y) = t.compose(t.inverse()).apply_point(7.0, 3.0);
+        assert!((x - 7.0).abs() < 1e-4);
+        assert!((y - 3.0).abs() < 1e-4);
     }
 
     #[test]
