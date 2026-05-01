@@ -105,6 +105,9 @@ pub enum Value {
     Keyword(String),
     Length(f32, Unit),
     Color(Color),
+    // Unitless number — used for properties like `z-index`, `line-height`,
+    // `opacity` where the value is a bare number rather than a length.
+    Number(f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +149,17 @@ pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
     let mut parser = Parser::new(source);
     let stylesheet = parser.parse_stylesheet_tolerant();
     Ok(stylesheet)
+}
+
+/// Flips the sign of a numeric value while leaving non-numeric values untouched.
+/// Used by the value parser to apply a leading minus to lengths and unitless
+/// numbers (e.g. `-10px`, `z-index: -2`).
+fn negate_numeric(value: Value) -> Value {
+    match value {
+        Value::Length(v, unit) => Value::Length(-v, unit),
+        Value::Number(v) => Value::Number(-v),
+        other => other,
+    }
 }
 
 /// Returns the rgba color associated with a CSS named color keyword, if any.
@@ -486,6 +500,13 @@ impl<'a> Parser<'a> {
         match self.next_char() {
             Some('#') => self.parse_hex_color(),
             Some(ch) if ch.is_ascii_digit() => self.parse_length_or_number(),
+            // A leading minus only counts as a numeric sign when an actual digit
+            // (or decimal point) follows; otherwise it is the start of an
+            // identifier (e.g. CSS custom properties like `--color`).
+            Some('-') if self.peeks_negative_number() => {
+                self.consume_char();
+                Ok(negate_numeric(self.parse_length_or_number()?))
+            }
             // Identifier-shaped values cover plain keywords (block, auto, ...), named
             // colors, and functional color notations like rgb()/rgba(). The functional
             // form is recognised when an opening paren follows the identifier name.
@@ -505,6 +526,13 @@ impl<'a> Parser<'a> {
                 "unexpected end of input while parsing value",
             )),
         }
+    }
+
+    fn peeks_negative_number(&self) -> bool {
+        let mut chars = self.input[self.pos..].chars();
+        let first = chars.next();
+        let second = chars.next();
+        first == Some('-') && matches!(second, Some(ch) if ch.is_ascii_digit() || ch == '.')
     }
 
     fn parse_rgb_function(&mut self, has_alpha: bool) -> Result<Value, ParseError> {
@@ -595,6 +623,12 @@ impl<'a> Parser<'a> {
         if self.next_char() == Some('%') {
             self.consume_char();
             return Ok(Value::Length(value, Unit::Percent));
+        }
+
+        // No alphabetic unit follows → unitless number. This is what
+        // `z-index: 5`, `line-height: 1.5`, etc. produce.
+        if !matches!(self.next_char(), Some(ch) if ch.is_alphabetic()) {
+            return Ok(Value::Number(value));
         }
 
         let unit = self.parse_identifier()?;
@@ -1066,5 +1100,43 @@ mod tests {
         assert_eq!(stylesheet.rules.len(), 1);
         assert_eq!(stylesheet.rules[0].declarations.len(), 1);
         assert_eq!(stylesheet.rules[0].declarations[0].name, "font-size");
+    }
+
+    #[test]
+    fn parses_unitless_integer_as_number() {
+        // `z-index: 5` has no unit — historically this errored; now it should
+        // produce a `Value::Number`.
+        let stylesheet = parse(".a { z-index: 5; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+
+        assert_eq!(decls[0].name, "z-index");
+        assert_eq!(decls[0].value, Value::Number(5.0));
+    }
+
+    #[test]
+    fn parses_negative_number_for_z_index() {
+        let stylesheet = parse(".a { z-index: -2; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+
+        assert_eq!(decls[0].value, Value::Number(-2.0));
+    }
+
+    #[test]
+    fn parses_negative_length_with_unit() {
+        // The same minus-prefix path also has to handle properties like
+        // `margin-left: -10px` once we get to negative offsets/positions.
+        let stylesheet = parse(".a { margin-left: -10px; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+
+        assert_eq!(decls[0].value, Value::Length(-10.0, Unit::Px));
+    }
+
+    #[test]
+    fn parses_unitless_decimal_as_number() {
+        // `line-height: 1.5` is the canonical unitless-decimal use case.
+        let stylesheet = parse(".a { line-height: 1.5; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+
+        assert_eq!(decls[0].value, Value::Number(1.5));
     }
 }

@@ -55,7 +55,9 @@ pub struct ImageCommand {
 
 pub fn build_display_list(layout_root: &LayoutBox) -> Vec<DisplayCommand> {
     let mut commands = Vec::new();
-    paint_layout_box(layout_root, &mut commands);
+    // The root layout box is treated as the initial stacking context: every
+    // positioned descendant ends up sorted into z-layers under it.
+    paint_stacking_context(layout_root, &mut commands);
     commands
 }
 
@@ -109,20 +111,114 @@ pub fn rasterize(
     buffer
 }
 
-fn paint_layout_box(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>) {
-    // The paint order is background -> border -> content so children appear on top.
+fn paint_stacking_context(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>) {
+    // 1. Paint this stacking-context-creator's own bg/border/text.
+    paint_self(layout_box, commands);
+
+    // Walk descendants and pluck out the positioned subtrees — each becomes
+    // its own atomic z-layer. Non-positioned content is painted between the
+    // negative and zero/positive z-layers, so we need both groups separately.
+    let mut positioned: Vec<&LayoutBox> = Vec::new();
+    for child in &layout_box.children {
+        collect_positioned_into(child, &mut positioned);
+    }
+
+    let mut negative: Vec<&LayoutBox> = positioned
+        .iter()
+        .copied()
+        .filter(|b| z_index_of(b) < 0)
+        .collect();
+    let zero_or_auto: Vec<&LayoutBox> = positioned
+        .iter()
+        .copied()
+        .filter(|b| z_index_of(b) == 0)
+        .collect();
+    let mut positive: Vec<&LayoutBox> = positioned
+        .iter()
+        .copied()
+        .filter(|b| z_index_of(b) > 0)
+        .collect();
+    // Stable sort preserves tree order among siblings sharing a z-index.
+    negative.sort_by_key(|b| z_index_of(b));
+    positive.sort_by_key(|b| z_index_of(b));
+
+    // 2. Negative-z layers paint first → they sit BEHIND non-positioned content.
+    for child in &negative {
+        paint_stacking_context(child, commands);
+    }
+
+    // 3. Non-positioned descendants in tree order. Positioned subtrees are
+    //    skipped here because they already belong to a z-layer.
+    for child in &layout_box.children {
+        paint_non_positioned(child, commands);
+    }
+
+    // 4 & 5. Zero/auto layers in tree order, then positive-z (sorted asc).
+    for child in zero_or_auto.iter().chain(positive.iter()) {
+        paint_stacking_context(child, commands);
+    }
+}
+
+fn paint_non_positioned(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>) {
+    // Stop at any positioned box — its painting belongs to its enclosing
+    // stacking context, where z-order is decided.
+    if is_positioned_box(layout_box) {
+        return;
+    }
+    paint_self(layout_box, commands);
+    for child in &layout_box.children {
+        paint_non_positioned(child, commands);
+    }
+}
+
+fn paint_self(layout_box: &LayoutBox, commands: &mut Vec<DisplayCommand>) {
+    // Per-box paint order is background -> border -> text, so text always
+    // sits on top of its own background.
     if let Some(command) = background_command(layout_box) {
         commands.push(command);
     }
-
     commands.extend(border_commands(layout_box));
-
     if let Some(command) = text_command(layout_box) {
         commands.push(command);
     }
+}
 
+fn collect_positioned_into<'a>(layout_box: &'a LayoutBox, out: &mut Vec<&'a LayoutBox>) {
+    if is_positioned_box(layout_box) {
+        out.push(layout_box);
+        // Don't recurse: the positioned box's own descendants live inside its
+        // own stacking context and are handled when we paint it.
+        return;
+    }
     for child in &layout_box.children {
-        paint_layout_box(child, commands);
+        collect_positioned_into(child, out);
+    }
+}
+
+fn is_positioned_box(layout_box: &LayoutBox) -> bool {
+    let node = match layout_box.styled_node() {
+        Some(node) => node,
+        None => return false,
+    };
+    matches!(
+        node.value("position"),
+        Some(Value::Keyword(keyword))
+            if keyword == "relative" || keyword == "absolute" || keyword == "fixed"
+    )
+}
+
+fn z_index_of(layout_box: &LayoutBox) -> i32 {
+    // `z-index: auto` is treated as 0 here. Per CSS spec, auto and 0 differ
+    // (auto does not create a stacking context), but this toy treats every
+    // positioned box as a context, so they share the same layer in practice.
+    let node = match layout_box.styled_node() {
+        Some(node) => node,
+        None => return 0,
+    };
+    match node.value("z-index") {
+        Some(Value::Number(value)) => *value as i32,
+        Some(Value::Length(value, _)) => *value as i32,
+        _ => 0,
     }
 }
 
@@ -1184,6 +1280,233 @@ mod tests {
                 },
                 CornerRadii::uniform(3.0),
             )
+        );
+    }
+
+    fn solid_rect_colors(commands: &[DisplayCommand]) -> Vec<Color> {
+        commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DisplayCommand::SolidRect(color, _) => Some(*color),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn positioned_box_paints_after_in_flow_sibling_even_when_earlier_in_dom() {
+        // .abs is a position:absolute box that comes BEFORE .flow in DOM order.
+        // Without stacking-context handling it would paint first and end up
+        // covered by .flow. With the new pass it gets pushed to the positioned
+        // layer and paints AFTER .flow.
+        let commands = display_list(
+            r#"<div id="root"><div class="abs"></div><div class="flow"></div></div>"#,
+            r#"
+                #root { width: 200px; height: 100px; background-color: #ffffff; }
+                .abs {
+                    position: absolute;
+                    width: 50px;
+                    height: 50px;
+                    background-color: #ff0000;
+                }
+                .flow {
+                    width: 200px;
+                    height: 30px;
+                    background-color: #0000ff;
+                }
+            "#,
+        );
+
+        let colors = solid_rect_colors(&commands);
+        let red = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let blue = Color {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        };
+        let red_idx = colors.iter().position(|c| *c == red).expect("red painted");
+        let blue_idx = colors
+            .iter()
+            .position(|c| *c == blue)
+            .expect("blue painted");
+
+        assert!(
+            blue_idx < red_idx,
+            "in-flow blue ({blue_idx}) should paint before absolute red ({red_idx})"
+        );
+    }
+
+    #[test]
+    fn z_index_orders_positioned_siblings_ascending() {
+        // Two absolutes; the one with z=1 should paint first, z=2 second.
+        let commands = display_list(
+            r#"<div id="root"><div class="back"></div><div class="front"></div></div>"#,
+            r#"
+                #root { width: 200px; height: 100px; }
+                .back {
+                    position: absolute;
+                    z-index: 2;
+                    width: 50px;
+                    height: 50px;
+                    background-color: #00ff00;
+                }
+                .front {
+                    position: absolute;
+                    z-index: 1;
+                    width: 50px;
+                    height: 50px;
+                    background-color: #ff8800;
+                }
+            "#,
+        );
+
+        let colors = solid_rect_colors(&commands);
+        let green = Color {
+            r: 0,
+            g: 255,
+            b: 0,
+            a: 255,
+        };
+        let orange = Color {
+            r: 255,
+            g: 136,
+            b: 0,
+            a: 255,
+        };
+        let green_idx = colors
+            .iter()
+            .position(|c| *c == green)
+            .expect("green painted");
+        let orange_idx = colors
+            .iter()
+            .position(|c| *c == orange)
+            .expect("orange painted");
+
+        // z=1 (orange) paints before z=2 (green). DOM order is reversed —
+        // proves z-index drives ordering, not source order.
+        assert!(
+            orange_idx < green_idx,
+            "z=1 ({orange_idx}) should paint before z=2 ({green_idx})"
+        );
+    }
+
+    #[test]
+    fn negative_z_index_paints_behind_in_flow_content() {
+        // .behind has z=-1, so it sits underneath the in-flow .flow even
+        // though the absolute would otherwise paint after.
+        let commands = display_list(
+            r#"<div id="root"><div class="behind"></div><div class="flow"></div></div>"#,
+            r#"
+                #root { width: 200px; height: 100px; }
+                .behind {
+                    position: absolute;
+                    z-index: -1;
+                    width: 50px;
+                    height: 50px;
+                    background-color: #ff0000;
+                }
+                .flow {
+                    width: 200px;
+                    height: 30px;
+                    background-color: #0000ff;
+                }
+            "#,
+        );
+
+        let colors = solid_rect_colors(&commands);
+        let red = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let blue = Color {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        };
+        let red_idx = colors.iter().position(|c| *c == red).expect("red painted");
+        let blue_idx = colors
+            .iter()
+            .position(|c| *c == blue)
+            .expect("blue painted");
+
+        assert!(
+            red_idx < blue_idx,
+            "z=-1 red ({red_idx}) should paint before in-flow blue ({blue_idx})"
+        );
+    }
+
+    #[test]
+    fn nested_positioned_descendants_belong_to_their_own_stacking_context() {
+        // .outer is absolute. .inner (also absolute) is its child. From the
+        // root's perspective .outer is one atomic z-layer — its children
+        // should paint within that atom, NOT escape to the root's layer order.
+        let commands = display_list(
+            r#"<div id="root"><div class="flow"></div><div class="outer"><div class="inner"></div></div></div>"#,
+            r#"
+                #root { width: 200px; height: 100px; }
+                .flow {
+                    width: 200px;
+                    height: 30px;
+                    background-color: #888888;
+                }
+                .outer {
+                    position: absolute;
+                    width: 100px;
+                    height: 60px;
+                    background-color: #ff0000;
+                }
+                .inner {
+                    position: absolute;
+                    width: 30px;
+                    height: 30px;
+                    background-color: #00ff00;
+                }
+            "#,
+        );
+
+        let colors = solid_rect_colors(&commands);
+        let gray = Color {
+            r: 136,
+            g: 136,
+            b: 136,
+            a: 255,
+        };
+        let red = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let green = Color {
+            r: 0,
+            g: 255,
+            b: 0,
+            a: 255,
+        };
+        let gray_idx = colors
+            .iter()
+            .position(|c| *c == gray)
+            .expect("gray painted");
+        let red_idx = colors.iter().position(|c| *c == red).expect("red painted");
+        let green_idx = colors
+            .iter()
+            .position(|c| *c == green)
+            .expect("green painted");
+
+        // Order: in-flow gray, then absolute outer (red), then nested inner (green).
+        assert!(gray_idx < red_idx, "in-flow before outer absolute");
+        assert!(
+            red_idx < green_idx,
+            "outer paints before its inner descendant"
         );
     }
 }

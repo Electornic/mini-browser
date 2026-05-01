@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 0 | Done | Block layout + Chrome-style UI | URL 인자 없이 실행 시 Chrome NTP 모양의 시작 페이지가 보인다 |
 | 1A | Done | Values & Selectors | %/em/rem 단위, named/rgb/rgba 색상, descendant/child 셀렉터, :hover/:focus/:active |
-| 1B | In progress | Layout Modes | inline-block ✅, position: relative/absolute/fixed ✅, stacking/z-index, float, margin collapse, line-height |
+| 1B | In progress | Layout Modes | inline-block ✅, position: relative/absolute/fixed ✅, stacking/z-index ✅, float, margin collapse, line-height |
 | 1C | Backlog | Paint | gradient, box-shadow, opacity, transform |
 | 1D | Backlog | Big Layout | Flexbox / Grid |
 | 2 | Backlog | JS Engine Integration | Boa 엔진 임베드 + DOM 바인딩, 단순 JS 동작 페이지 렌더 |
@@ -88,7 +88,7 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 | `position: relative` | Done | layout.rs | 1w | ★★★ | normal layout 후 subtree 전체를 (dx, dy) 평행이동. sibling cursor·line packing은 unoffset 좌표 그대로. 양쪽 set 시 left/top 우선. block/inline/inline-block 모두 지원 |
 | `position: absolute` | Done | layout.rs | 1-2w | ★★★ | 2-pass: pass 1은 static layout(흐름 cursor 안 움직임), pass 2는 containing-block 스택을 들고 트리를 다시 걸어 outer edge를 (cb_x+left, cb_y+top) 또는 right/bottom 기준으로 이동. 가장 가까운 positioned 조상의 padding box가 cb, 없으면 viewport. percent left/right는 cb.width, top/bottom은 cb.height에 resolve. block/inline 양쪽 + 중첩 absolute 지원 |
 | `position: fixed` | Done | layout.rs | 3d | ★★ | absolute의 분기 — `is_out_of_flow`로 inflow 제외 통합, pass 2가 `initial_cb`(viewport)도 함께 들고 다니며 fixed 노드만 그쪽으로 resolve. percent도 viewport 기준 |
-| Stacking context / `z-index` | Backlog | render.rs, layout.rs | 1w | ★★★ | absolute 먼저 |
+| Stacking context / `z-index` | Done | render.rs, css.rs | 1w | ★★★ | render에 stacking-context paint pass 도입: 자기 bg/border/text → 음의 z-index → in-flow 자손(positioned subtree skip) → zero/auto z-index → 양의 z-index. z-layer 정렬은 stable sort라 동일 z 안에서는 tree order. CSS 파서에 `Value::Number` + 음수/단위없는 숫자 파싱 추가. positioned 박스마다 자체 stacking context 생성 (auto와 0이 사실상 동일하게 취급되는 것은 toy 단순화) |
 | Float layout (`float: left/right`) | Backlog | layout.rs | 1w | ★★ | |
 | Margin collapse | Backlog | layout.rs | 1w | ★★ | |
 | `line-height` / `vertical-align` (inline) | Backlog | layout.rs, render.rs | 1w | ★★ | |
