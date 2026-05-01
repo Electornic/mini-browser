@@ -11,16 +11,17 @@ const TOOLBAR_HEIGHT: f32 = 56.0;
 const CHROME_HEIGHT: f32 = TAB_STRIP_HEIGHT + TOOLBAR_HEIGHT;
 const ADDRESS_TEXT_Y: f32 = TAB_STRIP_HEIGHT + 12.0;
 const STATUS_TEXT_Y: f32 = TAB_STRIP_HEIGHT + 34.0;
-const ADDRESS_BOX_X: f32 = 68.0;
+const ADDRESS_BOX_X: f32 = 92.0;
 const ADDRESS_BOX_Y: f32 = TAB_STRIP_HEIGHT + 8.0;
 const ADDRESS_BOX_HEIGHT: f32 = 18.0;
-const ADDRESS_TEXT_X: f32 = 72.0;
+const ADDRESS_TEXT_X: f32 = ADDRESS_BOX_X + 4.0;
 const ADDRESS_CHAR_WIDTH: f32 = 6.0;
 const NAV_BUTTON_Y: f32 = TAB_STRIP_HEIGHT + 8.0;
 const NAV_BUTTON_WIDTH: f32 = 20.0;
 const NAV_BUTTON_HEIGHT: f32 = 18.0;
 const BACK_BUTTON_X: f32 = 12.0;
 const FORWARD_BUTTON_X: f32 = 36.0;
+const REFRESH_BUTTON_X: f32 = 60.0;
 const MENU_BUTTON_WIDTH: f32 = 20.0;
 const MENU_BUTTON_RIGHT_PAD: f32 = 12.0;
 const MENU_BUTTON_GAP: f32 = 8.0;
@@ -90,6 +91,7 @@ struct ChromeState<'a> {
 enum ChromeAction {
     Back,
     Forward,
+    Refresh,
     Menu,
 }
 
@@ -228,6 +230,7 @@ impl BrowserState {
                 match action {
                     ChromeAction::Back => self.go_back(),
                     ChromeAction::Forward => self.go_forward(),
+                    ChromeAction::Refresh => self.reload_current(),
                     // The dropdown itself is not implemented yet, but acknowledging the click
                     // proves the hit region works and prevents the click from falling through
                     // to the page underneath.
@@ -500,6 +503,48 @@ impl BrowserState {
         !self.forward_stack.is_empty()
     }
 
+    fn reload_current(&mut self) {
+        // Refresh refetches the current document in place. Unlike navigate(), it does not
+        // touch the back/forward stacks — the user expects "reload" to land on the same
+        // page they were already viewing.
+        let Some(url) = self.current_url.clone() else {
+            self.set_status(
+                "nothing to refresh",
+                css::Color {
+                    r: 154,
+                    g: 160,
+                    b: 166,
+                    a: 255,
+                },
+            );
+            return;
+        };
+
+        match load_remote_document(&url.to_string()) {
+            Ok((document_html, stylesheet, images, font_data, resolved_url)) => {
+                self.document_html = document_html;
+                self.stylesheet = stylesheet;
+                self.images = images;
+                self.font_data = font_data;
+                self.current_url = Some(resolved_url);
+                self.scroll_offset = 0.0;
+                self.set_status(
+                    "loaded",
+                    css::Color {
+                        r: 40,
+                        g: 120,
+                        b: 40,
+                        a: 255,
+                    },
+                );
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                self.show_error_page("refresh failed", &error);
+            }
+        }
+    }
+
     fn hovered_chrome_action(
         &self,
         input: &window::WindowInput,
@@ -512,6 +557,12 @@ impl BrowserState {
         }
         if point_in_rect(mouse_x, mouse_y, forward_button_rect()) && self.can_go_forward() {
             return Some(ChromeAction::Forward);
+        }
+        // Refresh stays hover-able on the NTP too; the click handler decides whether
+        // there is anything to reload, mirroring how Chrome shows an enabled button
+        // but with a no-op effect when there is no current document.
+        if point_in_rect(mouse_x, mouse_y, refresh_button_rect()) {
+            return Some(ChromeAction::Refresh);
         }
         // The menu button always reports as hover-able even though its action is still a stub,
         // so the user gets visual feedback that the hit region is wired up.
@@ -720,6 +771,10 @@ fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
         chrome.can_go_forward,
         chrome.hovered_action == Some(ChromeAction::Forward),
     ));
+    commands.extend(refresh_button_commands(
+        refresh_button_rect(),
+        chrome.hovered_action == Some(ChromeAction::Refresh),
+    ));
     commands.extend(menu_button_commands(
         menu_button_rect(width),
         chrome.hovered_action == Some(ChromeAction::Menu),
@@ -833,6 +888,78 @@ fn chevron_commands(
         .collect()
 }
 
+fn refresh_button_commands(rect: layout::Rect, hovered: bool) -> Vec<render::DisplayCommand> {
+    // Faux-arc icon: 12 small squares are stamped along a circle, leaving a wedge open
+    // at the top-right where a small triangle arrow head sits. This avoids needing a
+    // dedicated arc primitive in the renderer while still reading as a refresh glyph.
+    let mut commands = Vec::new();
+    if hovered {
+        commands.push(render::DisplayCommand::RoundedRect(
+            css::Color {
+                r: 232,
+                g: 234,
+                b: 237,
+                a: 255,
+            },
+            rect,
+            render::CornerRadii::uniform(rect.height.min(rect.width) / 2.0),
+        ));
+    }
+
+    let icon_color = css::Color {
+        r: 60,
+        g: 64,
+        b: 67,
+        a: 255,
+    };
+    let cx = rect.x + rect.width / 2.0;
+    let cy = rect.y + rect.height / 2.0;
+    let radius = (rect.width.min(rect.height) / 2.0 - 3.0).max(3.0);
+
+    // 12 stops around the ring; skip stop 1 (just past 12 o'clock, top-right) for the gap.
+    let stops = 12i32;
+    let gap_stop = 1i32;
+    for i in 0..stops {
+        if i == gap_stop {
+            continue;
+        }
+        let theta =
+            (i as f32) * (std::f32::consts::TAU / stops as f32) - std::f32::consts::FRAC_PI_2;
+        let x = cx + theta.cos() * radius;
+        let y = cy + theta.sin() * radius;
+        commands.push(render::DisplayCommand::SolidRect(
+            icon_color,
+            layout::Rect {
+                x: x - 0.75,
+                y: y - 0.75,
+                width: 1.5,
+                height: 1.5,
+            },
+        ));
+    }
+
+    // Arrow head: a 3-row chevron pointing into the gap from the right, mirroring the
+    // chevron helper used by the back/forward buttons so the chrome stays visually consistent.
+    let gap_theta =
+        (gap_stop as f32) * (std::f32::consts::TAU / stops as f32) - std::f32::consts::FRAC_PI_2;
+    let ax = cx + gap_theta.cos() * radius;
+    let ay = cy + gap_theta.sin() * radius;
+    for k in 0..3 {
+        let off = k as f32;
+        commands.push(render::DisplayCommand::SolidRect(
+            icon_color,
+            layout::Rect {
+                x: ax - 1.0 + off,
+                y: ay - 1.0 - off,
+                width: 1.0,
+                height: 1.0 + off,
+            },
+        ));
+    }
+
+    commands
+}
+
 fn menu_button_commands(rect: layout::Rect, hovered: bool) -> Vec<render::DisplayCommand> {
     // Three vertical dots stand in for the overflow menu. The dropdown is still a stub,
     // but the hover wash and click hit-test are wired so the button feels real.
@@ -898,6 +1025,15 @@ fn back_button_rect() -> layout::Rect {
 fn forward_button_rect() -> layout::Rect {
     layout::Rect {
         x: FORWARD_BUTTON_X,
+        y: NAV_BUTTON_Y,
+        width: NAV_BUTTON_WIDTH,
+        height: NAV_BUTTON_HEIGHT,
+    }
+}
+
+fn refresh_button_rect() -> layout::Rect {
+    layout::Rect {
+        x: REFRESH_BUTTON_X,
         y: NAV_BUTTON_Y,
         width: NAV_BUTTON_WIDTH,
         height: NAV_BUTTON_HEIGHT,
@@ -1525,8 +1661,8 @@ mod tests {
         assert_eq!(rect.y, ADDRESS_BOX_Y);
         assert_eq!(rect.height, ADDRESS_BOX_HEIGHT);
         // Address bar reserves space for the menu button on the right edge:
-        // 800 viewport - 68 address-x - (12 right pad + 20 menu width + 8 gap) = 692.
-        assert_eq!(rect.width, 692.0);
+        // 800 viewport - 92 address-x - (12 right pad + 20 menu width + 8 gap) = 668.
+        assert_eq!(rect.width, 668.0);
     }
 
     #[test]
@@ -1704,6 +1840,58 @@ mod tests {
             800,
         );
         assert_eq!(hover, Some(super::ChromeAction::Back));
+    }
+
+    #[test]
+    fn refresh_button_is_hover_able_without_current_url() {
+        let browser = BrowserState::new(
+            String::new(),
+            String::new(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            None,
+            "",
+        );
+        let refresh_rect = super::refresh_button_rect();
+        let hover = browser.hovered_chrome_action(
+            &window::WindowInput {
+                mouse_position: Some((refresh_rect.x + 2.0, refresh_rect.y + 2.0)),
+                ..window::WindowInput::default()
+            },
+            800,
+        );
+        assert_eq!(hover, Some(super::ChromeAction::Refresh));
+    }
+
+    #[test]
+    fn refresh_without_current_url_sets_status_and_does_not_fetch() {
+        // On the NTP there is no document to reload — the click should land cleanly with
+        // a status hint rather than triggering an empty-URL network fetch.
+        let mut browser = BrowserState::new(
+            String::new(),
+            "<div>ntp</div>".into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            None,
+            "",
+        );
+        let original_html = browser.document_html.clone();
+        let refresh_rect = super::refresh_button_rect();
+
+        browser.apply_input(
+            &window::WindowInput {
+                mouse_position: Some((refresh_rect.x + 2.0, refresh_rect.y + 2.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(browser.status_text, "nothing to refresh");
+        assert_eq!(browser.document_html, original_html);
     }
 
     #[test]
