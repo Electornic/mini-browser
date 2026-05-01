@@ -10,7 +10,7 @@
 | 1A | Done | Values & Selectors | %/em/rem 단위, named/rgb/rgba 색상, descendant/child 셀렉터, :hover/:focus/:active |
 | 1B | Done | Layout Modes | inline-block ✅, position: relative/absolute/fixed ✅, stacking/z-index ✅, margin collapse ✅, line-height ✅, float ✅ |
 | 1C | Done | Paint | opacity ✅, linear-gradient ✅, radial-gradient ✅, box-shadow ✅, text-shadow ✅, transform ✅ |
-| 1D | In Progress | Big Layout | Flexbox ✅ / Grid (backlog) |
+| 1D | Done | Big Layout | Flexbox ✅ / Grid ✅ |
 | 2 | Backlog | JS Engine Integration | Boa 엔진 임베드 + DOM 바인딩, 단순 JS 동작 페이지 렌더 |
 
 ## Working Principles
@@ -110,8 +110,8 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 |---|---|---|---|---|---|
 | **Flexbox 최소 (justify/align)** | Done | layout.rs, main.rs, render.rs | 2-4w | ★★★ | Phase 1B 완료 후. `BoxType::FlexNode` 신규 variant + `layout_flex_children`. `display: flex`, `flex-direction: row/column`, `justify-content: flex-start/center/flex-end/space-between`, `align-items: stretch/flex-start/center/flex-end` 지원. flex 자식은 margin collapse / float 무시. **간이화**: row-reverse/column-reverse, space-around/evenly, baseline 정렬, flex-wrap, order는 미구현. align-items: stretch는 post-hoc resize라 자식 reflow 안 함 |
 | Flexbox: `flex-grow/shrink/basis` | Done | layout.rs, css.rs | 1-2w | ★★★ | minimal 먼저. 양수 free-space는 grow 비례 분배, 음수 free-space는 shrink × basis 가중 분배. `flex-basis: <length>`는 width 우선. `flex` shorthand는 `<number>` / `<number> <number>` / `<number> <number> <length>` 형태 인식. **간이화**: flex-basis percent/keyword(`auto`/`content`) 미지원, item 내부 자식은 grow 후 reflow 없이 trailing 영역으로 빈 공간 노출 |
-| **Grid: track sizing** | Backlog | layout.rs | 1-2m | ★★★ | flexbox 완료 후 |
-| Grid: areas, line names | Backlog | layout.rs | 2w | ★★★ | track sizing 먼저 |
+| **Grid: track sizing** | Done | layout.rs, css.rs, style.rs | 1-2m | ★★★ | flexbox 완료 후. `display: grid` + `BoxType::GridNode` 신규 variant. `grid-template-columns` / `grid-template-rows` 가 `<length>` / `<n>fr` / `auto` 트랙 지원, 행/열 모두에서 fr이 leftover 비례 분배. row-major auto-flow + occupancy 추적. `grid-column` / `grid-row` 명시 배치(`<n>`, `<n>/<m>`, `<n>/span <m>`, `span <n>`) + 행/열 span. **간이화**: `auto`/`min-content`/`max-content` 미지원 (`auto`만), 음수 grid line, 명명된 line, `grid-auto-columns`/`-rows` 미구현 (implicit track은 기존 트랙 클램프), 스팬 항목은 col_start 트랙에만 자연너비 기여, 자식 reflow 없는 post-hoc resize |
+| Grid: areas, line names | Done | layout.rs, css.rs | 2w | ★★★ | track sizing 먼저. `grid-template-areas: "h h h" "s m m" "f f f"`로 명명된 영역 정의 + `grid-area: <name>` 키워드로 항목 배치. **간이화**: 비-직사각 영역 lenient 처리(bbox로 환원), `grid-area`의 4-line shorthand 미구현, 명명된 line(`[start]` 등) 미구현 |
 
 ## Phase 2 — JS Engine Integration (Backlog)
 
