@@ -54,12 +54,13 @@ fn layout_node(
     cursor_y: &mut f32,
     parent_width: f32,
 ) -> LayoutBox {
-    let raw_margin = edge_sizes(node, "margin");
-    let padding = edge_sizes(node, "padding");
-    let border = edge_sizes(node, "border");
+    let raw_margin = edge_sizes(node, "margin", parent_width);
+    let padding = edge_sizes(node, "padding", parent_width);
+    let border = edge_sizes(node, "border", parent_width);
 
     // CSS auto-margin centering only applies when a width is specified.
-    let explicit_width = length_value(node, "width").or_else(|| intrinsic_width(node));
+    let explicit_width =
+        length_value(node, "width", parent_width).or_else(|| intrinsic_width(node));
     let left_auto = is_auto(node, "margin-left");
     let right_auto = is_auto(node, "margin-right");
 
@@ -114,7 +115,11 @@ fn layout_node(
         (children, child_height(node, content_y, child_cursor_y))
     };
 
-    let content_height = length_value(node, "height")
+    // Percent-on-height technically resolves against the parent's height in CSS, but the
+    // layout walk does not yet track parent height (heights are computed bottom-up). For
+    // now we use parent_width as the base, which is wrong only for explicit `height: x%`
+    // declarations — none of our toy pages exercise that path.
+    let content_height = length_value(node, "height", parent_width)
         .unwrap_or_else(|| auto_content_height.max(intrinsic_height(node)));
 
     let dimensions = Dimensions {
@@ -147,14 +152,15 @@ fn layout_inline_children(
 ) -> (Vec<LayoutBox>, f32) {
     // First pass: pack children into lines using their measured widths so we can know
     // each line's total width before placing any box. The placement pass uses that
-    // information to offset the line for non-left alignments.
+    // information to offset the line for non-left alignments. Percent-based widths on
+    // inline children resolve against `content_width`, which is the parent's content box.
     let mut lines: Vec<Vec<usize>> = Vec::new();
     let mut line_widths: Vec<f32> = Vec::new();
     let mut current_line: Vec<usize> = Vec::new();
     let mut current_width: f32 = 0.0;
 
     for (idx, child) in children.iter().enumerate() {
-        let child_w = inline_total_size(child).width;
+        let child_w = inline_total_size(child, content_width).width;
         if !current_line.is_empty() && current_width + child_w > content_width {
             lines.push(std::mem::take(&mut current_line));
             line_widths.push(current_width);
@@ -184,8 +190,8 @@ fn layout_inline_children(
         let mut line_height = 0.0f32;
         for &child_idx in line_children {
             let child = &children[child_idx];
-            let child_size = inline_total_size(child);
-            let child_box = layout_inline_node(child, line_x, line_y);
+            let child_size = inline_total_size(child, content_width);
+            let child_box = layout_inline_node(child, line_x, line_y, content_width);
             line_x += child_size.width;
             line_height = line_height.max(child_size.height);
             boxes.push(child_box);
@@ -212,12 +218,12 @@ fn inline_align_for(node: &StyledNode) -> InlineAlign {
     }
 }
 
-fn layout_inline_node(node: &StyledNode, x: f32, y: f32) -> LayoutBox {
-    let margin = edge_sizes(node, "margin");
-    let padding = edge_sizes(node, "padding");
-    let border = edge_sizes(node, "border");
-    let content_width = inline_content_width(node);
-    let content_height = inline_content_height(node);
+fn layout_inline_node(node: &StyledNode, x: f32, y: f32, parent_width: f32) -> LayoutBox {
+    let margin = edge_sizes(node, "margin", parent_width);
+    let padding = edge_sizes(node, "padding", parent_width);
+    let border = edge_sizes(node, "border", parent_width);
+    let content_width = inline_content_width(node, parent_width);
+    let content_height = inline_content_height(node, parent_width);
     let content_x = x + margin.left + border.left + padding.left;
     let content_y = y + margin.top + border.top + padding.top;
 
@@ -259,7 +265,7 @@ fn layout_inline_sequence_no_wrap(
     // Sum widths first so we know how much horizontal slack the line has before placing boxes.
     let total_width: f32 = children
         .iter()
-        .map(|child| inline_total_size(child).width)
+        .map(|child| inline_total_size(child, content_width).width)
         .sum();
     let line_offset = match align {
         InlineAlign::Left => 0.0,
@@ -271,8 +277,8 @@ fn layout_inline_sequence_no_wrap(
     let mut boxes = Vec::new();
 
     for child in children {
-        let child_box = layout_inline_node(child, cursor_x, y);
-        cursor_x += inline_total_size(child).width;
+        let child_box = layout_inline_node(child, cursor_x, y, content_width);
+        cursor_x += inline_total_size(child, content_width).width;
         boxes.push(child_box);
     }
 
@@ -299,21 +305,21 @@ fn is_inline_node(node: &StyledNode) -> bool {
     }
 }
 
-fn inline_total_size(node: &StyledNode) -> Rect {
-    let margin = edge_sizes(node, "margin");
-    let padding = edge_sizes(node, "padding");
-    let border = edge_sizes(node, "border");
+fn inline_total_size(node: &StyledNode, parent_width: f32) -> Rect {
+    let margin = edge_sizes(node, "margin", parent_width);
+    let padding = edge_sizes(node, "padding", parent_width);
+    let border = edge_sizes(node, "border", parent_width);
     let width = margin.left
         + border.left
         + padding.left
-        + inline_content_width(node)
+        + inline_content_width(node, parent_width)
         + padding.right
         + border.right
         + margin.right;
     let height = margin.top
         + border.top
         + padding.top
-        + inline_content_height(node)
+        + inline_content_height(node, parent_width)
         + padding.bottom
         + border.bottom
         + margin.bottom;
@@ -326,10 +332,10 @@ fn inline_total_size(node: &StyledNode) -> Rect {
     }
 }
 
-fn inline_content_width(node: &StyledNode) -> f32 {
+fn inline_content_width(node: &StyledNode, parent_width: f32) -> f32 {
     // Text width is approximated from character count because this toy renderer does not do
     // real font shaping or glyph measurement.
-    length_value(node, "width")
+    length_value(node, "width", parent_width)
         .or_else(|| intrinsic_width(node))
         .unwrap_or_else(|| match &node.node.node_type {
             NodeType::Text(text) => text.chars().count() as f32 * inline_char_width(node),
@@ -337,26 +343,29 @@ fn inline_content_width(node: &StyledNode) -> f32 {
             NodeType::Element(_) => node
                 .children
                 .iter()
-                .map(|child| inline_total_size(child).width)
+                .map(|child| inline_total_size(child, parent_width).width)
                 .sum(),
         })
 }
 
-fn inline_content_height(node: &StyledNode) -> f32 {
-    length_value(node, "height").unwrap_or_else(|| match &node.node.node_type {
+fn inline_content_height(node: &StyledNode, parent_width: f32) -> f32 {
+    // Same caveat as block height: percent on inline height should reference the parent's
+    // height, but we only have parent_width on hand. Toy pages have not exercised this yet.
+    length_value(node, "height", parent_width).unwrap_or_else(|| match &node.node.node_type {
         NodeType::Text(_) => inline_font_size(node),
         NodeType::Element(element) if element.tag_name == "img" => intrinsic_height(node),
         NodeType::Element(_) => node
             .children
             .iter()
-            .map(|child| inline_total_size(child).height)
+            .map(|child| inline_total_size(child, parent_width).height)
             .fold(0.0, f32::max)
             .max(intrinsic_height(node)),
     })
 }
 
 fn inline_font_size(node: &StyledNode) -> f32 {
-    length_value(node, "font-size").unwrap_or(16.0)
+    // font-size is always Px after the style pass, so the percent base is irrelevant here.
+    length_value(node, "font-size", 0.0).unwrap_or(16.0)
 }
 
 fn inline_char_width(node: &StyledNode) -> f32 {
@@ -383,7 +392,8 @@ fn intrinsic_width(node: &StyledNode) -> Option<f32> {
 
 fn intrinsic_height(node: &StyledNode) -> f32 {
     match &node.node.node_type {
-        NodeType::Text(_) => length_value(node, "font-size").unwrap_or(16.0),
+        // font-size is always Px after the style pass, so the percent base is irrelevant.
+        NodeType::Text(_) => length_value(node, "font-size", 0.0).unwrap_or(16.0),
         // Images also get a default height so the renderer has an area to paint into.
         NodeType::Element(element) if element.tag_name == "img" => {
             attribute_length(element, "height").unwrap_or(150.0)
@@ -392,18 +402,24 @@ fn intrinsic_height(node: &StyledNode) -> f32 {
     }
 }
 
-fn edge_sizes(node: &StyledNode, prefix: &str) -> EdgeSizes {
+fn edge_sizes(node: &StyledNode, prefix: &str, base: f32) -> EdgeSizes {
+    // CSS resolves percent margin/padding against the containing block's *width*, even
+    // for the top and bottom sides — a common gotcha worth keeping in mind here.
     EdgeSizes {
-        left: length_value(node, &format!("{prefix}-left")).unwrap_or(0.0),
-        right: length_value(node, &format!("{prefix}-right")).unwrap_or(0.0),
-        top: length_value(node, &format!("{prefix}-top")).unwrap_or(0.0),
-        bottom: length_value(node, &format!("{prefix}-bottom")).unwrap_or(0.0),
+        left: length_value(node, &format!("{prefix}-left"), base).unwrap_or(0.0),
+        right: length_value(node, &format!("{prefix}-right"), base).unwrap_or(0.0),
+        top: length_value(node, &format!("{prefix}-top"), base).unwrap_or(0.0),
+        bottom: length_value(node, &format!("{prefix}-bottom"), base).unwrap_or(0.0),
     }
 }
 
-fn length_value(node: &StyledNode, name: &str) -> Option<f32> {
+fn length_value(node: &StyledNode, name: &str, base: f32) -> Option<f32> {
+    // `base` is the containing-block dimension a Percent length resolves against. For
+    // properties that should never see a percent (font-size after style resolution, etc.)
+    // callers can safely pass any value.
     match node.value(name) {
         Some(Value::Length(value, Unit::Px)) => Some(*value),
+        Some(Value::Length(value, Unit::Percent)) => Some(*value / 100.0 * base),
         _ => None,
     }
 }
@@ -636,6 +652,59 @@ mod tests {
         assert_eq!(link.dimensions.content.x, 50.0);
         // <span> centers within <a>: (100 - 40) / 2 = 30, plus the link's content_x = 80.
         assert_eq!(span.dimensions.content.x, 80.0);
+    }
+
+    #[test]
+    fn percent_width_resolves_against_parent_content_width() {
+        let styled = styled_root(
+            r#"<div id="root"><section class="card"></section></div>"#,
+            r#"
+                #root { width: 400px; }
+                .card { width: 50%; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let card = &layout.children[0];
+
+        // 50% of #root's 400px content width = 200px.
+        assert_eq!(card.dimensions.content.width, 200.0);
+    }
+
+    #[test]
+    fn percent_padding_uses_parent_width_even_for_vertical_sides() {
+        // CSS spec quirk: percent padding/margin on top and bottom resolves against the
+        // containing block's width, not its height.
+        let styled = styled_root(
+            r#"<div id="root"><div class="card"></div></div>"#,
+            r#"
+                #root { width: 200px; }
+                .card { padding-top: 25%; padding-bottom: 10%; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let card = &layout.children[0];
+
+        // 25% and 10% of 200 = 50 and 20 respectively.
+        assert_eq!(card.dimensions.padding.top, 50.0);
+        assert_eq!(card.dimensions.padding.bottom, 20.0);
+    }
+
+    #[test]
+    fn em_widths_compose_with_inherited_font_size() {
+        // 1em width on the inner element should equal the parent's resolved font-size,
+        // proving the style-time em resolution feeds layout correctly.
+        let styled = styled_root(
+            r#"<div id="root"><div class="inner"></div></div>"#,
+            r#"
+                #root { font-size: 24px; }
+                .inner { width: 5em; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let inner = &layout.children[0];
+
+        // Inner inherits 24px font-size, so 5em = 120px.
+        assert_eq!(inner.dimensions.content.width, 120.0);
     }
 
     #[test]
