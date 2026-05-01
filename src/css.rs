@@ -133,6 +133,11 @@ pub enum Value {
     // (cell_start, cell_end) cell range that may be auto-resolved against the
     // running grid cursor.
     GridPlacement(GridPlacement),
+    // CSS Grid `grid-template-areas` value: a row-major map of cells to
+    // optional area names. `None` represents the `.` token (empty cell).
+    // Layout looks up an item's `grid-area` keyword in this map and uses
+    // the bounding rectangle of matching cells as the item's placement.
+    TemplateAreas(Vec<Vec<Option<String>>>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -597,8 +602,56 @@ impl<'a> Parser<'a> {
             return Ok(vec![Declaration { name, value }]);
         }
 
+        if name == "grid-template-areas" {
+            let value = self.parse_grid_template_areas()?;
+            return Ok(vec![Declaration { name, value }]);
+        }
+
         let value = self.parse_value()?;
         Ok(vec![Declaration { name, value }])
+    }
+
+    fn parse_grid_template_areas(&mut self) -> Result<Value, ParseError> {
+        // `grid-template-areas: "a a b" "c c b" "c c b";`
+        // Each row is a quoted string of whitespace-separated tokens. `.` is
+        // a designated empty cell. Adjacent cells with the same name form
+        // one rectangular area; the layout pass scans the map and builds a
+        // bounding rectangle when an item asks for that area by name.
+        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+        loop {
+            self.consume_whitespace();
+            match self.next_char() {
+                Some('"') => {}
+                _ => break,
+            }
+            self.consume_char(); // opening "
+            let body = self.consume_while(|ch| ch != '"');
+            if self.next_char() == Some('"') {
+                self.consume_char(); // closing "
+            } else {
+                return Err(ParseError::new(self.pos, "unterminated string in grid-template-areas"));
+            }
+            let cells = body
+                .split_whitespace()
+                .map(|tok| {
+                    if tok == "." {
+                        None
+                    } else {
+                        Some(tok.to_string())
+                    }
+                })
+                .collect::<Vec<_>>();
+            if !cells.is_empty() {
+                rows.push(cells);
+            }
+        }
+        if rows.is_empty() {
+            return Err(ParseError::new(
+                self.pos,
+                "grid-template-areas requires at least one row string",
+            ));
+        }
+        Ok(Value::TemplateAreas(rows))
     }
 
     fn parse_grid_placement(&mut self) -> Result<Value, ParseError> {
@@ -2211,6 +2264,32 @@ mod tests {
                 assert_eq!(p.end, GridLine::Auto);
             }
             other => panic!("expected GridPlacement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grid_template_areas_parses_quoted_rows_into_cell_map() {
+        let stylesheet =
+            parse(r#".g { grid-template-areas: "h h h" "s m m" "f f f"; }"#).unwrap();
+        match &stylesheet.rules[0].declarations[0].value {
+            Value::TemplateAreas(rows) => {
+                assert_eq!(rows.len(), 3);
+                assert_eq!(rows[0], vec![Some("h".into()), Some("h".into()), Some("h".into())]);
+                assert_eq!(rows[1], vec![Some("s".into()), Some("m".into()), Some("m".into())]);
+                assert_eq!(rows[2], vec![Some("f".into()), Some("f".into()), Some("f".into())]);
+            }
+            other => panic!("expected TemplateAreas, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grid_template_areas_recognizes_dot_as_empty_cell() {
+        let stylesheet = parse(r#".g { grid-template-areas: "a . b"; }"#).unwrap();
+        match &stylesheet.rules[0].declarations[0].value {
+            Value::TemplateAreas(rows) => {
+                assert_eq!(rows[0], vec![Some("a".into()), None, Some("b".into())]);
+            }
+            other => panic!("expected TemplateAreas, got {other:?}"),
         }
     }
 

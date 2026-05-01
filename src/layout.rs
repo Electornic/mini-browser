@@ -800,7 +800,20 @@ fn layout_grid_children<'a>(
         }
         let col_hint = axis_hint_from(child.value("grid-column"));
         let row_hint = axis_hint_from(child.value("grid-row"));
-        let area = place_grid_item(&mut occupancy, &mut cursor, n_cols, col_hint, row_hint);
+        // grid-area: <name> wins over both auto-flow and grid-column/-row when
+        // the container declares a matching template-area rectangle.
+        let template_area = grid_area_from_template(container, child);
+        let area = if let Some(rect) = template_area {
+            occupancy.mark(
+                rect.row_start,
+                rect.row_end - rect.row_start,
+                rect.col_start,
+                rect.col_end - rect.col_start,
+            );
+            rect
+        } else {
+            place_grid_item(&mut occupancy, &mut cursor, n_cols, col_hint, row_hint)
+        };
         let box_idx = boxes.len();
         cell_assignments.push((area, box_idx, child));
         // Pre-pass: lay out at the container origin so we can read the
@@ -890,12 +903,13 @@ fn layout_grid_children<'a>(
         if dy != 0.0 {
             shift_layout_subtree(&mut boxes[box_idx], 0.0, dy);
         }
-        // Row-span fill: when no explicit height, grow content to span the
-        // declared rows (sum of row_heights from row_start..row_end). Items
-        // with explicit height are left alone.
-        if area.row_end > area.row_start + 1
-            && !matches!(child.value("height"), Some(Value::Length(_, _)))
-        {
+        // Fill content to span the row range when no explicit height. This
+        // covers single-row and multi-row spans uniformly: an item without
+        // its own height takes the row's resolved height (or the sum across
+        // a multi-row span). Items with explicit height keep their declared
+        // size — this matches the column-track post-hoc fill on the main
+        // axis.
+        if !matches!(child.value("height"), Some(Value::Length(_, _))) {
             let span_height: f32 = row_heights[area.row_start..area.row_end.min(row_heights.len())]
                 .iter()
                 .sum();
@@ -910,6 +924,45 @@ fn layout_grid_children<'a>(
 
     let auto_content_height: f32 = row_heights.iter().sum();
     (boxes, auto_content_height)
+}
+
+fn grid_area_from_template(container: &StyledNode, item: &StyledNode) -> Option<GridArea> {
+    let area_name = match item.value("grid-area") {
+        Some(Value::Keyword(name)) => name.as_str(),
+        _ => return None,
+    };
+    let rows = match container.value("grid-template-areas") {
+        Some(Value::TemplateAreas(rows)) => rows,
+        _ => return None,
+    };
+    // Sweep the map and build a bounding rectangle for cells matching the
+    // area name. CSS spec actually requires the area to be rectangular and
+    // contiguous; toy is lenient — we just take the bbox even if the named
+    // cells are non-contiguous.
+    let mut min_row: Option<usize> = None;
+    let mut max_row: usize = 0;
+    let mut min_col: Option<usize> = None;
+    let mut max_col: usize = 0;
+    for (r, row) in rows.iter().enumerate() {
+        for (c, cell) in row.iter().enumerate() {
+            if cell.as_deref() == Some(area_name) {
+                min_row = Some(min_row.map_or(r, |m| m.min(r)));
+                if r > max_row {
+                    max_row = r;
+                }
+                min_col = Some(min_col.map_or(c, |m| m.min(c)));
+                if c > max_col {
+                    max_col = c;
+                }
+            }
+        }
+    }
+    Some(GridArea {
+        row_start: min_row?,
+        row_end: max_row + 1,
+        col_start: min_col?,
+        col_end: max_col + 1,
+    })
 }
 
 fn axis_hint_from(value: Option<&Value>) -> AxisHint {
@@ -3850,6 +3903,98 @@ mod tests {
         assert_eq!((b.dimensions.content.x, b.dimensions.content.y), (50.0, 0.0));
         assert_eq!((first.dimensions.content.x, first.dimensions.content.y), (0.0, 30.0));
         assert_eq!((c.dimensions.content.x, c.dimensions.content.y), (50.0, 30.0));
+    }
+
+    #[test]
+    fn grid_template_areas_places_named_items() {
+        // 3-column grid; header spans all 3, sidebar takes (1,0), main takes
+        // (1,1) and (1,2), footer spans all 3 in row 2. Items reference areas
+        // by name via grid-area.
+        let styled = styled_root(
+            r#"<div id="g">
+                <div class="header"></div>
+                <div class="sidebar"></div>
+                <div class="main"></div>
+                <div class="footer"></div>
+            </div>"#,
+            r#"
+                #g {
+                    display: grid;
+                    grid-template-columns: 50px 50px 50px;
+                    grid-template-rows: 30px 60px 40px;
+                    grid-template-areas: "h h h" "s m m" "f f f";
+                    width: 150px;
+                }
+                .header { grid-area: h; }
+                .sidebar { grid-area: s; }
+                .main { grid-area: m; }
+                .footer { grid-area: f; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let header = &layout.children[0];
+        let sidebar = &layout.children[1];
+        let main_box = &layout.children[2];
+        let footer = &layout.children[3];
+
+        // header spans the whole top row
+        assert_eq!(header.dimensions.content.x, 0.0);
+        assert_eq!(header.dimensions.content.y, 0.0);
+        assert_eq!(header.dimensions.content.width, 150.0);
+        assert_eq!(header.dimensions.content.height, 30.0);
+
+        // sidebar = single cell at (1, 0)
+        assert_eq!(sidebar.dimensions.content.x, 0.0);
+        assert_eq!(sidebar.dimensions.content.y, 30.0);
+        assert_eq!(sidebar.dimensions.content.width, 50.0);
+        assert_eq!(sidebar.dimensions.content.height, 60.0);
+
+        // main spans cols 1-2 of row 1
+        assert_eq!(main_box.dimensions.content.x, 50.0);
+        assert_eq!(main_box.dimensions.content.y, 30.0);
+        assert_eq!(main_box.dimensions.content.width, 100.0);
+        assert_eq!(main_box.dimensions.content.height, 60.0);
+
+        // footer spans the whole bottom row
+        assert_eq!(footer.dimensions.content.x, 0.0);
+        assert_eq!(footer.dimensions.content.y, 90.0);
+        assert_eq!(footer.dimensions.content.width, 150.0);
+        assert_eq!(footer.dimensions.content.height, 40.0);
+    }
+
+    #[test]
+    fn grid_template_areas_dot_skips_cells_for_auto_flow() {
+        // template-areas leaves cell (0, 1) unnamed (`.`). An item without a
+        // grid-area name should auto-flow into that empty slot.
+        let styled = styled_root(
+            r#"<div id="g">
+                <div class="a"></div>
+                <div class="filler"></div>
+                <div class="b"></div>
+            </div>"#,
+            r#"
+                #g {
+                    display: grid;
+                    grid-template-columns: 50px 50px 50px;
+                    grid-template-rows: 30px;
+                    grid-template-areas: "a . b";
+                    width: 150px;
+                }
+                .a { grid-area: a; }
+                .b { grid-area: b; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let filler = &layout.children[1];
+        let b = &layout.children[2];
+
+        // a anchored at col 0, b anchored at col 2 (both via template-areas)
+        assert_eq!(a.dimensions.content.x, 0.0);
+        assert_eq!(b.dimensions.content.x, 100.0);
+        // filler has no grid-area → auto-flows into the open cell at (0, 1).
+        assert_eq!(filler.dimensions.content.x, 50.0);
+        assert_eq!(filler.dimensions.content.y, 0.0);
     }
 
     #[test]
