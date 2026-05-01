@@ -403,6 +403,14 @@ enum JustifyContent {
     SpaceBetween,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlignItems {
+    Stretch,
+    FlexStart,
+    Center,
+    FlexEnd,
+}
+
 fn layout_flex_children(
     container: &StyledNode,
     children: &[StyledNode],
@@ -410,36 +418,43 @@ fn layout_flex_children(
     content_y: f32,
     content_width: f32,
 ) -> (Vec<LayoutBox>, f32) {
-    // Two-pass placement: pass 1 lays out every in-flow item at the container's
+    // Two-pass placement. Pass 1: lay out every in-flow item at the container's
     // content origin so we can measure each item's outer main/cross size
-    // without committing to a final position. Pass 2 reads `justify-content`
-    // and shifts each item along the main axis by its computed cursor offset.
+    // without committing to a final position. Pass 2: read justify-content
+    // (main axis) and align-items (cross axis), shift each item by its
+    // computed offset on each axis. For align-items: stretch, items without
+    // an explicit cross size also have their content cross size grown to fill
+    // the container.
     //
     // Sizing comes from the inline-block path (explicit width wins, otherwise
     // shrink-to-fit). Margin collapse and floats are skipped on flex items
     // per spec.
     let direction = flex_direction(container);
     let justify = justify_content(container);
+    let align = align_items(container);
 
     let mut boxes: Vec<LayoutBox> = Vec::with_capacity(children.len());
-    let mut in_flow_indices: Vec<usize> = Vec::new();
+    // Track (boxes index, source styled node) for each in-flow item so pass 2
+    // can read the styled node again to decide whether stretch should grow
+    // the item.
+    let mut in_flow: Vec<(usize, &StyledNode)> = Vec::new();
 
     for child in children {
         if is_out_of_flow(child) {
             // Static-position approximation, same trick as inline flow: drop
             // the absolute child at the container's content origin and let
-            // pass 2 (the absolute reposition pass at the tree root) move it.
+            // the absolute reposition pass at the tree root move it.
             let abs_box = layout_inline_or_inline_block(child, content_x, content_y, content_width);
             boxes.push(abs_box);
             continue;
         }
-        in_flow_indices.push(boxes.len());
+        in_flow.push((boxes.len(), child));
         boxes.push(layout_flex_item(child, content_x, content_y, content_width));
     }
 
-    let total_used: f32 = in_flow_indices
+    let total_used: f32 = in_flow
         .iter()
-        .map(|&i| main_axis_outer(&boxes[i], direction))
+        .map(|&(i, _)| main_axis_outer(&boxes[i], direction))
         .sum();
 
     // Container's main-axis content size. Row direction is anchored to the
@@ -452,29 +467,57 @@ fn layout_flex_children(
             length_value(container, "height", content_width).unwrap_or(total_used)
         }
     };
-    let leftover = (container_main_size - total_used).max(0.0);
-    let item_count = in_flow_indices.len();
+    let leftover_main = (container_main_size - total_used).max(0.0);
+    let item_count = in_flow.len();
 
     let (start_offset, between_gap) = match justify {
         JustifyContent::FlexStart => (0.0, 0.0),
-        JustifyContent::Center => (leftover / 2.0, 0.0),
-        JustifyContent::FlexEnd => (leftover, 0.0),
+        JustifyContent::Center => (leftover_main / 2.0, 0.0),
+        JustifyContent::FlexEnd => (leftover_main, 0.0),
         JustifyContent::SpaceBetween if item_count > 1 => {
-            (0.0, leftover / (item_count - 1) as f32)
+            (0.0, leftover_main / (item_count - 1) as f32)
         }
         // Single-item space-between collapses to flex-start (no gap to distribute).
         JustifyContent::SpaceBetween => (0.0, 0.0),
     };
 
+    // Container's cross size — needed before pass 2 so each item knows what
+    // to align against. For row direction, height may be explicit or fall back
+    // to the tallest item's outer cross size; for column direction the cross
+    // axis is width, which is always already resolved.
+    let max_cross_natural: f32 = in_flow
+        .iter()
+        .map(|&(i, _)| cross_axis_outer(&boxes[i], direction))
+        .fold(0.0, f32::max);
+    let container_cross_size = match direction {
+        FlexDirection::Row => {
+            length_value(container, "height", content_width).unwrap_or(max_cross_natural)
+        }
+        FlexDirection::Column => content_width,
+    };
+
     let mut cursor = start_offset;
-    let mut max_cross: f32 = 0.0;
-    for (idx_in_flow, &i) in in_flow_indices.iter().enumerate() {
+    for (idx_in_flow, &(i, child)) in in_flow.iter().enumerate() {
+        // Stretch grows the item's content cross size to fill the container,
+        // but only when the item didn't declare its own cross size — explicit
+        // sizes always win over stretch per spec. The growth happens before
+        // we read cross_axis_outer below so the post-stretch height feeds the
+        // alignment math correctly.
+        if matches!(align, AlignItems::Stretch) && !has_explicit_cross_size(child, direction) {
+            stretch_item_to_cross(&mut boxes[i], container_cross_size, direction);
+        }
+
         let main_size = main_axis_outer(&boxes[i], direction);
         let cross_size = cross_axis_outer(&boxes[i], direction);
-        max_cross = max_cross.max(cross_size);
+        let cross_offset = match align {
+            AlignItems::FlexStart | AlignItems::Stretch => 0.0,
+            AlignItems::Center => ((container_cross_size - cross_size) / 2.0).max(0.0),
+            AlignItems::FlexEnd => (container_cross_size - cross_size).max(0.0),
+        };
+
         match direction {
-            FlexDirection::Row => shift_layout_subtree(&mut boxes[i], cursor, 0.0),
-            FlexDirection::Column => shift_layout_subtree(&mut boxes[i], 0.0, cursor),
+            FlexDirection::Row => shift_layout_subtree(&mut boxes[i], cursor, cross_offset),
+            FlexDirection::Column => shift_layout_subtree(&mut boxes[i], cross_offset, cursor),
         }
         cursor += main_size;
         if idx_in_flow + 1 < item_count {
@@ -484,12 +527,60 @@ fn layout_flex_children(
 
     // Auto height for the container depends on direction:
     // - row:    cross axis = height, so it grows to the tallest item
-    // - column: main axis  = height, so it grows to the cumulative cursor
+    //           (post-stretch). When the container has explicit height, that
+    //           wins anyway in layout_node — this fallback only matters in the
+    //           auto case, where container_cross_size == max_cross_natural.
+    // - column: main axis  = height, so it grows to the cumulative cursor.
     let auto_content_height = match direction {
-        FlexDirection::Row => max_cross,
+        FlexDirection::Row => container_cross_size,
         FlexDirection::Column => cursor,
     };
     (boxes, auto_content_height)
+}
+
+fn stretch_item_to_cross(
+    layout_box: &mut LayoutBox,
+    container_cross_size: f32,
+    direction: FlexDirection,
+) {
+    // Grow the item's content rect on the cross axis so its outer size matches
+    // the container's cross. Margins/borders/padding stay as declared, so the
+    // delta lands on content size only. Children that already laid out inside
+    // do not move — they stay at their original positions and any gained
+    // space appears as background area at the trailing edge, which is the
+    // simplest reasonable visual approximation of stretch for a toy renderer.
+    let outer = outer_rect(layout_box);
+    let current_outer_cross = match direction {
+        FlexDirection::Row => outer.height,
+        FlexDirection::Column => outer.width,
+    };
+    if current_outer_cross >= container_cross_size {
+        return;
+    }
+    let delta = container_cross_size - current_outer_cross;
+    match direction {
+        FlexDirection::Row => layout_box.dimensions.content.height += delta,
+        FlexDirection::Column => layout_box.dimensions.content.width += delta,
+    }
+}
+
+fn align_items(node: &StyledNode) -> AlignItems {
+    match node.value("align-items") {
+        Some(Value::Keyword(keyword)) if keyword == "flex-start" => AlignItems::FlexStart,
+        Some(Value::Keyword(keyword)) if keyword == "center" => AlignItems::Center,
+        Some(Value::Keyword(keyword)) if keyword == "flex-end" => AlignItems::FlexEnd,
+        Some(Value::Keyword(keyword)) if keyword == "stretch" => AlignItems::Stretch,
+        // CSS default for align-items is `stretch`.
+        _ => AlignItems::Stretch,
+    }
+}
+
+fn has_explicit_cross_size(node: &StyledNode, direction: FlexDirection) -> bool {
+    let prop = match direction {
+        FlexDirection::Row => "height",
+        FlexDirection::Column => "width",
+    };
+    matches!(node.value(prop), Some(Value::Length(_, _)))
 }
 
 fn main_axis_outer(layout_box: &LayoutBox, direction: FlexDirection) -> f32 {
@@ -2508,6 +2599,138 @@ mod tests {
         let layout = layout_tree(&styled, 800.0);
         assert_eq!(layout.children[0].dimensions.content.y, 50.0);
         assert_eq!(layout.children[1].dimensions.content.y, 90.0);
+    }
+
+    #[test]
+    fn align_items_default_stretches_items_to_container_cross_size() {
+        // align-items defaults to stretch. The shorter item (height: 20) grows
+        // to match the container's cross size. Container has explicit height
+        // 100, so both items end up at outer_height = 100.
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #row { display: flex; width: 400px; height: 100px; }
+                .a { width: 60px; }
+                .b { width: 60px; height: 40px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+
+        // Item .a has no explicit height → stretched to fill 100.
+        assert_eq!(a.dimensions.content.height, 100.0);
+        // Item .b had explicit height 40 → stretch leaves it alone.
+        assert_eq!(b.dimensions.content.height, 40.0);
+        // Both items align at content_y = 0 (stretch and flex-start both pin
+        // the cross-start to the container start).
+        assert_eq!(a.dimensions.content.y, 0.0);
+        assert_eq!(b.dimensions.content.y, 0.0);
+    }
+
+    #[test]
+    fn align_items_center_offsets_each_item_by_half_cross_leftover() {
+        // Items have different heights (40, 60). Container height = 100.
+        // center: each item shifts down by (100 - item_height) / 2.
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #row {
+                    display: flex;
+                    align-items: center;
+                    width: 400px;
+                    height: 100px;
+                }
+                .a { width: 60px; height: 40px; }
+                .b { width: 60px; height: 60px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+
+        assert_eq!(a.dimensions.content.y, 30.0);
+        assert_eq!(b.dimensions.content.y, 20.0);
+        // Heights stay as declared (no stretch when align is not stretch).
+        assert_eq!(a.dimensions.content.height, 40.0);
+        assert_eq!(b.dimensions.content.height, 60.0);
+    }
+
+    #[test]
+    fn align_items_flex_end_pins_each_item_to_cross_end() {
+        // Each item shifts down by (container_cross - item_cross), so both
+        // bottoms land at the container's content-bottom (y = 100).
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #row {
+                    display: flex;
+                    align-items: flex-end;
+                    width: 400px;
+                    height: 100px;
+                }
+                .a { width: 60px; height: 40px; }
+                .b { width: 60px; height: 60px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+
+        assert_eq!(a.dimensions.content.y, 60.0);
+        assert_eq!(b.dimensions.content.y, 40.0);
+    }
+
+    #[test]
+    fn align_items_flex_start_keeps_items_at_cross_origin() {
+        // flex-start matches the original commit-1 behavior: items pinned to
+        // the cross-start regardless of size differences. Crucially this
+        // disables the default stretch, so the shorter item keeps its natural
+        // (zero) height.
+        let styled = styled_root(
+            r#"<div id="row"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #row {
+                    display: flex;
+                    align-items: flex-start;
+                    width: 400px;
+                    height: 100px;
+                }
+                .a { width: 60px; }
+                .b { width: 60px; height: 60px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+
+        assert_eq!(a.dimensions.content.y, 0.0);
+        assert_eq!(b.dimensions.content.y, 0.0);
+        // No stretch — .a's auto height stays 0 (no children, no font-size
+        // intrinsic on a div).
+        assert_eq!(a.dimensions.content.height, 0.0);
+    }
+
+    #[test]
+    fn align_items_stretch_grows_cross_axis_in_column_direction() {
+        // In column flow, cross axis = width. Stretch grows items without an
+        // explicit width to fill the container's content width (200).
+        let styled = styled_root(
+            r#"<div id="col"><div class="a"></div><div class="b"></div></div>"#,
+            r#"
+                #col { display: flex; flex-direction: column; width: 200px; }
+                .a { height: 30px; }
+                .b { width: 80px; height: 30px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let a = &layout.children[0];
+        let b = &layout.children[1];
+
+        // Item .a stretches across the cross axis to 200; .b's explicit width
+        // wins.
+        assert_eq!(a.dimensions.content.width, 200.0);
+        assert_eq!(b.dimensions.content.width, 80.0);
     }
 
     #[test]
