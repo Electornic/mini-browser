@@ -261,8 +261,14 @@ fn layout_node(
         // margin-top. Out-of-flow children skip both the cursor advance and
         // the collapse chain — they neither push siblings down nor break
         // adjacency between the in-flow neighbours that surround them.
+        // Floats are also out of flow but they DO take horizontal space at
+        // the current cursor and let `clear` push later siblings past them.
         let mut child_cursor_y = content_y;
         let mut prev_margin_bottom: f32 = 0.0;
+        let mut next_left_float_x = content_x;
+        let mut next_right_float_right = content_x + content_width;
+        let mut float_bottom_left: f32 = content_y;
+        let mut float_bottom_right: f32 = content_y;
         let mut children: Vec<LayoutBox> = Vec::with_capacity(node.children.len());
         for child in &node.children {
             if is_out_of_flow(child) {
@@ -270,6 +276,52 @@ fn layout_node(
                 children.push(layout_node(child, content_x, &mut frozen, content_width));
                 continue;
             }
+
+            if is_float_left(child) {
+                // Place at the next available x in the left-float column. The
+                // float's outer top sits at the current in-flow cursor, but
+                // we never write back to the cursor — siblings flow past it.
+                let mut throwaway = child_cursor_y;
+                let float_box =
+                    layout_node(child, next_left_float_x, &mut throwaway, content_width);
+                let outer = outer_rect(&float_box);
+                next_left_float_x += outer.width;
+                float_bottom_left = float_bottom_left.max(throwaway);
+                children.push(float_box);
+                continue;
+            }
+            if is_float_right(child) {
+                // Right floats need their outer width before placement, so we
+                // lay out at the left edge first to measure, then shift the
+                // whole subtree to (right_edge - outer_width).
+                let mut throwaway = child_cursor_y;
+                let mut float_box = layout_node(child, content_x, &mut throwaway, content_width);
+                let outer_width = outer_rect(&float_box).width;
+                let dx = (next_right_float_right - outer_width) - content_x;
+                if dx != 0.0 {
+                    shift_layout_subtree(&mut float_box, dx, 0.0);
+                }
+                next_right_float_right -= outer_width;
+                float_bottom_right = float_bottom_right.max(throwaway);
+                children.push(float_box);
+                continue;
+            }
+
+            // `clear` jumps the cursor past prior floats on the named side(s)
+            // and resets the float-stack column for that side because no
+            // earlier floats are adjacent at the new cursor anymore.
+            let cleared = clear_target_y(child, float_bottom_left, float_bottom_right);
+            if cleared > child_cursor_y {
+                child_cursor_y = cleared;
+                prev_margin_bottom = 0.0;
+                if cleared >= float_bottom_left {
+                    next_left_float_x = content_x;
+                }
+                if cleared >= float_bottom_right {
+                    next_right_float_right = content_x + content_width;
+                }
+            }
+
             // The cursor at this point already includes prev_margin_bottom from
             // the previous in-flow child's tail. Subtracting `(sum - combined)`
             // collapses it against the next margin-top before the child uses
@@ -281,7 +333,12 @@ fn layout_node(
             prev_margin_bottom = laid_out.dimensions.margin.bottom;
             children.push(laid_out);
         }
-        (children, child_height(node, content_y, child_cursor_y))
+        // Parent height needs to cover both the in-flow cursor and the
+        // tallest float — without this, floats would spill below the parent's
+        // background.
+        let in_flow_height = child_height(node, content_y, child_cursor_y);
+        let float_height = (float_bottom_left.max(float_bottom_right) - content_y).max(0.0);
+        (children, in_flow_height.max(float_height))
     };
 
     // Percent-on-height technically resolves against the parent's height in CSS, but the
@@ -787,6 +844,27 @@ fn collapse_margins(prev: f32, next: f32) -> f32 {
 
 fn is_position_relative(node: &StyledNode) -> bool {
     matches!(node.value("position"), Some(Value::Keyword(keyword)) if keyword == "relative")
+}
+
+fn is_float_left(node: &StyledNode) -> bool {
+    matches!(node.value("float"), Some(Value::Keyword(keyword)) if keyword == "left")
+}
+
+fn is_float_right(node: &StyledNode) -> bool {
+    matches!(node.value("float"), Some(Value::Keyword(keyword)) if keyword == "right")
+}
+
+fn clear_target_y(node: &StyledNode, float_bottom_left: f32, float_bottom_right: f32) -> f32 {
+    // CSS `clear` makes the box's outer top jump down past preceding floats
+    // on the named side(s). Returning -∞ means the cursor is left untouched.
+    match node.value("clear") {
+        Some(Value::Keyword(keyword)) if keyword == "left" => float_bottom_left,
+        Some(Value::Keyword(keyword)) if keyword == "right" => float_bottom_right,
+        Some(Value::Keyword(keyword)) if keyword == "both" => {
+            float_bottom_left.max(float_bottom_right)
+        }
+        _ => f32::NEG_INFINITY,
+    }
 }
 
 fn is_position_absolute(node: &StyledNode) -> bool {
@@ -1944,6 +2022,141 @@ mod tests {
         let layout = layout_tree(&styled, 400.0);
 
         assert_eq!(layout.dimensions.content.height, 30.0);
+    }
+
+    #[test]
+    fn left_floats_stack_horizontally_at_same_y() {
+        // Two `float: left` siblings should line up side by side at the
+        // current cursor (y = 0), and the parent should grow to the float's
+        // height even though no in-flow child contributes any height.
+        let styled = styled_root(
+            r#"<div id="root"><div class="f"></div><div class="f"></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .f { float: left; width: 100px; height: 50px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let first = &layout.children[0];
+        let second = &layout.children[1];
+
+        assert_eq!(first.dimensions.content.x, 0.0);
+        assert_eq!(first.dimensions.content.y, 0.0);
+        assert_eq!(second.dimensions.content.x, 100.0);
+        assert_eq!(second.dimensions.content.y, 0.0);
+        // Parent height extends to cover the floats even with zero in-flow content.
+        assert_eq!(layout.dimensions.content.height, 50.0);
+    }
+
+    #[test]
+    fn right_float_pins_to_parent_right_edge() {
+        // The right float's outer right edge should land at parent's content
+        // right edge — measured then shifted into place.
+        let styled = styled_root(
+            r#"<div id="root"><div class="f"></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .f { float: right; width: 80px; height: 30px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let f = &layout.children[0];
+
+        // 400 - 80 = 320: float starts there.
+        assert_eq!(f.dimensions.content.x, 320.0);
+        assert_eq!(f.dimensions.content.y, 0.0);
+    }
+
+    #[test]
+    fn float_does_not_advance_cursor_for_following_block_sibling() {
+        // Without `clear`, an in-flow block sibling that follows a float
+        // sits at the same y as the float — it does not get pushed below.
+        let styled = styled_root(
+            r#"<div id="root"><div class="f"></div><div class="b"></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .f { float: left; width: 100px; height: 80px; }
+                .b { height: 30px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let block = &layout.children[1];
+
+        assert_eq!(block.dimensions.content.x, 0.0);
+        assert_eq!(block.dimensions.content.y, 0.0);
+        // Parent height covers the float (80) since the in-flow block (30) is shorter.
+        assert_eq!(layout.dimensions.content.height, 80.0);
+    }
+
+    #[test]
+    fn clear_both_pushes_block_below_all_preceding_floats() {
+        // `clear: both` jumps the cursor past the tallest float on either
+        // side so the block lands cleanly below them.
+        let styled = styled_root(
+            r#"<div id="root"><div class="left"></div><div class="right"></div><div class="cleared"></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .left { float: left; width: 100px; height: 80px; }
+                .right { float: right; width: 80px; height: 50px; }
+                .cleared { clear: both; height: 30px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let cleared = &layout.children[2];
+
+        // Tallest float bottom = max(80, 50) = 80 → clear lands here.
+        assert_eq!(cleared.dimensions.content.y, 80.0);
+        // Parent height = 80 (clear pos) + 30 (cleared block).
+        assert_eq!(layout.dimensions.content.height, 110.0);
+    }
+
+    #[test]
+    fn float_does_not_break_margin_collapse_chain() {
+        // A float between two in-flow blocks behaves like an out-of-flow
+        // box for margin collapse — it neither contributes to nor breaks
+        // the collapse between its non-floated neighbours.
+        let styled = styled_root(
+            r#"<div id="root"><div class="a"></div><div class="f"></div><div class="b"></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .a { height: 20px; margin-bottom: 30px; }
+                .f { float: left; width: 50px; height: 40px; }
+                .b { height: 15px; margin-top: 10px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let b = &layout.children[2];
+
+        // Same outcome as if .f were a regular out-of-flow box: gap = max(30, 10) = 30.
+        assert_eq!(b.dimensions.content.y, 50.0);
+    }
+
+    #[test]
+    fn clear_resets_float_stack_column_for_following_floats() {
+        // After `clear: left`, the next left float starts at content_x again
+        // (not stacked beside the cleared-out float), because the cleared
+        // cursor is below all preceding left floats.
+        let styled = styled_root(
+            r#"<div id="root"><div class="f1"></div><div class="block"></div><div class="f2"></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .f1 { float: left; width: 100px; height: 60px; }
+                .block { clear: left; height: 20px; }
+                .f2 { float: left; width: 100px; height: 40px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let f1 = &layout.children[0];
+        let block = &layout.children[1];
+        let f2 = &layout.children[2];
+
+        assert_eq!(f1.dimensions.content.x, 0.0);
+        assert_eq!(f1.dimensions.content.y, 0.0);
+        // .block clears past f1 (60), then is laid out with height 20 → cursor=80.
+        assert_eq!(block.dimensions.content.y, 60.0);
+        // f2 lays out at the new cursor (80), restarting the left column at x=0.
+        assert_eq!(f2.dimensions.content.x, 0.0);
+        assert_eq!(f2.dimensions.content.y, 80.0);
     }
 
     #[test]

@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 0 | Done | Block layout + Chrome-style UI | URL 인자 없이 실행 시 Chrome NTP 모양의 시작 페이지가 보인다 |
 | 1A | Done | Values & Selectors | %/em/rem 단위, named/rgb/rgba 색상, descendant/child 셀렉터, :hover/:focus/:active |
-| 1B | In progress | Layout Modes | inline-block ✅, position: relative/absolute/fixed ✅, stacking/z-index ✅, margin collapse ✅, line-height ✅, float |
+| 1B | Done | Layout Modes | inline-block ✅, position: relative/absolute/fixed ✅, stacking/z-index ✅, margin collapse ✅, line-height ✅, float ✅ |
 | 1C | Backlog | Paint | gradient, box-shadow, opacity, transform |
 | 1D | Backlog | Big Layout | Flexbox / Grid |
 | 2 | Backlog | JS Engine Integration | Boa 엔진 임베드 + DOM 바인딩, 단순 JS 동작 페이지 렌더 |
@@ -89,7 +89,7 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 | `position: absolute` | Done | layout.rs | 1-2w | ★★★ | 2-pass: pass 1은 static layout(흐름 cursor 안 움직임), pass 2는 containing-block 스택을 들고 트리를 다시 걸어 outer edge를 (cb_x+left, cb_y+top) 또는 right/bottom 기준으로 이동. 가장 가까운 positioned 조상의 padding box가 cb, 없으면 viewport. percent left/right는 cb.width, top/bottom은 cb.height에 resolve. block/inline 양쪽 + 중첩 absolute 지원 |
 | `position: fixed` | Done | layout.rs | 3d | ★★ | absolute의 분기 — `is_out_of_flow`로 inflow 제외 통합, pass 2가 `initial_cb`(viewport)도 함께 들고 다니며 fixed 노드만 그쪽으로 resolve. percent도 viewport 기준 |
 | Stacking context / `z-index` | Done | render.rs, css.rs | 1w | ★★★ | render에 stacking-context paint pass 도입: 자기 bg/border/text → 음의 z-index → in-flow 자손(positioned subtree skip) → zero/auto z-index → 양의 z-index. z-layer 정렬은 stable sort라 동일 z 안에서는 tree order. CSS 파서에 `Value::Number` + 음수/단위없는 숫자 파싱 추가. positioned 박스마다 자체 stacking context 생성 (auto와 0이 사실상 동일하게 취급되는 것은 toy 단순화) |
-| Float layout (`float: left/right`) | Backlog | layout.rs | 1w | ★★ | |
+| Float layout (`float: left/right`) | Done | layout.rs | 1w | ★★ | block-children 루프에 left/right column 트래커 추가 — float은 in-flow cursor 안 움직이고 같은 쪽 끼리 가로 stack. `clear: left/right/both`은 다음 block의 cursor를 해당 쪽 float bottom으로 점프시키고 column 리셋. 부모 height auto-extend로 float 포함. **미구현**: inline content wrap-around (line shortening), float on inline parent (block 부모 안에서만 동작) |
 | Margin collapse | Done | layout.rs | 1w | ★★ | adjacent in-flow block sibling 사이의 vertical margin을 spec대로 결합: 둘 다 양수면 max, 둘 다 음수면 min, 혼합이면 sum. block-children 루프가 이전 in-flow 자식의 `margin-bottom`을 추적하다가 다음 자식의 `margin-top`을 collapse 후 cursor에서 overlap 만큼 빼준다. out-of-flow 자식은 chain 끊지 않음. parent-child collapse(rule #2)는 미구현 |
 | `line-height` (inline) | Done | layout.rs, render.rs, style.rs | 3-5d | ★★ | inline 텍스트 높이가 글리프 크기 대신 line-height 박스로 확장. number는 자식의 own font-size에 곱(상속), length는 절대값, percent는 own font-size 기준. line box는 max child line-height. render에서 글리프를 half-leading만큼 내려 박스 안에 시각적 가운데 정렬. `vertical-align`은 미구현 |
 
