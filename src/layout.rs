@@ -829,20 +829,33 @@ fn layout_grid_children<'a>(
         }
     }
 
-    // Pass 3: row heights = max(item outer height) per row, then cumulative
-    // y offsets shifted onto each item.
+    // Pass 3: natural row heights = max(item outer height) per row.
     let n_rows = cell_assignments
         .iter()
         .map(|&(row, _, _, _)| row + 1)
         .max()
         .unwrap_or(0);
-    let mut row_heights = vec![0.0_f32; n_rows];
+    let mut natural_row_heights = vec![0.0_f32; n_rows];
     for &(row, _, box_idx, _) in &cell_assignments {
         let h = outer_rect(&boxes[box_idx]).height;
-        if h > row_heights[row] {
-            row_heights[row] = h;
+        if h > natural_row_heights[row] {
+            natural_row_heights[row] = h;
         }
     }
+
+    // Resolve `grid-template-rows` against the natural heights. Rows the
+    // template doesn't cover fall back to natural max.
+    let row_track_decls = match container.value("grid-template-rows") {
+        Some(Value::TrackList(tracks)) if !tracks.is_empty() => Some(tracks.as_slice()),
+        _ => None,
+    };
+    let container_explicit_height = length_value(container, "height", content_width);
+    let row_heights = resolve_grid_rows(
+        row_track_decls,
+        container_explicit_height,
+        &natural_row_heights,
+    );
+
     let mut row_offsets: Vec<f32> = Vec::with_capacity(n_rows);
     let mut acc = 0.0;
     for h in &row_heights {
@@ -858,6 +871,73 @@ fn layout_grid_children<'a>(
 
     let auto_content_height: f32 = row_heights.iter().sum();
     (boxes, auto_content_height)
+}
+
+fn resolve_grid_rows(
+    tracks: Option<&[TrackSize]>,
+    container_height: Option<f32>,
+    natural_row_heights: &[f32],
+) -> Vec<f32> {
+    // Rows differ from columns in two ways:
+    //   - Container main-axis size (height) is often `auto`. fr rows can only
+    //     distribute leftover when the container has an explicit height; under
+    //     auto height they collapse to zero (matching the flex-column rule).
+    //   - The template can be shorter than the implicit row count (more
+    //     items than declared rows). Trailing rows beyond the template fall
+    //     back to natural max — the same auto-fallback that took row sizing
+    //     before this commit.
+    let template = tracks.unwrap_or(&[]);
+    let n_rows = natural_row_heights.len();
+    if n_rows == 0 {
+        return Vec::new();
+    }
+
+    let mut sizes = vec![0.0_f32; n_rows];
+    let mut total_fr = 0.0_f32;
+    let mut fixed_total = 0.0_f32;
+    for (i, &natural_h) in natural_row_heights.iter().enumerate() {
+        if let Some(track) = template.get(i) {
+            match track {
+                TrackSize::Length(value, Unit::Px) => {
+                    sizes[i] = *value;
+                    fixed_total += *value;
+                }
+                TrackSize::Length(value, Unit::Percent) => {
+                    let resolved = *value / 100.0 * container_height.unwrap_or(0.0);
+                    sizes[i] = resolved;
+                    fixed_total += resolved;
+                }
+                TrackSize::Length(value, _) => {
+                    sizes[i] = *value;
+                    fixed_total += *value;
+                }
+                TrackSize::Auto => {
+                    sizes[i] = natural_h;
+                    fixed_total += natural_h;
+                }
+                TrackSize::Fraction(weight) => {
+                    total_fr += *weight;
+                    // Filled in below if container_height is known.
+                }
+            }
+        } else {
+            sizes[i] = natural_h;
+            fixed_total += natural_h;
+        }
+    }
+
+    if total_fr > 0.0
+        && let Some(container_h) = container_height
+    {
+        let free = (container_h - fixed_total).max(0.0);
+        for (i, track) in template.iter().enumerate().take(n_rows) {
+            if let TrackSize::Fraction(weight) = track {
+                sizes[i] = free * *weight / total_fr;
+            }
+        }
+    }
+
+    sizes
 }
 
 fn resolve_grid_columns(
@@ -3339,6 +3419,133 @@ mod tests {
         assert_eq!(a.dimensions.content.x, 0.0);
         assert_eq!(a.dimensions.content.width, 60.0);
         // Container width is set; child of col 1 is none, so no test there.
+    }
+
+    #[test]
+    fn grid_template_rows_overrides_natural_row_heights() {
+        // Two-column grid with grid-template-rows: 80px 50px. Items have
+        // natural heights that would auto-fit to smaller rows, but the
+        // explicit template forces row 0 = 80, row 1 = 50.
+        let styled = styled_root(
+            r#"<div id="g">
+                <div class="a"></div>
+                <div class="b"></div>
+                <div class="c"></div>
+                <div class="d"></div>
+            </div>"#,
+            r#"
+                #g {
+                    display: grid;
+                    grid-template-columns: 100px 100px;
+                    grid-template-rows: 80px 50px;
+                    width: 200px;
+                }
+                .a, .b, .c, .d { height: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+
+        // Row 1 items (c, d) should sit at y = 80 (row 0 height).
+        let c = &layout.children[2];
+        let d = &layout.children[3];
+        assert_eq!(c.dimensions.content.y, 80.0);
+        assert_eq!(d.dimensions.content.y, 80.0);
+        // Container height = 80 + 50 = 130.
+        assert_eq!(layout.dimensions.content.height, 130.0);
+    }
+
+    #[test]
+    fn grid_template_rows_auto_keyword_sizes_to_content() {
+        // Mixed template: row 0 = auto (sizes to its tallest item), row 1 =
+        // 100px (fixed). Items in row 0 are 30 and 50 → row 0 = 50.
+        let styled = styled_root(
+            r#"<div id="g">
+                <div class="a"></div>
+                <div class="b"></div>
+                <div class="c"></div>
+                <div class="d"></div>
+            </div>"#,
+            r#"
+                #g {
+                    display: grid;
+                    grid-template-columns: 100px 100px;
+                    grid-template-rows: auto 100px;
+                    width: 200px;
+                }
+                .a { height: 30px; }
+                .b { height: 50px; }
+                .c, .d { height: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let c = &layout.children[2];
+
+        // Row 0 collapsed to max(30, 50) = 50; row 1 starts at y=50.
+        assert_eq!(c.dimensions.content.y, 50.0);
+        // Container height = 50 + 100 = 150.
+        assert_eq!(layout.dimensions.content.height, 150.0);
+    }
+
+    #[test]
+    fn grid_template_rows_fr_distributes_against_explicit_height() {
+        // Container height = 300, two rows: 100px and 1fr → free = 200, 1fr = 200.
+        let styled = styled_root(
+            r#"<div id="g">
+                <div class="a"></div>
+                <div class="b"></div>
+                <div class="c"></div>
+                <div class="d"></div>
+            </div>"#,
+            r#"
+                #g {
+                    display: grid;
+                    grid-template-columns: 100px 100px;
+                    grid-template-rows: 100px 1fr;
+                    width: 200px;
+                    height: 300px;
+                }
+                .a, .b, .c, .d { height: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let c = &layout.children[2];
+
+        // Row 1 starts at y = 100 (row 0 height).
+        assert_eq!(c.dimensions.content.y, 100.0);
+        // Container's auto height (sum) = 100 + 200 = 300.
+        assert_eq!(layout.dimensions.content.height, 300.0);
+    }
+
+    #[test]
+    fn grid_template_rows_falls_back_to_natural_for_extra_rows() {
+        // 3 rows of items but only 2 declared → row 2 falls back to its
+        // natural max height (here a single 70px item).
+        let styled = styled_root(
+            r#"<div id="g">
+                <div class="a"></div>
+                <div class="b"></div>
+                <div class="c"></div>
+                <div class="d"></div>
+                <div class="e"></div>
+            </div>"#,
+            r#"
+                #g {
+                    display: grid;
+                    grid-template-columns: 100px 100px;
+                    grid-template-rows: 50px 50px;
+                    width: 200px;
+                }
+                .a, .b, .c, .d { height: 20px; }
+                .e { height: 70px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let e = &layout.children[4];
+
+        // Row 2 starts at y = 100 (50 + 50), and fills to 70 (natural).
+        assert_eq!(e.dimensions.content.y, 100.0);
+        // Container height = 50 + 50 + 70 = 170.
+        assert_eq!(layout.dimensions.content.height, 170.0);
     }
 
     #[test]
