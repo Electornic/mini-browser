@@ -28,23 +28,47 @@ impl From<NetworkError> for ResourceError {
 
 pub fn load_stylesheets(document: &[Node], base_url: &Url) -> Result<Vec<String>, ResourceError> {
     let stylesheet_urls = stylesheet_urls(document, base_url)?;
-    // Skip individual stylesheet failures so one broken link does not kill the whole page.
-    Ok(stylesheet_urls
-        .iter()
-        .filter_map(|url| net::load_css(url).ok())
-        .collect())
+    // Fetch all stylesheets in parallel; per-resource failures are silently
+    // dropped so one broken link does not kill the whole page.
+    Ok(parallel_fetch(&stylesheet_urls, |url| net::load_css(url).ok()))
 }
 
 pub fn load_images(document: &[Node], base_url: &Url) -> Result<Vec<LoadedImage>, ResourceError> {
     let image_urls = image_urls(document, base_url)?;
-    // Skip individual image failures so one broken image does not kill the whole page.
-    Ok(image_urls
-        .iter()
-        .filter_map(|url| {
-            let bytes = net::load_image(url).ok()?;
-            decode_image(url.clone(), &bytes).ok()
-        })
-        .collect())
+    // Same parallel pattern as stylesheets: failures drop, order is preserved.
+    Ok(parallel_fetch(&image_urls, |url| {
+        let bytes = net::load_image(url).ok()?;
+        decode_image(url.clone(), &bytes).ok()
+    }))
+}
+
+// Runs `fetch` against every URL on its own scoped thread and collects the
+// successful results in original URL order. Failures (None returns / panics
+// in worker threads) are filtered out so the rest of the page can still load.
+//
+// scoped threads keep this safe without `'static` — the fetch closure can
+// borrow whatever the caller already had on the stack. There is no thread
+// pool: one thread per URL is fine because the bottleneck is network I/O,
+// not CPU, and pages rarely reference more than a handful of resources.
+fn parallel_fetch<T, F>(urls: &[Url], fetch: F) -> Vec<T>
+where
+    T: Send,
+    F: Fn(&Url) -> Option<T> + Send + Sync,
+{
+    if urls.is_empty() {
+        return Vec::new();
+    }
+    std::thread::scope(|scope| {
+        let fetch = &fetch;
+        let handles: Vec<_> = urls
+            .iter()
+            .map(|url| scope.spawn(move || fetch(url)))
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok().flatten())
+            .collect()
+    })
 }
 
 fn stylesheet_urls(document: &[Node], base_url: &Url) -> Result<Vec<Url>, ResourceError> {
@@ -141,31 +165,24 @@ fn decode_image(url: Url, bytes: &[u8]) -> Result<LoadedImage, ResourceError> {
 }
 
 pub fn load_fonts(css_sources: &[String], base_url: &Url) -> Vec<Vec<u8>> {
-    let mut font_data = Vec::new();
-
-    for css in css_sources {
-        for url_str in extract_font_urls(css) {
-            let url = if url_str.contains("://") {
-                match Url::parse(&url_str) {
-                    Ok(url) => url,
-                    Err(_) => continue,
-                }
+    // Resolve every @font-face URL up front, then fetch them all in parallel
+    // through the shared connection pool — same-origin font files reuse the
+    // already-warmed TLS session that the stylesheet fetch primed.
+    let urls: Vec<Url> = css_sources
+        .iter()
+        .flat_map(|css| extract_font_urls(css))
+        .filter_map(|url_str| {
+            if url_str.contains("://") {
+                Url::parse(&url_str).ok()
             } else {
-                match base_url.resolve(&url_str) {
-                    Ok(url) => url,
-                    Err(_) => continue,
-                }
-            };
-            match net::fetch(&url) {
-                Ok(result) if result.response.status_code == 200 => {
-                    font_data.push(result.response.body);
-                }
-                _ => {}
+                base_url.resolve(&url_str).ok()
             }
-        }
-    }
-
-    font_data
+        })
+        .collect();
+    parallel_fetch(&urls, |url| match net::fetch(url) {
+        Ok(result) if result.response.status_code == 200 => Some(result.response.body),
+        _ => None,
+    })
 }
 
 fn extract_font_urls(css: &str) -> Vec<String> {
