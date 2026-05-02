@@ -218,6 +218,10 @@ impl BrowserState {
     // (network failure, missing entry) are silently dropped — same degradation
     // pattern as broken stylesheets / images.
     fn run_scripts(&mut self) {
+        // Snapshot the parsed DOM into the runtime first so that scripts
+        // observing `document.getElementById` etc. see the document they were
+        // shipped with, not whatever ran the previous load.
+        self.js.bind_document(&self.parsed_document);
         let mut sources = Vec::new();
         for node in &self.parsed_document {
             collect_script_sources(node, &self.external_scripts, &mut sources);
@@ -2642,6 +2646,52 @@ mod tests {
             HashMap::new(),
         );
         assert_eq!(browser.js.execute("still_ran").unwrap(), "1");
+    }
+
+    #[test]
+    fn inline_script_can_read_dom_via_document_get_element_by_id() {
+        // Run a <script> that depends on `document.getElementById` resolving
+        // against the page's parsed DOM. Confirms the browser-level wiring
+        // (BrowserState::run_scripts → js.bind_document → js.execute) hands
+        // the engine the document it just installed, not an empty tree.
+        let mut browser = browser_with_html(
+            r#"<div id="hero">welcome</div><script>var greeting = document.getElementById('hero').textContent;</script>"#,
+        );
+        assert_eq!(browser.js.execute("greeting").unwrap(), "\"welcome\"");
+    }
+
+    #[test]
+    fn navigation_rebinds_dom_for_next_document() {
+        // After install_document a new page, the same JS APIs must resolve
+        // against the new DOM. Catches a regression where bind_document is
+        // forgotten on the second-and-later install path.
+        let mut browser = browser_with_html(r#"<p id="x">first</p>"#);
+        assert_eq!(
+            browser
+                .js
+                .execute("document.getElementById('x').textContent")
+                .unwrap(),
+            "\"first\""
+        );
+        browser.install_document(
+            r#"<p id="y">second</p>"#.into(),
+            String::new(),
+            HashMap::new(),
+        );
+        assert_eq!(
+            browser
+                .js
+                .execute("document.getElementById('x')")
+                .unwrap(),
+            "null"
+        );
+        assert_eq!(
+            browser
+                .js
+                .execute("document.getElementById('y').textContent")
+                .unwrap(),
+            "\"second\""
+        );
     }
 
     #[test]

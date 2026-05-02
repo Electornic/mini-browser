@@ -283,6 +283,24 @@ pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
     Ok(stylesheet)
 }
 
+/// Parse a single complex selector (e.g. `div.card > a`). Used by JS-facing
+/// `document.querySelector` to reuse the existing selector grammar without
+/// going through a full stylesheet rule. Trailing input after the selector is
+/// rejected so callers can't smuggle declarations through the same entry point.
+pub fn parse_selector(input: &str) -> Result<Selector, ParseError> {
+    let mut parser = Parser::new(input);
+    parser.skip_whitespace_and_comments();
+    let selector = parser.parse_selector()?;
+    parser.skip_whitespace_and_comments();
+    if !parser.eof() {
+        return Err(ParseError::new(
+            parser.pos,
+            "unexpected trailing input after selector",
+        ));
+    }
+    Ok(selector)
+}
+
 /// Flips the sign of a numeric value while leaving non-numeric values untouched.
 /// Used by the value parser to apply a leading minus to lengths and unitless
 /// numbers (e.g. `-10px`, `z-index: -2`).
