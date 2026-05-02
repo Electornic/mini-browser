@@ -268,6 +268,16 @@ impl BrowserState {
         self.frame_index = self.frame_index.wrapping_add(1);
         self.apply_input(input, viewport_width, viewport_height);
 
+        // Step 7 async: pump the JS event loop once per frame *before* the
+        // layout pass. Timers/microtasks that came due since the previous
+        // frame run first, then queued requestAnimationFrame callbacks fire
+        // (Boa's wall clock makes "due" align with `setTimeout` deadlines).
+        // Running both before the borrow on `parsed_document` below means
+        // any DOM mutations the handlers perform feed into this very
+        // frame's style/layout — no one-frame lag like :hover has.
+        self.js.drain_pending_jobs();
+        self.js.run_animation_frame_callbacks();
+
         // Interaction state piped into the style pass. Hover and focus are tracked
         // across frames (one-frame lag); active is purely transient — true only while
         // the left mouse is currently held over the previously-hovered element.
@@ -2986,5 +2996,63 @@ mod tests {
         let p_kids = &document.get(host_kids[0]).unwrap().children;
         assert_eq!(p_kids.len(), 1);
         assert_eq!(document.text(p_kids[0]), Some("inserted"));
+    }
+
+    // ---- Step 7 async: timers + rAF pumped per frame by display_list ----
+
+    #[test]
+    fn set_timeout_zero_fires_during_next_display_list_frame() {
+        // setTimeout(fn, 0) lands with a now-aligned deadline (StdClock).
+        // The first display_list call after install_document drains the
+        // job queue at the top of the frame, firing the handler before
+        // any layout happens.
+        let mut browser = browser_with_html_and_css(
+            r#"<script>var hits = 0; setTimeout(function () { hits = hits + 1; }, 0);</script>"#,
+            "",
+        );
+        // The script's own microtask drain inside execute already fires
+        // the timer (deadline == now), so the page already saw the tick.
+        // Confirm here, then verify the next frame doesn't double-fire.
+        assert_eq!(browser.js.execute("hits").unwrap(), "1");
+        let _ = browser.display_list(800, 600, &window::WindowInput::default(), &[]);
+        assert_eq!(browser.js.execute("hits").unwrap(), "1");
+    }
+
+    #[test]
+    fn request_animation_frame_callback_runs_during_next_display_list_frame() {
+        // requestAnimationFrame doesn't fire inside `execute` — the
+        // callback queues for the per-frame `run_animation_frame_callbacks`
+        // call. The first display_list after install drains it.
+        let mut browser = browser_with_html_and_css(
+            r#"<script>var hits = 0; requestAnimationFrame(function () { hits = hits + 1; });</script>"#,
+            "",
+        );
+        assert_eq!(browser.js.execute("hits").unwrap(), "0");
+        let _ = browser.display_list(800, 600, &window::WindowInput::default(), &[]);
+        assert_eq!(browser.js.execute("hits").unwrap(), "1");
+        // Snapshot-then-fire: re-rAF inside the handler would queue for
+        // next frame, but this handler doesn't, so a second frame is a
+        // no-op.
+        let _ = browser.display_list(800, 600, &window::WindowInput::default(), &[]);
+        assert_eq!(browser.js.execute("hits").unwrap(), "1");
+    }
+
+    #[test]
+    fn raf_callback_dom_mutation_lands_in_browser_state_arena() {
+        // rAF runs *before* the frame's layout pass, so any DOM mutation
+        // it performs is visible to BrowserState's parsed_document arena
+        // and therefore to whatever the layout/render pipeline reads next.
+        let mut browser = browser_with_html_and_css(
+            r#"<div id="host"></div><script>requestAnimationFrame(function () { var p = document.createElement('p'); p.textContent = 'rafted'; document.getElementById('host').appendChild(p); });</script>"#,
+            "",
+        );
+        let _ = browser.display_list(800, 600, &window::WindowInput::default(), &[]);
+        let document = browser.parsed_document.borrow();
+        let host = document.roots()[0];
+        let host_kids = &document.get(host).unwrap().children;
+        assert_eq!(host_kids.len(), 1);
+        let p_kids = &document.get(host_kids[0]).unwrap().children;
+        assert_eq!(p_kids.len(), 1);
+        assert_eq!(document.text(p_kids[0]), Some("rafted"));
     }
 }
