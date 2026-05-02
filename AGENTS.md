@@ -13,9 +13,24 @@
 - Simple Network Loader (HTTP/HTTPS + redirect), Resource Loader (CSS/이미지/web font)
 - Chrome 스타일 chrome (탭 strip, pill 주소창, chevron 아이콘) + Chrome NTP 모양 시작 페이지
 
-**Phase 1 (Backlog)** — CSS Expansion (units, advanced selectors, position, flexbox, grid 등). 자세한 task는 `docs/roadmap.md` 참조.
+**Phase 1 (Done)** — CSS Expansion:
+- 단위 `%` / `em` / `rem`, 색상 `rgb()`/`rgba()`/named, descendant/child selector, `:hover`/`:focus`/`:active`
+- `display: inline-block`, `position: relative|absolute|fixed`, stacking context + `z-index`, float + `clear`, margin collapse, `line-height`
+- `opacity`, `linear-gradient`, `radial-gradient`, `box-shadow`, `text-shadow`, `transform: translate/scale/rotate`
+- **Flexbox** (`flex-grow`/`shrink`/`basis`, `justify-content`, `align-items`), **Grid** (`grid-template-*`, `fr` 단위, `grid-area`, line names)
 
-**Phase 2 (Backlog)** — JS Engine Integration (Boa 임베드 + DOM 바인딩 + reflow trigger).
+**Phase 2 (Done)** — JS Engine Integration:
+- Boa 0.21 임베드, `<script>` inline + external 자동 로드/실행, `console` + `globalThis`/`window`/`self` alias
+- DOM read: `document.getElementById` / `querySelector` (descendant + child), `tagName` / `textContent` / `children` / `getAttribute` / `nodeType`
+- DOM mutate: `createElement` / `createTextNode`, `appendChild` / `removeChild` / `insertBefore` / `replaceChild` / `cloneNode`, `setAttribute`, stale handle 시 throw
+- 이벤트: `addEventListener('click', fn)` + bubble dispatch (text → Element retarget, mid-bubble removal 안전)
+- 비동기: `setTimeout` / `setInterval` / `requestAnimationFrame` + Promise microtask drain. 커스텀 `FrameJobExecutor` 가 매 프레임 due 인 timeout 만 발사하고 future 는 큐에 둠
+- Mutation 즉시 reflow: `Rc<RefCell<Document>>` 공유로 핸들러 mutation 이 같은 프레임 layout 에 반영
+
+**Phase 3 (Backlog)** — Interactive Browser:
+- preventDefault / stopPropagation, 키보드/포커스 이벤트, `<input>` / `<textarea>` / `<form>` submit, fetch/XHR (async/await), navigator/location stub, `main.rs` 분할
+- 워킹셋 매트릭스: [Notion 보드](https://www.notion.so/d2148621e352424ba22199e4be237e22)
+- 현재까지의 Phase 3 commit 가이드: [docs/roadmap.md](docs/roadmap.md) Phase 3 섹션
 
 상세 범위와 설계는 아래 문서를 기준으로 한다.
 - `README.md`
@@ -41,29 +56,32 @@
 - 적당한 작업 단위가 끝날 때마다 `git add .` 후 `git commit`까지 진행해 변경을 작은 단위로 유지
 - 현재 범위를 벗어나는 기능은 임의로 추가하지 않음
 - 미지원 기능은 억지로 일반화하지 말고 명시적으로 제한
-- parser, style, layout, render, network 모듈 경계를 흐리지 않음
+- parser, style, layout, render, network, js 모듈 경계를 흐리지 않음
 
 ## Implementation Guidance
 
 - HTML/CSS는 표준 전체를 구현하지 않는다. 필요한 만큼만 단계적으로 늘린다.
 - block layout이 기본. inline 흐름은 `<a>`/`<span>`/`<img>` 같은 명시적 인라인 태그에 한정.
-- Phase 1에서 layout 모드를 추가할 때마다 기존 block 경로를 깨지 않게 한다 (`display: inline-block`, `position` 등).
-- renderer는 rect/rounded-rect/text/image primitive 중심. 새 paint 효과(gradient, shadow 등)는 새 프리미티브로 추가하고 기존을 깨지 않는다.
-- 모듈 경계 유지: parser, style, layout, render, network 사이의 책임을 흐리지 않는다.
+- Phase 1에서 layout 모드를 추가할 때마다 기존 block 경로를 깨지 않게 한다 (`display: inline-block`, `position`, `flex`, `grid` 등).
+- renderer는 rect/rounded-rect/text/image primitive 중심. 새 paint 효과(gradient, shadow, transform 등)는 새 프리미티브로 추가하고 기존을 깨지 않는다.
+- JS 측 host API 는 `src/js.rs` 안에서만 노출한다. 외부 모듈은 Boa 타입 (`JsObject` / `JsValue` / `Context`) 을 직접 import 하지 않는다 — `JsRuntime` 의 좁은 메서드 (`execute` / `dispatch_event` / `drain_pending_jobs` / `run_animation_frame_callbacks`) 만 호출.
+- 모듈 경계 유지: parser, style, layout, render, network, js 사이의 책임을 흐리지 않는다.
 - 설계 기준 자료구조는 `docs/data-model.md`를 우선 참조한다.
 
 ## Code Organization
 
 모듈 추가 시 아래 책임 분리를 지향한다.
 
-- `dom`: 문서 트리 자료구조
+- `dom`: 문서 트리 자료구조 (현재 NodeId 기반 arena, `Rc<RefCell<Document>>` 공유)
 - `html`: HTML 파싱
 - `css`: CSS 파싱
 - `style`: selector matching, inheritance, computed/specified values
-- `layout`: block layout 계산
-- `render` 또는 `paint`: display command 생성 및 화면 출력 연결
-- `net`: URL parsing, HTTP GET, resource fetch
-- `app`: 전체 파이프라인 조립
+- `layout`: block / inline / inline-block / position / float / flex / grid 계산
+- `render` (또는 `paint`): display command 생성 및 화면 출력 연결
+- `net`: URL parsing, HTTP GET, keep-alive 풀, redirect
+- `resource`: HTML 에서 stylesheet / 이미지 / 스크립트 추출 후 병렬 fetch
+- `js`: Boa engine wrapper, document/window globals, 이벤트 디스패치, microtask/timer/rAF 드라이버
+- `main` (`BrowserState`): 전체 파이프라인 조립, history, chrome 입력 처리
 
 한 모듈이 다른 단계의 내부 구현 세부사항을 직접 알지 않도록 유지한다.
 
@@ -77,9 +95,12 @@
 2. typecheck
    - `cargo check`
 3. test
-   - `cargo test`
+   - `cargo test --lib`
+   - `cargo test --bin mini-browser`
 4. build
    - `cargo build`
+
+현재 baseline: lib 294 + bin 41 passing, clippy clean.
 
 모든 검증이 항상 가능하지 않다면:
 - 실행하지 못한 이유를 명시
@@ -121,21 +142,20 @@
 
 ## Long-term Roadmap
 
-Phase 0(블록 layout + Chrome 스타일 UI + NTP)은 main에 반영됨. 이후 단계는 학습 우선 순서대로 정리되어 있다.
+Phase 0 / 1 / 2 는 main에 반영됨. Phase 3 부터 backlog.
 
-- **Phase 1 — CSS Expansion**: 단위(`%`/`em`/`rem`), descendant/child/`:hover` selectors, `inline-block`, `position`, `transform`, `box-shadow`, gradient, **flexbox**, **grid** 등.
-- **Phase 2 — JS Engine Integration**: [Boa](https://crates.io/crates/boa_engine) 임베드, DOM 바인딩(`document`/`querySelector`/`addEventListener`), mutation → reflow trigger, event loop, `setTimeout`/`requestAnimationFrame`, `fetch` 기본 GET.
+- **Phase 3 — Interactive Browser**: 사용자 입력(`<input>`/`<textarea>`/`<form>` submit), 이벤트 surface 확장 (preventDefault·키보드·focus·input/change), 네트워크 from JS (`fetch`/`XHR` + `async/await`), 호스트 API stub (`navigator`/`location`/`history`), `main.rs` 분할.
 
-Phase별 task 분해와 작업량/학습 가치 매트릭스는 [docs/roadmap.md](docs/roadmap.md)에 있다. 진행 시 그 파일이 source of truth.
+Phase별 task 분해와 작업량/학습 가치 매트릭스는 [docs/roadmap.md](docs/roadmap.md)에 있다. Phase 3 워킹셋은 [Notion 보드](https://www.notion.so/d2148621e352424ba22199e4be237e22). 진행 시 두 곳을 source of truth 로 같이 본다.
 
 ### 명시적 비포함
 
 다음 항목은 학습 가치 대비 범위 폭증이 커서 로드맵에서 제외한다(필요 시 별도 Phase로 다시 평가):
 
 - WebGL / Canvas 2D context
-- WebSocket, IndexedDB, ServiceWorker
-- HTTP/2/3, compression(gzip/brotli)
-- 멀티탭 UI, 히스토리 페이지
+- WebSocket, IndexedDB, ServiceWorker, Web Workers
+- HTTP/2, HTTP/3, gzip/brotli compression
+- 멀티탭 UI, 히스토리 페이지 (chrome://history 같은)
 - 폰트 셰이핑(HarfBuzz 수준), BiDi 정교화
 
 ## Working Style

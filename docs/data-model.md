@@ -6,21 +6,22 @@
 
 ## DOM
 
-### `Node`
+### `Document` (arena)
 
-문서 트리의 기본 단위다.
-
-예상 역할:
-- element node 표현
-- text node 표현
-- child node 보관
+DOM 트리는 `NodeId` 기반 arena 로 보관된다. parent/child link 가 owned `Vec<Node>` 가 아니라 인덱스라서, JS 측 long-lived wrapper 가 트리 재배치 후에도 stable 한 핸들로 같은 노드를 가리킬 수 있다. 삭제는 tombstone — 슬롯은 비워두고 ID 는 invalidate.
 
 예시:
 
 ```rust
+pub struct Document {
+    nodes: Vec<Option<Node>>,
+    roots: Vec<NodeId>,
+}
+
 pub struct Node {
-    pub children: Vec<Node>,
     pub node_type: NodeType,
+    pub parent: Option<NodeId>,
+    pub children: Vec<NodeId>,
 }
 
 pub enum NodeType {
@@ -28,6 +29,8 @@ pub enum NodeType {
     Text(String),
 }
 ```
+
+JS 측 `JsRuntime` 과 BrowserState 가 `Rc<RefCell<Document>>` 를 공유하므로, JS 핸들러의 `appendChild` / `removeChild` 가 **즉시** layout 단에서 보인다 (다음 프레임 layout 빌드 시 새 트리를 그대로 read).
 
 ### `ElementData`
 
@@ -164,7 +167,7 @@ pub struct Dimensions {
 
 ### `BoxType`
 
-최소 버전의 박스 종류다.
+박스 종류는 layout 모드별로 분기된다. flex / grid 는 자체 레이아웃 알고리즘을 가진다.
 
 예시:
 
@@ -172,12 +175,15 @@ pub struct Dimensions {
 pub enum BoxType {
     BlockNode(StyledNode),
     InlineNode(StyledNode),
+    InlineBlockNode(StyledNode),
+    FlexNode(StyledNode),
+    GridNode(StyledNode),
     AnonymousBlock,
 }
 ```
 
 비고:
-- 첫 버전에서 inline layout을 생략한다면 `InlineNode`는 나중에 추가해도 된다.
+- 각 variant 의 `StyledNode` 가 `node_id` 를 들고 있어서 layout box → DOM 노드 역추적이 가능 (click hit-test → dispatch_event 에서 사용).
 
 ## Painting / Rendering
 
@@ -269,6 +275,30 @@ pub enum Resource {
 }
 ```
 
+## JavaScript
+
+### `JsRuntime`
+
+페이지 단위 Boa engine wrapper. 같은 Document arena 를 공유해 JS mutation 이 layout 에 즉시 반영되게 한다.
+
+예상 역할:
+- Boa `Context` 보유 (페이지 단위 globals 보존)
+- `Rc<RefCell<Document>>` 공유로 DOM read/mutate
+- 이벤트 listener registry — `(NodeId, event_type) -> Vec<JsObject>`
+- 비동기 잡 큐 — 커스텀 `FrameJobExecutor` (microtask + due timer 만 비블로킹 drain)
+- requestAnimationFrame 콜백 스냅샷 큐
+
+좁은 외부 API:
+- `JsRuntime::new(dom)` — 페이지 navigate 시 새로 만든다 (이전 globals/listener 초기화)
+- `execute(source) -> Result<String, String>` — `<script>` 본문 실행 후 microtask 자동 drain
+- `dispatch_event(target, event_type)` — bubble dispatch + microtask drain
+- `drain_pending_jobs()` — 매 프레임 시작에 호출, due 인 timer/microtask drain
+- `run_animation_frame_callbacks()` — 매 프레임 시작에 호출, snapshot-then-fire
+
+### `Job` (Boa)
+
+Boa 의 `Job` enum 을 그대로 사용 (PromiseJob / GenericJob / TimeoutJob / AsyncJob). 우리 `FrameJobExecutor` 는 PromiseJob / GenericJob 은 빈 큐 될 때까지 drain, TimeoutJob 은 deadline `<= now` 인 것만 발사, AsyncJob 은 dropped (Phase 3 에서 활성화 예정).
+
 ## App State
 
 ### `BrowserState`
@@ -276,21 +306,27 @@ pub enum Resource {
 앱 단위 상태를 관리한다.
 
 예상 역할:
-- 현재 URL
-- 현재 DOM
-- 현재 stylesheet 목록
-- 현재 layout tree 또는 display list
+- 현재 URL, address bar 입력 / focus 상태
+- 현재 DOM (`Rc<RefCell<Document>>`) — `JsRuntime` 과 공유
+- 현재 stylesheet 목록 (parsed)
+- 캐시된 image / font / external script 본문
+- back/forward history snapshot stack
+- hover/focus DOM path
 - last error 또는 loading state
+
+매 프레임 `display_list(viewport, input, fonts) -> Vec<DisplayCommand>` 호출이 진입점.
 
 ## Data Flow Summary
 
 ```text
-HTML text -> Node
+HTML text -> Document (NodeId arena)
 CSS text -> Stylesheet
-Node + Stylesheet -> StyledNode
+Document + Stylesheet (+ interaction state) -> StyledNode
 StyledNode + viewport -> LayoutBox
 LayoutBox -> DisplayCommand[]
-URL -> HttpResponse -> Html/Css/Image resource
+URL -> HttpResponse -> Html / Css / Image / Script body / Font bytes
+JS source -> Boa Context (mutates Document)
+User input + LayoutBox hit-test -> JsRuntime.dispatch_event
 ```
 
 ## Related Documents

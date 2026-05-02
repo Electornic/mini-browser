@@ -8,10 +8,16 @@
 |---|---|---|---|
 | 0 | Done | Block layout + Chrome-style UI | URL 인자 없이 실행 시 Chrome NTP 모양의 시작 페이지가 보인다 |
 | 1A | Done | Values & Selectors | %/em/rem 단위, named/rgb/rgba 색상, descendant/child 셀렉터, :hover/:focus/:active |
-| 1B | Done | Layout Modes | inline-block ✅, position: relative/absolute/fixed ✅, stacking/z-index ✅, margin collapse ✅, line-height ✅, float ✅ |
-| 1C | Done | Paint | opacity ✅, linear-gradient ✅, radial-gradient ✅, box-shadow ✅, text-shadow ✅, transform ✅ |
-| 1D | Done | Big Layout | Flexbox ✅ / Grid ✅ |
-| 2 | Backlog | JS Engine Integration | Boa 엔진 임베드 + DOM 바인딩, 단순 JS 동작 페이지 렌더 |
+| 1B | Done | Layout Modes | inline-block, position: relative/absolute/fixed, stacking/z-index, margin collapse, line-height, float |
+| 1C | Done | Paint | opacity, linear-gradient, radial-gradient, box-shadow, text-shadow, transform |
+| 1D | Done | Big Layout | Flexbox / Grid |
+| 2A | Done | Engine Embed | Boa 임베드, `<script>` 실행, console |
+| 2B | Done | DOM Read | document, window/self alias, getElementById, querySelector, textContent, getAttribute |
+| 2C | Done | DOM Mutation + Reflow | createElement, appendChild/removeChild/insertBefore/replaceChild/cloneNode, mutation→reflow |
+| 2D | Done | Events & Async | addEventListener('click', ...), Event loop (microtask + timer), setTimeout/setInterval, requestAnimationFrame |
+| 3 | Backlog | Interactive Browser | Form 입력, 이벤트 surface 확장 (preventDefault·키보드·focus·input/change), fetch/XHR, navigator/location stub |
+
+Phase 3 의 워킹셋(개별 task별 status/effort/value/files/notes)은 [Notion 보드](https://www.notion.so/d2148621e352424ba22199e4be237e22)에서 관리한다. 이 문서는 phase 단위 의도와 outcome 의 source of truth.
 
 ## Working Principles
 
@@ -60,12 +66,12 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 | 메뉴 버튼 클릭 hit-test | Done | `ChromeAction::Menu` + hover wash + 임시 status 메시지 (드롭다운 자체는 별도 작업) |
 | refresh 아이콘 / 액션 | Done | 12-stop ring + 화살표 합성 아이콘, `reload_current()`로 history 건드리지 않고 재페치. 홈 버튼은 향후 polish로 이월 |
 
-남은 후속 polish 후보 (Phase 1과 병렬 진행 가능, 우선순위 낮음):
+남은 후속 polish 후보 (Phase 3과 병렬 진행 가능, 우선순위 낮음):
 - 메뉴 드롭다운 실제 구현
 - 홈 버튼
 - refresh 진행 중 spinner 상태
 
-## Phase 1 — CSS Expansion (Backlog)
+## Phase 1 — CSS Expansion (Done)
 
 목표: 실제 웹페이지에서 흔히 보는 CSS 기능을 학습 단위로 직접 구현해본다. Phase 1 종료 시 단순 React 랜딩페이지 정도가 거의 깨지지 않고 렌더 가능해야 한다.
 
@@ -80,7 +86,7 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 | `:hover` pseudo-class | Done | DOM path 식별자 기반, 1-frame lag, hover ancestor 전파 |
 | `:focus`, `:active` | Done | `PseudoState` 구조체 통합. focus는 비전파, active는 hover처럼 전파. WindowInput에 `left_mouse_held` 추가 |
 
-### 1B. Layout Modes
+### 1B. Layout Modes (Done)
 
 | Task | Status | Files | Effort | Value | Dependencies |
 |---|---|---|---|---|---|
@@ -93,7 +99,7 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 | Margin collapse | Done | layout.rs | 1w | ★★ | adjacent in-flow block sibling 사이의 vertical margin을 spec대로 결합: 둘 다 양수면 max, 둘 다 음수면 min, 혼합이면 sum. block-children 루프가 이전 in-flow 자식의 `margin-bottom`을 추적하다가 다음 자식의 `margin-top`을 collapse 후 cursor에서 overlap 만큼 빼준다. out-of-flow 자식은 chain 끊지 않음. parent-child collapse(rule #2)는 미구현 |
 | `line-height` (inline) | Done | layout.rs, render.rs, style.rs | 3-5d | ★★ | inline 텍스트 높이가 글리프 크기 대신 line-height 박스로 확장. number는 자식의 own font-size에 곱(상속), length는 절대값, percent는 own font-size 기준. line box는 max child line-height. render에서 글리프를 half-leading만큼 내려 박스 안에 시각적 가운데 정렬. `vertical-align`은 미구현 |
 
-### 1C. Paint
+### 1C. Paint (Done)
 
 | Task | Status | Files | Effort | Value | Dependencies |
 |---|---|---|---|---|---|
@@ -104,7 +110,7 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 | `text-shadow` | Done | render.rs, css.rs, style.rs | 3d | ★ | css에 `Value::TextShadow`(offset/blur/color) + `parse_text_shadow_value`. style 인헤리턴스 화이트리스트에 `text-shadow` 추가 (자식 텍스트가 부모 declaration 받음). render는 `paint_self`에 `text_shadow_command`를 `text_command` 직전에 호출 — 텍스트 노드일 때만 두 번째 Text 커맨드를 offset 위치 + shadow 색으로 push. **간이화**: `blur_radius`는 파싱하지만 라스터에선 무시 (글리프 blur는 별도 raster-then-blur 패스 필요), single shadow only |
 | `transform: translate/scale/rotate` | Done | render.rs, css.rs, main.rs | 2-3w | ★★★ | `Affine` 6-entry 매트릭스를 paint pass의 `inherited_alpha`처럼 스레딩, 박스의 `T(centre) * own * T(-centre)`로 `transform-origin: 50% 50%` 구현. translate+scale은 axis-aligned 이라 emit 직후 rect/x/y/width/height에 bake (기존 fast path 유지). rotate가 들어가면 박스의 primitive들을 단일 `DisplayCommand::TransformGroup(matrix, Vec)`로 묶고, raster는 logical bbox의 4 corner를 매트릭스로 투영해 screen AABB를 구한 뒤 픽셀별 inverse-transform sampling으로 SolidRect/RoundedRect/Gradient/BoxShadow/Image/Text 모두 정확히 그린다 (per-glyph로 text까지). hit-test는 layout 트리를 같은 `inherited_transform`으로 걷고 cursor를 effective의 inverse로 logical 공간에 환원해서 비교 — `LinkTarget` rect도 collection 시점에 transform을 apply. CSS는 `Value::TransformList(Vec<TransformOp>)` + `translate(x[,y])`/`translateX/Y`, `scale(x[,y])`/`scaleX/Y`, `rotate(<angle>)`(deg/rad/turn/grad → rad). **간이화**: `transform-origin`은 항상 50% 50%, percent translate, matrix(...) 직접 입력, 3D transform은 미구현 |
 
-### 1D. Big Layout (마지막)
+### 1D. Big Layout (Done)
 
 | Task | Status | Files | Effort | Value | Dependencies |
 |---|---|---|---|---|---|
@@ -113,52 +119,90 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 | **Grid: track sizing** | Done | layout.rs, css.rs, style.rs | 1-2m | ★★★ | flexbox 완료 후. `display: grid` + `BoxType::GridNode` 신규 variant. `grid-template-columns` / `grid-template-rows` 가 `<length>` / `<n>fr` / `auto` 트랙 지원, 행/열 모두에서 fr이 leftover 비례 분배. row-major auto-flow + occupancy 추적. `grid-column` / `grid-row` 명시 배치(`<n>`, `<n>/<m>`, `<n>/span <m>`, `span <n>`) + 행/열 span. **간이화**: `auto`/`min-content`/`max-content` 미지원 (`auto`만), 음수 grid line, 명명된 line, `grid-auto-columns`/`-rows` 미구현 (implicit track은 기존 트랙 클램프), 스팬 항목은 col_start 트랙에만 자연너비 기여, 자식 reflow 없는 post-hoc resize |
 | Grid: areas, line names | Done | layout.rs, css.rs | 2w | ★★★ | track sizing 먼저. `grid-template-areas: "h h h" "s m m" "f f f"`로 명명된 영역 정의 + `grid-area: <name>` 키워드로 항목 배치. **간이화**: 비-직사각 영역 lenient 처리(bbox로 환원), `grid-area`의 4-line shorthand 미구현, 명명된 line(`[start]` 등) 미구현 |
 
-## Phase 2 — JS Engine Integration (Backlog)
+## Phase 2 — JS Engine Integration (Done)
 
-목표: 정적 HTML/CSS만 그리던 브라우저에 동적 동작을 넣는다. 자체 구현 대신 [Boa](https://crates.io/crates/boa_engine) 임베드 — DOM 바인딩과 reflow trigger가 진짜 학습 포인트.
+목표: 정적 HTML/CSS만 그리던 브라우저에 동적 동작을 넣었다. 자체 구현 대신 [Boa](https://crates.io/crates/boa_engine) 임베드 — DOM 바인딩과 reflow trigger가 진짜 학습 포인트.
 
-### 2A. Engine Embed
+검증 baseline (post-Step-7): **lib 294 + bin 41 tests passing**, clippy clean.
 
-| Task | Files | Effort | Value | Dependencies |
-|---|---|---|---|---|
-| `boa_engine` 의존성 추가 + hello-world | Cargo.toml, 새 모듈 | 1-2d | ★ | |
-| `<script>` 태그 실행 (HTML 파싱 → script 추출 → 실행) | html.rs, 새 모듈 | 3-5d | ★★ | engine embed 먼저 |
-| `console.log` → stderr 바인딩 | js.rs (가칭) | 1d | ★ | engine embed 먼저 |
+### 2A. Engine Embed (Done)
 
-### 2B. DOM Bindings (read-only first)
+| Task | Status | Notes |
+|---|---|---|
+| `boa_engine` 의존성 추가 + hello-world | Done | commit 11e98fd — Boa 0.21 + `JsRuntime` wrapper, globals 보존 |
+| `<script>` 태그 실행 (HTML 파싱 → script 추출 → 실행) | Done | `BrowserState::run_scripts` — inline + external `src` 둘 다 수집해 실행 |
+| `console.log` → stderr 바인딩 | Done | `register_console` — log/warn/error 모두 stderr 로 흘림 |
 
-| Task | Files | Effort | Value | Dependencies |
-|---|---|---|---|---|
-| `document`, `window` globals | js.rs, dom.rs | 3-5d | ★★ | engine embed |
-| `document.querySelector` | js.rs, style.rs (selector 재사용) | 1w | ★★★ | descendant selector 필요 (Phase 1) |
-| `document.getElementById` | js.rs | 2d | ★ | |
-| `.textContent` (read) | js.rs | 2d | ★ | |
-| `.getAttribute()` | js.rs | 2d | ★ | |
+### 2B. DOM Bindings (Done)
 
-### 2C. DOM Mutation + Reflow
+| Task | Status | Notes |
+|---|---|---|
+| `document`, `window` globals | Done | commit c19b8b3 — `window`/`self` ⇄ `globalThis` alias. document 는 `register_document` 에서 |
+| `document.querySelector` | Done | commit 37a528f — descendant + child 콤비네이터 (style.rs selector 재사용) |
+| `document.getElementById` | Done | `find_by_id` 트리 워크 + Element wrapper 반환 |
+| `.textContent` (read) | Done | descendant text 트리 워크 — setter 도 같이 노출 |
+| `.getAttribute()` | Done | Element wrapper getter — `setAttribute` 도 함께 |
 
-| Task | Files | Effort | Value | Dependencies |
-|---|---|---|---|---|
-| `document.createElement` | js.rs, dom.rs | 3d | ★★ | |
-| `.appendChild`, `.removeChild` | js.rs, dom.rs | 3d | ★★ | createElement |
-| Mutation → reflow trigger (스타일/레이아웃 재계산) | main.rs | 1-2w | ★★★ | mutation API 먼저 |
-| `.innerHTML` write (fragment HTML 파싱) | html.rs (fragment 모드 추가), js.rs | 1w | ★★★ | |
+### 2C. DOM Mutation + Reflow (Done)
 
-### 2D. Events & Async
+| Task | Status | Notes |
+|---|---|---|
+| `document.createElement` | Done | commit 91e11ff — `Document::create_element` + `createTextNode` |
+| `.appendChild`, `.removeChild` | Done | commit 91e11ff/e032531 — `insertBefore` / `replaceChild` / `cloneNode` 도 함께 + tombstone subtree, stale handle throw |
+| Mutation → reflow trigger (스타일/레이아웃 재계산) | Done | `Rc<RefCell<Document>>` 공유 + `display_list` 가 매 프레임 layout 새로 빌드 — JS mutation 즉시 반영 |
+| `.innerHTML` write (fragment HTML 파싱) | **Phase 3 으로 이전** | fragment HTML parser 가 별도 작업 — Phase 3 보드의 3C 섹션 |
 
-| Task | Files | Effort | Value | Dependencies |
-|---|---|---|---|---|
-| Event loop (microtask + macrotask 큐) | main.rs, js.rs | 1w | ★★★ | engine embed |
-| `addEventListener('click', ...)` | js.rs, main.rs | 1w | ★★★ | event loop |
-| `setTimeout`, `setInterval` | js.rs, main.rs | 3-5d | ★★ | event loop |
-| `requestAnimationFrame` | js.rs, main.rs | 3d | ★★ | event loop |
+### 2D. Events & Async (Done)
 
-### 2E. Network from JS (선택)
+| Task | Status | Notes |
+|---|---|---|
+| Event loop (microtask + macrotask 큐) | Done | commit c115d9c — 커스텀 `FrameJobExecutor`, `execute`/`dispatch_event` 끝에 drain, frame 시작에 timer drain |
+| `addEventListener('click', ...)` | Done | commit 5a6e009 — listener registry + bubble dispatch + text→Element retarget. preventDefault/stopPropagation 은 Phase 3 잔여물 |
+| `setTimeout`, `setInterval` | Done | commit c115d9c — clearTimeout/clearInterval/통합 id namespace + 셀프-clear in handler 안전 |
+| `requestAnimationFrame` | Done | commit c115d9c — snapshot-then-fire. `display_list` frame 시작에 drain. cancelAnimationFrame 까지 |
 
-| Task | Files | Effort | Value | Dependencies |
-|---|---|---|---|---|
-| `fetch()` basic GET | js.rs, net.rs | 1w | ★★ | event loop, async |
-| `XMLHttpRequest` minimal | js.rs, net.rs | 3-5d | ★ | fetch 먼저 |
+### 2E. Network from JS — **Phase 3 으로 이전**
+
+`fetch()` / `XMLHttpRequest` 는 모두 Phase 3 보드의 3D 섹션으로 이동. NativeAsyncJob 활성화가 별도 큰 작업이라 분리.
+
+## Phase 3 — Interactive Browser (Backlog)
+
+목표: 사용자가 직접 입력하고 폼을 제출하고 키보드/포커스로 상호작용하는 페이지가 동작하는 토이 브라우저로 끌어올린다. 동시에 Step 6/7 에서 의도적으로 미뤘던 이벤트 surface 잔여물 (preventDefault, currentTarget) 을 정리하고, naver-grade SPA 가 first-line ReferenceError 로 죽지 않도록 host API stub 을 채운다.
+
+상세 task 매트릭스 (각 task별 Status/Effort/Value/Files/Dependencies/Notes) 는 [Notion 보드](https://www.notion.so/d2148621e352424ba22199e4be237e22)에 있다. 이 문서는 phase 의도와 섹션 outcome 만 기술.
+
+### 3A. Event 확장
+- `event.preventDefault()` + link click 차단 wiring
+- `event.stopPropagation()` + bubble 중단 (`stopImmediatePropagation` 도 같이)
+- `event.currentTarget` — ancestor 마다 갱신
+- `keydown` / `keyup` 이벤트 디스패치 (chrome 의 키 입력 분기와 충돌 처리)
+- `focus` / `blur` 이벤트 (`focused_dom_path` 변화 시 자동 발화)
+
+### 3B. Form & Input
+- `<input type=text>` 텍스트 박스 + caret + selection (focus 상태에서만 caret blink)
+- `<textarea>` multi-line 입력 (줄바꿈 + 자동 wrap + scroll)
+- `<button>` + `<form>` submit (`action`/`method` URL 로 navigate, JS `submit` 핸들러 우선 + `preventDefault` 가능)
+- `input` / `change` 이벤트 (input 은 매 변경, change 는 blur 시 한 번)
+
+### 3C. DOM API 잔여
+- `.innerHTML write` (Phase 2 에서 이전) — fragment HTML parser 추가
+- `classList.add/remove/toggle/contains` — DOMTokenList 비슷한 객체
+- `closest()` / `matches()` — `matches_static_selector` 재사용
+- DOM tree 탐색 API (`parentElement`, `nextElementSibling`, `previousElementSibling`, `firstElementChild`, `lastElementChild`)
+
+### 3D. Network from JS
+- `fetch()` basic GET (Phase 2 에서 이전)
+- `fetch` POST + headers + `Response.text` / `.json`
+- `XMLHttpRequest` minimal (Phase 2 에서 이전, fetch 의존)
+- `async/await` + `NativeAsyncJob` 활성화 (Boa `run_jobs_async` + `thread::scope` 결합 설계)
+
+### 3E. Browser State Stubs
+- `navigator` + `location` + `history` stub (현재 URL thread 까지) — naver 같은 SPA 가 first-line crash 안 나게
+- `window.addEventListener` / `document.addEventListener` no-op stub — 1차엔 silent, 추후 `DOMContentLoaded`/`load` 같은 일부 type 만 실제 디스패치
+
+### 3H. Refactor & Polish
+- UA defaults 보강 — `script` / `style` / `head` / `title` / `meta` / `link` → `display: none`
+- `main.rs` 분할 1차 — BrowserState / chrome / display_list 분리
 
 ## Phase Beyond — 명시적 비포함
 
@@ -173,13 +217,20 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 - 실제 캐시 / 쿠키 정교화
 - 폰트 셰이핑 (HarfBuzz 수준), BiDi, line breaking 정교화
 
-이 항목이 필요해지는 시점이 오면 그때 별도 Phase 3+ 로드맵을 작성한다.
+이 항목이 필요해지는 시점이 오면 그때 별도 Phase 4+ 로드맵을 작성한다.
 
 ## Suggested Work Order
 
-Phase 1은 위 표의 1A → 1B → 1C → 1D 순서가 자연스럽다. 1A는 다른 모든 항목의 기반(단위, 셀렉터)이라 제일 먼저 깔아야 한다. 1D(flex/grid)는 가장 큼.
+Phase 1 은 1A → 1B → 1C → 1D, Phase 2 는 2A → 2B → 2C → 2D 순서로 진행됨 (실제 Step 1-7 으로 commit 단위 분할). Phase 3 는 의존성 그래프 상 다음 순서가 자연스럽다:
 
-Phase 2는 2A → 2B → 2C → 2D → 2E 순서.
+1. **3H UA defaults `script {display:none}`** — 1d, 의존성 0. 가장 큰 시각 노이즈 즉시 해결
+2. **3E navigator/location/history stub** — 2d, 의존성 0. SPA first-line crash 막음
+3. **3A preventDefault / stopPropagation / currentTarget** — Step 6/7 직접 연장선
+4. **3A keydown / focus** — chrome 입력 분기 정리 후
+5. **3B `<input type=text>` → `<textarea>` → `<button>`/`<form>` submit** — 입력 stack 차곡차곡
+6. **3C classList / closest / sibling** — DOM API 잔여물
+7. **3D async/await → fetch GET → fetch POST → XHR** — NativeAsyncJob 활성화부터
+8. **3H main.rs 분할** — 모든 위 작업 끝난 후 마무리
 
 ## Verification Strategy
 
@@ -187,7 +238,7 @@ Phase 2는 2A → 2B → 2C → 2D → 2E 순서.
 - style/layout 계층: snapshot 또는 구조 비교 중심
 - renderer/window 계층: 수동 실행 검증 + display command 비교
 - network 계층: integration test 또는 샘플 서버 기반
-- JS 계층 (Phase 2): JS 코드를 입력으로 받아 DOM 변경 결과를 비교
+- JS 계층 (Phase 2+): JS 코드를 입력으로 받아 DOM 변경 결과를 비교. Phase 2 부터 `JsRuntime::new_with_fixed_clock` 로 deterministic timer test 가능
 
 각 task 완료 시 다음 4개 커맨드로 검증:
 
