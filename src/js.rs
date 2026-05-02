@@ -112,6 +112,7 @@ impl JsRuntime {
         let cancelled_timers: Rc<RefCell<HashSet<u32>>> = Rc::new(RefCell::new(HashSet::new()));
         let next_timer_id: Rc<Cell<u32>> = Rc::new(Cell::new(0));
         register_console(&mut context);
+        register_window_aliases(&mut context);
         register_document(&mut context, dom.clone(), listeners.clone());
         register_timers(
             &mut context,
@@ -345,6 +346,26 @@ fn console_warn(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
 fn console_error(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     write_console("error", args, context);
     Ok(JsValue::undefined())
+}
+
+// Browsers expose `window` and `self` as aliases of the global object —
+// scripts in the wild rely on either name being defined (`window.foo`,
+// `self.addEventListener`, `typeof window === 'object'` feature checks).
+// Boa already provides `globalThis` per spec; we just bind the two extra
+// names to the same object so `window === globalThis === self` and a
+// `var x` at top level shows up as `window.x` like every other engine.
+fn register_window_aliases(context: &mut Context) {
+    let global = context.global_object();
+    let _ = context.register_global_property(
+        js_string!("window"),
+        JsValue::from(global.clone()),
+        Attribute::all(),
+    );
+    let _ = context.register_global_property(
+        js_string!("self"),
+        JsValue::from(global),
+        Attribute::all(),
+    );
 }
 
 fn write_console(level: &str, args: &[JsValue], context: &mut Context) {
@@ -1421,6 +1442,24 @@ mod tests {
             runtime.execute("'hello, ' + 'world'").unwrap(),
             "\"hello, world\""
         );
+    }
+
+    #[test]
+    fn window_and_self_alias_the_global_object() {
+        // Real-world scripts (analytics, polyfills) feature-detect via
+        // `window`/`self` and crash with ReferenceError if either is
+        // missing. We bind both to the global object so `window === self`,
+        // top-level `var foo` shows up as `window.foo`, and `typeof window`
+        // reports `"object"` like every browser.
+        let mut runtime = runtime_with("");
+        assert_eq!(runtime.execute("typeof window").unwrap(), "\"object\"");
+        assert_eq!(runtime.execute("typeof self").unwrap(), "\"object\"");
+        assert_eq!(runtime.execute("window === globalThis").unwrap(), "true");
+        assert_eq!(runtime.execute("self === globalThis").unwrap(), "true");
+        runtime.execute("var page = 7;").unwrap();
+        // var bindings at the top level are reflected as own properties of
+        // the global object; the alias should make them visible via window.
+        assert_eq!(runtime.execute("window.page").unwrap(), "7");
     }
 
     #[test]
