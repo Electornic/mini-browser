@@ -1,4 +1,4 @@
-use crate::dom::{AttrMap, Node};
+use crate::dom::{AttrMap, Document, NodeId};
 
 // This parser intentionally accepts only a small, well-formed subset of HTML.
 // The goal is to turn HTML text into a DOM tree, not to reproduce full browser recovery rules.
@@ -17,33 +17,49 @@ impl ParseError {
     }
 }
 
-pub fn parse(source: &str) -> Result<Vec<Node>, ParseError> {
-    let mut parser = Parser::new(source);
-    let nodes = parser.parse_nodes()?;
-    parser.consume_whitespace();
+pub fn parse(source: &str) -> Result<Document, ParseError> {
+    let mut document = Document::new();
+    // The parser's `&mut Document` borrow has to be released before we re-touch
+    // `document` (to append the parsed roots), so the parsing pass lives in its
+    // own scope. Returning the trailing offsets out of the scope keeps the eof
+    // check at the top level alongside the rest of the function's flow.
+    let (roots, trailing_pos, trailing_eof) = {
+        let mut parser = Parser::new(source, &mut document);
+        let roots = parser.parse_nodes()?;
+        parser.consume_whitespace();
+        (roots, parser.pos, parser.eof())
+    };
 
     // If anything is left after parsing sibling nodes, we treat it as malformed input.
-    if parser.eof() {
-        Ok(nodes)
-    } else {
-        Err(ParseError::new(
-            parser.pos,
+    if !trailing_eof {
+        return Err(ParseError::new(
+            trailing_pos,
             "unexpected trailing input after parsing document",
-        ))
+        ));
     }
+
+    for root in roots {
+        document.append_root(root);
+    }
+    Ok(document)
 }
 
-struct Parser<'a> {
+struct Parser<'a, 'd> {
     pos: usize,
     input: &'a str,
+    document: &'d mut Document,
 }
 
-impl<'a> Parser<'a> {
-    fn new(input: &'a str) -> Self {
-        Self { pos: 0, input }
+impl<'a, 'd> Parser<'a, 'd> {
+    fn new(input: &'a str, document: &'d mut Document) -> Self {
+        Self {
+            pos: 0,
+            input,
+            document,
+        }
     }
 
-    fn parse_nodes(&mut self) -> Result<Vec<Node>, ParseError> {
+    fn parse_nodes(&mut self) -> Result<Vec<NodeId>, ParseError> {
         let mut nodes = Vec::new();
 
         loop {
@@ -54,24 +70,25 @@ impl<'a> Parser<'a> {
             }
 
             // Repeatedly parse siblings until a closing tag or end-of-input ends this level.
-            let node = self.parse_node()?;
-            if !matches!(node.node_type, crate::dom::NodeType::Text(ref text) if text.is_empty()) {
-                nodes.push(node);
+            // `parse_node` returns `None` for skipped declarations / comments and for
+            // empty text runs; those simply don't add a child.
+            if let Some(id) = self.parse_node()? {
+                nodes.push(id);
             }
         }
 
         Ok(nodes)
     }
 
-    fn parse_node(&mut self) -> Result<Node, ParseError> {
+    fn parse_node(&mut self) -> Result<Option<NodeId>, ParseError> {
         // A leading '<' means element syntax; anything else is raw text content.
         if self.next_char() == Some('<') {
             // Skip constructs the toy parser does not model but real HTML contains.
             if self.starts_with("<!") {
                 self.skip_declaration_or_comment();
-                return Ok(Node::text(""));
+                return Ok(None);
             }
-            self.parse_element()
+            self.parse_element().map(Some)
         } else {
             Ok(self.parse_text())
         }
@@ -102,7 +119,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_element(&mut self) -> Result<Node, ParseError> {
+    fn parse_element(&mut self) -> Result<NodeId, ParseError> {
         self.expect_char('<')?;
         let tag_name = self.parse_tag_name()?;
         let attributes = self.parse_attributes()?;
@@ -110,14 +127,14 @@ impl<'a> Parser<'a> {
         // Self-closing elements stop immediately and never recurse into children.
         if self.starts_with("/>") {
             self.pos += 2;
-            return Ok(Node::element(tag_name, attributes, Vec::new()));
+            return Ok(self.document.create_element(tag_name, attributes));
         }
 
         self.expect_char('>')?;
 
         // Void elements never have children or closing tags in real HTML.
         if is_void_element(&tag_name) {
-            return Ok(Node::element(tag_name, attributes, Vec::new()));
+            return Ok(self.document.create_element(tag_name, attributes));
         }
 
         // Raw text elements contain code or styles, not nested HTML.
@@ -127,12 +144,12 @@ impl<'a> Parser<'a> {
         // children to keep the tree compact.
         if is_raw_text_element(&tag_name) {
             let content = self.consume_raw_text_content(&tag_name);
-            let children = if content.is_empty() {
-                Vec::new()
-            } else {
-                vec![Node::text(content)]
-            };
-            return Ok(Node::element(tag_name, attributes, children));
+            let element = self.document.create_element(tag_name, attributes);
+            if !content.is_empty() {
+                let text = self.document.create_text(content);
+                self.document.append_child(element, text);
+            }
+            return Ok(element);
         }
 
         let children = self.parse_nodes()?;
@@ -150,7 +167,11 @@ impl<'a> Parser<'a> {
         self.consume_whitespace();
         self.expect_char('>')?;
 
-        Ok(Node::element(tag_name, attributes, children))
+        let element = self.document.create_element(tag_name, attributes);
+        for child in children {
+            self.document.append_child(element, child);
+        }
+        Ok(element)
     }
 
     fn consume_raw_text_content(&mut self, tag_name: &str) -> String {
@@ -176,10 +197,16 @@ impl<'a> Parser<'a> {
             .is_some_and(|slice| slice.eq_ignore_ascii_case(value))
     }
 
-    fn parse_text(&mut self) -> Node {
-        // Text is everything until the next '<'.
+    fn parse_text(&mut self) -> Option<NodeId> {
+        // Text is everything until the next '<'. Empty runs (which can appear
+        // when whitespace was just consumed or `<!--…-->` was skipped) produce
+        // no node so the resulting tree stays free of zero-length text leaves.
         let text = self.consume_while(|ch| ch != '<');
-        Node::text(text)
+        if text.is_empty() {
+            None
+        } else {
+            Some(self.document.create_text(text))
+        }
     }
 
     fn parse_attributes(&mut self) -> Result<AttrMap, ParseError> {
@@ -327,11 +354,12 @@ mod tests {
 
     #[test]
     fn parses_nested_elements_and_text() {
-        let nodes = parse("<div id='root'><p>Hello</p><span>world</span></div>").unwrap();
+        let document = parse("<div id='root'><p>Hello</p><span>world</span></div>").unwrap();
 
-        assert_eq!(nodes.len(), 1);
+        assert_eq!(document.roots().len(), 1);
 
-        let root = &nodes[0];
+        let root_id = document.roots()[0];
+        let root = document.get(root_id).unwrap();
         let root_element = match &root.node_type {
             NodeType::Element(data) => data,
             NodeType::Text(_) => panic!("expected element node"),
@@ -344,21 +372,23 @@ mod tests {
         );
         assert_eq!(root.children.len(), 2);
 
-        let paragraph = &root.children[0];
+        let paragraph = document.get(root.children[0]).unwrap();
         let paragraph_element = match &paragraph.node_type {
             NodeType::Element(data) => data,
             NodeType::Text(_) => panic!("expected paragraph element"),
         };
         assert_eq!(paragraph_element.tag_name, "p");
-        assert_eq!(paragraph.children, vec![crate::dom::Node::text("Hello")]);
+        assert_eq!(paragraph.children.len(), 1);
+        assert_eq!(document.text(paragraph.children[0]), Some("Hello"));
     }
 
     #[test]
     fn parses_multiple_attributes_with_mixed_quotes() {
-        let nodes = parse(r#"<img src="hero.png" alt='Hero' data-id=abc />"#).unwrap();
+        let document = parse(r#"<img src="hero.png" alt='Hero' data-id=abc />"#).unwrap();
 
-        assert_eq!(nodes.len(), 1);
-        let element = match &nodes[0].node_type {
+        assert_eq!(document.roots().len(), 1);
+        let root_id = document.roots()[0];
+        let element = match &document.get(root_id).unwrap().node_type {
             NodeType::Element(data) => data,
             NodeType::Text(_) => panic!("expected element node"),
         };

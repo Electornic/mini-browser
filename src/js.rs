@@ -20,35 +20,35 @@ use boa_engine::{
 
 use crate::{
     css::{self, Combinator, Selector, SimpleSelector, SimpleSelectorKind},
-    dom::{self, NodeType},
+    dom::{Document, NodeId, NodeType},
 };
 
 pub struct JsRuntime {
     context: Context,
-    // Snapshot of the parsed DOM exposed to JS through `document.*`. Held
+    // Snapshot of the parsed Document exposed to JS through `document.*`. Held
     // behind Rc<RefCell<…>> so the native closures registered on the
     // `document` global can each carry an independent handle without
     // re-registering when the page changes — `bind_document` overwrites the
-    // inner Vec and every closure observes the new tree on its next call.
-    dom: Rc<RefCell<Vec<dom::Node>>>,
+    // inner Document and every closure observes the new tree on its next call.
+    dom: Rc<RefCell<Document>>,
 }
 
 impl JsRuntime {
     pub fn new() -> Self {
         let mut context = Context::default();
         register_console(&mut context);
-        let dom: Rc<RefCell<Vec<dom::Node>>> = Rc::new(RefCell::new(Vec::new()));
+        let dom: Rc<RefCell<Document>> = Rc::new(RefCell::new(Document::new()));
         register_document(&mut context, dom.clone());
         Self { context, dom }
     }
 
     /// Snapshot the parsed document into the runtime so JS can read it via
     /// `document.getElementById` / `document.querySelector`. Cloned eagerly:
-    /// the bridge is read-only in Step 4, so nothing inside the engine will
-    /// mutate this Vec — and copying lets us drop the caller's borrow before
-    /// script execution starts.
-    pub fn bind_document(&mut self, nodes: &[dom::Node]) {
-        *self.dom.borrow_mut() = nodes.to_vec();
+    /// the bridge is read-only in Step 5.0, so nothing inside the engine will
+    /// mutate this Document — and copying lets us drop the caller's borrow
+    /// before script execution starts.
+    pub fn bind_document(&mut self, document: &Document) {
+        *self.dom.borrow_mut() = document.clone();
     }
 
     // Returns the displayed form of the result on success, or a stringified
@@ -132,18 +132,18 @@ fn write_console(level: &str, args: &[JsValue], context: &mut Context) {
 }
 
 // Builds the `document` global with read-only DOM access methods. Each method
-// captures its own `Rc` clone of the shared DOM snapshot so they stay valid
+// captures its own `Rc` clone of the shared Document handle so they stay valid
 // after `register_document` returns. The closures use `unsafe from_closure`
-// because our captures (Rc<RefCell<Vec<Node>>>) are pure host data — no JS
+// because our captures (Rc<RefCell<Document>>) are pure host data — no JS
 // values hide inside, so Boa's GC has nothing to trace through them.
-fn register_document(context: &mut Context, dom: Rc<RefCell<Vec<dom::Node>>>) {
+fn register_document(context: &mut Context, dom: Rc<RefCell<Document>>) {
     let dom_for_id = dom.clone();
     let get_element_by_id = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let id = first_arg_as_string(args, ctx)?;
-            let nodes = dom_for_id.borrow();
-            match find_by_id(&nodes, &id) {
-                Some(path) => Ok(JsValue::from(make_element(&path, &nodes, ctx))),
+            let document = dom_for_id.borrow();
+            match find_by_id(&document, &id) {
+                Some(node_id) => Ok(JsValue::from(make_element(node_id, &document, ctx))),
                 None => Ok(JsValue::null()),
             }
         })
@@ -164,9 +164,9 @@ fn register_document(context: &mut Context, dom: Rc<RefCell<Vec<dom::Node>>>) {
                         .into());
                 }
             };
-            let nodes = dom_for_qs.borrow();
-            match find_first_match(&nodes, &selector) {
-                Some(path) => Ok(JsValue::from(make_element(&path, &nodes, ctx))),
+            let document = dom_for_qs.borrow();
+            match find_first_match(&document, &selector) {
+                Some(node_id) => Ok(JsValue::from(make_element(node_id, &document, ctx))),
                 None => Ok(JsValue::null()),
             }
         })
@@ -185,35 +185,39 @@ fn first_arg_as_string(args: &[JsValue], context: &mut Context) -> JsResult<Stri
     Ok(arg.to_string(context)?.to_std_string_escaped())
 }
 
-// Eagerly materialises a JS Element wrapper around the DOM node at `path`.
-// All exposed properties (tagName, textContent, children, getAttribute) are
-// captured by value at construction — Step 4 is read-only and the parsed DOM
-// can't change beneath the runtime, so a one-shot snapshot is correct and
-// dodges the lifetime gymnastics of carrying a borrow across native calls.
-fn make_element(path: &[usize], roots: &[dom::Node], context: &mut Context) -> JsObject {
-    // The walker that produced `path` only emits valid indices, so `expect`
+// Eagerly materialises a JS Element wrapper around the DOM node identified
+// by `node_id`. All exposed properties (tagName, textContent, children,
+// getAttribute) are captured by value at construction — Step 5.0 is
+// read-only and the parsed Document can't change beneath the runtime, so a
+// one-shot snapshot is correct and dodges the lifetime gymnastics of
+// carrying a borrow across native calls.
+fn make_element(node_id: NodeId, document: &Document, context: &mut Context) -> JsObject {
+    // The walker that produced `node_id` only emits valid handles, so `expect`
     // surfaces regressions immediately rather than silently returning a stub.
-    let node = resolve_path(roots, path).expect("path produced by tree walk must resolve");
+    let node = document
+        .get(node_id)
+        .expect("element factory called with stale NodeId");
     let element = match &node.node_type {
         NodeType::Element(e) => e,
-        NodeType::Text(_) => unreachable!("element factory called with text-node path"),
+        NodeType::Text(_) => unreachable!("element factory called with text-node id"),
     };
 
     // DOM `tagName` is canonically uppercase for HTML elements; our parser
     // stores lowercase tag names, so normalise at the JS boundary.
     let tag = element.tag_name.to_ascii_uppercase();
     let attrs = element.attributes.clone();
-    let text_content = collect_text_content(node);
+    let text_content = collect_text_content(document, node_id);
 
     // `.children` mirrors HTMLCollection: only Element children, indexed by
-    // position among elements (Text nodes filtered out). Recursion is bounded
-    // by tree depth; each child carries its own captured attribute map.
+    // position among elements (Text nodes filtered out). Each child carries
+    // its own captured attribute map.
     let children = JsArray::new(context);
-    for (i, child) in node.children.iter().enumerate() {
-        if matches!(child.node_type, NodeType::Element(_)) {
-            let mut child_path = path.to_vec();
-            child_path.push(i);
-            let child_obj = make_element(&child_path, roots, context);
+    for child_id in &node.children {
+        if matches!(
+            document.get(*child_id).map(|n| &n.node_type),
+            Some(NodeType::Element(_))
+        ) {
+            let child_obj = make_element(*child_id, document, context);
             // push() can only fail on length overflow — irrelevant for trees.
             let _ = children.push(JsValue::from(child_obj), context);
         }
@@ -245,107 +249,100 @@ fn make_element(path: &[usize], roots: &[dom::Node], context: &mut Context) -> J
         .build()
 }
 
-fn resolve_path<'a>(roots: &'a [dom::Node], path: &[usize]) -> Option<&'a dom::Node> {
-    let (first, rest) = path.split_first()?;
-    let mut current = roots.get(*first)?;
-    for idx in rest {
-        current = current.children.get(*idx)?;
-    }
-    Some(current)
-}
-
-fn collect_text_content(node: &dom::Node) -> String {
+fn collect_text_content(document: &Document, node_id: NodeId) -> String {
     let mut buf = String::new();
-    walk_text(node, &mut buf);
+    walk_text(document, node_id, &mut buf);
     buf
 }
 
-fn walk_text(node: &dom::Node, buf: &mut String) {
+fn walk_text(document: &Document, node_id: NodeId, buf: &mut String) {
+    let Some(node) = document.get(node_id) else {
+        return;
+    };
     match &node.node_type {
         NodeType::Text(text) => buf.push_str(text),
         NodeType::Element(_) => {
             for child in &node.children {
-                walk_text(child, buf);
+                walk_text(document, *child, buf);
             }
         }
     }
 }
 
-fn find_by_id(roots: &[dom::Node], id: &str) -> Option<Vec<usize>> {
-    let mut path = Vec::new();
-    for (i, node) in roots.iter().enumerate() {
-        path.push(i);
-        if let Some(p) = walk_for_id(node, id, &mut path) {
-            return Some(p);
+fn find_by_id(document: &Document, id: &str) -> Option<NodeId> {
+    for &root in document.roots() {
+        if let Some(found) = walk_for_id(document, root, id) {
+            return Some(found);
         }
-        path.pop();
     }
     None
 }
 
-fn walk_for_id(node: &dom::Node, id: &str, path: &mut Vec<usize>) -> Option<Vec<usize>> {
+fn walk_for_id(document: &Document, node_id: NodeId, id: &str) -> Option<NodeId> {
+    let node = document.get(node_id)?;
     if let NodeType::Element(elem) = &node.node_type
         && elem.attributes.get("id").is_some_and(|v| v == id)
     {
-        return Some(path.clone());
+        return Some(node_id);
     }
-    for (i, child) in node.children.iter().enumerate() {
-        path.push(i);
-        if let Some(p) = walk_for_id(child, id, path) {
-            return Some(p);
+    for child in &node.children {
+        if let Some(found) = walk_for_id(document, *child, id) {
+            return Some(found);
         }
-        path.pop();
     }
     None
 }
 
-fn find_first_match(roots: &[dom::Node], selector: &Selector) -> Option<Vec<usize>> {
-    let mut path = Vec::new();
-    let mut ancestors: Vec<&dom::Node> = Vec::new();
-    for (i, node) in roots.iter().enumerate() {
-        path.push(i);
-        if let Some(p) = walk_for_match(node, selector, &mut ancestors, &mut path) {
-            return Some(p);
+fn find_first_match(document: &Document, selector: &Selector) -> Option<NodeId> {
+    let mut ancestors: Vec<NodeId> = Vec::new();
+    for &root in document.roots() {
+        if let Some(found) = walk_for_match(document, root, selector, &mut ancestors) {
+            return Some(found);
         }
-        path.pop();
     }
     None
 }
 
-fn walk_for_match<'a>(
-    node: &'a dom::Node,
+fn walk_for_match(
+    document: &Document,
+    node_id: NodeId,
     selector: &Selector,
-    ancestors: &mut Vec<&'a dom::Node>,
-    path: &mut Vec<usize>,
-) -> Option<Vec<usize>> {
-    if matches_static_selector(node, ancestors, selector) {
-        return Some(path.clone());
+    ancestors: &mut Vec<NodeId>,
+) -> Option<NodeId> {
+    if matches_static_selector(document, node_id, ancestors, selector) {
+        return Some(node_id);
     }
-    ancestors.push(node);
-    for (i, child) in node.children.iter().enumerate() {
-        path.push(i);
-        if let Some(p) = walk_for_match(child, selector, ancestors, path) {
-            return Some(p);
+    // Snapshot children before recursing so a lookup against the
+    // arena doesn't conflict with the recursive borrows.
+    let children: Vec<NodeId> = match document.get(node_id) {
+        Some(node) => node.children.clone(),
+        None => return None,
+    };
+    ancestors.push(node_id);
+    for child in &children {
+        if let Some(found) = walk_for_match(document, *child, selector, ancestors) {
+            ancestors.pop();
+            return Some(found);
         }
-        path.pop();
     }
     ancestors.pop();
     None
 }
 
 // Mirrors style::matches_selector but skips pseudo-class state — querySelector
-// is a static lookup against the parsed DOM, no hover/focus context to thread
-// through. Pseudo-classes parse-but-ignore here: `.btn:hover` matches the
-// same set as `.btn`.
+// is a static lookup against the parsed Document, no hover/focus context to
+// thread through. Pseudo-classes parse-but-ignore here: `.btn:hover` matches
+// the same set as `.btn`.
 fn matches_static_selector(
-    node: &dom::Node,
-    ancestors: &[&dom::Node],
+    document: &Document,
+    node_id: NodeId,
+    ancestors: &[NodeId],
     selector: &Selector,
 ) -> bool {
     let Some((target, leading)) = selector.parts.split_last() else {
         return false;
     };
-    if !matches_simple_static(node, target) {
+    if !matches_simple_static(document, node_id, target) {
         return false;
     }
     let mut iter = ancestors.iter().rev();
@@ -354,13 +351,13 @@ fn matches_static_selector(
         match combinator {
             Combinator::Descendant => loop {
                 match iter.next() {
-                    Some(ancestor) if matches_simple_static(ancestor, part) => break,
+                    Some(ancestor) if matches_simple_static(document, *ancestor, part) => break,
                     Some(_) => continue,
                     None => return false,
                 }
             },
             Combinator::Child => match iter.next() {
-                Some(ancestor) if matches_simple_static(ancestor, part) => {}
+                Some(ancestor) if matches_simple_static(document, *ancestor, part) => {}
                 _ => return false,
             },
         }
@@ -368,10 +365,10 @@ fn matches_static_selector(
     true
 }
 
-fn matches_simple_static(node: &dom::Node, simple: &SimpleSelector) -> bool {
-    let element = match &node.node_type {
-        NodeType::Element(e) => e,
-        NodeType::Text(_) => return false,
+fn matches_simple_static(document: &Document, node_id: NodeId, simple: &SimpleSelector) -> bool {
+    let element = match document.get(node_id).map(|n| &n.node_type) {
+        Some(NodeType::Element(e)) => e,
+        _ => return false,
     };
     match &simple.kind {
         SimpleSelectorKind::Tag(tag) => element.tag_name == *tag,

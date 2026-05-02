@@ -1124,7 +1124,7 @@ fn text_shadow_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayComm
     // Only the actual text-bearing layout box paints a shadow — Element
     // boxes never carry text on their own, so they short-circuit here.
     let node = layout_box.styled_node()?;
-    let text = match &node.node.node_type {
+    let text = match &node.node_type {
         NodeType::Text(text) => text.clone(),
         NodeType::Element(_) => return None,
     };
@@ -1150,7 +1150,7 @@ fn text_shadow_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayComm
 
 fn text_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
     let node = layout_box.styled_node()?;
-    let text = match &node.node.node_type {
+    let text = match &node.node_type {
         NodeType::Text(text) => text.clone(),
         NodeType::Element(_) => return None,
     };
@@ -1908,13 +1908,10 @@ mod tests {
     };
 
     fn display_list(html_source: &str, css_source: &str) -> Vec<DisplayCommand> {
-        let node = html::parse(html_source)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
+        let document = html::parse(html_source).unwrap();
+        let root = document.roots()[0];
         let stylesheet = css::parse(css_source).unwrap();
-        let styled = style::style_tree(&node, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
         let layout = layout::layout_tree(&styled, 400.0);
         render::build_display_list(&layout)
     }

@@ -5,7 +5,7 @@ use crate::{
         Combinator, Declaration, PseudoClass, Selector, SimpleSelector, SimpleSelectorKind,
         Stylesheet, TrackSize, Unit, Value,
     },
-    dom::{ElementData, Node, NodeType},
+    dom::{Document, ElementData, NodeId, NodeType},
 };
 
 pub type PropertyMap = BTreeMap<String, Value>;
@@ -15,10 +15,18 @@ pub type PropertyMap = BTreeMap<String, Value>;
 const DEFAULT_FONT_SIZE: f32 = 16.0;
 
 // StyledNode mirrors the DOM tree but replaces raw attributes with resolved CSS properties.
-// If you want to know "what style does this node end up with?", this is the structure to inspect.
+//
+// `node_id` is the back-reference into the arena that produced this tree —
+// useful when callers (hit-testing, future mutation observers) need to find
+// the underlying DOM node again. `node_type` is a snapshot taken at style
+// time so layout/render can read tag and text without threading a `&Document`
+// borrow through every helper. The snapshot is correct because style is
+// always re-run against the current Document; layout/render never observe a
+// post-mutation tree without a fresh styling pass.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StyledNode {
-    pub node: Node,
+    pub node_id: NodeId,
+    pub node_type: NodeType,
     pub specified_values: PropertyMap,
     pub children: Vec<StyledNode>,
 }
@@ -47,19 +55,21 @@ struct PseudoState {
     active: bool,
 }
 
-pub fn style_tree(root: &Node, stylesheets: &[Stylesheet]) -> StyledNode {
+pub fn style_tree(document: &Document, root: NodeId, stylesheets: &[Stylesheet]) -> StyledNode {
     // Most callers do not care about interaction state — they get a "nothing engaged" tree.
-    style_tree_with_state(root, stylesheets, InteractionState::default())
+    style_tree_with_state(document, root, stylesheets, InteractionState::default())
 }
 
 /// Backward-compatible convenience: same as `style_tree_with_state` with only the
 /// hovered path filled in. New callers should reach for `style_tree_with_state` directly.
 pub fn style_tree_with_hover(
-    root: &Node,
+    document: &Document,
+    root: NodeId,
     stylesheets: &[Stylesheet],
     hovered_path: Option<&[usize]>,
 ) -> StyledNode {
     style_tree_with_state(
+        document,
         root,
         stylesheets,
         InteractionState {
@@ -74,19 +84,29 @@ pub fn style_tree_with_hover(
 /// :hover and :active propagate to ancestors of the deepest engaged node, while :focus
 /// only matches the focused node itself.
 pub fn style_tree_with_state(
-    root: &Node,
+    document: &Document,
+    root: NodeId,
     stylesheets: &[Stylesheet],
     state: InteractionState<'_>,
 ) -> StyledNode {
     // The root font-size feeds rem resolution for every descendant. Compute it up front
     // by treating the root as if it lived inside the user-agent default font-size.
-    let raw_root = specified_values(root, stylesheets, &[], PseudoState::default());
+    let raw_root = specified_values(document, root, stylesheets, &[], PseudoState::default());
     let root_font_size = resolve_font_size(
         raw_root.get("font-size"),
         DEFAULT_FONT_SIZE,
         DEFAULT_FONT_SIZE,
     );
-    style_tree_inner(root, stylesheets, None, root_font_size, &[], &[], state)
+    style_tree_inner(
+        document,
+        root,
+        stylesheets,
+        None,
+        root_font_size,
+        &[],
+        &[],
+        state,
+    )
 }
 
 fn pseudo_state_for(state: InteractionState<'_>, current_path: &[usize]) -> PseudoState {
@@ -107,17 +127,19 @@ fn pseudo_state_for(state: InteractionState<'_>, current_path: &[usize]) -> Pseu
     }
 }
 
-fn style_tree_inner<'a>(
-    node: &'a Node,
+#[allow(clippy::too_many_arguments)]
+fn style_tree_inner(
+    document: &Document,
+    node_id: NodeId,
     stylesheets: &[Stylesheet],
     parent_values: Option<&PropertyMap>,
     root_font_size: f32,
-    ancestors: &[(&'a Node, PseudoState)],
+    ancestors: &[(NodeId, PseudoState)],
     current_path: &[usize],
     state: InteractionState<'_>,
 ) -> StyledNode {
     let pseudo = pseudo_state_for(state, current_path);
-    let mut specified_values = specified_values(node, stylesheets, ancestors, pseudo);
+    let mut specified_values = specified_values(document, node_id, stylesheets, ancestors, pseudo);
 
     // Real browsers inherit many properties. Here we only inherit a few text-related ones
     // because they make documents readable without making the style system much more complex.
@@ -182,17 +204,22 @@ fn style_tree_inner<'a>(
     // Append self to the ancestor chain children see during their selector matching,
     // carrying the resolved pseudo-state so descendant matches can check pseudo classes
     // anchored on engaged ancestors (e.g. `.outer:hover .inner`).
-    let mut child_ancestors: Vec<(&Node, PseudoState)> = ancestors.to_vec();
-    child_ancestors.push((node, pseudo));
-    let children = node
+    let mut child_ancestors: Vec<(NodeId, PseudoState)> = ancestors.to_vec();
+    child_ancestors.push((node_id, pseudo));
+
+    let node_data = document
+        .get(node_id)
+        .expect("style_tree_inner called with invalid NodeId");
+    let children = node_data
         .children
         .iter()
         .enumerate()
-        .map(|(idx, child)| {
+        .map(|(idx, child_id)| {
             let mut child_path: Vec<usize> = current_path.to_vec();
             child_path.push(idx);
             style_tree_inner(
-                child,
+                document,
+                *child_id,
                 stylesheets,
                 Some(&specified_values),
                 root_font_size,
@@ -204,7 +231,8 @@ fn style_tree_inner<'a>(
         .collect();
 
     StyledNode {
-        node: node.clone(),
+        node_id,
+        node_type: node_data.node_type.clone(),
         specified_values,
         children,
     }
@@ -222,9 +250,10 @@ fn resolve_font_size(raw: Option<&Value>, parent_font_size: f32, root_font_size:
 }
 
 fn specified_values(
-    node: &Node,
+    document: &Document,
+    node_id: NodeId,
     stylesheets: &[Stylesheet],
-    ancestors: &[(&Node, PseudoState)],
+    ancestors: &[(NodeId, PseudoState)],
     pseudo: PseudoState,
 ) -> PropertyMap {
     let mut matched = Vec::new();
@@ -235,7 +264,9 @@ fn specified_values(
         .flat_map(|sheet| sheet.rules.iter())
         .enumerate()
     {
-        if let Some(specificity) = matching_specificity(node, pseudo, ancestors, &rule.selectors) {
+        if let Some(specificity) =
+            matching_specificity(document, node_id, pseudo, ancestors, &rule.selectors)
+        {
             matched.push((specificity, rule_order, &rule.declarations));
         }
     }
@@ -243,7 +274,7 @@ fn specified_values(
     // Lower-priority rules are applied first so later, more specific matches overwrite them.
     matched.sort_by_key(|(specificity, rule_order, _)| (*specificity, *rule_order));
 
-    let mut values = default_values(node);
+    let mut values = default_values(document, node_id);
     for (_, _, declarations) in matched {
         apply_declarations(&mut values, declarations);
     }
@@ -251,11 +282,11 @@ fn specified_values(
     values
 }
 
-fn default_values(node: &Node) -> PropertyMap {
+fn default_values(document: &Document, node_id: NodeId) -> PropertyMap {
     let mut values = PropertyMap::new();
-    let element = match &node.node_type {
-        NodeType::Element(element) => element,
-        NodeType::Text(_) => return values,
+    let element = match document.get(node_id).map(|n| &n.node_type) {
+        Some(NodeType::Element(element)) => element,
+        _ => return values,
     };
 
     // These defaults act like a tiny user-agent stylesheet so unstyled pages remain legible.
@@ -321,15 +352,16 @@ fn apply_declarations(values: &mut PropertyMap, declarations: &[Declaration]) {
 }
 
 fn matching_specificity(
-    node: &Node,
+    document: &Document,
+    node_id: NodeId,
     pseudo: PseudoState,
-    ancestors: &[(&Node, PseudoState)],
+    ancestors: &[(NodeId, PseudoState)],
     selectors: &[Selector],
 ) -> Option<u32> {
     // The highest matching selector wins within a rule group such as `h1, .title`.
     selectors
         .iter()
-        .filter(|selector| matches_selector(node, pseudo, ancestors, selector))
+        .filter(|selector| matches_selector(document, node_id, pseudo, ancestors, selector))
         .map(selector_specificity)
         .max()
 }
@@ -352,9 +384,10 @@ fn simple_specificity(simple: &SimpleSelector) -> u32 {
 }
 
 fn matches_selector(
-    node: &Node,
+    document: &Document,
+    node_id: NodeId,
     pseudo: PseudoState,
-    ancestors: &[(&Node, PseudoState)],
+    ancestors: &[(NodeId, PseudoState)],
     selector: &Selector,
 ) -> bool {
     // Right-to-left matching: the rightmost simple selector is the target and must match
@@ -367,7 +400,7 @@ fn matches_selector(
     let Some((target, leading)) = selector.parts.split_last() else {
         return false;
     };
-    if !matches_simple(node, pseudo, target) {
+    if !matches_simple(document, node_id, pseudo, target) {
         return false;
     }
 
@@ -377,8 +410,8 @@ fn matches_selector(
         match combinator {
             Combinator::Descendant => loop {
                 match ancestor_iter.next() {
-                    Some((ancestor, ancestor_pseudo))
-                        if matches_simple(ancestor, *ancestor_pseudo, part) =>
+                    Some((ancestor_id, ancestor_pseudo))
+                        if matches_simple(document, *ancestor_id, *ancestor_pseudo, part) =>
                     {
                         break;
                     }
@@ -387,8 +420,8 @@ fn matches_selector(
                 }
             },
             Combinator::Child => match ancestor_iter.next() {
-                Some((ancestor, ancestor_pseudo))
-                    if matches_simple(ancestor, *ancestor_pseudo, part) => {}
+                Some((ancestor_id, ancestor_pseudo))
+                    if matches_simple(document, *ancestor_id, *ancestor_pseudo, part) => {}
                 _ => return false,
             },
         }
@@ -396,11 +429,16 @@ fn matches_selector(
     true
 }
 
-fn matches_simple(node: &Node, pseudo: PseudoState, simple: &SimpleSelector) -> bool {
-    let element = match &node.node_type {
-        NodeType::Element(element) => element,
+fn matches_simple(
+    document: &Document,
+    node_id: NodeId,
+    pseudo: PseudoState,
+    simple: &SimpleSelector,
+) -> bool {
+    let element = match document.get(node_id).map(|n| &n.node_type) {
+        Some(NodeType::Element(element)) => element,
         // Text nodes never match selectors directly; they only inherit style from parents.
-        NodeType::Text(_) => return false,
+        _ => return false,
     };
 
     let kind_match = match &simple.kind {
@@ -435,11 +473,14 @@ fn has_class(element: &ElementData, class_name: &str) -> bool {
 mod tests {
     use crate::{
         css::{Color, Unit, Value},
+        dom::{Document, NodeId},
         html, style,
     };
 
-    fn parse_html(source: &str) -> crate::dom::Node {
-        html::parse(source).unwrap().into_iter().next().unwrap()
+    fn parse_html(source: &str) -> (Document, NodeId) {
+        let document = html::parse(source).unwrap();
+        let root = document.roots()[0];
+        (document, root)
     }
 
     fn parse_css(source: &str) -> crate::css::Stylesheet {
@@ -448,7 +489,7 @@ mod tests {
 
     #[test]
     fn applies_rule_specificity_in_tag_class_id_order() {
-        let root = parse_html(r#"<div id="hero" class="card promo">Hello</div>"#);
+        let (document, root) = parse_html(r#"<div id="hero" class="card promo">Hello</div>"#);
         let stylesheet = parse_css(
             r#"
                 div { color: #111111; display: block; }
@@ -457,7 +498,7 @@ mod tests {
             "#,
         );
 
-        let styled = style::style_tree(&root, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
 
         assert_eq!(
             styled.value("color"),
@@ -476,7 +517,7 @@ mod tests {
 
     #[test]
     fn inherits_color_and_font_size_from_parent() {
-        let root = parse_html(r#"<div id="app"><span>Text</span></div>"#);
+        let (document, root) = parse_html(r#"<div id="app"><span>Text</span></div>"#);
         let stylesheet = parse_css(
             r#"
                 #app {
@@ -486,7 +527,7 @@ mod tests {
             "#,
         );
 
-        let styled = style::style_tree(&root, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
         let child = &styled.children[0];
 
         assert_eq!(
@@ -506,7 +547,7 @@ mod tests {
 
     #[test]
     fn text_nodes_inherit_parent_style() {
-        let root = parse_html(r#"<p class="copy">Hello</p>"#);
+        let (document, root) = parse_html(r#"<p class="copy">Hello</p>"#);
         let stylesheet = parse_css(
             r#"
                 .copy {
@@ -515,7 +556,7 @@ mod tests {
             "#,
         );
 
-        let styled = style::style_tree(&root, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
         let text = &styled.children[0];
 
         assert_eq!(
@@ -531,8 +572,9 @@ mod tests {
 
     #[test]
     fn applies_basic_user_agent_defaults() {
-        let root = parse_html(r#"<body><h1>Title</h1><p>Copy</p><a href="/next">Next</a></body>"#);
-        let styled = style::style_tree(&root, &[]);
+        let (document, root) =
+            parse_html(r#"<body><h1>Title</h1><p>Copy</p><a href="/next">Next</a></body>"#);
+        let styled = style::style_tree(&document, root, &[]);
 
         assert_eq!(
             styled.value("margin-top"),
@@ -559,11 +601,11 @@ mod tests {
 
     #[test]
     fn descendant_selector_matches_nested_target() {
-        let root = parse_html(
+        let (document, root) = parse_html(
             r#"<div class="outer"><section><span class="inner">hi</span></section></div>"#,
         );
         let stylesheet = parse_css(".outer .inner { color: #ff0000; }");
-        let styled = style::style_tree(&root, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
         let inner = &styled.children[0].children[0];
 
         // .outer .inner targets the <span>, even though a <section> sits between them.
@@ -580,9 +622,9 @@ mod tests {
 
     #[test]
     fn descendant_selector_does_not_match_when_ancestor_is_missing() {
-        let root = parse_html(r#"<div><span class="inner">hi</span></div>"#);
+        let (document, root) = parse_html(r#"<div><span class="inner">hi</span></div>"#);
         let stylesheet = parse_css(".outer .inner { color: #ff0000; }");
-        let styled = style::style_tree(&root, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
         let inner = &styled.children[0];
 
         // No `.outer` ancestor exists, so the rule must not apply.
@@ -593,11 +635,11 @@ mod tests {
     fn child_selector_matches_only_immediate_parent() {
         // .outer > .inner should NOT match when a <section> sits between the two —
         // unlike descendant, the child combinator forbids skipping.
-        let nested = parse_html(
+        let (document, root) = parse_html(
             r#"<div class="outer"><section><span class="inner">hi</span></section></div>"#,
         );
         let stylesheet = parse_css(".outer > .inner { color: #ff0000; }");
-        let styled = style::style_tree(&nested, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
         let inner = &styled.children[0].children[0];
 
         assert_eq!(inner.value("color"), None);
@@ -605,9 +647,10 @@ mod tests {
 
     #[test]
     fn child_selector_matches_when_parent_is_direct() {
-        let direct = parse_html(r#"<div class="outer"><span class="inner">hi</span></div>"#);
+        let (document, root) =
+            parse_html(r#"<div class="outer"><span class="inner">hi</span></div>"#);
         let stylesheet = parse_css(".outer > .inner { color: #ff0000; }");
-        let styled = style::style_tree(&direct, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
         let inner = &styled.children[0];
 
         assert_eq!(
@@ -625,10 +668,10 @@ mod tests {
     fn mixed_descendant_and_child_combinators_compose_correctly() {
         // `nav ul > li` requires: target is <li>, its parent is <ul>, and somewhere up
         // the chain a <nav> ancestor exists.
-        let root =
+        let (document, root) =
             parse_html(r#"<nav class="primary"><div><ul><li class="t">hi</li></ul></div></nav>"#);
         let stylesheet = parse_css("nav ul > li { color: #ff0000; }");
-        let styled = style::style_tree(&root, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
         let li = &styled.children[0].children[0].children[0];
 
         assert_eq!(
@@ -647,14 +690,14 @@ mod tests {
         // Build: <div><a class="btn">click</a></div>. The root has one child (the <a>),
         // so the <a>'s DOM path is [0]. Telling style_tree_with_hover that [0] is hovered
         // should activate the .btn:hover rule.
-        let root = parse_html(r#"<div><a class="btn">click</a></div>"#);
+        let (document, root) = parse_html(r#"<div><a class="btn">click</a></div>"#);
         let stylesheet = parse_css(
             r#"
                 .btn { color: #00ff00; }
                 .btn:hover { color: #ff0000; }
             "#,
         );
-        let styled = style::style_tree_with_hover(&root, &[stylesheet], Some(&[0]));
+        let styled = style::style_tree_with_hover(&document, root, &[stylesheet], Some(&[0]));
         let link = &styled.children[0];
 
         assert_eq!(
@@ -672,14 +715,14 @@ mod tests {
     fn hover_pseudo_class_only_applies_to_the_hovered_node_not_siblings() {
         // Two .btn siblings; only the first ([0,0]) is "hovered". The second should keep
         // the non-hover color, proving the hovered_path identifies a single node.
-        let root = parse_html(r#"<div><a class="btn">a</a><a class="btn">b</a></div>"#);
+        let (document, root) = parse_html(r#"<div><a class="btn">a</a><a class="btn">b</a></div>"#);
         let stylesheet = parse_css(
             r#"
                 .btn { color: #00ff00; }
                 .btn:hover { color: #ff0000; }
             "#,
         );
-        let styled = style::style_tree_with_hover(&root, &[stylesheet], Some(&[0]));
+        let styled = style::style_tree_with_hover(&document, root, &[stylesheet], Some(&[0]));
         let first = &styled.children[0];
         let second = &styled.children[1];
 
@@ -707,7 +750,8 @@ mod tests {
     fn hover_on_ancestor_propagates_through_descendant_combinator() {
         // .outer:hover .inner — when the .outer ancestor is hovered, the descendant
         // .inner picks up the rule even though .inner itself isn't under the cursor.
-        let root = parse_html(r#"<div class="outer"><span class="inner">x</span></div>"#);
+        let (document, root) =
+            parse_html(r#"<div class="outer"><span class="inner">x</span></div>"#);
         let stylesheet = parse_css(
             r#"
                 .inner { color: #00ff00; }
@@ -715,7 +759,7 @@ mod tests {
             "#,
         );
         // Path [] is the root <div class="outer">.
-        let styled = style::style_tree_with_hover(&root, &[stylesheet], Some(&[]));
+        let styled = style::style_tree_with_hover(&document, root, &[stylesheet], Some(&[]));
         let inner = &styled.children[0];
 
         assert_eq!(
@@ -735,7 +779,7 @@ mod tests {
         // The .btn rule must fire, but focus does NOT bubble: a hypothetical .root:focus
         // wouldn't match the outer <div>. We assert the positive case here; the negative
         // is covered by the "no engaged path" test.
-        let root = parse_html(r#"<div><a class="btn">click</a></div>"#);
+        let (document, root) = parse_html(r#"<div><a class="btn">click</a></div>"#);
         let stylesheet = parse_css(
             r#"
                 .btn { color: #00ff00; }
@@ -743,7 +787,8 @@ mod tests {
             "#,
         );
         let styled = style::style_tree_with_state(
-            &root,
+            &document,
+            root,
             &[stylesheet],
             style::InteractionState {
                 focus: Some(&[0]),
@@ -768,7 +813,8 @@ mod tests {
         // Hover the deepest text under .outer; .outer:focus should NOT match because
         // focus is anchored to the focused node alone, not its ancestor chain. We use
         // the focus path of the deeper text node and verify .outer keeps its non-focus color.
-        let root = parse_html(r#"<div class="outer"><span class="inner">x</span></div>"#);
+        let (document, root) =
+            parse_html(r#"<div class="outer"><span class="inner">x</span></div>"#);
         let stylesheet = parse_css(
             r#"
                 .outer { color: #00ff00; }
@@ -777,7 +823,8 @@ mod tests {
         );
         // Focus path [0, 0] = the text node inside .inner. .outer is the root.
         let styled = style::style_tree_with_state(
-            &root,
+            &document,
+            root,
             &[stylesheet],
             style::InteractionState {
                 focus: Some(&[0, 0]),
@@ -802,7 +849,8 @@ mod tests {
     fn active_pseudo_class_propagates_like_hover() {
         // .active matches both the deepest active node and its ancestors, mirroring
         // :hover semantics.
-        let root = parse_html(r#"<div class="outer"><span class="inner">x</span></div>"#);
+        let (document, root) =
+            parse_html(r#"<div class="outer"><span class="inner">x</span></div>"#);
         let stylesheet = parse_css(
             r#"
                 .outer { color: #00ff00; }
@@ -811,7 +859,8 @@ mod tests {
         );
         // Active path [0, 0] = the text node; .outer (path []) is its ancestor.
         let styled = style::style_tree_with_state(
-            &root,
+            &document,
+            root,
             &[stylesheet],
             style::InteractionState {
                 active: Some(&[0, 0]),
@@ -835,14 +884,14 @@ mod tests {
         // Deepest hovered node is the text inside .btn (path [0, 0]). The CSS spec says
         // every ancestor on the way down also enters :hover, so the .btn rule should
         // apply even though the cursor is over its text child.
-        let root = parse_html(r#"<a class="btn">click</a>"#);
+        let (document, root) = parse_html(r#"<a class="btn">click</a>"#);
         let stylesheet = parse_css(
             r#"
                 .btn { color: #00ff00; }
                 .btn:hover { color: #ff0000; }
             "#,
         );
-        let styled = style::style_tree_with_hover(&root, &[stylesheet], Some(&[0]));
+        let styled = style::style_tree_with_hover(&document, root, &[stylesheet], Some(&[0]));
 
         assert_eq!(
             styled.value("color"),
@@ -860,14 +909,14 @@ mod tests {
         // The legacy entry point — `style_tree` without hover info — defaults to "nothing
         // is hovered", so any :hover rule should silently fail to match. A bare-class
         // fallback confirms the surrounding cascade still works.
-        let root = parse_html(r#"<a class="btn">click</a>"#);
+        let (document, root) = parse_html(r#"<a class="btn">click</a>"#);
         let stylesheet = parse_css(
             r#"
                 .btn { color: #00ff00; }
                 .btn:hover { color: #ff0000; }
             "#,
         );
-        let styled = style::style_tree(&root, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
 
         // The non-hover rule wins because the hover rule never matches.
         assert_eq!(
@@ -885,14 +934,15 @@ mod tests {
     fn descendant_selector_specificity_sums_across_chain() {
         // .outer .inner has specificity 10 + 10 = 20, beating the lone .inner rule (10)
         // even when the latter is listed later in the stylesheet.
-        let root = parse_html(r#"<div class="outer"><span class="inner">hi</span></div>"#);
+        let (document, root) =
+            parse_html(r#"<div class="outer"><span class="inner">hi</span></div>"#);
         let stylesheet = parse_css(
             r#"
                 .outer .inner { color: #ff0000; }
                 .inner { color: #00ff00; }
             "#,
         );
-        let styled = style::style_tree(&root, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
         let inner = &styled.children[0];
 
         assert_eq!(
@@ -908,14 +958,14 @@ mod tests {
 
     #[test]
     fn em_resolves_against_parent_font_size_for_font_size_itself() {
-        let root = parse_html(r#"<div id="outer"><div id="inner"></div></div>"#);
+        let (document, root) = parse_html(r#"<div id="outer"><div id="inner"></div></div>"#);
         let stylesheet = parse_css(
             r#"
                 #outer { font-size: 20px; }
                 #inner { font-size: 1.5em; }
             "#,
         );
-        let styled = style::style_tree(&root, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
         let inner = &styled.children[0];
 
         // 1.5em on a 20px parent resolves to 30px and is stored as a Px length so children
@@ -928,14 +978,14 @@ mod tests {
 
     #[test]
     fn em_on_other_properties_uses_own_resolved_font_size() {
-        let root = parse_html(r#"<div id="outer"><div id="inner"></div></div>"#);
+        let (document, root) = parse_html(r#"<div id="outer"><div id="inner"></div></div>"#);
         let stylesheet = parse_css(
             r#"
                 #outer { font-size: 20px; }
                 #inner { font-size: 1.5em; padding-left: 2em; }
             "#,
         );
-        let styled = style::style_tree(&root, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
         let inner = &styled.children[0];
 
         // padding 2em uses inner's resolved font-size (30px), not the parent's: 60px.
@@ -947,7 +997,7 @@ mod tests {
 
     #[test]
     fn rem_resolves_against_root_font_size_regardless_of_depth() {
-        let root = parse_html(
+        let (document, root) = parse_html(
             r#"<div id="root"><div class="middle"><div class="leaf"></div></div></div>"#,
         );
         let stylesheet = parse_css(
@@ -957,7 +1007,7 @@ mod tests {
                 .leaf { padding-left: 0.5rem; }
             "#,
         );
-        let styled = style::style_tree(&root, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
         let leaf = &styled.children[0].children[0];
 
         // 0.5rem references the root font-size (24px), independent of the .middle ancestor.
@@ -969,9 +1019,9 @@ mod tests {
 
     #[test]
     fn percent_on_non_font_properties_stays_unresolved_until_layout() {
-        let root = parse_html(r#"<div class="card"></div>"#);
+        let (document, root) = parse_html(r#"<div class="card"></div>"#);
         let stylesheet = parse_css(".card { width: 50%; }");
-        let styled = style::style_tree(&root, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
 
         // Percent on width is held back for the layout layer to resolve against the
         // containing block's content width.
@@ -983,14 +1033,14 @@ mod tests {
 
     #[test]
     fn author_styles_override_user_agent_defaults() {
-        let root = parse_html(r#"<body><a href="/next">Next</a></body>"#);
+        let (document, root) = parse_html(r#"<body><a href="/next">Next</a></body>"#);
         let stylesheet = parse_css(
             r#"
                 body { margin-top: 20px; }
                 a { color: #ff0000; }
             "#,
         );
-        let styled = style::style_tree(&root, &[stylesheet]);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
 
         assert_eq!(
             styled.value("margin-top"),

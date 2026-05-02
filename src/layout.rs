@@ -1368,7 +1368,7 @@ fn layout_inline_node(node: &StyledNode, x: f32, y: f32, parent_width: f32) -> L
     // Nested inline children are positioned relative to their inline parent's content box,
     // honoring text-align so labels inside an inline element (e.g. <a class="tile">) can
     // be centered instead of always sticking to the left edge.
-    let children = if matches!(&node.node.node_type, NodeType::Element(element) if element.tag_name != "img")
+    let children = if matches!(&node.node_type, NodeType::Element(element) if element.tag_name != "img")
     {
         let align = inline_align_for(node);
         layout_inline_sequence_no_wrap(&node.children, content_x, content_y, content_width, align)
@@ -1452,7 +1452,7 @@ fn is_inline_node(node: &StyledNode) -> bool {
         _ => {}
     }
 
-    match &node.node.node_type {
+    match &node.node_type {
         NodeType::Text(_) => true,
         // Keep the inline set small and predictable instead of trying to emulate full HTML layout.
         NodeType::Element(element) => matches!(element.tag_name.as_str(), "a" | "span" | "img"),
@@ -1532,7 +1532,7 @@ fn inline_block_shrink_to_fit_width(node: &StyledNode, available_width: f32) -> 
     // Toy shrink-to-fit: text uses approximate glyph width; element uses the
     // sum of inline child widths, capped to the available content width so a
     // long run still wraps rather than overflowing the container.
-    let natural = match &node.node.node_type {
+    let natural = match &node.node_type {
         NodeType::Text(text) => text.chars().count() as f32 * inline_char_width(node),
         NodeType::Element(_) => node
             .children
@@ -1602,7 +1602,7 @@ fn inline_content_width(node: &StyledNode, parent_width: f32) -> f32 {
     // real font shaping or glyph measurement.
     length_value(node, "width", parent_width)
         .or_else(|| intrinsic_width(node))
-        .unwrap_or_else(|| match &node.node.node_type {
+        .unwrap_or_else(|| match &node.node_type {
             NodeType::Text(text) => text.chars().count() as f32 * inline_char_width(node),
             NodeType::Element(element) if element.tag_name == "img" => 200.0,
             NodeType::Element(_) => node
@@ -1616,7 +1616,7 @@ fn inline_content_width(node: &StyledNode, parent_width: f32) -> f32 {
 fn inline_content_height(node: &StyledNode, parent_width: f32) -> f32 {
     // Same caveat as block height: percent on inline height should reference the parent's
     // height, but we only have parent_width on hand. Toy pages have not exercised this yet.
-    length_value(node, "height", parent_width).unwrap_or_else(|| match &node.node.node_type {
+    length_value(node, "height", parent_width).unwrap_or_else(|| match &node.node_type {
         // Text contributes its line-height (not just glyph height) so a parent
         // line box stretches to fit `line-height: 1.5` even when no descendant
         // declares an explicit height.
@@ -1657,7 +1657,7 @@ fn inline_char_width(node: &StyledNode) -> f32 {
 }
 
 fn child_height(node: &StyledNode, content_y: f32, child_cursor_y: f32) -> f32 {
-    if matches!(node.node.node_type, NodeType::Text(_)) {
+    if matches!(node.node_type, NodeType::Text(_)) {
         0.0
     } else {
         child_cursor_y - content_y
@@ -1665,7 +1665,7 @@ fn child_height(node: &StyledNode, content_y: f32, child_cursor_y: f32) -> f32 {
 }
 
 fn intrinsic_width(node: &StyledNode) -> Option<f32> {
-    match &node.node.node_type {
+    match &node.node_type {
         // Images need a visible box even when no author CSS width is provided.
         NodeType::Element(element) if element.tag_name == "img" => {
             attribute_length(element, "width").or(Some(200.0))
@@ -1675,7 +1675,7 @@ fn intrinsic_width(node: &StyledNode) -> Option<f32> {
 }
 
 fn intrinsic_height(node: &StyledNode) -> f32 {
-    match &node.node.node_type {
+    match &node.node_type {
         // font-size is always Px after the style pass, so the percent base is irrelevant.
         NodeType::Text(_) => length_value(node, "font-size", 0.0).unwrap_or(16.0),
         // Images also get a default height so the renderer has an area to paint into.
@@ -1819,13 +1819,10 @@ mod tests {
     use super::layout_tree;
 
     fn styled_root(html_source: &str, css_source: &str) -> style::StyledNode {
-        let node = html::parse(html_source)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
+        let document = html::parse(html_source).unwrap();
+        let root = document.roots()[0];
         let stylesheet = css::parse(css_source).unwrap();
-        style::style_tree(&node, &[stylesheet])
+        style::style_tree(&document, root, &[stylesheet])
     }
 
     #[test]

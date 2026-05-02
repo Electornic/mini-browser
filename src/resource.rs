@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    dom::{Node, NodeType},
+    dom::{Document, NodeId, NodeType},
     net::{self, NetworkError, Url},
 };
 
@@ -28,7 +28,7 @@ impl From<NetworkError> for ResourceError {
     }
 }
 
-pub fn load_stylesheets(document: &[Node], base_url: &Url) -> Result<Vec<String>, ResourceError> {
+pub fn load_stylesheets(document: &Document, base_url: &Url) -> Result<Vec<String>, ResourceError> {
     let stylesheet_urls = stylesheet_urls(document, base_url)?;
     // Fetch all stylesheets in parallel; per-resource failures are silently
     // dropped so one broken link does not kill the whole page.
@@ -44,12 +44,12 @@ pub fn load_stylesheets(document: &[Node], base_url: &Url) -> Result<Vec<String>
 // Per-script failures are dropped (the entry is simply absent from the map),
 // mirroring how `load_stylesheets` and `load_images` degrade.
 pub fn load_scripts(
-    document: &[Node],
+    document: &Document,
     base_url: &Url,
 ) -> Result<HashMap<String, String>, ResourceError> {
     let mut pairs = Vec::new();
-    for node in document {
-        collect_script_src_pairs(node, base_url, &mut pairs)?;
+    for &root in document.roots() {
+        collect_script_src_pairs(document, root, base_url, &mut pairs)?;
     }
     if pairs.is_empty() {
         return Ok(HashMap::new());
@@ -77,7 +77,10 @@ pub fn load_scripts(
     Ok(fetched.into_iter().collect())
 }
 
-pub fn load_images(document: &[Node], base_url: &Url) -> Result<Vec<LoadedImage>, ResourceError> {
+pub fn load_images(
+    document: &Document,
+    base_url: &Url,
+) -> Result<Vec<LoadedImage>, ResourceError> {
     let image_urls = image_urls(document, base_url)?;
     // Same parallel pattern as stylesheets: failures drop, order is preserved.
     Ok(parallel_fetch(&image_urls, |url| {
@@ -115,31 +118,35 @@ where
     })
 }
 
-fn stylesheet_urls(document: &[Node], base_url: &Url) -> Result<Vec<Url>, ResourceError> {
+fn stylesheet_urls(document: &Document, base_url: &Url) -> Result<Vec<Url>, ResourceError> {
     let mut urls = Vec::new();
 
-    for node in document {
-        collect_stylesheet_urls(node, base_url, &mut urls)?;
+    for &root in document.roots() {
+        collect_stylesheet_urls(document, root, base_url, &mut urls)?;
     }
 
     Ok(urls)
 }
 
-fn image_urls(document: &[Node], base_url: &Url) -> Result<Vec<Url>, ResourceError> {
+fn image_urls(document: &Document, base_url: &Url) -> Result<Vec<Url>, ResourceError> {
     let mut urls = Vec::new();
 
-    for node in document {
-        collect_image_urls(node, base_url, &mut urls)?;
+    for &root in document.roots() {
+        collect_image_urls(document, root, base_url, &mut urls)?;
     }
 
     Ok(urls)
 }
 
 fn collect_stylesheet_urls(
-    node: &Node,
+    document: &Document,
+    id: NodeId,
     base_url: &Url,
     urls: &mut Vec<Url>,
 ) -> Result<(), ResourceError> {
+    let Some(node) = document.get(id) else {
+        return Ok(());
+    };
     if let NodeType::Element(element) = &node.node_type {
         // Only explicit stylesheet links are treated as CSS resources.
         if element.tag_name == "link"
@@ -156,18 +163,22 @@ fn collect_stylesheet_urls(
         }
     }
 
-    for child in &node.children {
-        collect_stylesheet_urls(child, base_url, urls)?;
+    for &child in &node.children {
+        collect_stylesheet_urls(document, child, base_url, urls)?;
     }
 
     Ok(())
 }
 
 fn collect_script_src_pairs(
-    node: &Node,
+    document: &Document,
+    id: NodeId,
     base_url: &Url,
     out: &mut Vec<(String, Url)>,
 ) -> Result<(), ResourceError> {
+    let Some(node) = document.get(id) else {
+        return Ok(());
+    };
     if let NodeType::Element(element) = &node.node_type
         && element.tag_name.eq_ignore_ascii_case("script")
     {
@@ -180,18 +191,22 @@ fn collect_script_src_pairs(
         return Ok(());
     }
 
-    for child in &node.children {
-        collect_script_src_pairs(child, base_url, out)?;
+    for &child in &node.children {
+        collect_script_src_pairs(document, child, base_url, out)?;
     }
 
     Ok(())
 }
 
 fn collect_image_urls(
-    node: &Node,
+    document: &Document,
+    id: NodeId,
     base_url: &Url,
     urls: &mut Vec<Url>,
 ) -> Result<(), ResourceError> {
+    let Some(node) = document.get(id) else {
+        return Ok(());
+    };
     if let NodeType::Element(element) = &node.node_type {
         // Images are fetched lazily from DOM attributes after the main document is parsed.
         if element.tag_name == "img" {
@@ -203,8 +218,8 @@ fn collect_image_urls(
         }
     }
 
-    for child in &node.children {
-        collect_image_urls(child, base_url, urls)?;
+    for &child in &node.children {
+        collect_image_urls(document, child, base_url, urls)?;
     }
 
     Ok(())
@@ -347,7 +362,7 @@ mod tests {
 
     #[test]
     fn resolves_stylesheet_links_from_document() {
-        let nodes = html::parse(
+        let document = html::parse(
             r#"
                 <html>
                     <head>
@@ -384,7 +399,7 @@ mod tests {
         });
 
         let base_url = Url::parse(&format!("http://127.0.0.1:{port}/articles/index.html")).unwrap();
-        let stylesheets = load_stylesheets(&nodes, &base_url).unwrap();
+        let stylesheets = load_stylesheets(&document, &base_url).unwrap();
 
         server.join().unwrap();
         assert_eq!(stylesheets.len(), 2);
@@ -398,7 +413,7 @@ mod tests {
         // both resolve through the document's base URL and the returned map
         // keys back the original raw `src` attributes (so the install_document
         // walker can look them up directly while traversing the DOM).
-        let nodes = html::parse(
+        let document = html::parse(
             r#"
                 <html>
                     <head>
@@ -435,7 +450,7 @@ mod tests {
 
         let base_url =
             Url::parse(&format!("http://127.0.0.1:{port}/pages/index.html")).unwrap();
-        let scripts = load_scripts(&nodes, &base_url).unwrap();
+        let scripts = load_scripts(&document, &base_url).unwrap();
 
         server.join().unwrap();
         assert_eq!(scripts.len(), 2);
@@ -450,15 +465,15 @@ mod tests {
     fn load_scripts_returns_empty_map_when_document_has_no_external_scripts() {
         // Inline `<script>` (no `src`) must not appear in the externals map —
         // those are handled by the DOM walker reading text-child contents.
-        let nodes = html::parse("<html><body><script>var x = 1;</script></body></html>").unwrap();
+        let document = html::parse("<html><body><script>var x = 1;</script></body></html>").unwrap();
         let base = Url::parse("http://example.com/").unwrap();
-        let scripts = load_scripts(&nodes, &base).unwrap();
+        let scripts = load_scripts(&document, &base).unwrap();
         assert!(scripts.is_empty());
     }
 
     #[test]
     fn loads_image_resources_from_document() {
-        let nodes = html::parse(
+        let document = html::parse(
             r#"
                 <html>
                     <body>
@@ -495,7 +510,7 @@ mod tests {
         });
 
         let base_url = Url::parse(&format!("http://127.0.0.1:{port}/index.html")).unwrap();
-        let images = load_images(&nodes, &base_url).unwrap();
+        let images = load_images(&document, &base_url).unwrap();
 
         server.join().unwrap();
         assert_eq!(images.len(), 1);

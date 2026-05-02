@@ -1,6 +1,10 @@
 use std::{collections::HashMap, env};
 
-use mini_browser::{css, dom, dom::NodeType, html, js, layout, net, render, resource, style, window};
+use mini_browser::{
+    css, dom,
+    dom::{NodeId, NodeType},
+    html, js, layout, net, render, resource, style, window,
+};
 
 // These constants define the browser chrome at the top of the window.
 // Everything below `CHROME_HEIGHT` is treated as page content. The chrome stacks
@@ -50,7 +54,7 @@ struct BrowserState {
     // `install_document`. Caching the parsed trees here keeps the per-frame
     // pipeline from re-parsing the same HTML/CSS at 60 fps — both parses are
     // O(input size) and dominate the frame budget on non-trivial pages.
-    parsed_document: Vec<dom::Node>,
+    parsed_document: dom::Document,
     parsed_stylesheet: css::Stylesheet,
     images: HashMap<String, resource::LoadedImage>,
     font_data: Vec<Vec<u8>>,
@@ -223,8 +227,13 @@ impl BrowserState {
         // shipped with, not whatever ran the previous load.
         self.js.bind_document(&self.parsed_document);
         let mut sources = Vec::new();
-        for node in &self.parsed_document {
-            collect_script_sources(node, &self.external_scripts, &mut sources);
+        for &root in self.parsed_document.roots() {
+            collect_script_sources(
+                &self.parsed_document,
+                root,
+                &self.external_scripts,
+                &mut sources,
+            );
         }
         for source in sources {
             if let Err(err) = self.js.execute(&source) {
@@ -742,11 +751,15 @@ impl BrowserState {
 // was already logged upstream. Recursion stops at the script tag itself so a
 // `<script>` is captured exactly once.
 fn collect_script_sources(
-    node: &dom::Node,
+    document: &dom::Document,
+    node_id: NodeId,
     externals: &HashMap<String, String>,
     out: &mut Vec<String>,
 ) {
-    if let dom::NodeType::Element(elem) = &node.node_type
+    let Some(node) = document.get(node_id) else {
+        return;
+    };
+    if let NodeType::Element(elem) = &node.node_type
         && elem.tag_name.eq_ignore_ascii_case("script")
     {
         if let Some(src) = elem.attributes.get("src") {
@@ -756,8 +769,8 @@ fn collect_script_sources(
             return;
         }
         let mut source = String::new();
-        for child in &node.children {
-            if let dom::NodeType::Text(text) = &child.node_type {
+        for child_id in &node.children {
+            if let Some(NodeType::Text(text)) = document.get(*child_id).map(|n| &n.node_type) {
                 source.push_str(text);
             }
         }
@@ -767,12 +780,12 @@ fn collect_script_sources(
         return;
     }
     for child in &node.children {
-        collect_script_sources(child, externals, out);
+        collect_script_sources(document, *child, externals, out);
     }
 }
 
 fn build_document_view(
-    parsed_document: &[dom::Node],
+    parsed_document: &dom::Document,
     parsed_stylesheet: &css::Stylesheet,
     viewport_width: usize,
     current_url: Option<&net::Url>,
@@ -783,10 +796,22 @@ fn build_document_view(
     // happen once at navigate time (see `BrowserState::install_document`) and
     // this function takes the cached trees, so the per-frame pipeline is just:
     // styled tree -> layout tree -> display commands + clickable metadata.
+    //
+    // `.last()` over the roots mirrors the original Vec<Node> behavior — when
+    // the parser emits multiple top-level siblings (e.g. fragment-style HTML),
+    // the visible page is the trailing one, which matches how a real browser
+    // treats stray content before `<html>` as preamble.
     let root = parsed_document
+        .roots()
         .last()
+        .copied()
         .ok_or_else(|| "document did not produce a root node".to_string())?;
-    let styled = style::style_tree_with_state(root, std::slice::from_ref(parsed_stylesheet), interaction);
+    let styled = style::style_tree_with_state(
+        parsed_document,
+        root,
+        std::slice::from_ref(parsed_stylesheet),
+        interaction,
+    );
     let layout = layout::layout_tree(&styled, viewport_width as f32);
     let mut commands = render::build_display_list(&layout);
     commands.extend(collect_image_commands(&layout, current_url, images));
@@ -1417,7 +1442,7 @@ fn should_collect_link_target(layout_box: &layout::LayoutBox, own_href: Option<&
         layout::BoxType::BlockNode(styled_node)
             | layout::BoxType::FlexNode(styled_node)
             | layout::BoxType::GridNode(styled_node)
-            if matches!(styled_node.node.node_type, NodeType::Text(_))
+            if matches!(styled_node.node_type, NodeType::Text(_))
     )
 }
 
@@ -1425,7 +1450,7 @@ fn href_for_layout_box(layout_box: &layout::LayoutBox) -> Option<&str> {
     match &layout_box.box_type {
         layout::BoxType::BlockNode(styled_node)
         | layout::BoxType::FlexNode(styled_node)
-        | layout::BoxType::GridNode(styled_node) => match &styled_node.node.node_type {
+        | layout::BoxType::GridNode(styled_node) => match &styled_node.node_type {
             NodeType::Element(element) => element.attributes.get("href").map(String::as_str),
             NodeType::Text(_) => None,
         },
@@ -1437,7 +1462,7 @@ fn src_for_layout_box(layout_box: &layout::LayoutBox) -> Option<&str> {
     match &layout_box.box_type {
         layout::BoxType::BlockNode(styled_node)
         | layout::BoxType::FlexNode(styled_node)
-        | layout::BoxType::GridNode(styled_node) => match &styled_node.node.node_type {
+        | layout::BoxType::GridNode(styled_node) => match &styled_node.node_type {
             NodeType::Element(element) if element.tag_name == "img" => {
                 element.attributes.get("src").map(String::as_str)
             }
@@ -1799,17 +1824,17 @@ fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
 
     let html = String::from_utf8(response.body)
         .map_err(|_| describe_network_error(&net::NetworkError::InvalidBodyEncoding))?;
-    let nodes =
+    let document =
         html::parse(&html).map_err(|error| format!("html parse error {}", error.position))?;
-    let stylesheets = resource::load_stylesheets(&nodes, &final_url)
+    let stylesheets = resource::load_stylesheets(&document, &final_url)
         .map_err(|error| describe_resource_error(&error))?;
     let font_data = resource::load_fonts(&stylesheets, &final_url);
-    let images = resource::load_images(&nodes, &final_url)
+    let images = resource::load_images(&document, &final_url)
         .map_err(|error| describe_resource_error(&error))?
         .into_iter()
         .map(|image| (image.url.to_string(), image))
         .collect();
-    let external_scripts = resource::load_scripts(&nodes, &final_url)
+    let external_scripts = resource::load_scripts(&document, &final_url)
         .map_err(|error| describe_resource_error(&error))?;
     Ok((
         html,
@@ -1983,12 +2008,9 @@ mod tests {
 
     #[test]
     fn collects_link_targets_from_layout_tree() {
-        let node = html::parse(r#"<a href="/next"><span>Hello</span></a>"#)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
-        let styled = style::style_tree(&node, &[]);
+        let document = html::parse(r#"<a href="/next"><span>Hello</span></a>"#).unwrap();
+        let node = document.roots()[0];
+        let styled = style::style_tree(&document, node, &[]);
         let layout_tree = layout::layout_tree(&styled, 300.0);
         let links = collect_link_targets(&layout_tree, None, false, render::Affine::IDENTITY);
 
@@ -2001,13 +2023,10 @@ mod tests {
 
     #[test]
     fn text_decoration_none_suppresses_link_underline() {
-        let node = html::parse(r#"<a href="/next" class="tile">Hello</a>"#)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
+        let document = html::parse(r#"<a href="/next" class="tile">Hello</a>"#).unwrap();
+        let node = document.roots()[0];
         let stylesheet = css::parse(".tile { text-decoration: none; }").unwrap();
-        let styled = style::style_tree(&node, &[stylesheet]);
+        let styled = style::style_tree(&document, node, &[stylesheet]);
         let layout_tree = layout::layout_tree(&styled, 300.0);
         let links = collect_link_targets(&layout_tree, None, false, render::Affine::IDENTITY);
 
@@ -2060,12 +2079,9 @@ mod tests {
 
     #[test]
     fn collects_image_commands_from_layout_tree() {
-        let node = html::parse(r#"<img src="/pixel.png" width="12" height="8" />"#)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
-        let styled = style::style_tree(&node, &[]);
+        let document = html::parse(r#"<img src="/pixel.png" width="12" height="8" />"#).unwrap();
+        let node = document.roots()[0];
+        let styled = style::style_tree(&document, node, &[]);
         let layout_tree = layout::layout_tree(&styled, 300.0);
         let mut images = HashMap::new();
         images.insert(
@@ -2247,13 +2263,10 @@ mod tests {
             #root { width: 100px; height: 80px; }
             .leaf { width: 40px; height: 20px; }
         "#;
-        let node = mini_browser::html::parse(html_source)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
+        let document = mini_browser::html::parse(html_source).unwrap();
+        let node = document.roots()[0];
         let stylesheet = mini_browser::css::parse(css_source).unwrap();
-        let styled = mini_browser::style::style_tree(&node, &[stylesheet]);
+        let styled = mini_browser::style::style_tree(&document, node, &[stylesheet]);
         let layout = mini_browser::layout::layout_tree(&styled, 800.0);
 
         // Mouse coordinates: window-space pointer over the leaf, accounting for the
@@ -2284,13 +2297,10 @@ mod tests {
             #root { width: 200px; height: 80px; }
             .leaf { width: 40px; height: 20px; transform: translate(50px, 0); }
         "#;
-        let node = mini_browser::html::parse(html_source)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
+        let document = mini_browser::html::parse(html_source).unwrap();
+        let node = document.roots()[0];
         let stylesheet = mini_browser::css::parse(css_source).unwrap();
-        let styled = mini_browser::style::style_tree(&node, &[stylesheet]);
+        let styled = mini_browser::style::style_tree(&document, node, &[stylesheet]);
         let layout = mini_browser::layout::layout_tree(&styled, 800.0);
 
         // Logical x = 10 (inside leaf's untransformed box) but cursor is in
@@ -2334,13 +2344,10 @@ mod tests {
             #root { width: 200px; height: 80px; }
             .leaf { width: 40px; height: 20px; transform: scale(2); }
         "#;
-        let node = mini_browser::html::parse(html_source)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
+        let document = mini_browser::html::parse(html_source).unwrap();
+        let node = document.roots()[0];
         let stylesheet = mini_browser::css::parse(css_source).unwrap();
-        let styled = mini_browser::style::style_tree(&node, &[stylesheet]);
+        let styled = mini_browser::style::style_tree(&document, node, &[stylesheet]);
         let layout = mini_browser::layout::layout_tree(&styled, 800.0);
 
         // Cursor at screen x=55: outside the leaf's *logical* 40-wide box,
@@ -2367,13 +2374,10 @@ mod tests {
             #root { width: 200px; height: 80px; }
             .leaf { width: 40px; height: 20px; }
         "#;
-        let plain_node = mini_browser::html::parse(no_transform_html)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
+        let plain_document = mini_browser::html::parse(no_transform_html).unwrap();
+        let plain_node = plain_document.roots()[0];
         let plain_sheet = mini_browser::css::parse(no_transform_css).unwrap();
-        let plain_styled = mini_browser::style::style_tree(&plain_node, &[plain_sheet]);
+        let plain_styled = mini_browser::style::style_tree(&plain_document, plain_node, &[plain_sheet]);
         let plain_layout = mini_browser::layout::layout_tree(&plain_styled, 800.0);
         let plain_path = super::compute_hovered_dom_path(
             &window::WindowInput {
@@ -2402,13 +2406,10 @@ mod tests {
             #root { width: 200px; height: 80px; }
             .leaf { width: 20px; height: 20px; transform: rotate(45deg); }
         "#;
-        let node = mini_browser::html::parse(html_source)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
+        let document = mini_browser::html::parse(html_source).unwrap();
+        let node = document.roots()[0];
         let stylesheet = mini_browser::css::parse(css_source).unwrap();
-        let styled = mini_browser::style::style_tree(&node, &[stylesheet]);
+        let styled = mini_browser::style::style_tree(&document, node, &[stylesheet]);
         let layout = mini_browser::layout::layout_tree(&styled, 800.0);
 
         let leaf_window_y = super::CHROME_HEIGHT + 10.0;
@@ -2429,13 +2430,10 @@ mod tests {
             #root { width: 200px; height: 80px; }
             .leaf { width: 20px; height: 20px; }
         "#;
-        let plain_node = mini_browser::html::parse(plain_html)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
+        let plain_document = mini_browser::html::parse(plain_html).unwrap();
+        let plain_node = plain_document.roots()[0];
         let plain_sheet = mini_browser::css::parse(plain_css).unwrap();
-        let plain_styled = mini_browser::style::style_tree(&plain_node, &[plain_sheet]);
+        let plain_styled = mini_browser::style::style_tree(&plain_document, plain_node, &[plain_sheet]);
         let plain_layout = mini_browser::layout::layout_tree(&plain_styled, 800.0);
         let plain_path = super::compute_hovered_dom_path(
             &window::WindowInput {
@@ -2451,12 +2449,9 @@ mod tests {
     #[test]
     fn hovered_dom_path_returns_none_when_pointer_is_in_chrome() {
         let html_source = r#"<div id="root"><span class="leaf">hi</span></div>"#;
-        let node = mini_browser::html::parse(html_source)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
-        let styled = mini_browser::style::style_tree(&node, &[]);
+        let document = mini_browser::html::parse(html_source).unwrap();
+        let node = document.roots()[0];
+        let styled = mini_browser::style::style_tree(&document, node, &[]);
         let layout = mini_browser::layout::layout_tree(&styled, 800.0);
 
         // Pointer parked above the chrome cutoff — there is no page element to hover.
