@@ -1,13 +1,18 @@
 use std::{
+    collections::HashMap,
     fmt,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
+    sync::{Mutex, OnceLock},
     time::Duration,
 };
 
-use native_tls::TlsConnector;
+use native_tls::{TlsConnector, TlsStream};
 
-// The network layer keeps requests tiny: GET only, synchronous, and close-after-response.
+// The network layer keeps requests tiny: GET only, synchronous, with HTTP/1.1
+// keep-alive backed by a per-host connection pool. Reusing TCP/TLS sessions
+// for same-origin resources is the single biggest latency win when a page
+// pulls many CSS/IMG/font assets from one host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Url {
     pub scheme: String,
@@ -234,68 +239,55 @@ pub fn fetch(url: &Url) -> Result<FetchResult, NetworkError> {
 }
 
 pub fn http_get(url: &Url) -> Result<HttpResponse, NetworkError> {
-    let mut tcp_stream = TcpStream::connect((url.host.as_str(), url.port))
-        .map_err(|error| NetworkError::Io(error.to_string()))?;
-    tcp_stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|error| NetworkError::Io(error.to_string()))?;
-    tcp_stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|error| NetworkError::Io(error.to_string()))?;
-
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: mini-browser/0.1\r\nAccept: text/html,*/*\r\nAccept-Encoding: identity\r\n\r\n",
-        url.path, url.host
-    );
-
-    let mut response_bytes = Vec::new();
-    // TLS only changes how bytes move over the socket; HTTP parsing stays exactly the same.
-    match url.scheme.as_str() {
-        "http" => {
-            tcp_stream
-                .write_all(request.as_bytes())
-                .map_err(|error| NetworkError::Io(error.to_string()))?;
-            tcp_stream
-                .read_to_end(&mut response_bytes)
-                .map_err(|error| NetworkError::Io(error.to_string()))?;
+    // Fast path: try a pooled connection. If the server already closed the
+    // idle keep-alive (silent half-close), the read fails and we fall through
+    // to a fresh connection. We retry exactly once — repeated failures are
+    // real errors and shouldn't loop.
+    if let Some(mut conn) = take_conn(&url.scheme, &url.host, url.port)
+        && let Ok((response, reusable)) = exchange(&mut conn, url)
+    {
+        if reusable {
+            return_conn(&url.scheme, &url.host, url.port, conn);
         }
-        "https" => {
-            let connector =
-                TlsConnector::new().map_err(|error| NetworkError::Tls(error.to_string()))?;
-            let mut tls_stream = connector
-                .connect(url.host.as_str(), tcp_stream)
-                .map_err(|error| NetworkError::Tls(error.to_string()))?;
-            tls_stream
-                .write_all(request.as_bytes())
-                .map_err(|error| NetworkError::Io(error.to_string()))?;
-            tls_stream
-                .read_to_end(&mut response_bytes)
-                .map_err(|error| NetworkError::Io(error.to_string()))?;
-        }
-        scheme => {
-            return Err(NetworkError::UnsupportedScheme(scheme.into()));
-        }
+        return Ok(response);
     }
 
-    parse_response(&response_bytes)
+    let mut conn = create_conn(url)?;
+    let (response, reusable) = exchange(&mut conn, url)?;
+    if reusable {
+        return_conn(&url.scheme, &url.host, url.port, conn);
+    }
+    Ok(response)
 }
 
-fn parse_response(bytes: &[u8]) -> Result<HttpResponse, NetworkError> {
-    let header_end = bytes
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| NetworkError::InvalidResponse("missing header terminator".into()))?;
+fn exchange(conn: &mut PoolConn, url: &Url) -> Result<(HttpResponse, bool), NetworkError> {
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nUser-Agent: mini-browser/0.1\r\nAccept: text/html,*/*\r\nAccept-Encoding: identity\r\n\r\n",
+        url.path, url.host
+    );
+    conn.write_all(request.as_bytes())
+        .map_err(|error| NetworkError::Io(error.to_string()))?;
+    read_response(conn)
+}
 
-    let header_bytes = &bytes[..header_end];
-    let body = bytes[header_end + 4..].to_vec();
-    let header_text = std::str::from_utf8(header_bytes)
-        .map_err(|_| NetworkError::InvalidResponse("headers are not valid utf-8".into()))?;
+// Reads one full HTTP/1.1 response off `conn` and returns the parsed response
+// plus a hint about whether the underlying connection can be returned to the
+// pool. Reusable means: response body length was determined precisely (either
+// Content-Length or chunked), and the server did not signal Connection: close.
+fn read_response(conn: &mut PoolConn) -> Result<(HttpResponse, bool), NetworkError> {
+    let mut status_line = String::new();
+    if conn
+        .read_line(&mut status_line)
+        .map_err(|error| NetworkError::Io(error.to_string()))?
+        == 0
+    {
+        return Err(NetworkError::InvalidResponse(
+            "connection closed before status line".into(),
+        ));
+    }
 
-    let mut lines = header_text.split("\r\n");
-    let status_line = lines
-        .next()
-        .ok_or_else(|| NetworkError::InvalidResponse("missing status line".into()))?;
-    let mut status_parts = status_line.splitn(3, ' ');
+    let trimmed_status = status_line.trim_end_matches(['\r', '\n']);
+    let mut status_parts = trimmed_status.splitn(3, ' ');
     let _http_version = status_parts
         .next()
         .ok_or_else(|| NetworkError::InvalidResponse("missing http version".into()))?;
@@ -306,19 +298,241 @@ fn parse_response(bytes: &[u8]) -> Result<HttpResponse, NetworkError> {
         .map_err(|_| NetworkError::InvalidResponse("invalid status code".into()))?;
     let reason_phrase = status_parts.next().unwrap_or("").to_string();
 
-    let headers = lines
-        .filter_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
-        })
-        .collect();
+    let mut headers = Vec::new();
+    loop {
+        let mut line = String::new();
+        if conn
+            .read_line(&mut line)
+            .map_err(|error| NetworkError::Io(error.to_string()))?
+            == 0
+        {
+            return Err(NetworkError::InvalidResponse(
+                "connection closed mid-headers".into(),
+            ));
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if let Some((name, value)) = trimmed.split_once(':') {
+            headers.push((
+                name.trim().to_ascii_lowercase(),
+                value.trim().to_string(),
+            ));
+        }
+    }
 
-    Ok(HttpResponse {
-        status_code,
-        reason_phrase,
-        headers,
-        body,
-    })
+    let content_length = find_header(&headers, "content-length")
+        .and_then(|value| value.parse::<usize>().ok());
+    let chunked = find_header(&headers, "transfer-encoding")
+        .map(|value| value.to_ascii_lowercase().contains("chunked"))
+        .unwrap_or(false);
+    let connection_close = find_header(&headers, "connection")
+        .map(|value| value.to_ascii_lowercase().contains("close"))
+        .unwrap_or(false);
+
+    let body = if chunked {
+        read_chunked_body(conn)?
+    } else if let Some(length) = content_length {
+        let mut body = vec![0u8; length];
+        conn.read_exact(&mut body)
+            .map_err(|error| NetworkError::Io(error.to_string()))?;
+        body
+    } else {
+        // No length signal — read until the server closes. Connection cannot
+        // be reused after this since framing is "until EOF".
+        let mut body = Vec::new();
+        conn.read_to_end(&mut body)
+            .map_err(|error| NetworkError::Io(error.to_string()))?;
+        body
+    };
+
+    let reusable = !connection_close && (chunked || content_length.is_some());
+
+    Ok((
+        HttpResponse {
+            status_code,
+            reason_phrase,
+            headers,
+            body,
+        },
+        reusable,
+    ))
+}
+
+fn read_chunked_body(conn: &mut PoolConn) -> Result<Vec<u8>, NetworkError> {
+    let mut body = Vec::new();
+    loop {
+        let mut size_line = String::new();
+        if conn
+            .read_line(&mut size_line)
+            .map_err(|error| NetworkError::Io(error.to_string()))?
+            == 0
+        {
+            return Err(NetworkError::InvalidResponse(
+                "connection closed mid-chunk-size".into(),
+            ));
+        }
+        let size_token = size_line
+            .trim_end_matches(['\r', '\n'])
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim();
+        let size = usize::from_str_radix(size_token, 16).map_err(|_| {
+            NetworkError::InvalidResponse(format!("invalid chunk size {size_token:?}"))
+        })?;
+        if size == 0 {
+            // Discard optional trailers up to the final blank line.
+            loop {
+                let mut trailer = String::new();
+                if conn
+                    .read_line(&mut trailer)
+                    .map_err(|error| NetworkError::Io(error.to_string()))?
+                    == 0
+                    || trailer == "\r\n"
+                    || trailer == "\n"
+                {
+                    break;
+                }
+            }
+            return Ok(body);
+        }
+        let mut chunk = vec![0u8; size];
+        conn.read_exact(&mut chunk)
+            .map_err(|error| NetworkError::Io(error.to_string()))?;
+        body.extend_from_slice(&chunk);
+        let mut crlf = [0u8; 2];
+        conn.read_exact(&mut crlf)
+            .map_err(|error| NetworkError::Io(error.to_string()))?;
+    }
+}
+
+fn find_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header_name, _)| header_name == name)
+        .map(|(_, value)| value.as_str())
+}
+
+// A `PoolConn` is "a buffered stream we can speak HTTP over". The buffering is
+// kept on the same value as the stream so that any unread bytes inside the
+// BufReader come back along with the connection when it returns to the pool.
+enum PoolConn {
+    Plain(BufReader<TcpStream>),
+    Tls(BufReader<TlsStream<TcpStream>>),
+}
+
+impl Read for PoolConn {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            PoolConn::Plain(reader) => reader.read(buf),
+            PoolConn::Tls(reader) => reader.read(buf),
+        }
+    }
+}
+
+impl BufRead for PoolConn {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        match self {
+            PoolConn::Plain(reader) => reader.fill_buf(),
+            PoolConn::Tls(reader) => reader.fill_buf(),
+        }
+    }
+
+    fn consume(&mut self, amount: usize) {
+        match self {
+            PoolConn::Plain(reader) => reader.consume(amount),
+            PoolConn::Tls(reader) => reader.consume(amount),
+        }
+    }
+}
+
+impl Write for PoolConn {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            PoolConn::Plain(reader) => reader.get_mut().write(buf),
+            PoolConn::Tls(reader) => reader.get_mut().write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            PoolConn::Plain(reader) => reader.get_mut().flush(),
+            PoolConn::Tls(reader) => reader.get_mut().flush(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ConnectionPool {
+    plain: HashMap<(String, u16), Vec<BufReader<TcpStream>>>,
+    tls: HashMap<(String, u16), Vec<BufReader<TlsStream<TcpStream>>>>,
+}
+
+fn pool() -> &'static Mutex<ConnectionPool> {
+    static POOL: OnceLock<Mutex<ConnectionPool>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(ConnectionPool::default()))
+}
+
+fn take_conn(scheme: &str, host: &str, port: u16) -> Option<PoolConn> {
+    let mut p = pool().lock().ok()?;
+    match scheme {
+        "http" => {
+            let queue = p.plain.get_mut(&(host.to_string(), port))?;
+            queue.pop().map(PoolConn::Plain)
+        }
+        "https" => {
+            let queue = p.tls.get_mut(&(host.to_string(), port))?;
+            queue.pop().map(PoolConn::Tls)
+        }
+        _ => None,
+    }
+}
+
+fn return_conn(scheme: &str, host: &str, port: u16, conn: PoolConn) {
+    let Ok(mut p) = pool().lock() else { return };
+    match (scheme, conn) {
+        ("http", PoolConn::Plain(reader)) => {
+            p.plain
+                .entry((host.to_string(), port))
+                .or_default()
+                .push(reader);
+        }
+        ("https", PoolConn::Tls(reader)) => {
+            p.tls
+                .entry((host.to_string(), port))
+                .or_default()
+                .push(reader);
+        }
+        // Mismatched scheme/conn variants are dropped (closed). Should not
+        // happen in practice, but we'd rather close than poison the pool.
+        _ => {}
+    }
+}
+
+fn create_conn(url: &Url) -> Result<PoolConn, NetworkError> {
+    let stream = TcpStream::connect((url.host.as_str(), url.port))
+        .map_err(|error| NetworkError::Io(error.to_string()))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| NetworkError::Io(error.to_string()))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| NetworkError::Io(error.to_string()))?;
+
+    match url.scheme.as_str() {
+        "http" => Ok(PoolConn::Plain(BufReader::new(stream))),
+        "https" => {
+            let connector =
+                TlsConnector::new().map_err(|error| NetworkError::Tls(error.to_string()))?;
+            let tls_stream = connector
+                .connect(url.host.as_str(), stream)
+                .map_err(|error| NetworkError::Tls(error.to_string()))?;
+            Ok(PoolConn::Tls(BufReader::new(tls_stream)))
+        }
+        scheme => Err(NetworkError::UnsupportedScheme(scheme.into())),
+    }
 }
 
 fn is_redirect_status(status_code: u16) -> bool {
@@ -434,12 +648,10 @@ mod tests {
             let request_text = String::from_utf8_lossy(&request[..bytes_read]);
             assert!(request_text.starts_with("GET / HTTP/1.1"));
 
-            let response = concat!(
-                "HTTP/1.1 200 OK\r\n",
-                "Content-Type: text/html; charset=utf-8\r\n",
-                "Connection: close\r\n",
-                "\r\n",
-                "<html><body>Hello</body></html>"
+            let body = "<html><body>Hello</body></html>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
             );
             stream.write_all(response.as_bytes()).unwrap();
         });
@@ -464,7 +676,7 @@ mod tests {
             let _ = stream.read(&mut request).unwrap();
 
             let response = format!(
-                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{second_port}/final.html\r\nConnection: close\r\n\r\n"
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{second_port}/final.html\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             );
             stream.write_all(response.as_bytes()).unwrap();
         });
@@ -476,12 +688,10 @@ mod tests {
             let request_text = String::from_utf8_lossy(&request[..bytes_read]);
             assert!(request_text.starts_with("GET /final.html HTTP/1.1"));
 
-            let response = concat!(
-                "HTTP/1.1 200 OK\r\n",
-                "Content-Type: text/html\r\n",
-                "Connection: close\r\n",
-                "\r\n",
-                "<html>done</html>"
+            let body = "<html>done</html>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
             );
             stream.write_all(response.as_bytes()).unwrap();
         });
@@ -512,16 +722,14 @@ mod tests {
 
                 if request_index == 0 {
                     assert!(request_text.starts_with("GET /start HTTP/1.1"));
-                    let response = "HTTP/1.1 301 Moved Permanently\r\nLocation: /final.html\r\nConnection: close\r\n\r\n";
+                    let response = "HTTP/1.1 301 Moved Permanently\r\nLocation: /final.html\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     stream.write_all(response.as_bytes()).unwrap();
                 } else {
                     assert!(request_text.starts_with("GET /final.html HTTP/1.1"));
-                    let response = concat!(
-                        "HTTP/1.1 200 OK\r\n",
-                        "Content-Type: text/html\r\n",
-                        "Connection: close\r\n",
-                        "\r\n",
-                        "<html>final</html>"
+                    let body = "<html>final</html>";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
                     );
                     stream.write_all(response.as_bytes()).unwrap();
                 }
@@ -549,7 +757,7 @@ mod tests {
             let mut request = [0; 1024];
             let _ = stream.read(&mut request).unwrap();
 
-            let response = "HTTP/1.1 302 Found\r\nConnection: close\r\n\r\n";
+            let response = "HTTP/1.1 302 Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             stream.write_all(response.as_bytes()).unwrap();
         });
 
@@ -569,12 +777,10 @@ mod tests {
             let mut request = [0; 1024];
             let _ = stream.read(&mut request).unwrap();
 
-            let response = concat!(
-                "HTTP/1.1 404 Not Found\r\n",
-                "Content-Type: text/plain\r\n",
-                "Connection: close\r\n",
-                "\r\n",
-                "missing"
+            let body = "missing";
+            let response = format!(
+                "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
             );
             stream.write_all(response.as_bytes()).unwrap();
         });
@@ -598,12 +804,10 @@ mod tests {
             let mut request = [0; 1024];
             let _ = stream.read(&mut request).unwrap();
 
-            let response = concat!(
-                "HTTP/1.1 200 OK\r\n",
-                "Content-Type: text/css\r\n",
-                "Connection: close\r\n",
-                "\r\n",
-                "body { margin-top: 8px; }"
+            let body = "body { margin-top: 8px; }";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/css\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
             );
             stream.write_all(response.as_bytes()).unwrap();
         });
@@ -646,5 +850,59 @@ mod tests {
         server.join().unwrap();
         assert!(!bytes.is_empty());
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn decodes_chunked_response_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+
+            // "Wikipedia in\r\n\r\nchunks." spread over two chunks plus terminator.
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/chunked")).unwrap();
+        let response = http_get(&url).unwrap();
+
+        server.join().unwrap();
+        assert_eq!(response.body, b"Wikipedia");
+    }
+
+    #[test]
+    fn reuses_pooled_connection_for_same_host() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Server accepts ONE connection and serves TWO requests over it. If our
+        // client opens a second TCP connection instead of reusing the pooled
+        // one, accept() never returns and the test hangs.
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            for index in 0..2 {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                assert!(n > 0, "request {index} read 0 bytes");
+                let body = format!("payload-{index}");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/x")).unwrap();
+        let first = http_get(&url).unwrap();
+        let second = http_get(&url).unwrap();
+
+        server.join().unwrap();
+        assert_eq!(first.body, b"payload-0");
+        assert_eq!(second.body, b"payload-1");
     }
 }
