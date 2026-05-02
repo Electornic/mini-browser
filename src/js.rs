@@ -189,7 +189,7 @@ fn register_document(context: &mut Context, dom: Rc<RefCell<Document>>) {
         })
     };
 
-    let dom_for_create = dom;
+    let dom_for_create = dom.clone();
     let create_element = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let tag = first_arg_as_string(args, ctx)?;
@@ -208,10 +208,20 @@ fn register_document(context: &mut Context, dom: Rc<RefCell<Document>>) {
         })
     };
 
+    let dom_for_text = dom;
+    let create_text_node = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let text = first_arg_as_string(args, ctx)?;
+            let new_id = dom_for_text.borrow_mut().create_text(text);
+            Ok(JsValue::from(make_text(new_id, dom_for_text.clone(), ctx)))
+        })
+    };
+
     let document = ObjectInitializer::new(context)
         .function(get_element_by_id, js_string!("getElementById"), 1)
         .function(query_selector, js_string!("querySelector"), 1)
         .function(create_element, js_string!("createElement"), 1)
+        .function(create_text_node, js_string!("createTextNode"), 1)
         .build();
 
     let _ = context.register_global_property(js_string!("document"), document, Attribute::all());
@@ -280,9 +290,16 @@ fn make_element(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Conte
     let text_set = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let new_text = first_arg_as_string(args, ctx)?;
-            // Document::replace_with_text is a no-op on stale ids; mutation
-            // setters silently degrade rather than throw.
-            dom_s.borrow_mut().replace_with_text(node_id, new_text);
+            // Mutation setters on a stale handle throw — getters keep the
+            // older silent-null behaviour because reading a removed node is
+            // common (logging, cleanup) and shouldn't blow up scripts, but
+            // *writing* through a dead handle is a genuine bug worth
+            // surfacing per Step 5.1.5.
+            let mut document = dom_s.borrow_mut();
+            if document.get(node_id).is_none() {
+                return Err(stale_node_error());
+            }
+            document.replace_with_text(node_id, new_text);
             Ok(JsValue::undefined())
         })
     }
@@ -345,10 +362,13 @@ fn make_element(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Conte
             let name = first_arg_as_string(args, ctx)?;
             let value = nth_arg_as_string(args, 1, ctx)?;
             let mut document = dom_sa.borrow_mut();
-            if let Some(elem) = document.element_data_mut(node_id) {
-                elem.attributes.insert(name, value);
+            match document.element_data_mut(node_id) {
+                Some(elem) => {
+                    elem.attributes.insert(name, value);
+                    Ok(JsValue::undefined())
+                }
+                None => Err(stale_node_error()),
             }
-            Ok(JsValue::undefined())
         })
     };
 
@@ -359,11 +379,10 @@ fn make_element(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Conte
             let other_id = read_node_id(&arg, ctx)?;
             {
                 let mut document = dom_ac.borrow_mut();
-                // Both ids must point at live slots; otherwise silently no-op.
-                // The wrapper-as-arg path and the createElement-then-append
-                // path both flow through here.
+                // Both ids must point at live slots; per Step 5.1.5 a stale
+                // receiver or argument is a script bug, not a no-op.
                 if document.get(node_id).is_none() || document.get(other_id).is_none() {
-                    return Ok(JsValue::null());
+                    return Err(stale_node_error());
                 }
                 // A node can only live in one parent at a time — unhook it
                 // first so we don't end up with the same NodeId in two
@@ -380,22 +399,105 @@ fn make_element(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Conte
         NativeFunction::from_closure(move |_this, args, ctx| {
             let arg = args.first().cloned().unwrap_or_default();
             let other_id = read_node_id(&arg, ctx)?;
-            let removed = {
-                let mut document = dom_rc.borrow_mut();
-                if document.remove_child(node_id, other_id) {
-                    // Per the standard, removed nodes stay alive (the caller
-                    // can re-insert). For the toy bridge we tombstone the
-                    // subtree so stale handles cleanly resolve to null via
-                    // the existing None-on-stale policy. A future commit
-                    // can park the node in a "free" pool if reattachment
-                    // turns out to matter.
-                    document.tombstone_subtree(other_id);
-                    true
-                } else {
-                    false
-                }
+            let mut document = dom_rc.borrow_mut();
+            if document.get(node_id).is_none() {
+                return Err(stale_node_error());
+            }
+            // The standard throws NotFoundError when the target isn't a
+            // direct child; we surface that as a TypeError so callers see
+            // a real exception rather than the previous silent-null result.
+            if !document.remove_child(node_id, other_id) {
+                return Err(JsNativeError::typ()
+                    .with_message("removeChild: target is not a child of this node")
+                    .into());
+            }
+            // Toy bridge convention: tombstone the removed subtree so its
+            // wrappers cleanly resolve to None on stale-handle checks.
+            // A future commit can park the node in a "free" pool if
+            // reattachment turns out to matter.
+            document.tombstone_subtree(other_id);
+            Ok(arg)
+        })
+    };
+
+    let dom_ib = dom.clone();
+    let insert_before = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let new_arg = args.first().cloned().unwrap_or_default();
+            let ref_arg = args.get(1).cloned().unwrap_or_default();
+            let new_id = read_node_id(&new_arg, ctx)?;
+            // Spec: when refNode is null, insertBefore degrades to
+            // appendChild. Resolving the optional id outside the borrow
+            // keeps `read_node_id` (which uses ctx) from racing the
+            // dom borrow_mut below.
+            let ref_id_opt = if ref_arg.is_null() || ref_arg.is_undefined() {
+                None
+            } else {
+                Some(read_node_id(&ref_arg, ctx)?)
             };
-            if removed { Ok(arg) } else { Ok(JsValue::null()) }
+            let mut document = dom_ib.borrow_mut();
+            if document.get(node_id).is_none() {
+                return Err(stale_node_error());
+            }
+            match ref_id_opt {
+                None => {
+                    if document.get(new_id).is_none() {
+                        return Err(stale_node_error());
+                    }
+                    document.detach(new_id);
+                    document.append_child(node_id, new_id);
+                }
+                Some(ref_id) => {
+                    if !document.insert_before(node_id, new_id, ref_id) {
+                        return Err(JsNativeError::typ()
+                            .with_message(
+                                "insertBefore: reference node is not a child of this node",
+                            )
+                            .into());
+                    }
+                }
+            }
+            Ok(new_arg)
+        })
+    };
+
+    let dom_rep = dom.clone();
+    let replace_child = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let new_arg = args.first().cloned().unwrap_or_default();
+            let old_arg = args.get(1).cloned().unwrap_or_default();
+            let new_id = read_node_id(&new_arg, ctx)?;
+            let old_id = read_node_id(&old_arg, ctx)?;
+            let mut document = dom_rep.borrow_mut();
+            if document.get(node_id).is_none() {
+                return Err(stale_node_error());
+            }
+            if !document.replace_child(node_id, new_id, old_id) {
+                return Err(JsNativeError::typ()
+                    .with_message("replaceChild: target node is not a child of this node")
+                    .into());
+            }
+            // Standard returns the (now-removed) old node. Our tombstoning
+            // means subsequent reads on the returned wrapper observe the
+            // usual stale-handle semantics — sufficient for the toy bridge.
+            Ok(old_arg)
+        })
+    };
+
+    let dom_cl = dom.clone();
+    let clone_node = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let deep = args.first().is_some_and(|v| v.to_boolean());
+            let new_id = {
+                let mut document = dom_cl.borrow_mut();
+                document.clone_node(node_id, deep)
+            };
+            match new_id {
+                Some(id) => Ok(make_node(id, dom_cl.clone(), ctx)
+                    .map(JsValue::from)
+                    .unwrap_or(JsValue::null())),
+                None => Err(stale_node_error()),
+            }
         })
     };
 
@@ -403,6 +505,11 @@ fn make_element(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Conte
         .property(
             js_string!(NODE_ID_PROP),
             JsValue::from(node_id.raw()),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("nodeType"),
+            JsValue::from(1i32),
             Attribute::all(),
         )
         .property(
@@ -426,7 +533,103 @@ fn make_element(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Conte
         .function(set_attribute, js_string!("setAttribute"), 2)
         .function(append_child, js_string!("appendChild"), 1)
         .function(remove_child, js_string!("removeChild"), 1)
+        .function(insert_before, js_string!("insertBefore"), 2)
+        .function(replace_child, js_string!("replaceChild"), 2)
+        .function(clone_node, js_string!("cloneNode"), 1)
         .build()
+}
+
+// Wrapper for a Text node — much thinner than Element since text nodes
+// only carry a string. The single accessor (`textContent`) doubles as the
+// `data` / `nodeValue` getter and setter; the toy bridge skips those alias
+// names rather than cloning the closures three times.
+//
+// `_nodeId` round-trips just like the Element wrapper so methods like
+// `parent.appendChild(textNode)` and `parent.replaceChild(text, oldNode)`
+// can recover the NodeId without any extra dispatch.
+fn make_text(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Context) -> JsObject {
+    let dom_g = dom.clone();
+    let text_get = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let document = dom_g.borrow();
+            match document.text(node_id) {
+                Some(t) => Ok(JsValue::from(JsString::from(t))),
+                None => Ok(JsValue::null()),
+            }
+        })
+    }
+    .to_js_function(context.realm());
+
+    let dom_s = dom;
+    let text_set = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let new_text = first_arg_as_string(args, ctx)?;
+            // `set_text` returns false when the slot is gone OR when it
+            // points at an Element. Both are stale-handle scenarios from
+            // the script's perspective: throw rather than silently lose
+            // the write.
+            if !dom_s.borrow_mut().set_text(node_id, new_text) {
+                return Err(stale_node_error());
+            }
+            Ok(JsValue::undefined())
+        })
+    }
+    .to_js_function(context.realm());
+
+    ObjectInitializer::new(context)
+        .property(
+            js_string!(NODE_ID_PROP),
+            JsValue::from(node_id.raw()),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("nodeType"),
+            JsValue::from(3i32),
+            Attribute::all(),
+        )
+        .accessor(
+            js_string!("textContent"),
+            Some(text_get),
+            Some(text_set),
+            Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
+        )
+        .build()
+}
+
+// Dispatch helper: hand back the right wrapper for whatever kind of node
+// `node_id` happens to be. Used by `cloneNode` (whose result mirrors the
+// source's kind) and by anything else that needs to surface a not-yet-typed
+// NodeId to JS without the caller pre-computing the variant.
+//
+// Returns `None` only when the slot is already tombstoned — callers either
+// propagate that as a stale-handle throw or fall back to `JsValue::null()`.
+fn make_node(
+    node_id: NodeId,
+    dom: Rc<RefCell<Document>>,
+    context: &mut Context,
+) -> Option<JsObject> {
+    let is_element = {
+        let document = dom.borrow();
+        document
+            .get(node_id)
+            .map(|n| matches!(n.node_type, NodeType::Element(_)))
+    };
+    match is_element {
+        Some(true) => Some(make_element(node_id, dom, context)),
+        Some(false) => Some(make_text(node_id, dom, context)),
+        None => None,
+    }
+}
+
+// Standard error returned by every mutation entry point when the receiver
+// or argument refers to a slot that's been tombstoned. Step 5.1.5 promoted
+// this from the previous silent-null degrade because writing through a
+// dead handle is a script bug worth surfacing — getters keep the lenient
+// behaviour since reading after removal is a common cleanup pattern.
+fn stale_node_error() -> boa_engine::JsError {
+    JsNativeError::typ()
+        .with_message("operation on detached or removed node")
+        .into()
 }
 
 fn collect_text_content(document: &Document, node_id: NodeId) -> String {
@@ -902,6 +1105,244 @@ mod tests {
                 .execute("dst.children[0].getAttribute('id')")
                 .unwrap(),
             "\"movable\""
+        );
+    }
+
+    #[test]
+    fn element_and_text_wrappers_expose_node_type() {
+        // 1 = ELEMENT_NODE, 3 = TEXT_NODE per the standard. The toy bridge
+        // exposes just these two — the rest (comment, document, etc.) aren't
+        // produced by the parser or by any createX() factory.
+        let mut runtime = runtime_with(r#"<div id="x">y</div>"#);
+        assert_eq!(
+            runtime.execute("document.getElementById('x').nodeType").unwrap(),
+            "1"
+        );
+        assert_eq!(
+            runtime.execute("document.createTextNode('hi').nodeType").unwrap(),
+            "3"
+        );
+    }
+
+    #[test]
+    fn create_text_node_returns_text_wrapper_appendable_into_a_parent() {
+        let mut runtime = runtime_with(r#"<p id="host"></p>"#);
+        runtime
+            .execute(
+                "var host = document.getElementById('host');\
+                 var t = document.createTextNode('first ');\
+                 host.appendChild(t);\
+                 host.appendChild(document.createTextNode('second'));",
+            )
+            .unwrap();
+        // textContent walks all descendants so two adjacent text nodes
+        // surface as the concatenated string.
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('host').textContent")
+                .unwrap(),
+            "\"first second\""
+        );
+    }
+
+    #[test]
+    fn text_node_text_content_is_writable() {
+        // The Text wrapper's textContent doubles as `data`/`nodeValue` —
+        // setting it edits the text in place rather than replacing the node.
+        let mut runtime = runtime_with(r#"<p id="host"></p>"#);
+        runtime
+            .execute(
+                "var host = document.getElementById('host');\
+                 var t = document.createTextNode('initial');\
+                 host.appendChild(t);\
+                 t.textContent = 'updated';",
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('host').textContent")
+                .unwrap(),
+            "\"updated\""
+        );
+    }
+
+    #[test]
+    fn insert_before_places_node_at_ref_child_position() {
+        let mut runtime = runtime_with(
+            r#"<ul id="list"><li id="a">a</li><li id="c">c</li></ul>"#,
+        );
+        runtime
+            .execute(
+                "var list = document.getElementById('list');\
+                 var c = document.getElementById('c');\
+                 var b = document.createElement('li');\
+                 b.textContent = 'b';\
+                 list.insertBefore(b, c);",
+            )
+            .unwrap();
+        // Final order is a, b, c.
+        assert_eq!(runtime.execute("list.children.length").unwrap(), "3");
+        assert_eq!(
+            runtime.execute("list.children[0].textContent").unwrap(),
+            "\"a\""
+        );
+        assert_eq!(
+            runtime.execute("list.children[1].textContent").unwrap(),
+            "\"b\""
+        );
+        assert_eq!(
+            runtime.execute("list.children[2].textContent").unwrap(),
+            "\"c\""
+        );
+    }
+
+    #[test]
+    fn insert_before_with_null_ref_appends_to_end() {
+        // Spec: insertBefore(node, null) === appendChild(node). Useful for
+        // generic insertion code that doesn't special-case the empty list.
+        let mut runtime = runtime_with(r#"<ul id="list"><li>first</li></ul>"#);
+        runtime
+            .execute(
+                "var list = document.getElementById('list');\
+                 var x = document.createElement('li');\
+                 x.textContent = 'tail';\
+                 list.insertBefore(x, null);",
+            )
+            .unwrap();
+        assert_eq!(runtime.execute("list.children.length").unwrap(), "2");
+        assert_eq!(
+            runtime.execute("list.children[1].textContent").unwrap(),
+            "\"tail\""
+        );
+    }
+
+    #[test]
+    fn insert_before_throws_when_ref_is_not_a_child() {
+        let mut runtime = runtime_with(
+            r#"<div id="a"><p id="kid">k</p></div><div id="b"></div>"#,
+        );
+        let err = runtime
+            .execute(
+                "var a = document.getElementById('a');\
+                 var b = document.getElementById('b');\
+                 var kid = document.getElementById('kid');\
+                 var x = document.createElement('span');\
+                 b.insertBefore(x, kid);",
+            )
+            .unwrap_err();
+        assert!(
+            err.to_lowercase().contains("insertbefore"),
+            "expected insertBefore TypeError, got: {err}"
+        );
+    }
+
+    #[test]
+    fn replace_child_swaps_node_and_tombstones_the_old_subtree() {
+        let mut runtime = runtime_with(
+            r#"<section id="host"><p id="old">old</p></section>"#,
+        );
+        runtime
+            .execute(
+                "var host = document.getElementById('host');\
+                 var oldNode = document.getElementById('old');\
+                 var fresh = document.createElement('p');\
+                 fresh.textContent = 'fresh';\
+                 host.replaceChild(fresh, oldNode);",
+            )
+            .unwrap();
+        // The replacement is in place …
+        assert_eq!(runtime.execute("host.children.length").unwrap(), "1");
+        assert_eq!(
+            runtime.execute("host.children[0].textContent").unwrap(),
+            "\"fresh\""
+        );
+        // … and the old node is gone from the document entirely.
+        assert_eq!(
+            runtime.execute("document.getElementById('old')").unwrap(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn clone_node_shallow_drops_descendants_and_does_not_attach() {
+        let mut runtime = runtime_with(
+            r#"<div id="src"><span>kid</span></div>"#,
+        );
+        runtime
+            .execute(
+                "var src = document.getElementById('src');\
+                 var dup = src.cloneNode(false);",
+            )
+            .unwrap();
+        // Same tag, no children, not yet in the document.
+        assert_eq!(runtime.execute("dup.tagName").unwrap(), "\"DIV\"");
+        assert_eq!(runtime.execute("dup.children.length").unwrap(), "0");
+        // Original is untouched.
+        assert_eq!(runtime.execute("src.children.length").unwrap(), "1");
+    }
+
+    #[test]
+    fn clone_node_deep_duplicates_subtree_into_fresh_handles() {
+        let mut runtime = runtime_with(
+            r#"<ul id="src"><li>one</li><li>two</li></ul>"#,
+        );
+        // Mutating the original after the clone confirms independence —
+        // a shared subtree would let the textContent= rewrite collapse the
+        // clone too, surfacing as a length=0 in the next assertion.
+        runtime
+            .execute(
+                "var src = document.getElementById('src');\
+                 var dup = src.cloneNode(true);\
+                 src.textContent = 'wiped';",
+            )
+            .unwrap();
+        // The clone keeps both <li> children with their text.
+        assert_eq!(runtime.execute("dup.children.length").unwrap(), "2");
+        assert_eq!(
+            runtime.execute("dup.children[0].textContent").unwrap(),
+            "\"one\""
+        );
+        assert_eq!(
+            runtime.execute("dup.children[1].textContent").unwrap(),
+            "\"two\""
+        );
+    }
+
+    #[test]
+    fn mutation_setter_throws_on_a_stale_handle() {
+        // Step 5.1.5: writing through a removed wrapper raises rather than
+        // silently dropping the write. Reading (textContent get on a stale
+        // handle) keeps the previous null-degrade behaviour — that path is
+        // exercised by `remove_child_unhooks_node_and_invalidates_its_handle`.
+        let mut runtime = runtime_with(r#"<ul id="list"><li id="kid">a</li></ul>"#);
+        runtime
+            .execute("var kid = document.getElementById('kid'); document.getElementById('list').removeChild(kid);")
+            .unwrap();
+        let err = runtime.execute("kid.textContent = 'x';").unwrap_err();
+        assert!(
+            err.to_lowercase().contains("detached") || err.to_lowercase().contains("removed"),
+            "expected stale-handle TypeError, got: {err}"
+        );
+    }
+
+    #[test]
+    fn append_child_throws_when_receiver_is_stale() {
+        let mut runtime = runtime_with(
+            r#"<div id="parent"><div id="host"><p>old</p></div></div>"#,
+        );
+        runtime
+            .execute(
+                "var parent = document.getElementById('parent');\
+                 var host = document.getElementById('host');\
+                 parent.removeChild(host);",
+            )
+            .unwrap();
+        let err = runtime
+            .execute("host.appendChild(document.createElement('span'));")
+            .unwrap_err();
+        assert!(
+            err.to_lowercase().contains("detached") || err.to_lowercase().contains("removed"),
+            "expected stale-handle TypeError, got: {err}"
         );
     }
 

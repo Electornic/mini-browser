@@ -229,6 +229,123 @@ impl Document {
         self.append_child(id, text_id);
     }
 
+    /// Replace a Text node's data in place. Returns `false` for stale ids
+    /// or when `id` points at an Element — the JS bridge uses the bool to
+    /// distinguish "do nothing" from "throw".
+    pub fn set_text(&mut self, id: NodeId, text: String) -> bool {
+        match self.get_mut(id).map(|n| &mut n.node_type) {
+            Some(NodeType::Text(s)) => {
+                *s = text;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Insert `new_child` directly before `ref_child` in `parent`'s children
+    /// list. Returns `false` when any id is stale or `ref_child` isn't a
+    /// direct child of `parent`. `new_child` is detached from its current
+    /// location first, so the same node can be moved (including reordered
+    /// among existing siblings) without ending up in two places.
+    pub fn insert_before(
+        &mut self,
+        parent: NodeId,
+        new_child: NodeId,
+        ref_child: NodeId,
+    ) -> bool {
+        if self.get(parent).is_none() || self.get(new_child).is_none() {
+            return false;
+        }
+        let belongs = self
+            .get(parent)
+            .is_some_and(|p| p.children.contains(&ref_child));
+        if !belongs {
+            return false;
+        }
+        // Detach first; this can shift `ref_child`'s index when `new_child`
+        // was already a sibling, so recompute the position afterwards.
+        self.detach(new_child);
+        let pos = self
+            .get(parent)
+            .and_then(|p| p.children.iter().position(|c| *c == ref_child))
+            .expect("ref_child still present after detaching new_child");
+        if let Some(child) = self.get_mut(new_child) {
+            child.parent = Some(parent);
+        }
+        if let Some(p) = self.get_mut(parent) {
+            p.children.insert(pos, new_child);
+        }
+        true
+    }
+
+    /// Replace `old_child` with `new_child` in `parent`'s children list.
+    /// On success `old_child`'s subtree is tombstoned; `new_child` is
+    /// detached from its current location first. Returns `false` for stale
+    /// ids or when `old_child` isn't a direct child of `parent`.
+    pub fn replace_child(
+        &mut self,
+        parent: NodeId,
+        new_child: NodeId,
+        old_child: NodeId,
+    ) -> bool {
+        if self.get(parent).is_none() || self.get(new_child).is_none() {
+            return false;
+        }
+        let belongs = self
+            .get(parent)
+            .is_some_and(|p| p.children.contains(&old_child));
+        if !belongs {
+            return false;
+        }
+        self.detach(new_child);
+        // `new_child` detach may have shifted indices when it was already
+        // a sibling of `old_child`; recompute against the post-detach list.
+        let pos = self
+            .get(parent)
+            .and_then(|p| p.children.iter().position(|c| *c == old_child))
+            .expect("old_child still present after detaching new_child");
+        if let Some(child) = self.get_mut(new_child) {
+            child.parent = Some(parent);
+        }
+        if let Some(p) = self.get_mut(parent) {
+            p.children[pos] = new_child;
+        }
+        if let Some(old) = self.get_mut(old_child) {
+            old.parent = None;
+        }
+        self.tombstone_subtree(old_child);
+        true
+    }
+
+    /// Recursively clone `id`. The returned NodeId is detached: it has no
+    /// parent and is not in `roots` — callers wire it in via `append_child`
+    /// / `insert_before` / `append_root`. With `deep = false` the clone has
+    /// an empty children list; with `deep = true` the entire subtree is
+    /// duplicated, each descendant getting its own fresh slot.
+    pub fn clone_node(&mut self, id: NodeId, deep: bool) -> Option<NodeId> {
+        let (data, kids) = {
+            let node = self.get(id)?;
+            let data = NodeData {
+                node_type: node.node_type.clone(),
+                parent: None,
+                children: Vec::new(),
+            };
+            let kids = if deep {
+                node.children.clone()
+            } else {
+                Vec::new()
+            };
+            (data, kids)
+        };
+        let new_id = self.alloc(data);
+        for child in kids {
+            if let Some(child_clone) = self.clone_node(child, true) {
+                self.append_child(new_id, child_clone);
+            }
+        }
+        Some(new_id)
+    }
+
     /// Walk a `Vec<usize>` child-index path starting from a root. Returns
     /// `None` if any step indexes out of range — used by both the JS bridge
     /// and the legacy hover/focus path comparisons that store paths as the
@@ -350,6 +467,136 @@ mod tests {
         let host_node = doc.get(host).unwrap();
         assert_eq!(host_node.children.len(), 1);
         assert_eq!(doc.text(host_node.children[0]), Some("fresh"));
+    }
+
+    #[test]
+    fn set_text_updates_text_node_in_place_and_rejects_elements() {
+        let mut doc = Document::new();
+        let text = doc.create_text("old");
+        let elem = doc.create_element("div", AttrMap::new());
+
+        assert!(doc.set_text(text, "new".to_string()));
+        assert_eq!(doc.text(text), Some("new"));
+
+        // Mutating an Element via set_text is a no-op + returns false so the
+        // JS bridge can map that to a thrown TypeError instead of corrupting
+        // the element into a text node.
+        assert!(!doc.set_text(elem, "x".to_string()));
+        assert!(matches!(
+            doc.get(elem).unwrap().node_type,
+            NodeType::Element(_)
+        ));
+    }
+
+    #[test]
+    fn insert_before_inserts_at_ref_child_position() {
+        let mut doc = Document::new();
+        let parent = doc.create_element("ul", AttrMap::new());
+        let a = doc.create_element("li", AttrMap::new());
+        let b = doc.create_element("li", AttrMap::new());
+        let c = doc.create_element("li", AttrMap::new());
+        let new_kid = doc.create_element("li", AttrMap::new());
+        doc.append_child(parent, a);
+        doc.append_child(parent, b);
+        doc.append_child(parent, c);
+
+        assert!(doc.insert_before(parent, new_kid, b));
+        assert_eq!(doc.get(parent).unwrap().children, vec![a, new_kid, b, c]);
+        assert_eq!(doc.get(new_kid).unwrap().parent, Some(parent));
+    }
+
+    #[test]
+    fn insert_before_reorders_existing_sibling_correctly() {
+        // The sibling case is the one most likely to mis-index: detaching
+        // `c` shifts the position of `a` from 0 → 0 (unchanged here), but
+        // a naive implementation that captured the position before detach
+        // would crash if we'd moved a later sibling forward.
+        let mut doc = Document::new();
+        let parent = doc.create_element("ul", AttrMap::new());
+        let a = doc.create_element("li", AttrMap::new());
+        let b = doc.create_element("li", AttrMap::new());
+        let c = doc.create_element("li", AttrMap::new());
+        doc.append_child(parent, a);
+        doc.append_child(parent, b);
+        doc.append_child(parent, c);
+
+        // Move c to before a.
+        assert!(doc.insert_before(parent, c, a));
+        assert_eq!(doc.get(parent).unwrap().children, vec![c, a, b]);
+    }
+
+    #[test]
+    fn insert_before_returns_false_when_ref_is_not_a_child() {
+        let mut doc = Document::new();
+        let parent = doc.create_element("div", AttrMap::new());
+        let kid = doc.create_element("p", AttrMap::new());
+        let stranger = doc.create_element("span", AttrMap::new());
+        let new_kid = doc.create_element("em", AttrMap::new());
+        doc.append_child(parent, kid);
+
+        assert!(!doc.insert_before(parent, new_kid, stranger));
+        // The new node was NOT inserted (still detached).
+        assert_eq!(doc.get(parent).unwrap().children, vec![kid]);
+        assert_eq!(doc.get(new_kid).unwrap().parent, None);
+    }
+
+    #[test]
+    fn replace_child_swaps_subtree_and_tombstones_old() {
+        let mut doc = Document::new();
+        let parent = doc.create_element("section", AttrMap::new());
+        let old = doc.create_element("p", AttrMap::new());
+        let old_kid = doc.create_text("gone");
+        doc.append_child(old, old_kid);
+        doc.append_child(parent, old);
+        let fresh = doc.create_element("p", AttrMap::new());
+
+        assert!(doc.replace_child(parent, fresh, old));
+        assert_eq!(doc.get(parent).unwrap().children, vec![fresh]);
+        assert_eq!(doc.get(fresh).unwrap().parent, Some(parent));
+        // Old subtree is fully tombstoned.
+        assert!(doc.get(old).is_none());
+        assert!(doc.get(old_kid).is_none());
+    }
+
+    #[test]
+    fn clone_node_shallow_copies_only_the_node_itself() {
+        let mut doc = Document::new();
+        let mut attrs = AttrMap::new();
+        attrs.insert("id".into(), "src".into());
+        let src = doc.create_element("div", attrs);
+        let kid = doc.create_text("hi");
+        doc.append_child(src, kid);
+
+        let dup = doc.clone_node(src, false).unwrap();
+        // Same tag + attributes, but no children and parent=None.
+        let dup_data = doc.element_data(dup).unwrap();
+        assert_eq!(dup_data.tag_name, "div");
+        assert_eq!(dup_data.attributes.get("id").map(|s| s.as_str()), Some("src"));
+        let dup_node = doc.get(dup).unwrap();
+        assert!(dup_node.children.is_empty());
+        assert_eq!(dup_node.parent, None);
+        // Original is untouched.
+        assert_eq!(doc.get(src).unwrap().children, vec![kid]);
+    }
+
+    #[test]
+    fn clone_node_deep_duplicates_descendants_into_fresh_slots() {
+        let mut doc = Document::new();
+        let src = doc.create_element("ul", AttrMap::new());
+        let li = doc.create_element("li", AttrMap::new());
+        let txt = doc.create_text("one");
+        doc.append_child(li, txt);
+        doc.append_child(src, li);
+
+        let dup = doc.clone_node(src, true).unwrap();
+        // The new subtree mirrors the structure but uses fresh ids.
+        let dup_kids = &doc.get(dup).unwrap().children;
+        assert_eq!(dup_kids.len(), 1);
+        let dup_li = dup_kids[0];
+        assert_ne!(dup_li, li);
+        let dup_txt_id = doc.get(dup_li).unwrap().children[0];
+        assert_ne!(dup_txt_id, txt);
+        assert_eq!(doc.text(dup_txt_id), Some("one"));
     }
 
     #[test]

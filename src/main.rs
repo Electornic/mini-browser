@@ -2743,6 +2743,53 @@ mod tests {
     }
 
     #[test]
+    fn inline_script_insert_before_persists_in_browser_dom() {
+        // Step 5.2: insertBefore must reach the same arena as appendChild
+        // does. Builds a list with two preexisting <li>s and threads a third
+        // one between them at install time.
+        let browser = browser_with_html(
+            r#"<ul id="list"><li id="a">a</li><li id="c">c</li></ul><script>
+                 var list = document.getElementById('list');
+                 var c = document.getElementById('c');
+                 var b = document.createElement('li');
+                 b.textContent = 'b';
+                 list.insertBefore(b, c);
+               </script>"#,
+        );
+        let document = browser.parsed_document.borrow();
+        let ul = document.roots()[0];
+        let kids = &document.get(ul).unwrap().children;
+        assert_eq!(kids.len(), 3);
+        // Final order is a, b, c — so kids[1] is the freshly inserted <li>.
+        let li_b = kids[1];
+        let li_b_kids = &document.get(li_b).unwrap().children;
+        assert_eq!(li_b_kids.len(), 1);
+        assert_eq!(document.text(li_b_kids[0]), Some("b"));
+    }
+
+    #[test]
+    fn inline_script_create_text_node_appended_persists_in_browser_dom() {
+        // The other half of the Step 5.2 surface: createTextNode produces a
+        // Text node whose NodeId is appendable into the same arena. Without
+        // this, scripts wanting to insert plain text would have to resort to
+        // textContent= replacement, which clobbers any pre-existing children.
+        let browser = browser_with_html(
+            r#"<p id="host">existing </p><script>
+                 var host = document.getElementById('host');
+                 host.appendChild(document.createTextNode('appended'));
+               </script>"#,
+        );
+        let document = browser.parsed_document.borrow();
+        let host = document.roots()[0];
+        let kids = &document.get(host).unwrap().children;
+        // Two text-node siblings: the parser-produced "existing " and the
+        // script-appended "appended". The element survives intact.
+        assert_eq!(kids.len(), 2);
+        assert_eq!(document.text(kids[0]), Some("existing "));
+        assert_eq!(document.text(kids[1]), Some("appended"));
+    }
+
+    #[test]
     fn inline_script_append_child_persists_in_browser_dom() {
         // Same arena-sharing contract, exercised through createElement +
         // appendChild + textContent setter chained together — a regression
