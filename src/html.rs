@@ -121,10 +121,18 @@ impl<'a> Parser<'a> {
         }
 
         // Raw text elements contain code or styles, not nested HTML.
-        // Their content must be consumed verbatim until the matching closing tag.
+        // Their content is consumed verbatim until the matching closing tag and
+        // preserved as a single text child so later stages (e.g. JS execution
+        // for `<script>`) can read the source. Empty bodies still yield no
+        // children to keep the tree compact.
         if is_raw_text_element(&tag_name) {
-            self.skip_raw_text_content(&tag_name);
-            return Ok(Node::element(tag_name, attributes, Vec::new()));
+            let content = self.consume_raw_text_content(&tag_name);
+            let children = if content.is_empty() {
+                Vec::new()
+            } else {
+                vec![Node::text(content)]
+            };
+            return Ok(Node::element(tag_name, attributes, children));
         }
 
         let children = self.parse_nodes()?;
@@ -145,18 +153,21 @@ impl<'a> Parser<'a> {
         Ok(Node::element(tag_name, attributes, children))
     }
 
-    fn skip_raw_text_content(&mut self, tag_name: &str) {
+    fn consume_raw_text_content(&mut self, tag_name: &str) -> String {
         let closing = format!("</{tag_name}>");
+        let start = self.pos;
         while !self.eof() && !self.starts_with_ignore_case(&closing) {
             // Advance by one full character to stay on valid UTF-8 boundaries.
             if let Some(ch) = self.next_char() {
                 self.pos += ch.len_utf8();
             }
         }
+        let content = self.input[start..self.pos].to_string();
         // Consume the closing tag itself.
         if self.starts_with_ignore_case(&closing) {
             self.pos += closing.len();
         }
+        content
     }
 
     fn starts_with_ignore_case(&self, value: &str) -> bool {

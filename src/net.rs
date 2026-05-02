@@ -193,6 +193,24 @@ pub fn load_css(url: &Url) -> Result<String, NetworkError> {
     String::from_utf8(response.body).map_err(|_| NetworkError::InvalidBodyEncoding)
 }
 
+// Skips the strict Content-Type check that `load_css` does. Real browsers
+// happily run scripts served as `text/javascript`, `application/javascript`,
+// `application/x-javascript`, or even `text/plain`, and many static hosts
+// label JS files inconsistently — enforcing a whitelist here would silently
+// break otherwise-working pages.
+pub fn load_script(url: &Url) -> Result<String, NetworkError> {
+    let response = fetch(url)?.response;
+
+    if response.status_code != 200 {
+        return Err(NetworkError::HttpStatus(
+            response.status_code,
+            response.reason_phrase,
+        ));
+    }
+
+    String::from_utf8(response.body).map_err(|_| NetworkError::InvalidBodyEncoding)
+}
+
 pub fn load_image(url: &Url) -> Result<Vec<u8>, NetworkError> {
     let response = fetch(url)?.response;
 

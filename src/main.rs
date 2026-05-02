@@ -1,6 +1,6 @@
 use std::{collections::HashMap, env};
 
-use mini_browser::{css, dom, dom::NodeType, html, layout, net, render, resource, style, window};
+use mini_browser::{css, dom, dom::NodeType, html, js, layout, net, render, resource, style, window};
 
 // These constants define the browser chrome at the top of the window.
 // Everything below `CHROME_HEIGHT` is treated as page content. The chrome stacks
@@ -35,7 +35,7 @@ const TAB_TITLE_X: f32 = TAB_X + 16.0;
 const TAB_TITLE_Y: f32 = TAB_Y + 11.0;
 const TAB_TITLE_FONT_SIZE: f32 = 13.0;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct BrowserState {
     // Address bar and focus state for the tiny browser chrome.
     address_input: String,
@@ -73,6 +73,17 @@ struct BrowserState {
     // :focus rules keep matching after the click; cleared when the user clicks anywhere
     // outside the page (chrome buttons, the address bar, off-window).
     focused_dom_path: Option<Vec<usize>>,
+
+    // JavaScript runtime. Globals (var bindings, declared functions) survive across
+    // `<script>` tags within the same document but reset when the user navigates,
+    // because `install_document` allocates a fresh runtime for the new page.
+    js: js::JsRuntime,
+
+    // Pre-fetched bodies for `<script src="…">` references in the current document,
+    // keyed by the raw `src` attribute string (matches what the DOM walker sees).
+    // Carried alongside `parsed_document` so that history restore can re-execute
+    // every script without re-fetching from the network.
+    external_scripts: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,24 +133,32 @@ struct HistoryEntry {
     stylesheet: String,
     images: HashMap<String, resource::LoadedImage>,
     font_data: Vec<Vec<u8>>,
+    external_scripts: HashMap<String, String>,
     current_url: Option<net::Url>,
     status_text: String,
     status_color: css::Color,
 }
 
 impl BrowserState {
+    // The arg list is wide because every per-document resource is hoisted to
+    // the call site (so test code can build a state without going through the
+    // network loader). Bundling these into a struct is a Phase 1-style
+    // refactor we explicitly defer per the Phase 2 plan — adding JS without
+    // churning unrelated surfaces.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         address_input: String,
         document_html: String,
         stylesheet: String,
         images: HashMap<String, resource::LoadedImage>,
         font_data: Vec<Vec<u8>>,
+        external_scripts: HashMap<String, String>,
         current_url: Option<net::Url>,
         status_text: impl Into<String>,
     ) -> Self {
         let parsed_document = html::parse(&document_html).unwrap_or_default();
         let parsed_stylesheet = css::parse(&stylesheet).unwrap_or_default();
-        Self {
+        let mut state = Self {
             address_input,
             address_bar_focused: true,
             address_bar_selected: false,
@@ -158,7 +177,14 @@ impl BrowserState {
             forward_stack: Vec::new(),
             hovered_dom_path: None,
             focused_dom_path: None,
-        }
+            js: js::JsRuntime::new(),
+            external_scripts,
+        };
+        // The first page seen on construction also runs its scripts so the
+        // initial document follows the same lifecycle as later navigations
+        // (which all funnel through `install_document`).
+        state.run_scripts();
+        state
     }
 
     // Single funnel for "the displayed document changed". Updates the raw
@@ -167,11 +193,40 @@ impl BrowserState {
     // `stylesheet`. Parse failures degrade to empty trees so the rest of the
     // browser keeps running (build_document_view already has its own fallback
     // path for empty inputs).
-    fn install_document(&mut self, document_html: String, stylesheet: String) {
+    fn install_document(
+        &mut self,
+        document_html: String,
+        stylesheet: String,
+        external_scripts: HashMap<String, String>,
+    ) {
         self.parsed_document = html::parse(&document_html).unwrap_or_default();
         self.parsed_stylesheet = css::parse(&stylesheet).unwrap_or_default();
         self.document_html = document_html;
         self.stylesheet = stylesheet;
+        self.external_scripts = external_scripts;
+        // Each navigated document starts with a fresh JS runtime — globals from
+        // the previous page should not leak into the new one. Back/forward also
+        // route through here, so the same reset rule applies on history moves.
+        self.js = js::JsRuntime::new();
+        self.run_scripts();
+    }
+
+    // Walks the parsed document in tree order and runs every `<script>` tag
+    // through the JS runtime. Inline scripts use their text-child content;
+    // external scripts (with a `src` attribute) look up their pre-fetched body
+    // in `external_scripts`, keyed by the raw `src` value. Lookups that miss
+    // (network failure, missing entry) are silently dropped — same degradation
+    // pattern as broken stylesheets / images.
+    fn run_scripts(&mut self) {
+        let mut sources = Vec::new();
+        for node in &self.parsed_document {
+            collect_script_sources(node, &self.external_scripts, &mut sources);
+        }
+        for source in sources {
+            if let Err(err) = self.js.execute(&source) {
+                eprintln!("script error: {err}");
+            }
+        }
     }
 
     fn display_list(
@@ -400,13 +455,14 @@ impl BrowserState {
 
         // Successful navigation replaces the visible page and pushes the old snapshot to history.
         match load_remote_document(&target) {
-            Ok((document_html, stylesheet, images, font_data, resolved_url)) => {
+            Ok((document_html, stylesheet, images, font_data, external_scripts, resolved_url)) => {
                 let next_entry = HistoryEntry {
                     address_input: resolved_url.to_string(),
                     document_html,
                     stylesheet,
                     images,
                     font_data,
+                    external_scripts,
                     current_url: Some(resolved_url),
                     status_text: "loaded".into(),
                     status_color: css::Color {
@@ -440,13 +496,14 @@ impl BrowserState {
         self.address_bar_focused = false;
         // Link navigation reuses the same loader path as manual URL entry.
         match load_remote_document(&resolved.to_string()) {
-            Ok((document_html, stylesheet, images, font_data, resolved_url)) => {
+            Ok((document_html, stylesheet, images, font_data, external_scripts, resolved_url)) => {
                 let next_entry = HistoryEntry {
                     address_input: resolved_url.to_string(),
                     document_html,
                     stylesheet,
                     images,
                     font_data,
+                    external_scripts,
                     current_url: Some(resolved_url),
                     status_text: "loaded".into(),
                     status_color: css::Color {
@@ -528,13 +585,15 @@ impl BrowserState {
     }
 
     fn snapshot(&self) -> HistoryEntry {
-        // History snapshots include the decoded image cache so back/forward feels immediate.
+        // History snapshots include the decoded image cache and pre-fetched
+        // script bodies so back/forward feels immediate — no re-fetching.
         HistoryEntry {
             address_input: self.address_input.clone(),
             document_html: self.document_html.clone(),
             stylesheet: self.stylesheet.clone(),
             images: self.images.clone(),
             font_data: self.font_data.clone(),
+            external_scripts: self.external_scripts.clone(),
             current_url: self.current_url.clone(),
             status_text: self.status_text.clone(),
             status_color: self.status_color,
@@ -543,7 +602,7 @@ impl BrowserState {
 
     fn restore_entry(&mut self, entry: HistoryEntry) {
         self.address_input = entry.address_input;
-        self.install_document(entry.document_html, entry.stylesheet);
+        self.install_document(entry.document_html, entry.stylesheet, entry.external_scripts);
         self.images = entry.images;
         self.font_data = entry.font_data;
         self.current_url = entry.current_url;
@@ -599,8 +658,8 @@ impl BrowserState {
         };
 
         match load_remote_document(&url.to_string()) {
-            Ok((document_html, stylesheet, images, font_data, resolved_url)) => {
-                self.install_document(document_html, stylesheet);
+            Ok((document_html, stylesheet, images, font_data, external_scripts, resolved_url)) => {
+                self.install_document(document_html, stylesheet, external_scripts);
                 self.images = images;
                 self.font_data = font_data;
                 self.current_url = Some(resolved_url);
@@ -658,6 +717,7 @@ impl BrowserState {
             stylesheet,
             images: HashMap::new(),
             font_data: Vec::new(),
+            external_scripts: HashMap::new(),
             current_url: None,
             status_text: title.into(),
             status_color: css::Color {
@@ -667,6 +727,43 @@ impl BrowserState {
                 a: 255,
             },
         }
+    }
+}
+
+// Recursive helper that appends every `<script>` body found under `node` to
+// `out`, in document (tree) order. Inline scripts use their text-child
+// content; external scripts (with a `src` attribute) read from the pre-fetched
+// `externals` map keyed by the raw `src` value. A `src` whose body is missing
+// from the map silently produces no entry — it indicates a fetch failure that
+// was already logged upstream. Recursion stops at the script tag itself so a
+// `<script>` is captured exactly once.
+fn collect_script_sources(
+    node: &dom::Node,
+    externals: &HashMap<String, String>,
+    out: &mut Vec<String>,
+) {
+    if let dom::NodeType::Element(elem) = &node.node_type
+        && elem.tag_name.eq_ignore_ascii_case("script")
+    {
+        if let Some(src) = elem.attributes.get("src") {
+            if let Some(body) = externals.get(src) {
+                out.push(body.clone());
+            }
+            return;
+        }
+        let mut source = String::new();
+        for child in &node.children {
+            if let dom::NodeType::Text(text) = &child.node_type {
+                source.push_str(text);
+            }
+        }
+        if !source.trim().is_empty() {
+            out.push(source);
+        }
+        return;
+    }
+    for child in &node.children {
+        collect_script_sources(child, externals, out);
     }
 }
 
@@ -1649,11 +1746,16 @@ fn escape_html(value: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+// Bundle of everything `load_remote_document` produces. The `HashMap<String, String>`
+// holds external `<script src>` bodies keyed by the raw `src` attribute string;
+// `install_document` looks them up by attribute when walking the DOM, so no extra
+// URL resolution is needed at execution time.
 type LoadedDocument = (
     String,
     String,
     HashMap<String, resource::LoadedImage>,
     Vec<Vec<u8>>,
+    HashMap<String, String>,
     net::Url,
 );
 
@@ -1682,6 +1784,7 @@ fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
             stylesheet,
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             final_url,
         ));
     }
@@ -1702,7 +1805,16 @@ fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
         .into_iter()
         .map(|image| (image.url.to_string(), image))
         .collect();
-    Ok((html, stylesheets.join("\n"), images, font_data, final_url))
+    let external_scripts = resource::load_scripts(&nodes, &final_url)
+        .map_err(|error| describe_resource_error(&error))?;
+    Ok((
+        html,
+        stylesheets.join("\n"),
+        images,
+        font_data,
+        external_scripts,
+        final_url,
+    ))
 }
 
 fn describe_network_error(error: &net::NetworkError) -> String {
@@ -1734,15 +1846,18 @@ fn describe_resource_error(error: &resource::ResourceError) -> String {
 fn load_initial_state() -> BrowserState {
     match env::args().nth(1) {
         Some(raw_url) => match load_remote_document(&raw_url) {
-            Ok((document_html, stylesheet, images, font_data, current_url)) => BrowserState::new(
-                raw_url,
-                document_html,
-                stylesheet,
-                images,
-                font_data,
-                Some(current_url),
-                "loaded",
-            ),
+            Ok((document_html, stylesheet, images, font_data, external_scripts, current_url)) => {
+                BrowserState::new(
+                    raw_url,
+                    document_html,
+                    stylesheet,
+                    images,
+                    font_data,
+                    external_scripts,
+                    Some(current_url),
+                    "loaded",
+                )
+            }
             Err(error) => {
                 eprintln!("{error}");
                 let mut state = BrowserState::new(
@@ -1751,6 +1866,7 @@ fn load_initial_state() -> BrowserState {
                     String::new(),
                     HashMap::new(),
                     Vec::new(),
+                    HashMap::new(),
                     None,
                     "load failed",
                 );
@@ -1766,6 +1882,7 @@ fn load_initial_state() -> BrowserState {
             sample_css().to_string(),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             None,
             "",
         ),
@@ -2058,6 +2175,7 @@ mod tests {
             String::new(),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             None,
             "loaded",
         );
@@ -2068,6 +2186,7 @@ mod tests {
             stylesheet: String::new(),
             images: HashMap::new(),
             font_data: Vec::new(),
+            external_scripts: HashMap::new(),
             current_url: None,
             status_text: "loaded".into(),
             status_color: css::Color::BLACK,
@@ -2090,6 +2209,7 @@ mod tests {
             String::new(),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             None,
             "loaded",
         );
@@ -2355,6 +2475,7 @@ mod tests {
             String::new(),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             None,
             "",
         );
@@ -2379,6 +2500,7 @@ mod tests {
             String::new(),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             None,
             "",
         );
@@ -2407,6 +2529,7 @@ mod tests {
             String::new(),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             None,
             "loaded",
         );
@@ -2430,6 +2553,7 @@ mod tests {
             String::new(),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             None,
             "loaded",
         );
@@ -2450,5 +2574,85 @@ mod tests {
         // current document is left untouched (no fall-through to page link handling).
         assert_eq!(browser.status_text, "menu (todo)");
         assert_eq!(browser.document_html, original_html);
+    }
+
+    fn browser_with_html(html: &str) -> BrowserState {
+        BrowserState::new(
+            "about:blank".into(),
+            html.into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            None,
+            "",
+        )
+    }
+
+    #[test]
+    fn inline_script_runs_during_construction() {
+        let mut browser = browser_with_html("<script>var phase2 = 42;</script>");
+        assert_eq!(browser.js.execute("phase2").unwrap(), "42");
+    }
+
+    #[test]
+    fn inline_scripts_execute_in_document_order() {
+        let mut browser = browser_with_html(
+            "<script>var n = 1;</script><div><script>n = n + 5;</script></div>",
+        );
+        assert_eq!(browser.js.execute("n").unwrap(), "6");
+    }
+
+    #[test]
+    fn navigation_resets_js_runtime() {
+        let mut browser = browser_with_html("<script>var leaked = 'first';</script>");
+        assert_eq!(browser.js.execute("leaked").unwrap(), "\"first\"");
+        // install_document funnels every navigation/back-forward; it must clear
+        // page-defined globals so the next document starts clean.
+        browser.install_document("<p>second</p>".into(), String::new(), HashMap::new());
+        assert!(browser.js.execute("leaked").is_err());
+    }
+
+    fn browser_with_externals(html: &str, externals: HashMap<String, String>) -> BrowserState {
+        BrowserState::new(
+            "about:blank".into(),
+            html.into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            externals,
+            None,
+            "",
+        )
+    }
+
+    #[test]
+    fn external_script_body_runs_when_present_in_externals_map() {
+        let externals = HashMap::from([("lib.js".to_string(), "var lib = 7;".to_string())]);
+        let mut browser = browser_with_externals(r#"<script src="lib.js"></script>"#, externals);
+        assert_eq!(browser.js.execute("lib").unwrap(), "7");
+    }
+
+    #[test]
+    fn external_script_with_missing_body_is_silently_skipped() {
+        // Empty externals map simulates a fetch failure — `missing.js` simply has
+        // no entry. The browser must not error; later inline scripts must still run.
+        let mut browser = browser_with_externals(
+            r#"<script src="missing.js"></script><script>var still_ran = 1;</script>"#,
+            HashMap::new(),
+        );
+        assert_eq!(browser.js.execute("still_ran").unwrap(), "1");
+    }
+
+    #[test]
+    fn inline_and_external_scripts_execute_in_document_order() {
+        // The order must be: inline 'a' → external 'b' → inline 'c'. If externals
+        // were appended after all inlines (or vice versa), `seq` would not be "abc".
+        let externals = HashMap::from([("b.js".to_string(), r#"seq += "b";"#.to_string())]);
+        let mut browser = browser_with_externals(
+            r#"<script>var seq = "a";</script><script src="b.js"></script><script>seq += "c";</script>"#,
+            externals,
+        );
+        assert_eq!(browser.js.execute("seq").unwrap(), "\"abc\"");
     }
 }

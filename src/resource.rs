@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{
     dom::{Node, NodeType},
     net::{self, NetworkError, Url},
@@ -31,6 +33,48 @@ pub fn load_stylesheets(document: &[Node], base_url: &Url) -> Result<Vec<String>
     // Fetch all stylesheets in parallel; per-resource failures are silently
     // dropped so one broken link does not kill the whole page.
     Ok(parallel_fetch(&stylesheet_urls, |url| net::load_css(url).ok()))
+}
+
+// Fetches every `<script src="…">` body referenced by `document` in parallel
+// and returns a map from the raw `src` attribute string to the JS body. The
+// caller (install_document) walks the DOM in document order and looks up each
+// `<script>` element by its `src` attribute, which matches what's stored as
+// the key — so no further URL resolution is needed at execution time.
+//
+// Per-script failures are dropped (the entry is simply absent from the map),
+// mirroring how `load_stylesheets` and `load_images` degrade.
+pub fn load_scripts(
+    document: &[Node],
+    base_url: &Url,
+) -> Result<HashMap<String, String>, ResourceError> {
+    let mut pairs = Vec::new();
+    for node in document {
+        collect_script_src_pairs(node, base_url, &mut pairs)?;
+    }
+    if pairs.is_empty() {
+        return Ok(HashMap::new());
+    }
+    // Custom scoped-thread fan-out (rather than reusing `parallel_fetch`)
+    // because we need to keep the raw `src` key paired with its fetched body
+    // — `parallel_fetch` only carries forward `T` values and would lose that
+    // mapping on per-URL failures.
+    let fetched: Vec<(String, String)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = pairs
+            .iter()
+            .map(|(raw_src, url)| {
+                scope.spawn(move || {
+                    net::load_script(url)
+                        .ok()
+                        .map(|body| (raw_src.clone(), body))
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok().flatten())
+            .collect()
+    });
+    Ok(fetched.into_iter().collect())
 }
 
 pub fn load_images(document: &[Node], base_url: &Url) -> Result<Vec<LoadedImage>, ResourceError> {
@@ -114,6 +158,30 @@ fn collect_stylesheet_urls(
 
     for child in &node.children {
         collect_stylesheet_urls(child, base_url, urls)?;
+    }
+
+    Ok(())
+}
+
+fn collect_script_src_pairs(
+    node: &Node,
+    base_url: &Url,
+    out: &mut Vec<(String, Url)>,
+) -> Result<(), ResourceError> {
+    if let NodeType::Element(element) = &node.node_type
+        && element.tag_name.eq_ignore_ascii_case("script")
+    {
+        // Inline scripts (no `src`) are handled later by walking the parsed
+        // document directly; only external scripts need fetching here.
+        if let Some(src) = element.attributes.get("src") {
+            out.push((src.clone(), base_url.resolve(src)?));
+        }
+        // `<script>` content is never nested HTML — don't recurse into it.
+        return Ok(());
+    }
+
+    for child in &node.children {
+        collect_script_src_pairs(child, base_url, out)?;
     }
 
     Ok(())
@@ -275,7 +343,7 @@ mod tests {
 
     use crate::{html, net::Url};
 
-    use super::{load_images, load_stylesheets};
+    use super::{load_images, load_scripts, load_stylesheets};
 
     #[test]
     fn resolves_stylesheet_links_from_document() {
@@ -322,6 +390,70 @@ mod tests {
         assert_eq!(stylesheets.len(), 2);
         assert_eq!(stylesheets[0], "body { color: #111111; }");
         assert_eq!(stylesheets[1], "p { color: #222222; }");
+    }
+
+    #[test]
+    fn fetches_external_scripts_keyed_by_raw_src() {
+        // Two `<script src>` references — one absolute path, one relative —
+        // both resolve through the document's base URL and the returned map
+        // keys back the original raw `src` attributes (so the install_document
+        // walker can look them up directly while traversing the DOM).
+        let nodes = html::parse(
+            r#"
+                <html>
+                    <head>
+                        <script src="/lib.js"></script>
+                        <script src="nested/page.js"></script>
+                    </head>
+                </html>
+            "#,
+        )
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                let bytes_read = stream.read(&mut request).unwrap();
+                let request_text = String::from_utf8_lossy(&request[..bytes_read]);
+                let body = if request_text.starts_with("GET /lib.js HTTP/1.1") {
+                    "var lib = 1;"
+                } else if request_text.starts_with("GET /pages/nested/page.js HTTP/1.1") {
+                    "var page = 2;"
+                } else {
+                    panic!("unexpected request: {request_text}");
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nConnection: close\r\n\r\n{body}"
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let base_url =
+            Url::parse(&format!("http://127.0.0.1:{port}/pages/index.html")).unwrap();
+        let scripts = load_scripts(&nodes, &base_url).unwrap();
+
+        server.join().unwrap();
+        assert_eq!(scripts.len(), 2);
+        assert_eq!(scripts.get("/lib.js").map(String::as_str), Some("var lib = 1;"));
+        assert_eq!(
+            scripts.get("nested/page.js").map(String::as_str),
+            Some("var page = 2;"),
+        );
+    }
+
+    #[test]
+    fn load_scripts_returns_empty_map_when_document_has_no_external_scripts() {
+        // Inline `<script>` (no `src`) must not appear in the externals map —
+        // those are handled by the DOM walker reading text-child contents.
+        let nodes = html::parse("<html><body><script>var x = 1;</script></body></html>").unwrap();
+        let base = Url::parse("http://example.com/").unwrap();
+        let scripts = load_scripts(&nodes, &base).unwrap();
+        assert!(scripts.is_empty());
     }
 
     #[test]
