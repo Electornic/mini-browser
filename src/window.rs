@@ -49,7 +49,10 @@ where
         title,
         initial_width,
         initial_height,
-        WindowOptions::default(),
+        WindowOptions {
+            resize: true,
+            ..WindowOptions::default()
+        },
     )?;
     let typed_chars = Rc::new(RefCell::new(String::new()));
     window.set_input_callback(Box::new(TextCollector {

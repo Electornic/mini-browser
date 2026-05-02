@@ -1,37 +1,39 @@
 use std::{collections::HashMap, env};
 
-use mini_browser::{css, dom::NodeType, html, layout, net, render, resource, style, window};
+use mini_browser::{css, dom, dom::NodeType, html, layout, net, render, resource, style, window};
 
 // These constants define the browser chrome at the top of the window.
 // Everything below `CHROME_HEIGHT` is treated as page content. The chrome stacks
 // a tab strip on top of a toolbar; toolbar constants are expressed in screen
 // coordinates so they already include `TAB_STRIP_HEIGHT` as their top offset.
-const TAB_STRIP_HEIGHT: f32 = 32.0;
-const TOOLBAR_HEIGHT: f32 = 56.0;
+const TAB_STRIP_HEIGHT: f32 = 42.0;
+const TOOLBAR_HEIGHT: f32 = 60.0;
 const CHROME_HEIGHT: f32 = TAB_STRIP_HEIGHT + TOOLBAR_HEIGHT;
-const ADDRESS_TEXT_Y: f32 = TAB_STRIP_HEIGHT + 12.0;
-const STATUS_TEXT_Y: f32 = TAB_STRIP_HEIGHT + 34.0;
-const ADDRESS_BOX_X: f32 = 92.0;
-const ADDRESS_BOX_Y: f32 = TAB_STRIP_HEIGHT + 8.0;
-const ADDRESS_BOX_HEIGHT: f32 = 18.0;
-const ADDRESS_TEXT_X: f32 = ADDRESS_BOX_X + 4.0;
-const ADDRESS_CHAR_WIDTH: f32 = 6.0;
-const NAV_BUTTON_Y: f32 = TAB_STRIP_HEIGHT + 8.0;
-const NAV_BUTTON_WIDTH: f32 = 20.0;
-const NAV_BUTTON_HEIGHT: f32 = 18.0;
+const NAV_BUTTON_WIDTH: f32 = 32.0;
+const NAV_BUTTON_HEIGHT: f32 = 32.0;
+const NAV_BUTTON_Y: f32 = TAB_STRIP_HEIGHT + 12.0;
 const BACK_BUTTON_X: f32 = 12.0;
-const FORWARD_BUTTON_X: f32 = 36.0;
-const REFRESH_BUTTON_X: f32 = 60.0;
-const MENU_BUTTON_WIDTH: f32 = 20.0;
+const FORWARD_BUTTON_X: f32 = BACK_BUTTON_X + NAV_BUTTON_WIDTH + 4.0;
+const REFRESH_BUTTON_X: f32 = FORWARD_BUTTON_X + NAV_BUTTON_WIDTH + 4.0;
+const ADDRESS_BOX_X: f32 = REFRESH_BUTTON_X + NAV_BUTTON_WIDTH + 16.0;
+const ADDRESS_BOX_Y: f32 = TAB_STRIP_HEIGHT + 12.0;
+const ADDRESS_BOX_HEIGHT: f32 = 36.0;
+const ADDRESS_TEXT_X: f32 = ADDRESS_BOX_X + 16.0;
+const ADDRESS_TEXT_Y: f32 = ADDRESS_BOX_Y + 11.0;
+const ADDRESS_FONT_SIZE: f32 = 14.0;
+const STATUS_TEXT_Y: f32 = ADDRESS_BOX_Y + ADDRESS_BOX_HEIGHT + 4.0;
+const STATUS_FONT_SIZE: f32 = 10.0;
+const MENU_BUTTON_WIDTH: f32 = 32.0;
 const MENU_BUTTON_RIGHT_PAD: f32 = 12.0;
 const MENU_BUTTON_GAP: f32 = 8.0;
 const TAB_X: f32 = 8.0;
-const TAB_Y: f32 = 4.0;
-const TAB_WIDTH: f32 = 240.0;
+const TAB_Y: f32 = 6.0;
+const TAB_WIDTH: f32 = 272.0;
 const TAB_HEIGHT: f32 = TAB_STRIP_HEIGHT - TAB_Y;
-const TAB_RADIUS: f32 = 8.0;
-const TAB_TITLE_X: f32 = TAB_X + 12.0;
-const TAB_TITLE_Y: f32 = TAB_Y + 9.0;
+const TAB_RADIUS: f32 = 10.0;
+const TAB_TITLE_X: f32 = TAB_X + 16.0;
+const TAB_TITLE_Y: f32 = TAB_Y + 11.0;
+const TAB_TITLE_FONT_SIZE: f32 = 13.0;
 
 #[derive(Debug, Clone)]
 struct BrowserState {
@@ -44,6 +46,12 @@ struct BrowserState {
     // The currently displayed document snapshot.
     document_html: String,
     stylesheet: String,
+    // Parsed forms of `document_html` and `stylesheet`, kept in sync via
+    // `install_document`. Caching the parsed trees here keeps the per-frame
+    // pipeline from re-parsing the same HTML/CSS at 60 fps — both parses are
+    // O(input size) and dominate the frame budget on non-trivial pages.
+    parsed_document: Vec<dom::Node>,
+    parsed_stylesheet: css::Stylesheet,
     images: HashMap<String, resource::LoadedImage>,
     font_data: Vec<Vec<u8>>,
     current_url: Option<net::Url>,
@@ -129,6 +137,8 @@ impl BrowserState {
         current_url: Option<net::Url>,
         status_text: impl Into<String>,
     ) -> Self {
+        let parsed_document = html::parse(&document_html).unwrap_or_default();
+        let parsed_stylesheet = css::parse(&stylesheet).unwrap_or_default();
         Self {
             address_input,
             address_bar_focused: true,
@@ -136,6 +146,8 @@ impl BrowserState {
             frame_index: 0,
             document_html,
             stylesheet,
+            parsed_document,
+            parsed_stylesheet,
             images,
             font_data,
             current_url,
@@ -149,11 +161,25 @@ impl BrowserState {
         }
     }
 
+    // Single funnel for "the displayed document changed". Updates the raw
+    // strings and the parsed caches together so the per-frame pipeline can
+    // assume `parsed_document` / `parsed_stylesheet` mirror `document_html` /
+    // `stylesheet`. Parse failures degrade to empty trees so the rest of the
+    // browser keeps running (build_document_view already has its own fallback
+    // path for empty inputs).
+    fn install_document(&mut self, document_html: String, stylesheet: String) {
+        self.parsed_document = html::parse(&document_html).unwrap_or_default();
+        self.parsed_stylesheet = css::parse(&stylesheet).unwrap_or_default();
+        self.document_html = document_html;
+        self.stylesheet = stylesheet;
+    }
+
     fn display_list(
         &mut self,
         viewport_width: usize,
         viewport_height: usize,
         input: &window::WindowInput,
+        fonts: &[fontdue::Font],
     ) -> Vec<render::DisplayCommand> {
         // The browser re-builds its visible scene every frame from current state + fresh input.
         self.frame_index = self.frame_index.wrapping_add(1);
@@ -172,8 +198,8 @@ impl BrowserState {
             },
         };
         let document_view = build_document_view(
-            &self.document_html,
-            &self.stylesheet,
+            &self.parsed_document,
+            &self.parsed_stylesheet,
             viewport_width,
             self.current_url.as_ref(),
             &self.images,
@@ -233,29 +259,35 @@ impl BrowserState {
             .map(|url| url.host.as_str())
             .filter(|host| !host.is_empty())
             .unwrap_or("New Tab");
-        let mut commands = chrome_commands(ChromeState {
-            viewport_width,
-            address_input: &self.address_input,
-            status_text: &self.status_text,
-            status_color: self.status_color,
-            address_bar_focused: self.address_bar_focused,
-            address_bar_selected: self.address_bar_selected,
-            show_caret: self.show_caret(),
-            can_go_back: self.can_go_back(),
-            can_go_forward: self.can_go_forward(),
-            hovered_action,
-            tab_title,
-        });
-        // Page commands are translated below the fixed chrome and then decorated with link underlines.
-        commands.extend(render::translate(
+        // Painter's-algorithm order: page first, then chrome on top. Painting
+        // chrome last means any page content that would otherwise scroll up
+        // into the chrome band (y < CHROME_HEIGHT) gets covered, so the chrome
+        // visually pins to the top instead of "scrolling away" with the page.
+        let mut commands = render::translate(
             document_view.commands,
             0.0,
             CHROME_HEIGHT - self.scroll_offset,
-        ));
+        );
         commands.extend(render::translate(
             link_decoration_commands(&document_view.links, hovered_href),
             0.0,
             CHROME_HEIGHT - self.scroll_offset,
+        ));
+        commands.extend(chrome_commands(
+            ChromeState {
+                viewport_width,
+                address_input: &self.address_input,
+                status_text: &self.status_text,
+                status_color: self.status_color,
+                address_bar_focused: self.address_bar_focused,
+                address_bar_selected: self.address_bar_selected,
+                show_caret: self.show_caret(),
+                can_go_back: self.can_go_back(),
+                can_go_forward: self.can_go_forward(),
+                hovered_action,
+                tab_title,
+            },
+            fonts,
         ));
         commands
     }
@@ -511,8 +543,7 @@ impl BrowserState {
 
     fn restore_entry(&mut self, entry: HistoryEntry) {
         self.address_input = entry.address_input;
-        self.document_html = entry.document_html;
-        self.stylesheet = entry.stylesheet;
+        self.install_document(entry.document_html, entry.stylesheet);
         self.images = entry.images;
         self.font_data = entry.font_data;
         self.current_url = entry.current_url;
@@ -569,8 +600,7 @@ impl BrowserState {
 
         match load_remote_document(&url.to_string()) {
             Ok((document_html, stylesheet, images, font_data, resolved_url)) => {
-                self.document_html = document_html;
-                self.stylesheet = stylesheet;
+                self.install_document(document_html, stylesheet);
                 self.images = images;
                 self.font_data = font_data;
                 self.current_url = Some(resolved_url);
@@ -641,23 +671,21 @@ impl BrowserState {
 }
 
 fn build_document_view(
-    document_html: &str,
-    stylesheet_source: &str,
+    parsed_document: &[dom::Node],
+    parsed_stylesheet: &css::Stylesheet,
     viewport_width: usize,
     current_url: Option<&net::Url>,
     images: &HashMap<String, resource::LoadedImage>,
     interaction: style::InteractionState<'_>,
 ) -> Result<DocumentView, String> {
-    // This is the full browser pipeline in one place:
-    // HTML/CSS text -> styled tree -> layout tree -> display commands + clickable metadata.
-    let mut nodes = html::parse(document_html)
-        .map_err(|error| format!("html parse error at {}: {}", error.position, error.message))?;
-    let stylesheet = css::parse(stylesheet_source)
-        .map_err(|error| format!("css parse error at {}: {}", error.position, error.message))?;
-    let root = nodes
-        .pop()
+    // The HTML/CSS parse steps used to live here and run every frame; they now
+    // happen once at navigate time (see `BrowserState::install_document`) and
+    // this function takes the cached trees, so the per-frame pipeline is just:
+    // styled tree -> layout tree -> display commands + clickable metadata.
+    let root = parsed_document
+        .last()
         .ok_or_else(|| "document did not produce a root node".to_string())?;
-    let styled = style::style_tree_with_state(&root, &[stylesheet], interaction);
+    let styled = style::style_tree_with_state(root, std::slice::from_ref(parsed_stylesheet), interaction);
     let layout = layout::layout_tree(&styled, viewport_width as f32);
     let mut commands = render::build_display_list(&layout);
     commands.extend(collect_image_commands(&layout, current_url, images));
@@ -669,7 +697,10 @@ fn build_document_view(
     })
 }
 
-fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
+fn chrome_commands(
+    chrome: ChromeState<'_>,
+    fonts: &[fontdue::Font],
+) -> Vec<render::DisplayCommand> {
     // Chrome rendering is intentionally separate from page rendering so scrolling never moves it.
     let width = chrome.viewport_width as f32;
     let input_empty = chrome.address_input.is_empty();
@@ -776,7 +807,7 @@ fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
                 b: 67,
                 a: 255,
             },
-            font_size: 8.0,
+            font_size: TAB_TITLE_FONT_SIZE,
         }),
         render::DisplayCommand::RoundedRect(border_color, address_box, pill_outer),
         render::DisplayCommand::RoundedRect(
@@ -799,14 +830,14 @@ fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             x: ADDRESS_TEXT_X,
             y: ADDRESS_TEXT_Y,
             color: address_color,
-            font_size: 8.0,
+            font_size: ADDRESS_FONT_SIZE,
         }),
         render::DisplayCommand::Text(render::TextCommand {
             text: chrome.status_text.to_string(),
             x: 16.0,
             y: STATUS_TEXT_Y,
             color: chrome.status_color,
-            font_size: 8.0,
+            font_size: STATUS_FONT_SIZE,
         }),
     ];
     commands.extend(nav_button_commands(
@@ -831,6 +862,7 @@ fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
     ));
 
     if chrome.address_bar_selected {
+        let measured = render::measure_text_width(&address_display, ADDRESS_FONT_SIZE, fonts);
         commands.push(render::DisplayCommand::SolidRect(
             css::Color {
                 r: 214,
@@ -840,10 +872,9 @@ fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             },
             layout::Rect {
                 x: ADDRESS_TEXT_X - 2.0,
-                y: ADDRESS_BOX_Y + 4.0,
-                width: (address_display.len() as f32 * ADDRESS_CHAR_WIDTH + 4.0)
-                    .min((address_box.width - 8.0).max(0.0)),
-                height: 10.0,
+                y: ADDRESS_TEXT_Y - 2.0,
+                width: (measured + 4.0).min((address_box.width - 8.0).max(0.0)),
+                height: ADDRESS_FONT_SIZE + 4.0,
             },
         ));
         commands.push(render::DisplayCommand::Text(render::TextCommand {
@@ -851,16 +882,25 @@ fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             x: ADDRESS_TEXT_X,
             y: ADDRESS_TEXT_Y,
             color: css::Color::BLACK,
-            font_size: 8.0,
+            font_size: ADDRESS_FONT_SIZE,
         }));
     } else if chrome.show_caret {
+        // Caret position is measured from the *actual input* (empty when only the
+        // placeholder is showing), and uses fontdue's advance widths so it lines
+        // up with where draw_text actually ends — a fixed average glyph width
+        // would always drift on proportional fonts.
+        let caret_offset = if input_empty {
+            0.0
+        } else {
+            render::measure_text_width(&address_display, ADDRESS_FONT_SIZE, fonts)
+        };
         commands.push(render::DisplayCommand::SolidRect(
             css::Color::BLACK,
             layout::Rect {
-                x: ADDRESS_TEXT_X + address_display.len() as f32 * ADDRESS_CHAR_WIDTH,
-                y: ADDRESS_BOX_Y + 4.0,
+                x: ADDRESS_TEXT_X + caret_offset,
+                y: ADDRESS_TEXT_Y - 1.0,
                 width: 1.0,
-                height: 10.0,
+                height: ADDRESS_FONT_SIZE + 2.0,
             },
         ));
     }
@@ -939,9 +979,13 @@ fn chevron_commands(
 }
 
 fn refresh_button_commands(rect: layout::Rect, hovered: bool) -> Vec<render::DisplayCommand> {
-    // Faux-arc icon: 12 small squares are stamped along a circle, leaving a wedge open
-    // at the top-right where a small triangle arrow head sits. This avoids needing a
-    // dedicated arc primitive in the renderer while still reading as a refresh glyph.
+    // Refresh glyph: ~330° arc opening at the top, plus a filled triangular
+    // arrow head at the start of the arc pointing radially outward. The arc is
+    // stamped by ~80 small squares (density scales with radius so the ring
+    // never reads as dotted) — without a dedicated arc primitive in the
+    // renderer this is the cleanest way to fake a curve.
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_6, TAU};
+
     let mut commands = Vec::new();
     if hovered {
         commands.push(render::DisplayCommand::RoundedRect(
@@ -964,47 +1008,69 @@ fn refresh_button_commands(rect: layout::Rect, hovered: bool) -> Vec<render::Dis
     };
     let cx = rect.x + rect.width / 2.0;
     let cy = rect.y + rect.height / 2.0;
-    let radius = (rect.width.min(rect.height) / 2.0 - 3.0).max(3.0);
+    let radius = (rect.width.min(rect.height) / 2.0 - 5.0).max(4.0);
 
-    // 12 stops around the ring; skip stop 1 (just past 12 o'clock, top-right) for the gap.
-    let stops = 12i32;
-    let gap_stop = 1i32;
-    for i in 0..stops {
-        if i == gap_stop {
-            continue;
-        }
-        let theta =
-            (i as f32) * (std::f32::consts::TAU / stops as f32) - std::f32::consts::FRAC_PI_2;
+    // Arc starts ~30° past 12 o'clock (top-right), sweeps clockwise around back
+    // to ~30° before 12 o'clock — leaves a clean 60° gap at the top for the
+    // arrow head to sit in.
+    let arc_start = -FRAC_PI_2 + FRAC_PI_6;
+    let arc_total = TAU - 2.0 * FRAC_PI_6;
+
+    // Density chosen so adjacent stamps overlap by ~half their width — gives a
+    // visually continuous stroke instead of dotted-line.
+    let stops = (radius * 8.0).ceil() as i32;
+    for i in 0..=stops {
+        let t = i as f32 / stops as f32;
+        let theta = arc_start + t * arc_total;
         let x = cx + theta.cos() * radius;
         let y = cy + theta.sin() * radius;
         commands.push(render::DisplayCommand::SolidRect(
             icon_color,
             layout::Rect {
-                x: x - 0.75,
-                y: y - 0.75,
-                width: 1.5,
-                height: 1.5,
+                x: x - 1.0,
+                y: y - 1.0,
+                width: 2.0,
+                height: 2.0,
             },
         ));
     }
 
-    // Arrow head: a 3-row chevron pointing into the gap from the right, mirroring the
-    // chevron helper used by the back/forward buttons so the chrome stays visually consistent.
-    let gap_theta =
-        (gap_stop as f32) * (std::f32::consts::TAU / stops as f32) - std::f32::consts::FRAC_PI_2;
-    let ax = cx + gap_theta.cos() * radius;
-    let ay = cy + gap_theta.sin() * radius;
-    for k in 0..3 {
-        let off = k as f32;
-        commands.push(render::DisplayCommand::SolidRect(
-            icon_color,
-            layout::Rect {
-                x: ax - 1.0 + off,
-                y: ay - 1.0 - off,
-                width: 1.0,
-                height: 1.0 + off,
-            },
-        ));
+    // Triangular arrow head at the arc's start. Base sits on the ring; tip
+    // extends `arrow_len` pixels radially outward. Filled by stepping along
+    // the radial axis and stamping a 1px-tall band whose width tapers with
+    // distance — a poor man's flat-shaded triangle.
+    let nx = arc_start.cos();
+    let ny = arc_start.sin();
+    let tx = -ny;
+    let ty = nx;
+    let base_cx = cx + radius * nx;
+    let base_cy = cy + radius * ny;
+    let arrow_len = 5.0_f32;
+    let arrow_half = 3.0_f32;
+    let steps = arrow_len.ceil() as i32 + 1;
+    for i in 0..=steps {
+        let progress = i as f32 / steps as f32;
+        let half_width = arrow_half * (1.0 - progress);
+        let dist = arrow_len * progress;
+        let row_cx = base_cx + dist * nx;
+        let row_cy = base_cy + dist * ny;
+        let span = half_width.ceil() as i32;
+        for j in -span..=span {
+            if (j as f32).abs() > half_width + 0.5 {
+                continue;
+            }
+            let px = row_cx + (j as f32) * tx;
+            let py = row_cy + (j as f32) * ty;
+            commands.push(render::DisplayCommand::SolidRect(
+                icon_color,
+                layout::Rect {
+                    x: px - 0.5,
+                    y: py - 0.5,
+                    width: 1.0,
+                    height: 1.0,
+                },
+            ));
+        }
     }
 
     commands
@@ -1736,13 +1802,14 @@ fn main() {
     let mut last_font_count = browser.font_data.len();
 
     if let Err(error) = window::run("mini-browser", 800, 600, |width, height, input| {
-        let commands = browser.display_list(width, height, input);
-
-        // Rebuild font cache when navigation loads new fonts.
+        // Rebuild font cache when navigation loads new fonts. Done before
+        // display_list so chrome's caret-width measurement sees the fresh fonts.
         if browser.font_data.len() != last_font_count {
             fonts = build_font_cache(&browser.font_data);
             last_font_count = browser.font_data.len();
         }
+
+        let commands = browser.display_list(width, height, input, &fonts);
 
         render::rasterize(&commands, width, height, &fonts)
     }) {
@@ -1863,9 +1930,11 @@ mod tests {
         assert_eq!(rect.x, ADDRESS_BOX_X);
         assert_eq!(rect.y, ADDRESS_BOX_Y);
         assert_eq!(rect.height, ADDRESS_BOX_HEIGHT);
-        // Address bar reserves space for the menu button on the right edge:
-        // 800 viewport - 92 address-x - (12 right pad + 20 menu width + 8 gap) = 668.
-        assert_eq!(rect.width, 668.0);
+        // Address bar reserves space for the menu button on the right edge.
+        let expected_width = 800.0
+            - ADDRESS_BOX_X
+            - (super::MENU_BUTTON_RIGHT_PAD + super::MENU_BUTTON_WIDTH + super::MENU_BUTTON_GAP);
+        assert_eq!(rect.width, expected_width);
     }
 
     #[test]

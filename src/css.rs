@@ -1,6 +1,6 @@
 // CSS support is intentionally narrow: simple selectors and a handful of value types.
 // That keeps the parser small while still giving the rest of the browser realistic input.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
 }

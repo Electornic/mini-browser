@@ -264,6 +264,37 @@ pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<Dis
     commands
 }
 
+// Measures the rendered width of `text` at `font_size` using the same advance
+// rules as `draw_text` / `draw_text_bitmap`. Callers use this to position UI
+// elements that need to align with the *end* of a rendered string (e.g. the
+// caret in the chrome address bar) without resorting to a fixed average glyph
+// width — which is always wrong for proportional fonts.
+pub fn measure_text_width(text: &str, font_size: f32, fonts: &[fontdue::Font]) -> f32 {
+    if fonts.is_empty() {
+        let scale = (font_size / 8.0).max(1.0).round();
+        return text
+            .chars()
+            .map(|ch| if ch == ' ' { 4.0 * scale } else { 6.0 * scale })
+            .sum();
+    }
+
+    let size = font_size.max(8.0);
+    let mut width = 0.0_f32;
+    for ch in text.chars() {
+        let font_match = fonts
+            .iter()
+            .find(|f| f.lookup_glyph_index(ch) != 0 || ch == ' ');
+        match font_match {
+            Some(font) => {
+                let (metrics, _) = font.rasterize(ch, size);
+                width += metrics.advance_width;
+            }
+            None => width += font_size * 0.75,
+        }
+    }
+    width
+}
+
 pub fn rasterize(
     commands: &[DisplayCommand],
     width: usize,
