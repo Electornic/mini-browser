@@ -20,35 +20,50 @@ use boa_engine::{
 
 use crate::{
     css::{self, Combinator, Selector, SimpleSelector, SimpleSelectorKind},
-    dom::{Document, NodeId, NodeType},
+    dom::{AttrMap, Document, NodeId, NodeType},
 };
+
+// Hidden property name used to round-trip a NodeId through any Element
+// JsObject — methods like `appendChild(other)` read `other._nodeId` to
+// recover the receiver's NodeId without an external wrapper-to-NodeId table.
+// JS code shouldn't poke at this; the dynamic mutation methods all
+// re-validate the recovered id against the live arena before acting on it.
+const NODE_ID_PROP: &str = "_nodeId";
 
 pub struct JsRuntime {
     context: Context,
-    // Snapshot of the parsed Document exposed to JS through `document.*`. Held
-    // behind Rc<RefCell<…>> so the native closures registered on the
-    // `document` global can each carry an independent handle without
-    // re-registering when the page changes — `bind_document` overwrites the
-    // inner Document and every closure observes the new tree on its next call.
+    // Shared handle to the parsed Document. BrowserState constructs the Rc
+    // and hands a clone to the runtime; that clone is then handed to every
+    // native closure registered on `document` and on each Element wrapper,
+    // so each closure observes the same up-to-date tree without ever
+    // re-reading the field on the struct. The field is therefore live only
+    // through the closures (and through `dom_handle` in tests) — `dead_code`
+    // is silenced to make that intent explicit rather than have us drop the
+    // canonical handle and reach into the Context for it later.
+    #[allow(dead_code)]
     dom: Rc<RefCell<Document>>,
 }
 
 impl JsRuntime {
-    pub fn new() -> Self {
+    /// Build a runtime bound to `dom`. The caller keeps a clone of the Rc so
+    /// it can read the DOM back (for layout) and mutate it directly (for
+    /// page swaps via `*dom.borrow_mut() = …`); JS-side mutations land in the
+    /// same arena. Per Step 5.1, ownership is shared at construction time —
+    /// there is no `bind_document` afterward because nothing inside the engine
+    /// needs to switch Documents mid-life: a navigation rebuilds JsRuntime.
+    pub fn new(dom: Rc<RefCell<Document>>) -> Self {
         let mut context = Context::default();
         register_console(&mut context);
-        let dom: Rc<RefCell<Document>> = Rc::new(RefCell::new(Document::new()));
         register_document(&mut context, dom.clone());
         Self { context, dom }
     }
 
-    /// Snapshot the parsed document into the runtime so JS can read it via
-    /// `document.getElementById` / `document.querySelector`. Cloned eagerly:
-    /// the bridge is read-only in Step 5.0, so nothing inside the engine will
-    /// mutate this Document — and copying lets us drop the caller's borrow
-    /// before script execution starts.
-    pub fn bind_document(&mut self, document: &Document) {
-        *self.dom.borrow_mut() = document.clone();
+    /// Returns a clone of the shared DOM handle. Mainly useful in tests where
+    /// the test wants to swap the document contents under the runtime to
+    /// simulate a navigation.
+    #[cfg(test)]
+    pub fn dom_handle(&self) -> Rc<RefCell<Document>> {
+        self.dom.clone()
     }
 
     // Returns the displayed form of the result on success, or a stringified
@@ -59,12 +74,6 @@ impl JsRuntime {
             .eval(Source::from_bytes(source))
             .map(|value| value.display().to_string())
             .map_err(|err| err.to_string())
-    }
-}
-
-impl Default for JsRuntime {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -131,25 +140,30 @@ fn write_console(level: &str, args: &[JsValue], context: &mut Context) {
     eprintln!("[console.{level}] {}", parts.join(" "));
 }
 
-// Builds the `document` global with read-only DOM access methods. Each method
-// captures its own `Rc` clone of the shared Document handle so they stay valid
-// after `register_document` returns. The closures use `unsafe from_closure`
-// because our captures (Rc<RefCell<Document>>) are pure host data — no JS
-// values hide inside, so Boa's GC has nothing to trace through them.
+// Builds the `document` global. Each method captures its own `Rc` clone of
+// the shared Document handle so they stay valid after `register_document`
+// returns. The closures use `unsafe from_closure` because our captures
+// (Rc<RefCell<Document>>) are pure host data — no JS values hide inside, so
+// Boa's GC has nothing to trace through them.
 fn register_document(context: &mut Context, dom: Rc<RefCell<Document>>) {
     let dom_for_id = dom.clone();
     let get_element_by_id = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let id = first_arg_as_string(args, ctx)?;
-            let document = dom_for_id.borrow();
-            match find_by_id(&document, &id) {
-                Some(node_id) => Ok(JsValue::from(make_element(node_id, &document, ctx))),
+            // Borrow scoped to the lookup so make_element below can take its
+            // own borrow without the two stepping on each other.
+            let node_id = {
+                let document = dom_for_id.borrow();
+                find_by_id(&document, &id)
+            };
+            match node_id {
+                Some(node_id) => Ok(JsValue::from(make_element(node_id, dom_for_id.clone(), ctx))),
                 None => Ok(JsValue::null()),
             }
         })
     };
 
-    let dom_for_qs = dom;
+    let dom_for_qs = dom.clone();
     let query_selector = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let selector_text = first_arg_as_string(args, ctx)?;
@@ -164,88 +178,254 @@ fn register_document(context: &mut Context, dom: Rc<RefCell<Document>>) {
                         .into());
                 }
             };
-            let document = dom_for_qs.borrow();
-            match find_first_match(&document, &selector) {
-                Some(node_id) => Ok(JsValue::from(make_element(node_id, &document, ctx))),
+            let node_id = {
+                let document = dom_for_qs.borrow();
+                find_first_match(&document, &selector)
+            };
+            match node_id {
+                Some(node_id) => Ok(JsValue::from(make_element(node_id, dom_for_qs.clone(), ctx))),
                 None => Ok(JsValue::null()),
             }
+        })
+    };
+
+    let dom_for_create = dom;
+    let create_element = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let tag = first_arg_as_string(args, ctx)?;
+            // Match the parser convention: tag names live lowercase in the
+            // arena, regardless of how JS spelled them. The tagName getter
+            // surfaces the canonical uppercase form back to JS.
+            let tag_lower = tag.to_ascii_lowercase();
+            let new_id = dom_for_create
+                .borrow_mut()
+                .create_element(tag_lower, AttrMap::new());
+            Ok(JsValue::from(make_element(
+                new_id,
+                dom_for_create.clone(),
+                ctx,
+            )))
         })
     };
 
     let document = ObjectInitializer::new(context)
         .function(get_element_by_id, js_string!("getElementById"), 1)
         .function(query_selector, js_string!("querySelector"), 1)
+        .function(create_element, js_string!("createElement"), 1)
         .build();
 
     let _ = context.register_global_property(js_string!("document"), document, Attribute::all());
 }
 
 fn first_arg_as_string(args: &[JsValue], context: &mut Context) -> JsResult<String> {
-    let arg = args.first().cloned().unwrap_or_default();
+    nth_arg_as_string(args, 0, context)
+}
+
+fn nth_arg_as_string(args: &[JsValue], n: usize, context: &mut Context) -> JsResult<String> {
+    let arg = args.get(n).cloned().unwrap_or_default();
     Ok(arg.to_string(context)?.to_std_string_escaped())
 }
 
-// Eagerly materialises a JS Element wrapper around the DOM node identified
-// by `node_id`. All exposed properties (tagName, textContent, children,
-// getAttribute) are captured by value at construction — Step 5.0 is
-// read-only and the parsed Document can't change beneath the runtime, so a
-// one-shot snapshot is correct and dodges the lifetime gymnastics of
-// carrying a borrow across native calls.
-fn make_element(node_id: NodeId, document: &Document, context: &mut Context) -> JsObject {
-    // The walker that produced `node_id` only emits valid handles, so `expect`
-    // surfaces regressions immediately rather than silently returning a stub.
-    let node = document
-        .get(node_id)
-        .expect("element factory called with stale NodeId");
-    let element = match &node.node_type {
-        NodeType::Element(e) => e,
-        NodeType::Text(_) => unreachable!("element factory called with text-node id"),
+// Recovers a NodeId from any Element wrapper by reading the hidden `_nodeId`
+// data property the wrapper factory stored. Returns Err for non-Element
+// arguments (foreign objects, primitives) — that's the TypeError the DOM
+// methods report.
+fn read_node_id(arg: &JsValue, context: &mut Context) -> JsResult<NodeId> {
+    let object = arg.as_object().ok_or_else(|| {
+        JsNativeError::typ().with_message("expected an Element-like argument")
+    })?;
+    let raw = object
+        .get(js_string!(NODE_ID_PROP), context)?
+        .to_u32(context)?;
+    Ok(NodeId::from_raw(raw))
+}
+
+// Builds an Element wrapper that resolves every observable property against
+// the shared Document on each access. Multiple wrappers may exist for the
+// same NodeId (e.g. one returned from getElementById, another later from
+// `.children[0]`) — they're equivalent because all reads/writes funnel
+// through the same `Rc<RefCell<Document>>`.
+//
+// `tagName` is the only static property: the DOM treats it as readonly, so a
+// one-time uppercase snapshot is correct and saves a borrow per access.
+// Everything else (textContent, children, getAttribute/setAttribute,
+// appendChild/removeChild) is dynamic so post-mutation reads observe the
+// new tree.
+fn make_element(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Context) -> JsObject {
+    let tag = {
+        let document = dom.borrow();
+        let element = document
+            .element_data(node_id)
+            .expect("element factory called with non-Element NodeId");
+        element.tag_name.to_ascii_uppercase()
     };
 
-    // DOM `tagName` is canonically uppercase for HTML elements; our parser
-    // stores lowercase tag names, so normalise at the JS boundary.
-    let tag = element.tag_name.to_ascii_uppercase();
-    let attrs = element.attributes.clone();
-    let text_content = collect_text_content(document, node_id);
-
-    // `.children` mirrors HTMLCollection: only Element children, indexed by
-    // position among elements (Text nodes filtered out). Each child carries
-    // its own captured attribute map.
-    let children = JsArray::new(context);
-    for child_id in &node.children {
-        if matches!(
-            document.get(*child_id).map(|n| &n.node_type),
-            Some(NodeType::Element(_))
-        ) {
-            let child_obj = make_element(*child_id, document, context);
-            // push() can only fail on length overflow — irrelevant for trees.
-            let _ = children.push(JsValue::from(child_obj), context);
-        }
+    let dom_g = dom.clone();
+    let text_get = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let document = dom_g.borrow();
+            // Stale handle (the slot was tombstoned): degrade to null per the
+            // Step 5.1.4 silent-degrade policy. Throwing is reserved for a
+            // later commit.
+            if document.get(node_id).is_none() {
+                return Ok(JsValue::null());
+            }
+            let text = collect_text_content(&document, node_id);
+            Ok(JsValue::from(JsString::from(text.as_str())))
+        })
     }
+    .to_js_function(context.realm());
 
+    let dom_s = dom.clone();
+    let text_set = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let new_text = first_arg_as_string(args, ctx)?;
+            // Document::replace_with_text is a no-op on stale ids; mutation
+            // setters silently degrade rather than throw.
+            dom_s.borrow_mut().replace_with_text(node_id, new_text);
+            Ok(JsValue::undefined())
+        })
+    }
+    .to_js_function(context.realm());
+
+    let dom_c = dom.clone();
+    let children_get = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            // Snapshot the current Element children into a Vec<NodeId> while
+            // holding the borrow, then drop it before recursing into
+            // make_element — make_element re-borrows to read tag names, so
+            // overlapping borrows would panic. Text-only children are
+            // filtered out so .children mirrors HTMLCollection (Element
+            // kids only) rather than .childNodes.
+            let kids: Vec<NodeId> = {
+                let document = dom_c.borrow();
+                match document.get(node_id) {
+                    Some(node) => node
+                        .children
+                        .iter()
+                        .copied()
+                        .filter(|cid| {
+                            matches!(
+                                document.get(*cid).map(|n| &n.node_type),
+                                Some(NodeType::Element(_))
+                            )
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                }
+            };
+            let array = JsArray::new(ctx);
+            for child_id in kids {
+                let child_obj = make_element(child_id, dom_c.clone(), ctx);
+                let _ = array.push(JsValue::from(child_obj), ctx);
+            }
+            Ok(JsValue::from(array))
+        })
+    }
+    .to_js_function(context.realm());
+
+    let dom_ga = dom.clone();
     let get_attribute = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let name = first_arg_as_string(args, ctx)?;
-            match attrs.get(&name) {
-                Some(value) => Ok(JsValue::from(JsString::from(value.as_str()))),
+            let document = dom_ga.borrow();
+            match document.element_data(node_id) {
+                Some(elem) => match elem.attributes.get(&name) {
+                    Some(value) => Ok(JsValue::from(JsString::from(value.as_str()))),
+                    None => Ok(JsValue::null()),
+                },
                 None => Ok(JsValue::null()),
             }
         })
     };
 
+    let dom_sa = dom.clone();
+    let set_attribute = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let name = first_arg_as_string(args, ctx)?;
+            let value = nth_arg_as_string(args, 1, ctx)?;
+            let mut document = dom_sa.borrow_mut();
+            if let Some(elem) = document.element_data_mut(node_id) {
+                elem.attributes.insert(name, value);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let dom_ac = dom.clone();
+    let append_child = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let arg = args.first().cloned().unwrap_or_default();
+            let other_id = read_node_id(&arg, ctx)?;
+            {
+                let mut document = dom_ac.borrow_mut();
+                // Both ids must point at live slots; otherwise silently no-op.
+                // The wrapper-as-arg path and the createElement-then-append
+                // path both flow through here.
+                if document.get(node_id).is_none() || document.get(other_id).is_none() {
+                    return Ok(JsValue::null());
+                }
+                // A node can only live in one parent at a time — unhook it
+                // first so we don't end up with the same NodeId in two
+                // children lists.
+                document.detach(other_id);
+                document.append_child(node_id, other_id);
+            }
+            Ok(arg)
+        })
+    };
+
+    let dom_rc = dom.clone();
+    let remove_child = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let arg = args.first().cloned().unwrap_or_default();
+            let other_id = read_node_id(&arg, ctx)?;
+            let removed = {
+                let mut document = dom_rc.borrow_mut();
+                if document.remove_child(node_id, other_id) {
+                    // Per the standard, removed nodes stay alive (the caller
+                    // can re-insert). For the toy bridge we tombstone the
+                    // subtree so stale handles cleanly resolve to null via
+                    // the existing None-on-stale policy. A future commit
+                    // can park the node in a "free" pool if reattachment
+                    // turns out to matter.
+                    document.tombstone_subtree(other_id);
+                    true
+                } else {
+                    false
+                }
+            };
+            if removed { Ok(arg) } else { Ok(JsValue::null()) }
+        })
+    };
+
     ObjectInitializer::new(context)
+        .property(
+            js_string!(NODE_ID_PROP),
+            JsValue::from(node_id.raw()),
+            Attribute::all(),
+        )
         .property(
             js_string!("tagName"),
             JsString::from(tag.as_str()),
             Attribute::all(),
         )
-        .property(
+        .accessor(
             js_string!("textContent"),
-            JsString::from(text_content.as_str()),
-            Attribute::all(),
+            Some(text_get),
+            Some(text_set),
+            Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
         )
-        .property(js_string!("children"), children, Attribute::all())
+        .accessor(
+            js_string!("children"),
+            Some(children_get),
+            None,
+            Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
+        )
         .function(get_attribute, js_string!("getAttribute"), 1)
+        .function(set_attribute, js_string!("setAttribute"), 2)
+        .function(append_child, js_string!("appendChild"), 1)
+        .function(remove_child, js_string!("removeChild"), 1)
         .build()
 }
 
@@ -386,28 +566,27 @@ mod tests {
     use crate::html;
 
     fn runtime_with(html: &str) -> JsRuntime {
-        let mut runtime = JsRuntime::new();
-        let nodes = html::parse(html).unwrap();
-        runtime.bind_document(&nodes);
-        runtime
+        let document = html::parse(html).unwrap();
+        let dom = Rc::new(RefCell::new(document));
+        JsRuntime::new(dom)
     }
 
     #[test]
     fn evaluates_arithmetic() {
-        let mut runtime = JsRuntime::new();
+        let mut runtime = runtime_with("");
         assert_eq!(runtime.execute("1 + 2 * 3").unwrap(), "7");
     }
 
     #[test]
     fn preserves_global_state_between_calls() {
-        let mut runtime = JsRuntime::new();
+        let mut runtime = runtime_with("");
         runtime.execute("var page = 41;").unwrap();
         assert_eq!(runtime.execute("page + 1").unwrap(), "42");
     }
 
     #[test]
     fn surfaces_runtime_errors() {
-        let mut runtime = JsRuntime::new();
+        let mut runtime = runtime_with("");
         let err = runtime.execute("missing.prop").unwrap_err();
         assert!(
             err.to_lowercase().contains("missing"),
@@ -417,7 +596,7 @@ mod tests {
 
     #[test]
     fn evaluates_string_concatenation() {
-        let mut runtime = JsRuntime::new();
+        let mut runtime = runtime_with("");
         assert_eq!(
             runtime.execute("'hello, ' + 'world'").unwrap(),
             "\"hello, world\""
@@ -426,7 +605,7 @@ mod tests {
 
     #[test]
     fn console_object_is_registered_with_log_warn_error() {
-        let mut runtime = JsRuntime::new();
+        let mut runtime = runtime_with("");
         assert_eq!(runtime.execute("typeof console").unwrap(), "\"object\"");
         assert_eq!(runtime.execute("typeof console.log").unwrap(), "\"function\"");
         assert_eq!(runtime.execute("typeof console.warn").unwrap(), "\"function\"");
@@ -435,7 +614,7 @@ mod tests {
 
     #[test]
     fn console_log_returns_undefined_and_does_not_throw() {
-        let mut runtime = JsRuntime::new();
+        let mut runtime = runtime_with("");
         // Multiple args + mixed types — exercises the ToString coercion path
         // and confirms the binding accepts variadic invocation.
         assert_eq!(
@@ -454,6 +633,10 @@ mod tests {
         );
         assert_eq!(
             runtime.execute("typeof document.querySelector").unwrap(),
+            "\"function\""
+        );
+        assert_eq!(
+            runtime.execute("typeof document.createElement").unwrap(),
             "\"function\""
         );
     }
@@ -610,9 +793,13 @@ mod tests {
     }
 
     #[test]
-    fn re_binding_document_replaces_dom_for_subsequent_calls() {
-        // The closure captures an Rc<RefCell<…>>, not a Vec snapshot — so a
-        // later bind_document must redirect the next getElementById call.
+    fn swapping_dom_under_runtime_redirects_subsequent_lookups() {
+        // The closures capture an Rc<RefCell<…>>, not a Document snapshot —
+        // so replacing the inner Document under the runtime must redirect
+        // the next getElementById call. This is the contract BrowserState
+        // relies on for navigation: a fresh JsRuntime is built per page,
+        // but the test exercises the in-place swap path that the production
+        // arena now also uses for read-only DOM updates.
         let mut runtime = runtime_with(r#"<p id="a">first</p>"#);
         assert_eq!(
             runtime
@@ -621,7 +808,7 @@ mod tests {
             "\"first\""
         );
         let next = html::parse(r#"<p id="b">second</p>"#).unwrap();
-        runtime.bind_document(&next);
+        *runtime.dom_handle().borrow_mut() = next;
         assert_eq!(
             runtime.execute("document.getElementById('a')").unwrap(),
             "null"
@@ -631,6 +818,113 @@ mod tests {
                 .execute("document.getElementById('b').textContent")
                 .unwrap(),
             "\"second\""
+        );
+    }
+
+    // ---- Step 5.1 mutation API ----
+
+    #[test]
+    fn text_content_setter_replaces_descendants_with_text() {
+        let mut runtime = runtime_with(r#"<div id="host"><span>old</span><b>more</b></div>"#);
+        runtime
+            .execute("document.getElementById('host').textContent = 'fresh';")
+            .unwrap();
+        // Subsequent reads observe the new text; the old element children
+        // are gone (children list now empty since the only child is text).
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('host').textContent")
+                .unwrap(),
+            "\"fresh\""
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('host').children.length")
+                .unwrap(),
+            "0"
+        );
+    }
+
+    #[test]
+    fn set_attribute_round_trips_through_get_attribute() {
+        let mut runtime = runtime_with(r#"<a id="link">x</a>"#);
+        runtime
+            .execute("document.getElementById('link').setAttribute('href', '/about');")
+            .unwrap();
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('link').getAttribute('href')")
+                .unwrap(),
+            "\"/about\""
+        );
+    }
+
+    #[test]
+    fn append_child_attaches_freshly_created_element_into_parent() {
+        let mut runtime = runtime_with(r#"<div id="host"></div>"#);
+        runtime
+            .execute(
+                "var host = document.getElementById('host');\
+                 var p = document.createElement('p');\
+                 p.textContent = 'inserted';\
+                 host.appendChild(p);",
+            )
+            .unwrap();
+        assert_eq!(runtime.execute("host.children.length").unwrap(), "1");
+        assert_eq!(
+            runtime.execute("host.children[0].tagName").unwrap(),
+            "\"P\""
+        );
+        assert_eq!(
+            runtime.execute("host.children[0].textContent").unwrap(),
+            "\"inserted\""
+        );
+    }
+
+    #[test]
+    fn append_child_reparents_existing_node_rather_than_duplicating() {
+        let mut runtime = runtime_with(
+            r#"<div id="src"><span id="movable">m</span></div><div id="dst"></div>"#,
+        );
+        runtime
+            .execute(
+                "var src = document.getElementById('src');\
+                 var dst = document.getElementById('dst');\
+                 var m = document.getElementById('movable');\
+                 dst.appendChild(m);",
+            )
+            .unwrap();
+        // The node moved — src is empty and dst owns it now.
+        assert_eq!(runtime.execute("src.children.length").unwrap(), "0");
+        assert_eq!(runtime.execute("dst.children.length").unwrap(), "1");
+        assert_eq!(
+            runtime
+                .execute("dst.children[0].getAttribute('id')")
+                .unwrap(),
+            "\"movable\""
+        );
+    }
+
+    #[test]
+    fn remove_child_unhooks_node_and_invalidates_its_handle() {
+        let mut runtime = runtime_with(r#"<ul id="list"><li id="kid">a</li></ul>"#);
+        runtime
+            .execute(
+                "var list = document.getElementById('list');\
+                 var kid = document.getElementById('kid');\
+                 list.removeChild(kid);",
+            )
+            .unwrap();
+        // Parent observes the removal.
+        assert_eq!(runtime.execute("list.children.length").unwrap(), "0");
+        // Stale handle: textContent on the removed wrapper degrades to null
+        // per the Step 5.1.4 silent-degrade policy.
+        assert_eq!(runtime.execute("kid.textContent").unwrap(), "null");
+        // Re-querying the document confirms the node is gone, not just
+        // unhooked from `list`.
+        assert_eq!(
+            runtime.execute("document.getElementById('kid')").unwrap(),
+            "null"
         );
     }
 }

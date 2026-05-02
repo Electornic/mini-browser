@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env};
+use std::{cell::RefCell, collections::HashMap, env, rc::Rc};
 
 use mini_browser::{
     css, dom,
@@ -54,7 +54,13 @@ struct BrowserState {
     // `install_document`. Caching the parsed trees here keeps the per-frame
     // pipeline from re-parsing the same HTML/CSS at 60 fps — both parses are
     // O(input size) and dominate the frame budget on non-trivial pages.
-    parsed_document: dom::Document,
+    //
+    // The Document lives behind `Rc<RefCell<…>>` because `JsRuntime` shares
+    // the same arena: JS-side mutations (createElement, appendChild, …) flow
+    // through the shared handle and the next frame's style/layout pass picks
+    // up the new tree without a re-parse. BrowserState owns the canonical Rc
+    // and the runtime gets a clone in `install_document`.
+    parsed_document: Rc<RefCell<dom::Document>>,
     parsed_stylesheet: css::Stylesheet,
     images: HashMap<String, resource::LoadedImage>,
     font_data: Vec<Vec<u8>>,
@@ -160,8 +166,13 @@ impl BrowserState {
         current_url: Option<net::Url>,
         status_text: impl Into<String>,
     ) -> Self {
-        let parsed_document = html::parse(&document_html).unwrap_or_default();
+        let parsed_document = Rc::new(RefCell::new(
+            html::parse(&document_html).unwrap_or_default(),
+        ));
         let parsed_stylesheet = css::parse(&stylesheet).unwrap_or_default();
+        // The runtime shares the document handle so JS-side mutations land
+        // in the same arena BrowserState reads for layout.
+        let js = js::JsRuntime::new(parsed_document.clone());
         let mut state = Self {
             address_input,
             address_bar_focused: true,
@@ -181,7 +192,7 @@ impl BrowserState {
             forward_stack: Vec::new(),
             hovered_dom_path: None,
             focused_dom_path: None,
-            js: js::JsRuntime::new(),
+            js,
             external_scripts,
         };
         // The first page seen on construction also runs its scripts so the
@@ -203,7 +214,12 @@ impl BrowserState {
         stylesheet: String,
         external_scripts: HashMap<String, String>,
     ) {
-        self.parsed_document = html::parse(&document_html).unwrap_or_default();
+        // Replace the Document in place rather than swapping the Rc itself —
+        // any external clones (currently just the now-stale JsRuntime's) get
+        // dropped right after, but keeping the Rc identity stable means tests
+        // and any future caller that holds on to the handle observe the new
+        // tree without re-fetching the Rc.
+        *self.parsed_document.borrow_mut() = html::parse(&document_html).unwrap_or_default();
         self.parsed_stylesheet = css::parse(&stylesheet).unwrap_or_default();
         self.document_html = document_html;
         self.stylesheet = stylesheet;
@@ -211,7 +227,9 @@ impl BrowserState {
         // Each navigated document starts with a fresh JS runtime — globals from
         // the previous page should not leak into the new one. Back/forward also
         // route through here, so the same reset rule applies on history moves.
-        self.js = js::JsRuntime::new();
+        // The new runtime takes a clone of the same Rc so JS mutations during
+        // run_scripts land in the document we're about to render.
+        self.js = js::JsRuntime::new(self.parsed_document.clone());
         self.run_scripts();
     }
 
@@ -222,18 +240,15 @@ impl BrowserState {
     // (network failure, missing entry) are silently dropped — same degradation
     // pattern as broken stylesheets / images.
     fn run_scripts(&mut self) {
-        // Snapshot the parsed DOM into the runtime first so that scripts
-        // observing `document.getElementById` etc. see the document they were
-        // shipped with, not whatever ran the previous load.
-        self.js.bind_document(&self.parsed_document);
+        // Collect script bodies under a short-lived borrow so JS execution
+        // (which may take a borrow_mut via the shared Document handle to
+        // mutate the DOM) doesn't overlap with our read.
         let mut sources = Vec::new();
-        for &root in self.parsed_document.roots() {
-            collect_script_sources(
-                &self.parsed_document,
-                root,
-                &self.external_scripts,
-                &mut sources,
-            );
+        {
+            let document = self.parsed_document.borrow();
+            for &root in document.roots() {
+                collect_script_sources(&document, root, &self.external_scripts, &mut sources);
+            }
         }
         for source in sources {
             if let Err(err) = self.js.execute(&source) {
@@ -265,15 +280,22 @@ impl BrowserState {
                 None
             },
         };
-        let document_view = build_document_view(
-            &self.parsed_document,
-            &self.parsed_stylesheet,
-            viewport_width,
-            self.current_url.as_ref(),
-            &self.images,
-            interaction,
-        )
-        .unwrap_or_else(|build_error| {
+        // Borrow the shared Document just long enough to build the layout —
+        // dropping the Ref before unwrap_or_else lets the error path call
+        // back into &mut self (set_status). No JS executes during display_list
+        // so we don't have to worry about an interleaved borrow_mut here.
+        let layout_result = {
+            let document = self.parsed_document.borrow();
+            build_document_view(
+                &document,
+                &self.parsed_stylesheet,
+                viewport_width,
+                self.current_url.as_ref(),
+                &self.images,
+                interaction,
+            )
+        };
+        let document_view = layout_result.unwrap_or_else(|build_error| {
             eprintln!("{build_error}");
             self.set_status(
                 "render failed",
@@ -2699,5 +2721,49 @@ mod tests {
             externals,
         );
         assert_eq!(browser.js.execute("seq").unwrap(), "\"abc\"");
+    }
+
+    #[test]
+    fn inline_script_text_content_mutation_persists_in_browser_dom() {
+        // Step 5.1 contract: BrowserState's `parsed_document` Rc and the
+        // JsRuntime's Rc point at the same arena. A script that mutates the
+        // DOM at install time must therefore be observable by BrowserState
+        // post-construction — that's what feeds the next frame's layout.
+        let browser = browser_with_html(
+            r#"<div id="host"><div id="x"></div><script>document.getElementById('x').textContent='hi';</script></div>"#,
+        );
+        let document = browser.parsed_document.borrow();
+        let host = document.roots()[0];
+        let host_kids = &document.get(host).unwrap().children;
+        // host has [div#x, script]; div#x is the first child after parsing.
+        let target = host_kids[0];
+        let target_kids = &document.get(target).unwrap().children;
+        assert_eq!(target_kids.len(), 1);
+        assert_eq!(document.text(target_kids[0]), Some("hi"));
+    }
+
+    #[test]
+    fn inline_script_append_child_persists_in_browser_dom() {
+        // Same arena-sharing contract, exercised through createElement +
+        // appendChild + textContent setter chained together — a regression
+        // here means the mutation API isn't really mutating BrowserState's
+        // arena, even if it round-trips through the JS bridge alone.
+        let browser = browser_with_html(
+            r#"<ul id="list"></ul><script>
+                 var list = document.getElementById('list');
+                 var li = document.createElement('li');
+                 li.textContent = 'one';
+                 list.appendChild(li);
+               </script>"#,
+        );
+        let document = browser.parsed_document.borrow();
+        // <ul> is the first root; after the script, it should have exactly
+        // one <li> child with text "one".
+        let ul = document.roots()[0];
+        let kids = &document.get(ul).unwrap().children;
+        assert_eq!(kids.len(), 1);
+        let li_kids = &document.get(kids[0]).unwrap().children;
+        assert_eq!(li_kids.len(), 1);
+        assert_eq!(document.text(li_kids[0]), Some("one"));
     }
 }
