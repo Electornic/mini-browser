@@ -9,6 +9,7 @@
 // scopes.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use boa_engine::{
@@ -30,18 +31,27 @@ use crate::{
 // re-validate the recovered id against the live arena before acting on it.
 const NODE_ID_PROP: &str = "_nodeId";
 
+// Per-node event listener registry. Keyed by `(NodeId, event_type_name)`,
+// each entry holds the callable JS objects passed to `addEventListener` in
+// insertion order. Listeners live on `JsRuntime` rather than on individual
+// Element wrappers because multiple wrappers may exist for the same NodeId
+// (children getter, repeated `getElementById`, …) and they all need to
+// observe the same listener set. We store the original `JsObject` (not a
+// converted `JsFunction`) so identity comparisons via `JsObject::equals`
+// line up with the wrappers JS code passes back to `removeEventListener`.
+type ListenerMap = HashMap<(NodeId, String), Vec<JsObject>>;
+
 pub struct JsRuntime {
     context: Context,
-    // Shared handle to the parsed Document. BrowserState constructs the Rc
-    // and hands a clone to the runtime; that clone is then handed to every
-    // native closure registered on `document` and on each Element wrapper,
-    // so each closure observes the same up-to-date tree without ever
-    // re-reading the field on the struct. The field is therefore live only
-    // through the closures (and through `dom_handle` in tests) — `dead_code`
-    // is silenced to make that intent explicit rather than have us drop the
-    // canonical handle and reach into the Context for it later.
-    #[allow(dead_code)]
+    // Shared handle to the parsed Document. The runtime hands clones to
+    // every native closure (so each closure observes the live tree without
+    // re-reading the field) and reads the field directly when synthesising
+    // bubble paths in `dispatch_event`.
     dom: Rc<RefCell<Document>>,
+    // Per-node event listener registry. Cloned into every Element wrapper's
+    // addEventListener / removeEventListener closure and read directly from
+    // `dispatch_event` when invoking handlers.
+    listeners: Rc<RefCell<ListenerMap>>,
 }
 
 impl JsRuntime {
@@ -53,9 +63,14 @@ impl JsRuntime {
     /// needs to switch Documents mid-life: a navigation rebuilds JsRuntime.
     pub fn new(dom: Rc<RefCell<Document>>) -> Self {
         let mut context = Context::default();
+        let listeners: Rc<RefCell<ListenerMap>> = Rc::new(RefCell::new(HashMap::new()));
         register_console(&mut context);
-        register_document(&mut context, dom.clone());
-        Self { context, dom }
+        register_document(&mut context, dom.clone(), listeners.clone());
+        Self {
+            context,
+            dom,
+            listeners,
+        }
     }
 
     /// Returns a clone of the shared DOM handle. Mainly useful in tests where
@@ -74,6 +89,103 @@ impl JsRuntime {
             .eval(Source::from_bytes(source))
             .map(|value| value.display().to_string())
             .map_err(|err| err.to_string())
+    }
+
+    /// Synthesise a DOM event of the given type at `target` and bubble it
+    /// up through the parent chain, invoking every registered listener
+    /// along the way. The main loop calls this on left-mouse clicks
+    /// (`event_type = "click"`) — Step 6's surface for getting page-level
+    /// pointer input back into JS land.
+    ///
+    /// If `target` lands on a Text node — which is what the hit-tester
+    /// returns when the click hits inline text — dispatch retargets to the
+    /// nearest Element ancestor. Text wrappers don't expose
+    /// `addEventListener`, and almost every author-side click handler
+    /// expects `event.target` to be the Element it lives on.
+    pub fn dispatch_event(&mut self, target: NodeId, event_type: &str) {
+        let event_target = {
+            let dom = self.dom.borrow();
+            let mut cur = Some(target);
+            loop {
+                match cur {
+                    Some(id) => match dom.get(id) {
+                        Some(node) => match &node.node_type {
+                            NodeType::Element(_) => break Some(id),
+                            NodeType::Text(_) => cur = node.parent,
+                        },
+                        None => break None,
+                    },
+                    None => break None,
+                }
+            }
+        };
+        let Some(event_target) = event_target else {
+            return;
+        };
+        let chain: Vec<NodeId> = {
+            let dom = self.dom.borrow();
+            let mut chain = Vec::new();
+            let mut cur = Some(event_target);
+            while let Some(id) = cur {
+                match dom.get(id) {
+                    Some(node) => {
+                        chain.push(id);
+                        cur = node.parent;
+                    }
+                    None => break,
+                }
+            }
+            chain
+        };
+        if chain.is_empty() {
+            return;
+        }
+        let event = build_event_object(
+            event_type,
+            event_target,
+            self.dom.clone(),
+            self.listeners.clone(),
+            &mut self.context,
+        );
+        let event_value = JsValue::from(event);
+        let key_type = event_type.to_string();
+        for current_target in chain {
+            // Snapshot the listener list so a handler that calls
+            // `removeEventListener` on itself mid-iteration doesn't shorten
+            // the slice we're walking.
+            let snapshot: Vec<JsObject> = self
+                .listeners
+                .borrow()
+                .get(&(current_target, key_type.clone()))
+                .cloned()
+                .unwrap_or_default();
+            if snapshot.is_empty() {
+                continue;
+            }
+            // A previous handler may have removed `current_target` from the
+            // tree; skip dispatch on tombstoned ancestors so make_element's
+            // "Element NodeId" expect doesn't fire.
+            let still_alive = matches!(
+                self.dom.borrow().get(current_target).map(|n| &n.node_type),
+                Some(NodeType::Element(_))
+            );
+            if !still_alive {
+                continue;
+            }
+            let this = JsValue::from(make_element(
+                current_target,
+                self.dom.clone(),
+                self.listeners.clone(),
+                &mut self.context,
+            ));
+            for handler in snapshot {
+                if let Err(err) =
+                    handler.call(&this, std::slice::from_ref(&event_value), &mut self.context)
+                {
+                    eprintln!("[event] {event_type} handler error: {err}");
+                }
+            }
+        }
     }
 }
 
@@ -145,8 +257,13 @@ fn write_console(level: &str, args: &[JsValue], context: &mut Context) {
 // returns. The closures use `unsafe from_closure` because our captures
 // (Rc<RefCell<Document>>) are pure host data — no JS values hide inside, so
 // Boa's GC has nothing to trace through them.
-fn register_document(context: &mut Context, dom: Rc<RefCell<Document>>) {
+fn register_document(
+    context: &mut Context,
+    dom: Rc<RefCell<Document>>,
+    listeners: Rc<RefCell<ListenerMap>>,
+) {
     let dom_for_id = dom.clone();
+    let listeners_for_id = listeners.clone();
     let get_element_by_id = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let id = first_arg_as_string(args, ctx)?;
@@ -157,13 +274,19 @@ fn register_document(context: &mut Context, dom: Rc<RefCell<Document>>) {
                 find_by_id(&document, &id)
             };
             match node_id {
-                Some(node_id) => Ok(JsValue::from(make_element(node_id, dom_for_id.clone(), ctx))),
+                Some(node_id) => Ok(JsValue::from(make_element(
+                    node_id,
+                    dom_for_id.clone(),
+                    listeners_for_id.clone(),
+                    ctx,
+                ))),
                 None => Ok(JsValue::null()),
             }
         })
     };
 
     let dom_for_qs = dom.clone();
+    let listeners_for_qs = listeners.clone();
     let query_selector = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let selector_text = first_arg_as_string(args, ctx)?;
@@ -183,13 +306,19 @@ fn register_document(context: &mut Context, dom: Rc<RefCell<Document>>) {
                 find_first_match(&document, &selector)
             };
             match node_id {
-                Some(node_id) => Ok(JsValue::from(make_element(node_id, dom_for_qs.clone(), ctx))),
+                Some(node_id) => Ok(JsValue::from(make_element(
+                    node_id,
+                    dom_for_qs.clone(),
+                    listeners_for_qs.clone(),
+                    ctx,
+                ))),
                 None => Ok(JsValue::null()),
             }
         })
     };
 
     let dom_for_create = dom.clone();
+    let listeners_for_create = listeners.clone();
     let create_element = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let tag = first_arg_as_string(args, ctx)?;
@@ -203,6 +332,7 @@ fn register_document(context: &mut Context, dom: Rc<RefCell<Document>>) {
             Ok(JsValue::from(make_element(
                 new_id,
                 dom_for_create.clone(),
+                listeners_for_create.clone(),
                 ctx,
             )))
         })
@@ -261,7 +391,12 @@ fn read_node_id(arg: &JsValue, context: &mut Context) -> JsResult<NodeId> {
 // Everything else (textContent, children, getAttribute/setAttribute,
 // appendChild/removeChild) is dynamic so post-mutation reads observe the
 // new tree.
-fn make_element(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Context) -> JsObject {
+fn make_element(
+    node_id: NodeId,
+    dom: Rc<RefCell<Document>>,
+    listeners: Rc<RefCell<ListenerMap>>,
+    context: &mut Context,
+) -> JsObject {
     let tag = {
         let document = dom.borrow();
         let element = document
@@ -306,6 +441,7 @@ fn make_element(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Conte
     .to_js_function(context.realm());
 
     let dom_c = dom.clone();
+    let listeners_c = listeners.clone();
     let children_get = unsafe {
         NativeFunction::from_closure(move |_this, _args, ctx| {
             // Snapshot the current Element children into a Vec<NodeId> while
@@ -333,7 +469,7 @@ fn make_element(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Conte
             };
             let array = JsArray::new(ctx);
             for child_id in kids {
-                let child_obj = make_element(child_id, dom_c.clone(), ctx);
+                let child_obj = make_element(child_id, dom_c.clone(), listeners_c.clone(), ctx);
                 let _ = array.push(JsValue::from(child_obj), ctx);
             }
             Ok(JsValue::from(array))
@@ -485,6 +621,7 @@ fn make_element(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Conte
     };
 
     let dom_cl = dom.clone();
+    let listeners_cl = listeners.clone();
     let clone_node = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let deep = args.first().is_some_and(|v| v.to_boolean());
@@ -493,11 +630,65 @@ fn make_element(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Conte
                 document.clone_node(node_id, deep)
             };
             match new_id {
-                Some(id) => Ok(make_node(id, dom_cl.clone(), ctx)
-                    .map(JsValue::from)
-                    .unwrap_or(JsValue::null())),
+                Some(id) => Ok(
+                    make_node(id, dom_cl.clone(), listeners_cl.clone(), ctx)
+                        .map(JsValue::from)
+                        .unwrap_or(JsValue::null()),
+                ),
                 None => Err(stale_node_error()),
             }
+        })
+    };
+
+    let dom_ael = dom.clone();
+    let listeners_ael = listeners.clone();
+    let add_event_listener = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event_type = first_arg_as_string(args, ctx)?;
+            let handler_obj = args
+                .get(1)
+                .and_then(|arg| arg.as_object())
+                .filter(|obj| obj.is_callable())
+                .ok_or_else(|| {
+                    JsNativeError::typ()
+                        .with_message("addEventListener: handler must be a function")
+                })?;
+            // Stale receiver: writing through a removed wrapper is the same
+            // bug class as the other mutation entry points, so throw rather
+            // than silently pile up listeners on a tombstoned node.
+            if dom_ael.borrow().get(node_id).is_none() {
+                return Err(stale_node_error());
+            }
+            let mut map = listeners_ael.borrow_mut();
+            let entry = map.entry((node_id, event_type)).or_default();
+            // Whatwg dedup: same `(target, type, callback)` tuple registered
+            // twice is treated as one listener. Identity-compare the
+            // underlying JsObject so two distinct `function () {}` literals
+            // (different objects, identical bodies) still count as two.
+            if !entry
+                .iter()
+                .any(|existing| JsObject::equals(existing, &handler_obj))
+            {
+                entry.push(handler_obj);
+            }
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let listeners_rel = listeners.clone();
+    let remove_event_listener = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let event_type = first_arg_as_string(args, ctx)?;
+            // A non-callable / missing second arg is a no-op per spec —
+            // there's nothing to match in the registry.
+            let Some(handler_obj) = args.get(1).and_then(|arg| arg.as_object()) else {
+                return Ok(JsValue::undefined());
+            };
+            let mut map = listeners_rel.borrow_mut();
+            if let Some(entry) = map.get_mut(&(node_id, event_type)) {
+                entry.retain(|existing| !JsObject::equals(existing, &handler_obj));
+            }
+            Ok(JsValue::undefined())
         })
     };
 
@@ -536,6 +727,8 @@ fn make_element(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Conte
         .function(insert_before, js_string!("insertBefore"), 2)
         .function(replace_child, js_string!("replaceChild"), 2)
         .function(clone_node, js_string!("cloneNode"), 1)
+        .function(add_event_listener, js_string!("addEventListener"), 2)
+        .function(remove_event_listener, js_string!("removeEventListener"), 2)
         .build()
 }
 
@@ -606,6 +799,7 @@ fn make_text(node_id: NodeId, dom: Rc<RefCell<Document>>, context: &mut Context)
 fn make_node(
     node_id: NodeId,
     dom: Rc<RefCell<Document>>,
+    listeners: Rc<RefCell<ListenerMap>>,
     context: &mut Context,
 ) -> Option<JsObject> {
     let is_element = {
@@ -615,10 +809,38 @@ fn make_node(
             .map(|n| matches!(n.node_type, NodeType::Element(_)))
     };
     match is_element {
-        Some(true) => Some(make_element(node_id, dom, context)),
+        Some(true) => Some(make_element(node_id, dom, listeners, context)),
         Some(false) => Some(make_text(node_id, dom, context)),
         None => None,
     }
+}
+
+// Minimal Event object passed to every dispatched listener. Carries the
+// event type string and a wrapper for the original target Element. Future
+// commits will round it out with `currentTarget`, `preventDefault`, and
+// `stopPropagation` — the toy bridge skips them since clicks always
+// bubble fully through and the only side-effect a handler can suppress
+// today is link navigation, which Step 6 explicitly leaves running.
+fn build_event_object(
+    event_type: &str,
+    target: NodeId,
+    dom: Rc<RefCell<Document>>,
+    listeners: Rc<RefCell<ListenerMap>>,
+    context: &mut Context,
+) -> JsObject {
+    let target_wrapper = make_element(target, dom, listeners, context);
+    ObjectInitializer::new(context)
+        .property(
+            js_string!("type"),
+            JsString::from(event_type),
+            Attribute::all(),
+        )
+        .property(
+            js_string!("target"),
+            JsValue::from(target_wrapper),
+            Attribute::all(),
+        )
+        .build()
 }
 
 // Standard error returned by every mutation entry point when the receiver
@@ -1367,5 +1589,196 @@ mod tests {
             runtime.execute("document.getElementById('kid')").unwrap(),
             "null"
         );
+    }
+
+    // ---- Step 6 events ----
+
+    #[test]
+    fn dispatch_event_invokes_registered_listener() {
+        let mut runtime = runtime_with(r#"<div id="x">y</div>"#);
+        runtime
+            .execute(
+                "var hits = 0;\
+                 document.getElementById('x').addEventListener('click', function() { hits = hits + 1; });",
+            )
+            .unwrap();
+        let target = runtime.dom_handle().borrow().roots()[0];
+        runtime.dispatch_event(target, "click");
+        assert_eq!(runtime.execute("hits").unwrap(), "1");
+    }
+
+    #[test]
+    fn dispatch_event_bubbles_through_ancestor_listeners_in_target_first_order() {
+        let mut runtime =
+            runtime_with(r#"<div id="outer"><div id="inner">x</div></div>"#);
+        runtime
+            .execute(
+                "var trace = '';\
+                 document.getElementById('outer').addEventListener('click', function() { trace += 'outer:'; });\
+                 document.getElementById('inner').addEventListener('click', function() { trace += 'inner:'; });",
+            )
+            .unwrap();
+        let inner_id = {
+            let dom = runtime.dom_handle();
+            let dom = dom.borrow();
+            let outer = dom.roots()[0];
+            dom.get(outer).unwrap().children[0]
+        };
+        runtime.dispatch_event(inner_id, "click");
+        // Standard bubble order: target first, then each ancestor.
+        assert_eq!(runtime.execute("trace").unwrap(), "\"inner:outer:\"");
+    }
+
+    #[test]
+    fn dispatch_event_retargets_text_node_clicks_to_parent_element() {
+        // The hit-tester returns the deepest layout box, which for inline
+        // text is the text node itself. Text wrappers don't expose
+        // addEventListener, so dispatch promotes the target to the nearest
+        // Element ancestor before walking the chain.
+        let mut runtime = runtime_with(r#"<p id="host">hello</p>"#);
+        runtime
+            .execute(
+                "var ttype = ''; var ttag = '';\
+                 document.getElementById('host').addEventListener('click', function(e) {\
+                     ttype = e.type; ttag = e.target.tagName;\
+                 });",
+            )
+            .unwrap();
+        let text_id = {
+            let dom = runtime.dom_handle();
+            let dom = dom.borrow();
+            let host = dom.roots()[0];
+            dom.get(host).unwrap().children[0]
+        };
+        runtime.dispatch_event(text_id, "click");
+        assert_eq!(runtime.execute("ttype").unwrap(), "\"click\"");
+        assert_eq!(runtime.execute("ttag").unwrap(), "\"P\"");
+    }
+
+    #[test]
+    fn remove_event_listener_unsubscribes_the_callback() {
+        let mut runtime = runtime_with(r#"<div id="x">y</div>"#);
+        runtime
+            .execute(
+                "var hits = 0;\
+                 var fn = function() { hits = hits + 1; };\
+                 var x = document.getElementById('x');\
+                 x.addEventListener('click', fn);\
+                 x.removeEventListener('click', fn);",
+            )
+            .unwrap();
+        let id = runtime.dom_handle().borrow().roots()[0];
+        runtime.dispatch_event(id, "click");
+        assert_eq!(runtime.execute("hits").unwrap(), "0");
+    }
+
+    #[test]
+    fn add_event_listener_dedupes_identical_callable() {
+        // WHATWG: registering the same `(target, type, callback)` tuple
+        // twice equals one listener. Two distinct function objects with
+        // identical bodies still count as two — the dedup key is identity.
+        let mut runtime = runtime_with(r#"<div id="x">y</div>"#);
+        runtime
+            .execute(
+                "var hits = 0;\
+                 var fn = function() { hits = hits + 1; };\
+                 var x = document.getElementById('x');\
+                 x.addEventListener('click', fn);\
+                 x.addEventListener('click', fn);",
+            )
+            .unwrap();
+        let id = runtime.dom_handle().borrow().roots()[0];
+        runtime.dispatch_event(id, "click");
+        assert_eq!(runtime.execute("hits").unwrap(), "1");
+    }
+
+    #[test]
+    fn dispatch_event_continues_when_an_earlier_handler_throws() {
+        // A buggy first handler shouldn't suppress later ones registered
+        // on the same node — toy semantics surface the error to stderr but
+        // keep delivering the event.
+        let mut runtime = runtime_with(r#"<div id="x">y</div>"#);
+        runtime
+            .execute(
+                "var second = 0;\
+                 var x = document.getElementById('x');\
+                 x.addEventListener('click', function() { throw new Error('boom'); });\
+                 x.addEventListener('click', function() { second = second + 1; });",
+            )
+            .unwrap();
+        let id = runtime.dom_handle().borrow().roots()[0];
+        runtime.dispatch_event(id, "click");
+        assert_eq!(runtime.execute("second").unwrap(), "1");
+    }
+
+    #[test]
+    fn add_event_listener_throws_for_non_callable_handler() {
+        let mut runtime = runtime_with(r#"<div id="x">y</div>"#);
+        let err = runtime
+            .execute("document.getElementById('x').addEventListener('click', 42);")
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("function"), "got: {err}");
+    }
+
+    #[test]
+    fn click_handler_can_mutate_the_dom_during_dispatch() {
+        let mut runtime = runtime_with(r#"<div id="host"></div>"#);
+        runtime
+            .execute(
+                "var host = document.getElementById('host');\
+                 host.addEventListener('click', function() {\
+                     var p = document.createElement('p');\
+                     p.textContent = 'clicked';\
+                     host.appendChild(p);\
+                 });",
+            )
+            .unwrap();
+        let id = runtime.dom_handle().borrow().roots()[0];
+        runtime.dispatch_event(id, "click");
+        assert_eq!(runtime.execute("host.children.length").unwrap(), "1");
+        assert_eq!(
+            runtime.execute("host.children[0].textContent").unwrap(),
+            "\"clicked\""
+        );
+    }
+
+    #[test]
+    fn dispatch_event_skips_listeners_on_ancestors_removed_mid_bubble() {
+        // A handler can remove its own ancestor from the tree; the bubble
+        // loop must not panic on the now-tombstoned NodeId. Listener
+        // registration on `outer` here matters: dispatch only attempts to
+        // re-wrap `current_target` if there's at least one listener to
+        // call, which is exactly the case that exercised the panic before
+        // the live-element guard was added.
+        let mut runtime = runtime_with(
+            r#"<div id="grand"><div id="outer"><div id="inner">x</div></div></div>"#,
+        );
+        runtime
+            .execute(
+                "var trace = '';\
+                 document.getElementById('inner').addEventListener('click', function() {\
+                     trace += 'inner:';\
+                     document.getElementById('grand').removeChild(document.getElementById('outer'));\
+                 });\
+                 document.getElementById('outer').addEventListener('click', function() {\
+                     trace += 'outer:';\
+                 });\
+                 document.getElementById('grand').addEventListener('click', function() {\
+                     trace += 'grand:';\
+                 });",
+            )
+            .unwrap();
+        let inner_id = {
+            let dom = runtime.dom_handle();
+            let dom = dom.borrow();
+            let grand = dom.roots()[0];
+            let outer = dom.get(grand).unwrap().children[0];
+            dom.get(outer).unwrap().children[0]
+        };
+        runtime.dispatch_event(inner_id, "click");
+        // inner runs first; it removes the outer subtree (tombstoning
+        // outer + inner). The bubble walk reaches outer next but skips it
+        // (now stale). It still finds grand alive and runs its listener.
+        assert_eq!(runtime.execute("trace").unwrap(), "\"inner:grand:\"");
     }
 }

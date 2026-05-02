@@ -318,17 +318,35 @@ impl BrowserState {
             }
         });
 
+        // Compute the deepest layout-box hit once: `path` feeds the next
+        // frame's :hover/:focus styling, `node_id` feeds the click dispatch
+        // below. Doing it before `clicked_link` matters because link
+        // navigation rebuilds the JS runtime — handlers must run against
+        // the page they were registered on, not the next one.
+        let hover_hit =
+            compute_hovered_hit(input, &document_view.layout_root, self.scroll_offset);
+
+        // Page-area clicks fire JS click handlers on the live page first,
+        // then fall through to link navigation. preventDefault isn't wired
+        // up yet (Step 6 leaves it for a follow-up), so a click on an
+        // `<a>` still navigates after its handler runs.
+        if input.left_mouse_pressed
+            && input.mouse_position.is_some_and(|(_, y)| y >= CHROME_HEIGHT)
+            && let Some(node_id) = hover_hit.as_ref().and_then(|hit| hit.node_id)
+        {
+            self.js.dispatch_event(node_id, "click");
+        }
+
         // Page clicks are handled after layout exists so hit testing can use real rectangles.
         if let Some(link_target) = self.clicked_link(input, &document_view.links) {
             self.navigate_to_link(link_target);
         }
 
         self.clamp_scroll(viewport_height, document_height(&document_view.commands));
-        // Recompute the hovered DOM path from this frame's layout. The next frame's style
-        // pass will pick it up — a deliberate one-frame lag that keeps style and layout
-        // strictly forward, no double-pass per frame required.
-        self.hovered_dom_path =
-            compute_hovered_dom_path(input, &document_view.layout_root, self.scroll_offset);
+        // The next frame's style pass picks up `hovered_dom_path` — a
+        // deliberate one-frame lag that keeps style and layout strictly
+        // forward, no double-pass per frame required.
+        self.hovered_dom_path = hover_hit.map(|hit| hit.path);
 
         // A page-area click moves :focus to the just-hovered element; clicks anywhere
         // outside the page (chrome buttons, the address bar, off-window) clear it.
@@ -1523,11 +1541,36 @@ fn point_in_rect(x: f32, y: f32, rect: layout::Rect) -> bool {
     x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height
 }
 
+// The deepest layout box under the mouse. `path` is the DOM-order index
+// path used by the style pass for :hover/:focus rules; `node_id` is the
+// back-reference into the arena used by Step 6 click dispatch. `node_id`
+// is `None` only when the deepest hit is an anonymous block — none are
+// produced today, so a None there reads as "no element under the cursor".
+#[derive(Debug, Clone)]
+struct HoverHit {
+    path: Vec<usize>,
+    node_id: Option<NodeId>,
+}
+
+// Thin convenience wrapper that drops the NodeId. Used only by the
+// pre-Step-6 hover tests, which compare against the path slice; the
+// production caller (`display_list`) reaches for `compute_hovered_hit`
+// directly so it can also feed the deepest hit's NodeId into click
+// dispatch.
+#[cfg(test)]
 fn compute_hovered_dom_path(
     input: &window::WindowInput,
     layout_root: &layout::LayoutBox,
     scroll_offset: f32,
 ) -> Option<Vec<usize>> {
+    compute_hovered_hit(input, layout_root, scroll_offset).map(|hit| hit.path)
+}
+
+fn compute_hovered_hit(
+    input: &window::WindowInput,
+    layout_root: &layout::LayoutBox,
+    scroll_offset: f32,
+) -> Option<HoverHit> {
     // Hover is only meaningful when the pointer is over the page area (i.e. below the
     // chrome). Anywhere else — chrome, off-window — leaves the styled tree in its
     // "nothing hovered" state.
@@ -1537,11 +1580,12 @@ fn compute_hovered_dom_path(
     }
     let doc_y = mouse_y - CHROME_HEIGHT + scroll_offset;
 
-    // Walk the layout tree depth-first, tracking the path of child indices. Layout child
-    // positions mirror DOM child positions (no anonymous boxes are created today), so the
-    // path doubles as a DOM path. The deepest containing box wins by virtue of being
-    // visited last.
-    let mut best: Option<Vec<usize>> = None;
+    // Walk the layout tree depth-first, tracking the path of child
+    // indices alongside the StyledNode behind each box. Layout child
+    // positions mirror DOM child positions (no anonymous boxes are
+    // created today), so the path doubles as a DOM path. The deepest
+    // containing box wins by virtue of being visited last.
+    let mut best: Option<HoverHit> = None;
     let mut path: Vec<usize> = Vec::new();
     walk_for_hover(
         layout_root,
@@ -1560,7 +1604,7 @@ fn walk_for_hover(
     doc_y: f32,
     inherited_transform: render::Affine,
     path: &mut Vec<usize>,
-    best: &mut Option<Vec<usize>>,
+    best: &mut Option<HoverHit>,
 ) {
     // Compose this box's own `transform` onto the inherited matrix, then map
     // the screen-space cursor back into the box's logical coordinates so the
@@ -1570,12 +1614,24 @@ fn walk_for_hover(
     let (logical_x, logical_y) = effective_transform.inverse().apply_point(mouse_x, doc_y);
     let outer = padding_box(layout_box);
     if point_in_rect(logical_x, logical_y, outer) {
-        *best = Some(path.clone());
+        *best = Some(HoverHit {
+            path: path.clone(),
+            node_id: node_id_for_layout_box(layout_box),
+        });
     }
     for (idx, child) in layout_box.children.iter().enumerate() {
         path.push(idx);
         walk_for_hover(child, mouse_x, doc_y, effective_transform, path, best);
         path.pop();
+    }
+}
+
+fn node_id_for_layout_box(layout_box: &layout::LayoutBox) -> Option<NodeId> {
+    match &layout_box.box_type {
+        layout::BoxType::BlockNode(node)
+        | layout::BoxType::FlexNode(node)
+        | layout::BoxType::GridNode(node) => Some(node.node_id),
+        layout::BoxType::AnonymousBlock => None,
     }
 }
 
@@ -2812,5 +2868,123 @@ mod tests {
         let li_kids = &document.get(kids[0]).unwrap().children;
         assert_eq!(li_kids.len(), 1);
         assert_eq!(document.text(li_kids[0]), Some("one"));
+    }
+
+    // ---- Step 6 events: page-area click → JS dispatch_event ----
+
+    fn browser_with_html_and_css(html: &str, css: &str) -> BrowserState {
+        BrowserState::new(
+            "about:blank".into(),
+            html.into(),
+            css.into(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            None,
+            "",
+        )
+    }
+
+    #[test]
+    fn page_click_dispatches_click_event_to_target_element() {
+        // The script registers a listener at install time; the layout
+        // root is the trailing div (build_document_view picks
+        // roots().last()), so a press at (50, CHROME+10) lands on it
+        // and bubbles into the click handler.
+        let mut browser = browser_with_html_and_css(
+            r#"<script>var clicks = 0; document.getElementById('kid').addEventListener('click', function() { clicks = clicks + 1; });</script><div id="kid">x</div>"#,
+            r#"#kid { width: 200px; height: 100px; }"#,
+        );
+        assert_eq!(browser.js.execute("clicks").unwrap(), "0");
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((50.0, super::CHROME_HEIGHT + 10.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+        assert_eq!(browser.js.execute("clicks").unwrap(), "1");
+    }
+
+    #[test]
+    fn click_above_the_chrome_cutoff_does_not_fire_page_listeners() {
+        // Clicks above CHROME_HEIGHT belong to the address bar / nav
+        // buttons; the page-area dispatch must skip them so chrome
+        // interactions don't double-fire as DOM clicks underneath.
+        let mut browser = browser_with_html_and_css(
+            r#"<script>var clicks = 0; document.getElementById('kid').addEventListener('click', function() { clicks = clicks + 1; });</script><div id="kid">x</div>"#,
+            r#"#kid { width: 200px; height: 100px; }"#,
+        );
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((50.0, super::CHROME_HEIGHT - 1.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+        assert_eq!(browser.js.execute("clicks").unwrap(), "0");
+    }
+
+    #[test]
+    fn page_click_bubbles_into_ancestor_listener_via_browser_pipeline() {
+        // End-to-end: layout box for `inner` is the deepest hit, dispatch
+        // promotes the bubble up to outer. Confirms compute_hovered_hit
+        // and dispatch_event line up with each other when funnelled
+        // through display_list.
+        let mut browser = browser_with_html_and_css(
+            r#"<script>var trace = ''; document.getElementById('outer').addEventListener('click', function() { trace += 'outer:'; }); document.getElementById('inner').addEventListener('click', function() { trace += 'inner:'; });</script><div id="outer"><div id="inner">x</div></div>"#,
+            r#"#outer { width: 200px; height: 100px; } #inner { width: 100px; height: 50px; }"#,
+        );
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((10.0, super::CHROME_HEIGHT + 5.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+        assert_eq!(
+            browser.js.execute("trace").unwrap(),
+            "\"inner:outer:\""
+        );
+    }
+
+    #[test]
+    fn click_handler_dom_mutation_is_visible_to_browser_state() {
+        // Step 6 keeps the same Rc<RefCell<Document>> sharing contract
+        // Step 5.x set up: a handler that calls appendChild during dispatch
+        // mutates the same arena BrowserState reads back here.
+        let mut browser = browser_with_html_and_css(
+            r#"<script>document.getElementById('host').addEventListener('click', function() { var p = document.createElement('p'); p.textContent = 'inserted'; document.getElementById('host').appendChild(p); });</script><div id="host"></div>"#,
+            r#"#host { width: 200px; height: 100px; }"#,
+        );
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((10.0, super::CHROME_HEIGHT + 5.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+        let document = browser.parsed_document.borrow();
+        // Two roots: the leading <script> and the trailing <div id=host>.
+        // The host is the second one — the handler should have appended
+        // a single <p> child.
+        let host = *document.roots().last().unwrap();
+        let host_kids = &document.get(host).unwrap().children;
+        assert_eq!(host_kids.len(), 1);
+        let p_kids = &document.get(host_kids[0]).unwrap().children;
+        assert_eq!(p_kids.len(), 1);
+        assert_eq!(document.text(p_kids[0]), Some("inserted"));
     }
 }
