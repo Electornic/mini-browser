@@ -282,18 +282,24 @@ impl BrowserState {
             compute_hovered_hit(input, &document_view.layout_root, self.scroll_offset);
 
         // Page-area clicks fire JS click handlers on the live page first,
-        // then fall through to link navigation. preventDefault isn't wired
-        // up yet (Step 6 leaves it for a follow-up), so a click on an
-        // `<a>` still navigates after its handler runs.
-        if input.left_mouse_pressed
+        // then fall through to link navigation unless a handler called
+        // `event.preventDefault()`. Dispatch returns true in that case;
+        // the toy's first "JS suppresses a default browser action" path.
+        let click_default_prevented = if input.left_mouse_pressed
             && input.mouse_position.is_some_and(|(_, y)| y >= CHROME_HEIGHT)
             && let Some(node_id) = hover_hit.as_ref().and_then(|hit| hit.node_id)
         {
-            self.js.dispatch_event(node_id, "click");
-        }
+            self.js.dispatch_event(node_id, "click")
+        } else {
+            false
+        };
 
-        // Page clicks are handled after layout exists so hit testing can use real rectangles.
-        if let Some(link_target) = self.clicked_link(input, &document_view.links) {
+        // Page clicks are handled after layout exists so hit testing can use
+        // real rectangles. preventDefault on the click bubble suppresses the
+        // navigation entirely — the click was "consumed" by JS.
+        if !click_default_prevented
+            && let Some(link_target) = self.clicked_link(input, &document_view.links)
+        {
             self.navigate_to_link(link_target);
         }
 

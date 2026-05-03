@@ -986,6 +986,33 @@ mod tests {
         assert_eq!(document.text(p_kids[0]), Some("inserted"));
     }
 
+    #[test]
+    fn click_on_link_with_prevent_default_skips_navigation() {
+        // The first "JS suppresses a default browser action" path — a
+        // handler on the click bubble calls e.preventDefault(), and
+        // BrowserState's display_list must skip the link follow-through.
+        // Without the suppress path, navigate_to_link tries to resolve
+        // "/next" against the (None) current_url, fails, and shows an
+        // error page; document_html would change. With preventDefault
+        // honoured, the original document survives the click intact.
+        let mut browser = browser_with_html_and_css(
+            r#"<script>document.getElementById('outer').addEventListener('click', function(e) { e.preventDefault(); });</script><div id="outer"><a id="lnk" href="/next">go</a></div>"#,
+            r#"#outer { width: 200px; height: 100px; }"#,
+        );
+        let original_html = browser.document_html.clone();
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((10.0, CHROME_HEIGHT + 5.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+        assert_eq!(browser.document_html, original_html);
+    }
+
     // ---- Step 7 async: timers + rAF pumped per frame by display_list ----
 
     #[test]

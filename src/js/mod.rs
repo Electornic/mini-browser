@@ -189,7 +189,12 @@ impl JsRuntime {
     /// nearest Element ancestor. Text wrappers don't expose
     /// `addEventListener`, and almost every author-side click handler
     /// expects `event.target` to be the Element it lives on.
-    pub fn dispatch_event(&mut self, target: NodeId, event_type: &str) {
+    ///
+    /// Returns `true` when any handler called `event.preventDefault()`.
+    /// Callers (BrowserState's click path) use this to decide whether to
+    /// run the default action — e.g. skipping link navigation when JS
+    /// handled the click itself.
+    pub fn dispatch_event(&mut self, target: NodeId, event_type: &str) -> bool {
         let event_target = {
             let dom = self.dom.borrow();
             let mut cur = Some(target);
@@ -207,7 +212,7 @@ impl JsRuntime {
             }
         };
         let Some(event_target) = event_target else {
-            return;
+            return false;
         };
         let chain: Vec<NodeId> = {
             let dom = self.dom.borrow();
@@ -225,9 +230,9 @@ impl JsRuntime {
             chain
         };
         if chain.is_empty() {
-            return;
+            return false;
         }
-        let event = event::build_event_object(
+        let (event, event_state) = event::build_event_object(
             event_type,
             event_target,
             self.dom.clone(),
@@ -237,6 +242,16 @@ impl JsRuntime {
         let event_value = JsValue::from(event);
         let key_type = event_type.to_string();
         for current_target in chain {
+            // `stopPropagation` (set inside a handler one ancestor below)
+            // breaks the bubble before this ancestor's handlers run. The
+            // ancestor that called stopPropagation still finished its own
+            // handler list — only further bubbling is suppressed.
+            if event_state.borrow().propagation_stopped {
+                break;
+            }
+            // Tell the Event object which ancestor's handlers are about to
+            // run; the `currentTarget` accessor reads this on each access.
+            event_state.borrow_mut().current_target = Some(current_target);
             // Snapshot the listener list so a handler that calls
             // `removeEventListener` on itself mid-iteration doesn't shorten
             // the slice we're walking.
@@ -266,6 +281,12 @@ impl JsRuntime {
                 &mut self.context,
             ));
             for handler in snapshot {
+                // `stopImmediatePropagation` skips the rest of THIS
+                // ancestor's listeners; the propagation flag it also sets
+                // then breaks the outer loop on the next iteration.
+                if event_state.borrow().immediate_propagation_stopped {
+                    break;
+                }
                 if let Err(err) =
                     handler.call(&this, std::slice::from_ref(&event_value), &mut self.context)
                 {
@@ -273,10 +294,15 @@ impl JsRuntime {
                 }
             }
         }
+        // Clear `currentTarget` once the bubble has fully unwound so a
+        // post-dispatch read (rare, but real handlers can stash the event
+        // on a global) sees null instead of the last ancestor we visited.
+        event_state.borrow_mut().current_target = None;
         // A handler may have resolved a promise or queued a setTimeout(0);
         // drain those before returning so observers up the call stack see
         // a fully-settled JS state without waiting for the next frame.
         self.drain_pending_jobs();
+        event_state.borrow().default_prevented
     }
 }
 
@@ -1185,6 +1211,160 @@ mod tests {
         runtime.dispatch_event(text_id, "click");
         assert_eq!(runtime.execute("ttype").unwrap(), "\"click\"");
         assert_eq!(runtime.execute("ttag").unwrap(), "\"P\"");
+    }
+
+    #[test]
+    fn event_current_target_updates_per_ancestor_during_bubble() {
+        // `currentTarget` reads the ancestor whose listener is *currently*
+        // running, not the original target. Each ancestor's handler should
+        // see its own element via `e.currentTarget`, while `e.target`
+        // stays pinned to the deepest hit (here, the inner div).
+        let mut runtime = runtime_with(
+            r#"<div id="outer"><div id="inner">x</div></div>"#,
+        );
+        runtime
+            .execute(
+                "var trace = '';\
+                 document.getElementById('outer').addEventListener('click', function(e) {\
+                     trace += e.currentTarget.getAttribute('id') + '/' + e.target.getAttribute('id') + ';';\
+                 });\
+                 document.getElementById('inner').addEventListener('click', function(e) {\
+                     trace += e.currentTarget.getAttribute('id') + '/' + e.target.getAttribute('id') + ';';\
+                 });",
+            )
+            .unwrap();
+        let inner_id = {
+            let dom = runtime.dom_handle();
+            let dom = dom.borrow();
+            let outer = dom.roots()[0];
+            dom.get(outer).unwrap().children[0]
+        };
+        runtime.dispatch_event(inner_id, "click");
+        // Inner handler runs first (bubble order), currentTarget=inner.
+        // Outer handler runs second, currentTarget=outer. target stays inner.
+        assert_eq!(
+            runtime.execute("trace").unwrap(),
+            "\"inner/inner;outer/inner;\""
+        );
+    }
+
+    #[test]
+    fn event_current_target_reads_null_after_dispatch_returns() {
+        // Real handlers occasionally stash the event object on a global
+        // and inspect it later (analytics flush, retry-on-error). Once
+        // the bubble has unwound `currentTarget` should read null —
+        // matches what every browser exposes after dispatch.
+        let mut runtime = runtime_with(r#"<div id="x">y</div>"#);
+        runtime
+            .execute(
+                "var stash = null;\
+                 document.getElementById('x').addEventListener('click', function(e) { stash = e; });",
+            )
+            .unwrap();
+        let id = runtime.dom_handle().borrow().roots()[0];
+        runtime.dispatch_event(id, "click");
+        assert_eq!(runtime.execute("stash.currentTarget").unwrap(), "null");
+        // The original target is preserved (event.target is set once at
+        // dispatch start and never moves).
+        assert_eq!(
+            runtime.execute("stash.target.getAttribute('id')").unwrap(),
+            "\"x\""
+        );
+    }
+
+    #[test]
+    fn event_stop_propagation_skips_remaining_ancestors_but_finishes_current() {
+        // stopPropagation set on the inner handler must NOT skip the
+        // second listener registered on the same ancestor — only further
+        // bubbling. The outer ancestor sees nothing.
+        let mut runtime = runtime_with(
+            r#"<div id="outer"><div id="inner">x</div></div>"#,
+        );
+        runtime
+            .execute(
+                "var trace = '';\
+                 document.getElementById('outer').addEventListener('click', function() { trace += 'outer;'; });\
+                 var inner = document.getElementById('inner');\
+                 inner.addEventListener('click', function(e) { trace += 'inner1;'; e.stopPropagation(); });\
+                 inner.addEventListener('click', function() { trace += 'inner2;'; });",
+            )
+            .unwrap();
+        let inner_id = {
+            let dom = runtime.dom_handle();
+            let dom = dom.borrow();
+            let outer = dom.roots()[0];
+            dom.get(outer).unwrap().children[0]
+        };
+        runtime.dispatch_event(inner_id, "click");
+        assert_eq!(runtime.execute("trace").unwrap(), "\"inner1;inner2;\"");
+    }
+
+    #[test]
+    fn event_stop_immediate_propagation_also_skips_remaining_listeners_on_target() {
+        // stopImmediatePropagation goes one step further: the same
+        // ancestor's later handlers are skipped too, then the bubble
+        // breaks just like stopPropagation.
+        let mut runtime = runtime_with(
+            r#"<div id="outer"><div id="inner">x</div></div>"#,
+        );
+        runtime
+            .execute(
+                "var trace = '';\
+                 document.getElementById('outer').addEventListener('click', function() { trace += 'outer;'; });\
+                 var inner = document.getElementById('inner');\
+                 inner.addEventListener('click', function(e) { trace += 'inner1;'; e.stopImmediatePropagation(); });\
+                 inner.addEventListener('click', function() { trace += 'inner2;'; });",
+            )
+            .unwrap();
+        let inner_id = {
+            let dom = runtime.dom_handle();
+            let dom = dom.borrow();
+            let outer = dom.roots()[0];
+            dom.get(outer).unwrap().children[0]
+        };
+        runtime.dispatch_event(inner_id, "click");
+        assert_eq!(runtime.execute("trace").unwrap(), "\"inner1;\"");
+    }
+
+    #[test]
+    fn event_prevent_default_flips_default_prevented_and_dispatch_returns_true() {
+        // dispatch_event returns whether any handler called
+        // preventDefault(). Read-back via `defaultPrevented` confirms the
+        // flag is observable from JS too.
+        let mut runtime = runtime_with(r#"<div id="x">y</div>"#);
+        runtime
+            .execute(
+                "var prevented_in_handler = null;\
+                 document.getElementById('x').addEventListener('click', function(e) {\
+                     e.preventDefault();\
+                     prevented_in_handler = e.defaultPrevented;\
+                 });",
+            )
+            .unwrap();
+        let id = runtime.dom_handle().borrow().roots()[0];
+        let returned_prevented = runtime.dispatch_event(id, "click");
+        assert!(returned_prevented);
+        assert_eq!(
+            runtime.execute("prevented_in_handler").unwrap(),
+            "true"
+        );
+    }
+
+    #[test]
+    fn event_default_prevented_starts_false_when_no_handler_calls_prevent_default() {
+        // Symmetric check: a handler that just inspects the event must
+        // see defaultPrevented=false, and dispatch returns false too.
+        let mut runtime = runtime_with(r#"<div id="x">y</div>"#);
+        runtime
+            .execute(
+                "var seen = null;\
+                 document.getElementById('x').addEventListener('click', function(e) { seen = e.defaultPrevented; });",
+            )
+            .unwrap();
+        let id = runtime.dom_handle().borrow().roots()[0];
+        let returned = runtime.dispatch_event(id, "click");
+        assert!(!returned);
+        assert_eq!(runtime.execute("seen").unwrap(), "false");
     }
 
     #[test]
