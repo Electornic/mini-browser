@@ -1042,6 +1042,17 @@ fn collect_script_sources(
     if let NodeType::Element(elem) = &node.node_type
         && elem.tag_name.eq_ignore_ascii_case("script")
     {
+        // HTML spec: only "classic" script types execute as JS. Real
+        // pages routinely embed `<script type="application/ld+json">`
+        // (SEO metadata) and `<script type="application/json">`
+        // (config blocks); evaluating those as JS produces spurious
+        // SyntaxErrors. ES modules (`type="module"`) need a module
+        // loader the toy doesn't have — skipping them avoids running
+        // module code in a script context where `import` / `export`
+        // would also fail to parse.
+        if !is_classic_script_type(elem.attributes.get("type").map(String::as_str)) {
+            return;
+        }
         if let Some(src) = elem.attributes.get("src") {
             if let Some(body) = externals.get(src) {
                 out.push(body.clone());
@@ -1062,6 +1073,60 @@ fn collect_script_sources(
     for child in &node.children {
         collect_script_sources(document, *child, externals, out);
     }
+}
+
+// Whether a `<script type="...">` value identifies a *classic* script
+// (i.e. the kind we should hand to the JS engine). Per HTML spec the
+// type attribute's value, case-insensitively trimmed of leading and
+// trailing ASCII whitespace, runs through these rules:
+//
+//   - missing or empty → classic
+//   - "module" → ES module (we don't run it; future module-loader work)
+//   - "importmap" → import map data (we don't run it)
+//   - any of the JavaScript MIME-type aliases → classic
+//   - anything else (json, ld+json, application/x-handlebars-template, …)
+//     is a *data block* and must NOT execute
+//
+// The MIME alias list mirrors the spec's "JavaScript MIME type" table
+// (text/javascript and friends). MIME parameters like ";version=1.7"
+// are stripped before matching since real pages occasionally include
+// them. Any leading/trailing whitespace on the attribute value is
+// trimmed too — `type=" text/javascript "` is technically malformed
+// but appears in older hand-written HTML.
+fn is_classic_script_type(type_attr: Option<&str>) -> bool {
+    let Some(value) = type_attr else {
+        return true;
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // Strip MIME parameters (everything after the first `;`) before
+    // matching. The spec's "JavaScript MIME type" check is essentially
+    // a lookup against the bare type/subtype.
+    let bare = trimmed
+        .split_once(';')
+        .map(|(prefix, _)| prefix.trim())
+        .unwrap_or(trimmed);
+    matches!(
+        bare.to_ascii_lowercase().as_str(),
+        "application/ecmascript"
+            | "application/javascript"
+            | "application/x-ecmascript"
+            | "application/x-javascript"
+            | "text/ecmascript"
+            | "text/javascript"
+            | "text/javascript1.0"
+            | "text/javascript1.1"
+            | "text/javascript1.2"
+            | "text/javascript1.3"
+            | "text/javascript1.4"
+            | "text/javascript1.5"
+            | "text/jscript"
+            | "text/livescript"
+            | "text/x-ecmascript"
+            | "text/x-javascript"
+    )
 }
 
 pub fn page_step(viewport_height: usize) -> f32 {
@@ -1475,5 +1540,59 @@ mod tests {
             build_form_submit_url("/save", &data),
             "/save?first+name=Alice&note=a%26b"
         );
+    }
+
+    #[test]
+    fn is_classic_script_type_accepts_missing_empty_and_javascript_aliases() {
+        // No type attribute → classic. Same for an empty / whitespace
+        // attribute. The full JavaScript MIME alias table is treated
+        // case-insensitively, and a `;version=...` parameter on the
+        // type doesn't disqualify the script.
+        assert!(is_classic_script_type(None));
+        assert!(is_classic_script_type(Some("")));
+        assert!(is_classic_script_type(Some("   ")));
+        assert!(is_classic_script_type(Some("text/javascript")));
+        assert!(is_classic_script_type(Some("TEXT/JAVASCRIPT")));
+        assert!(is_classic_script_type(Some("application/javascript")));
+        assert!(is_classic_script_type(Some(
+            "text/javascript; charset=utf-8"
+        )));
+        assert!(is_classic_script_type(Some("text/jscript")));
+    }
+
+    #[test]
+    fn is_classic_script_type_rejects_data_blocks_and_modules() {
+        // The non-classic types real pages use most often: JSON-LD
+        // SEO metadata, JSON config blocks, ES modules, import maps,
+        // and arbitrary template MIMEs (Handlebars, etc.). Each must
+        // be skipped — running them as classic JS would surface
+        // SyntaxErrors that confuse the user.
+        assert!(!is_classic_script_type(Some("application/ld+json")));
+        assert!(!is_classic_script_type(Some("application/json")));
+        assert!(!is_classic_script_type(Some("module")));
+        assert!(!is_classic_script_type(Some("importmap")));
+        assert!(!is_classic_script_type(Some(
+            "application/x-handlebars-template"
+        )));
+        assert!(!is_classic_script_type(Some("text/template")));
+    }
+
+    #[test]
+    fn collect_script_sources_skips_non_classic_script_types() {
+        // The HTML-spec script type filter is enforced by the
+        // collector — a JSON-LD block beside a real classic script
+        // must produce only the classic source. Without this filter,
+        // the JSON-LD body would be handed to the JS engine and
+        // crash with a SyntaxError mid-page-load.
+        let html = "<script type=\"application/ld+json\">{\"@context\":\"x\"}</script>\
+                    <script>var ok = 1;</script>\
+                    <script type=\"module\">import x from 'a';</script>";
+        let document = crate::html::parse(html).unwrap();
+        let externals: HashMap<String, String> = HashMap::new();
+        let mut out = Vec::new();
+        for &root in document.roots() {
+            collect_script_sources(&document, root, &externals, &mut out);
+        }
+        assert_eq!(out, vec!["var ok = 1;".to_string()]);
     }
 }
