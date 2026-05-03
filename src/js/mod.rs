@@ -195,6 +195,26 @@ impl JsRuntime {
     /// run the default action — e.g. skipping link navigation when JS
     /// handled the click itself.
     pub fn dispatch_event(&mut self, target: NodeId, event_type: &str) -> bool {
+        self.dispatch_event_inner(target, event_type, true)
+    }
+
+    /// Direct dispatch — fires every listener registered on `target` for
+    /// `event_type`, but does not walk up the parent chain afterwards.
+    /// Used for events that don't bubble per spec, primarily `focus` /
+    /// `blur` (the bubbling forms are `focusin` / `focusout`, which the
+    /// toy doesn't ship yet). Real-world handlers register on the
+    /// focused element directly, so a bubble would erroneously fire
+    /// ancestor listeners that expected only their own focus state.
+    pub fn dispatch_event_at(&mut self, target: NodeId, event_type: &str) -> bool {
+        self.dispatch_event_inner(target, event_type, false)
+    }
+
+    fn dispatch_event_inner(
+        &mut self,
+        target: NodeId,
+        event_type: &str,
+        bubbles: bool,
+    ) -> bool {
         let event_target = {
             let dom = self.dom.borrow();
             let mut cur = Some(target);
@@ -214,7 +234,7 @@ impl JsRuntime {
         let Some(event_target) = event_target else {
             return false;
         };
-        let chain: Vec<NodeId> = {
+        let chain: Vec<NodeId> = if bubbles {
             let dom = self.dom.borrow();
             let mut chain = Vec::new();
             let mut cur = Some(event_target);
@@ -228,6 +248,9 @@ impl JsRuntime {
                 }
             }
             chain
+        } else {
+            // Non-bubbling: only the target's own listeners run.
+            vec![event_target]
         };
         if chain.is_empty() {
             return false;
@@ -1348,6 +1371,31 @@ mod tests {
             runtime.execute("prevented_in_handler").unwrap(),
             "true"
         );
+    }
+
+    #[test]
+    fn dispatch_event_at_fires_only_on_target_and_skips_ancestors() {
+        // `dispatch_event_at` is the no-bubble path used for focus/blur.
+        // The inner div's listener fires; the outer div's identical
+        // listener never sees the event because the chain is just
+        // [target], not [target, ...ancestors].
+        let mut runtime =
+            runtime_with(r#"<div id="outer"><div id="inner">x</div></div>"#);
+        runtime
+            .execute(
+                "var trace = '';\
+                 document.getElementById('outer').addEventListener('focus', function() { trace += 'outer;'; });\
+                 document.getElementById('inner').addEventListener('focus', function() { trace += 'inner;'; });",
+            )
+            .unwrap();
+        let inner_id = {
+            let dom = runtime.dom_handle();
+            let dom = dom.borrow();
+            let outer = dom.roots()[0];
+            dom.get(outer).unwrap().children[0]
+        };
+        runtime.dispatch_event_at(inner_id, "focus");
+        assert_eq!(runtime.execute("trace").unwrap(), "\"inner;\"");
     }
 
     #[test]

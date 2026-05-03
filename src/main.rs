@@ -1013,6 +1013,96 @@ mod tests {
         assert_eq!(browser.document_html, original_html);
     }
 
+    #[test]
+    fn page_click_fires_focus_on_target_and_blur_on_previously_focused_element() {
+        // First click: a fresh focus lands on `a`. Second click on `b`:
+        // blur fires on `a` first (the previously-focused path), then
+        // focus on `b`. Tracing the order pins the contract end-to-end:
+        // focused_dom_path tracking + non-bubbling dispatch + ordering.
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                "<script>",
+                "var trace = '';",
+                "document.getElementById('a').addEventListener('focus', function() { trace += 'a-focus;'; });",
+                "document.getElementById('a').addEventListener('blur',  function() { trace += 'a-blur;'; });",
+                "document.getElementById('b').addEventListener('focus', function() { trace += 'b-focus;'; });",
+                "document.getElementById('b').addEventListener('blur',  function() { trace += 'b-blur;'; });",
+                "</script>",
+                r#"<div><div id="a">a</div><div id="b">b</div></div>"#,
+            ),
+            r#"#a { width: 200px; height: 50px; } #b { width: 200px; height: 50px; }"#,
+        );
+        // First press over the `a` box: a single focus, no blur (nothing was focused yet).
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((10.0, CHROME_HEIGHT + 10.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+        assert_eq!(browser.js.execute("trace").unwrap(), "\"a-focus;\"");
+        // Second press over the `b` box: blur on `a` then focus on `b`.
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((10.0, CHROME_HEIGHT + 60.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+        assert_eq!(
+            browser.js.execute("trace").unwrap(),
+            "\"a-focus;a-blur;b-focus;\""
+        );
+    }
+
+    #[test]
+    fn click_above_chrome_clears_focus_and_fires_blur_on_previously_focused() {
+        // Mouse press over the chrome (y < CHROME_HEIGHT) sets the new
+        // focus to None; the previously-focused element should still
+        // see a blur, but no focus event fires (no new target).
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                "<script>",
+                "var trace = '';",
+                "document.getElementById('x').addEventListener('focus', function() { trace += 'focus;'; });",
+                "document.getElementById('x').addEventListener('blur',  function() { trace += 'blur;'; });",
+                "</script>",
+                r#"<div id="x">x</div>"#,
+            ),
+            r#"#x { width: 200px; height: 100px; }"#,
+        );
+        // Step 1: focus the page element.
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((10.0, CHROME_HEIGHT + 10.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+        assert_eq!(browser.js.execute("trace").unwrap(), "\"focus;\"");
+        // Step 2: click in the chrome band — focus clears, only blur fires.
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((10.0, CHROME_HEIGHT - 1.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+        assert_eq!(browser.js.execute("trace").unwrap(), "\"focus;blur;\"");
+    }
+
     // ---- Step 7 async: timers + rAF pumped per frame by display_list ----
 
     #[test]

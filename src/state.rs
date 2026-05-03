@@ -309,13 +309,40 @@ impl BrowserState {
         // forward, no double-pass per frame required.
         self.hovered_dom_path = hover_hit.map(|hit| hit.path);
 
-        // A page-area click moves :focus to the just-hovered element; clicks anywhere
-        // outside the page (chrome buttons, the address bar, off-window) clear it.
+        // A page-area click moves :focus to the just-hovered element; clicks
+        // anywhere outside the page (chrome buttons, the address bar,
+        // off-window) clear it. When the path actually changes we also fire
+        // blur on the previously-focused element and focus on the new one
+        // (non-bubbling per spec — handlers register directly, ancestors
+        // shouldn't see the event).
         if input.left_mouse_pressed {
-            self.focused_dom_path = match input.mouse_position {
+            let new_focus = match input.mouse_position {
                 Some((_, mouse_y)) if mouse_y >= CHROME_HEIGHT => self.hovered_dom_path.clone(),
                 _ => None,
             };
+            if new_focus != self.focused_dom_path {
+                // Resolve both old and new paths in a single short-lived
+                // borrow so the dispatch calls below (which re-borrow the
+                // shared Document via the JsRuntime) don't conflict.
+                let (old_id, new_id) = {
+                    let document = self.parsed_document.borrow();
+                    (
+                        self.focused_dom_path
+                            .as_deref()
+                            .and_then(|path| node_id_for_dom_path(&document, path)),
+                        new_focus
+                            .as_deref()
+                            .and_then(|path| node_id_for_dom_path(&document, path)),
+                    )
+                };
+                if let Some(id) = old_id {
+                    self.js.dispatch_event_at(id, "blur");
+                }
+                if let Some(id) = new_id {
+                    self.js.dispatch_event_at(id, "focus");
+                }
+                self.focused_dom_path = new_focus;
+            }
         }
         let hovered_href = self
             .hovered_link(input, &document_view.links)
@@ -787,6 +814,23 @@ fn collect_script_sources(
 
 pub fn page_step(viewport_height: usize) -> f32 {
     (viewport_height as f32 - CHROME_HEIGHT - 24.0).max(24.0)
+}
+
+// Walks a stored hover/focus path back to its NodeId. The path is a
+// sequence of child indices starting at the document's last root —
+// matching the convention in `display_list::build_document_view`, which
+// picks `roots().last()` as the visible page root, and the hit-test in
+// `compute_hovered_hit`, which produces paths against the same tree.
+// Layout child positions still mirror DOM child positions today (no
+// anonymous boxes are produced), so a path computed against the layout
+// tree resolves to the same NodeId here.
+fn node_id_for_dom_path(document: &dom::Document, path: &[usize]) -> Option<NodeId> {
+    let mut current = *document.roots().last()?;
+    for &idx in path {
+        let node = document.get(current)?;
+        current = *node.children.get(idx)?;
+    }
+    Some(current)
 }
 
 fn sample_html() -> &'static str {
