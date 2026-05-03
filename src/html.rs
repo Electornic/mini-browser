@@ -228,11 +228,11 @@ impl<'a, 'd> Parser<'a, 'd> {
         // Text is everything until the next '<'. Empty runs (which can appear
         // when whitespace was just consumed or `<!--…-->` was skipped) produce
         // no node so the resulting tree stays free of zero-length text leaves.
-        let text = self.consume_while(|ch| ch != '<');
-        if text.is_empty() {
+        let raw = self.consume_while(|ch| ch != '<');
+        if raw.is_empty() {
             None
         } else {
-            Some(self.document.create_text(text))
+            Some(self.document.create_text(decode_entities(&raw)))
         }
     }
 
@@ -275,10 +275,12 @@ impl<'a, 'd> Parser<'a, 'd> {
                 let quote = self.consume_char().expect("quote checked above");
                 let value = self.consume_while(|ch| ch != quote);
                 self.expect_char(quote)?;
-                Ok(value)
+                Ok(decode_entities(&value))
             }
             // Unquoted attributes are supported because they are easy to handle and common in demos.
-            Some(_) => Ok(self.consume_while(|ch| !ch.is_whitespace() && ch != '>' && ch != '/')),
+            Some(_) => Ok(decode_entities(
+                &self.consume_while(|ch| !ch.is_whitespace() && ch != '>' && ch != '/'),
+            )),
             None => Err(ParseError::new(
                 self.pos,
                 "unexpected end of input while parsing attribute value",
@@ -351,6 +353,120 @@ impl<'a, 'd> Parser<'a, 'd> {
 
 fn is_raw_text_element(tag_name: &str) -> bool {
     matches!(tag_name, "script" | "style")
+}
+
+/// Decode HTML character references inside a text run or attribute value.
+/// Handles named entities (`&amp;`, `&nbsp;`, …), decimal numeric (`&#39;`),
+/// and hex numeric (`&#x27;`). An entity is recognized only when a `;`
+/// terminator appears within a small window and the body is non-empty and
+/// contains no whitespace, `<`, or stray `&`. Anything else — bad bodies,
+/// unknown names, missing semicolons — is left verbatim, matching real
+/// browsers' permissive policy on broken markup.
+fn decode_entities(input: &str) -> String {
+    if !input.contains('&') {
+        return input.to_string();
+    }
+    // Longest entity reference we model is `&#x10FFFF;` (10 chars). 16 leaves
+    // headroom for slightly-longer named entities while still bailing fast on
+    // a stray '&' in normal prose.
+    const MAX_LOOKAHEAD: usize = 16;
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        let ch = input[i..]
+            .chars()
+            .next()
+            .expect("loop condition guarantees a char");
+        let len = ch.len_utf8();
+        if ch != '&' {
+            out.push(ch);
+            i += len;
+            continue;
+        }
+        let look_end = (i + 1 + MAX_LOOKAHEAD).min(input.len());
+        let slice = &input[i + 1..look_end];
+        let Some(semi) = slice.find(';') else {
+            out.push('&');
+            i += 1;
+            continue;
+        };
+        let body = &slice[..semi];
+        if body.is_empty()
+            || body
+                .chars()
+                .any(|c| c.is_whitespace() || c == '<' || c == '&')
+        {
+            out.push('&');
+            i += 1;
+            continue;
+        }
+        match decode_one_entity(body) {
+            Some(decoded) => {
+                out.push_str(&decoded);
+                i += 1 + body.len() + 1; // skip past `&body;`
+            }
+            None => {
+                out.push('&');
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+fn decode_one_entity(body: &str) -> Option<String> {
+    if let Some(num) = body.strip_prefix('#') {
+        let codepoint = if let Some(hex) = num.strip_prefix(['x', 'X']) {
+            u32::from_str_radix(hex, 16).ok()?
+        } else {
+            num.parse::<u32>().ok()?
+        };
+        char::from_u32(codepoint).map(|ch| ch.to_string())
+    } else {
+        named_entity(body).map(|s| s.to_string())
+    }
+}
+
+fn named_entity(name: &str) -> Option<&'static str> {
+    Some(match name {
+        // Core five — the only ones that are "must" in HTML serialization.
+        "amp" => "&",
+        "lt" => "<",
+        "gt" => ">",
+        "quot" => "\"",
+        "apos" => "'",
+        // Whitespace + typography most commonly seen on real pages.
+        "nbsp" => "\u{00A0}",
+        "ensp" => "\u{2002}",
+        "emsp" => "\u{2003}",
+        "thinsp" => "\u{2009}",
+        // Punctuation / dashes / quotes.
+        "ndash" => "\u{2013}",
+        "mdash" => "\u{2014}",
+        "lsquo" => "\u{2018}",
+        "rsquo" => "\u{2019}",
+        "ldquo" => "\u{201C}",
+        "rdquo" => "\u{201D}",
+        "laquo" => "\u{00AB}",
+        "raquo" => "\u{00BB}",
+        "hellip" => "\u{2026}",
+        "middot" => "\u{00B7}",
+        "bull" => "\u{2022}",
+        // Common symbols.
+        "copy" => "\u{00A9}",
+        "reg" => "\u{00AE}",
+        "trade" => "\u{2122}",
+        "deg" => "\u{00B0}",
+        "plusmn" => "\u{00B1}",
+        "times" => "\u{00D7}",
+        "divide" => "\u{00F7}",
+        // Math / arrows.
+        "larr" => "\u{2190}",
+        "uarr" => "\u{2191}",
+        "rarr" => "\u{2192}",
+        "darr" => "\u{2193}",
+        _ => return None,
+    })
 }
 
 /// Tags whose HTML serialization has no content and no closing tag (`<br>`,
@@ -444,5 +560,66 @@ mod tests {
         let error = parse("<div><p>Hello</div>").unwrap_err();
 
         assert!(error.message.contains("mismatched closing tag"));
+    }
+
+    #[test]
+    fn decodes_named_and_numeric_entities_in_text() {
+        // The big five plus a typography sample (`&hellip;`), plus decimal
+        // (`&#39;` apostrophe) and hex (`&#x27;` apostrophe) numeric forms —
+        // both the HN comment thread and most blog markup hit this surface.
+        let document = parse(
+            "<p>&amp;&lt;&gt;&quot;&#39;&#x27;&hellip;&nbsp;&copy;</p>",
+        )
+        .unwrap();
+        let p = document.roots()[0];
+        let text_id = document.get(p).unwrap().children[0];
+        assert_eq!(
+            document.text(text_id),
+            Some("&<>\"\'\'\u{2026}\u{00A0}\u{00A9}")
+        );
+    }
+
+    #[test]
+    fn keeps_unknown_or_malformed_entities_verbatim() {
+        // Real pages contain stray `&` in prose ("Tom & Jerry"). Our policy
+        // matches browsers: only known entity forms decode; everything else
+        // — unknown names, missing `;`, embedded whitespace — stays literal.
+        let document = parse("<p>Tom &amp; Jerry &unknown; & loose</p>").unwrap();
+        let p = document.roots()[0];
+        let text_id = document.get(p).unwrap().children[0];
+        assert_eq!(
+            document.text(text_id),
+            Some("Tom & Jerry &unknown; & loose")
+        );
+    }
+
+    #[test]
+    fn decodes_entities_inside_attribute_values() {
+        // Query strings frequently encode `&` as `&amp;` so the HTML stays
+        // well-formed; the live attribute must be the decoded form so links
+        // work and JS comparisons against the URL match the source.
+        let document = parse(r#"<a href="?x=1&amp;y=2&#x3D;ok">go</a>"#).unwrap();
+        let a = document.roots()[0];
+        let element = match &document.get(a).unwrap().node_type {
+            NodeType::Element(e) => e,
+            _ => panic!("expected <a>"),
+        };
+        assert_eq!(
+            element.attributes.get("href").map(String::as_str),
+            Some("?x=1&y=2=ok")
+        );
+    }
+
+    #[test]
+    fn does_not_decode_entities_inside_script_or_style_bodies() {
+        // `<script>` / `<style>` are raw-text elements: their body is consumed
+        // verbatim until the closing tag, never re-tokenized for entities.
+        // A JS comparison like `if (a < b)` must round-trip with `&lt;` left
+        // alone — otherwise the script becomes a syntax error.
+        let document =
+            parse("<script>if (a&lt;b) {}</script>").unwrap();
+        let script = document.roots()[0];
+        let body = document.get(script).unwrap().children[0];
+        assert_eq!(document.text(body), Some("if (a&lt;b) {}"));
     }
 }
