@@ -33,6 +33,7 @@ mod fetch;
 mod timers;
 mod util;
 mod window;
+mod xhr;
 
 // Hidden property name used to round-trip a NodeId through any Element
 // JsObject — methods like `appendChild(other)` read `other._nodeId` to
@@ -111,6 +112,7 @@ impl JsRuntime {
             raf_callbacks.clone(),
         );
         fetch::register_fetch(&mut context);
+        xhr::register_xmlhttprequest(&mut context);
         Self {
             context,
             dom,
@@ -3070,6 +3072,402 @@ mod tests {
                 || caught.to_lowercase().contains("object")
                 || caught.to_lowercase().contains("typeerror"),
             "expected init-must-be-object error, got: {caught}"
+        );
+    }
+
+    // ---- XMLHttpRequest (Step 15) ----
+
+    #[test]
+    fn xhr_constructor_yields_instance_in_unsent_state() {
+        // A fresh instance starts in UNSENT (readyState=0) with no
+        // status / response data. The numeric constants are exposed on
+        // the instance so callers can compare against `xhr.DONE`
+        // instead of the literal `4`.
+        let mut runtime = runtime_with("");
+        runtime
+            .execute("var xhr = new XMLHttpRequest();")
+            .unwrap();
+        assert_eq!(runtime.execute("xhr.readyState").unwrap(), "0");
+        assert_eq!(runtime.execute("xhr.status").unwrap(), "0");
+        assert_eq!(runtime.execute("xhr.responseText").unwrap(), "\"\"");
+        assert_eq!(runtime.execute("xhr.UNSENT").unwrap(), "0");
+        assert_eq!(runtime.execute("xhr.OPENED").unwrap(), "1");
+        assert_eq!(runtime.execute("xhr.HEADERS_RECEIVED").unwrap(), "2");
+        assert_eq!(runtime.execute("xhr.LOADING").unwrap(), "3");
+        assert_eq!(runtime.execute("xhr.DONE").unwrap(), "4");
+    }
+
+    #[test]
+    fn xhr_open_transitions_state_to_opened() {
+        let mut runtime = runtime_with("");
+        runtime
+            .execute(
+                "var xhr = new XMLHttpRequest();\
+                 xhr.open('GET', 'http://example.test/');",
+            )
+            .unwrap();
+        assert_eq!(runtime.execute("xhr.readyState").unwrap(), "1");
+    }
+
+    #[test]
+    fn xhr_send_populates_response_fields_after_done() {
+        // Happy path: a successful GET pushes status, statusText, and
+        // responseText through to the JS side; readyState lands on
+        // DONE (4) and responseURL reflects the requested URL.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = "ok";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var xhr = new XMLHttpRequest();\
+             xhr.open('GET', 'http://127.0.0.1:{port}/');\
+             xhr.send();",
+        );
+        runtime.execute(&script).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(runtime.execute("xhr.readyState").unwrap(), "4");
+        assert_eq!(runtime.execute("xhr.status").unwrap(), "200");
+        assert_eq!(runtime.execute("xhr.statusText").unwrap(), "\"OK\"");
+        assert_eq!(runtime.execute("xhr.responseText").unwrap(), "\"ok\"");
+        // `response` mirrors `responseText` for the default
+        // (empty-string) responseType the toy uses.
+        assert_eq!(runtime.execute("xhr.response").unwrap(), "\"ok\"");
+        assert_eq!(
+            runtime.execute("xhr.responseURL").unwrap(),
+            format!("\"http://127.0.0.1:{port}/\"")
+        );
+    }
+
+    #[test]
+    fn xhr_setrequestheader_carries_to_outgoing_request() {
+        // The header registered via setRequestHeader must land in the
+        // wire request — otherwise auth / API-key flows break. We
+        // capture the full request bytes via the existing
+        // `read_full_request` helper so the assertion isn't racy
+        // against the kernel's TCP framing.
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let received = read_full_request(&mut stream);
+            let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+            received
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var xhr = new XMLHttpRequest();\
+             xhr.open('GET', 'http://127.0.0.1:{port}/');\
+             xhr.setRequestHeader('X-Trace', 'abc');\
+             xhr.send();",
+        );
+        runtime.execute(&script).unwrap();
+        let received = server.join().unwrap();
+
+        assert!(
+            received.contains("X-Trace: abc"),
+            "expected X-Trace header in request, got: {received:?}"
+        );
+    }
+
+    #[test]
+    fn xhr_send_writes_post_body_to_server() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let received = read_full_request(&mut stream);
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+            received
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var xhr = new XMLHttpRequest();\
+             xhr.open('POST', 'http://127.0.0.1:{port}/submit');\
+             xhr.send('payload=42');",
+        );
+        runtime.execute(&script).unwrap();
+        let received = server.join().unwrap();
+
+        assert!(
+            received.starts_with("POST /submit"),
+            "expected POST request line, got: {received:?}"
+        );
+        assert!(
+            received.ends_with("payload=42"),
+            "body must be appended after the headers, got: {received:?}"
+        );
+    }
+
+    #[test]
+    fn xhr_onreadystatechange_fires_until_done() {
+        // The toy collapses HEADERS_RECEIVED → LOADING → DONE inside
+        // send(); each transition fires `readystatechange`, so a
+        // handler that records states sees `2,3,4`. jQuery's $.ajax
+        // listens here (or on `onload`) for completion.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var trace = '';\
+             var xhr = new XMLHttpRequest();\
+             xhr.onreadystatechange = function () {{ trace += String(xhr.readyState) + ','; }};\
+             xhr.open('GET', 'http://127.0.0.1:{port}/');\
+             xhr.send();",
+        );
+        runtime.execute(&script).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(runtime.execute("trace").unwrap(), "\"2,3,4,\"");
+    }
+
+    #[test]
+    fn xhr_onload_fires_after_done() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = "loaded";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var seen = null;\
+             var xhr = new XMLHttpRequest();\
+             xhr.onload = function () {{ seen = xhr.responseText; }};\
+             xhr.open('GET', 'http://127.0.0.1:{port}/');\
+             xhr.send();",
+        );
+        runtime.execute(&script).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(runtime.execute("seen").unwrap(), "\"loaded\"");
+    }
+
+    #[test]
+    fn xhr_addeventlistener_load_fires_alongside_onload() {
+        // Both delivery channels should fire — property-style first,
+        // then addEventListener-registered handlers in registration
+        // order. Two distinct entries in `trace` confirms the
+        // listener registry isn't shadowed by the property handler.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var trace = '';\
+             var xhr = new XMLHttpRequest();\
+             xhr.onload = function () {{ trace += 'prop,'; }};\
+             xhr.addEventListener('load', function () {{ trace += 'listener,'; }});\
+             xhr.open('GET', 'http://127.0.0.1:{port}/');\
+             xhr.send();",
+        );
+        runtime.execute(&script).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(runtime.execute("trace").unwrap(), "\"prop,listener,\"");
+    }
+
+    #[test]
+    fn xhr_get_response_header_lookup_is_case_insensitive() {
+        // Header lookup is case-insensitive per spec — `XHR.getResponseHeader`
+        // is the standard way to read a Content-Type back, and authors
+        // routinely spell it `content-type`.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Custom: yes\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var xhr = new XMLHttpRequest();\
+             xhr.open('GET', 'http://127.0.0.1:{port}/');\
+             xhr.send();",
+        );
+        runtime.execute(&script).unwrap();
+        server.join().unwrap();
+
+        // Mixed-case input still finds the header value.
+        assert_eq!(
+            runtime
+                .execute("xhr.getResponseHeader('content-type')")
+                .unwrap(),
+            "\"application/json\""
+        );
+        assert_eq!(
+            runtime
+                .execute("xhr.getResponseHeader('X-CUSTOM')")
+                .unwrap(),
+            "\"yes\""
+        );
+        // Missing header returns null.
+        assert_eq!(
+            runtime
+                .execute("xhr.getResponseHeader('not-present')")
+                .unwrap(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn xhr_get_all_response_headers_joins_headers_with_crlf() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let response = "HTTP/1.1 200 OK\r\nA: 1\r\nB: 2\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var xhr = new XMLHttpRequest();\
+             xhr.open('GET', 'http://127.0.0.1:{port}/');\
+             xhr.send();\
+             var s = xhr.getAllResponseHeaders();",
+        );
+        runtime.execute(&script).unwrap();
+        server.join().unwrap();
+
+        // Probing through JS sidesteps the JsValue::display escaping
+        // dance — `\r\n` in a real string round-trips through indexOf
+        // regardless of how the harness prints it. The toy network
+        // layer lowercases response header names while parsing, so
+        // `A: 1` arrives as `a: 1`; we match the post-parse form.
+        // Other headers (content-length, connection) may be present
+        // alongside the two we explicitly wrote.
+        assert_eq!(
+            runtime
+                .execute("s.indexOf('a: 1\\r\\n') >= 0")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            runtime
+                .execute("s.indexOf('b: 2\\r\\n') >= 0")
+                .unwrap(),
+            "true"
+        );
+    }
+
+    #[test]
+    fn xhr_send_before_open_throws() {
+        let mut runtime = runtime_with("");
+        let err = runtime
+            .execute(
+                "var xhr = new XMLHttpRequest();\
+                 xhr.send();",
+            )
+            .unwrap_err();
+        assert!(
+            err.to_lowercase().contains("opened"),
+            "expected state-must-be-OPENED error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn xhr_set_request_header_before_open_throws() {
+        let mut runtime = runtime_with("");
+        let err = runtime
+            .execute(
+                "var xhr = new XMLHttpRequest();\
+                 xhr.setRequestHeader('X-Foo', 'bar');",
+            )
+            .unwrap_err();
+        assert!(
+            err.to_lowercase().contains("opened"),
+            "expected state-must-be-OPENED error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn xhr_open_with_invalid_url_throws() {
+        let mut runtime = runtime_with("");
+        let err = runtime
+            .execute(
+                "var xhr = new XMLHttpRequest();\
+                 xhr.open('GET', 'not a url');",
+            )
+            .unwrap_err();
+        assert!(
+            err.to_lowercase().contains("invalid url"),
+            "expected invalid-URL TypeError, got: {err}"
         );
     }
 }
