@@ -1276,6 +1276,58 @@ mod tests {
         );
     }
 
+    // ---- Step 6 integration: typing ↔ JS round-trip ----
+
+    #[test]
+    fn page_input_keyboard_typing_is_visible_to_javascript() {
+        // Closes the Step 6 loop: a real keyboard event lands in the
+        // `value` attribute (Step 6.3), and a JS read via the new
+        // `.value` accessor (Step 6.4) sees the up-to-date string. This
+        // is what would make a `oninput` handler (still TODO in #9)
+        // observe the same text the user just typed.
+        let mut browser = browser_with_html(r#"<input id="q" value="hi"/>"#);
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                typed: " world".into(),
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(
+            browser
+                .js
+                .execute("document.getElementById('q').value")
+                .unwrap(),
+            "\"hi world\""
+        );
+    }
+
+    #[test]
+    fn js_set_value_is_visible_to_browser_state_layout_pass() {
+        // The reverse direction: JS-driven `.value =` lands in the same
+        // arena BrowserState reads on the next display_list frame, so the
+        // input re-paints with the new text without any explicit
+        // invalidation hop. Mirrors how class_list_mutations land.
+        let mut browser = browser_with_html(r#"<input id="q" value="initial"/>"#);
+        browser
+            .js
+            .execute("document.getElementById('q').value = 'changed';")
+            .unwrap();
+
+        let document = browser.parsed_document.borrow();
+        let input_id = document.roots()[0];
+        let elem = document.element_data(input_id).unwrap();
+        assert_eq!(
+            elem.attributes.get("value").map(String::as_str),
+            Some("changed")
+        );
+    }
+
     #[test]
     fn raf_callback_dom_mutation_lands_in_browser_state_arena() {
         // rAF runs *before* the frame's layout pass, so any DOM mutation
