@@ -294,7 +294,32 @@ fn specified_values(
         apply_declarations(&mut values, declarations);
     }
 
+    // Legacy `<center>` element: real browsers center every block child
+    // through quirks-mode magic (effectively `margin: 0 auto`). HN still
+    // wraps its main table in `<center>` for that reason. Without this
+    // shim the table renders left-aligned, leaving a wide empty band on
+    // the right. We only fill in auto-margins when the cascade hasn't
+    // already supplied a horizontal margin — author CSS / presentational
+    // hints stay authoritative if they declared one.
+    if parent_is_center(document, ancestors)
+        && !values.contains_key("margin-left")
+        && !values.contains_key("margin-right")
+    {
+        values.insert("margin-left".into(), Value::Keyword("auto".into()));
+        values.insert("margin-right".into(), Value::Keyword("auto".into()));
+    }
+
     values
+}
+
+fn parent_is_center(document: &Document, ancestors: &[(NodeId, PseudoState)]) -> bool {
+    let Some((parent_id, _)) = ancestors.last() else {
+        return false;
+    };
+    matches!(
+        document.get(*parent_id).map(|n| &n.node_type),
+        Some(NodeType::Element(element)) if element.tag_name.eq_ignore_ascii_case("center")
+    )
 }
 
 /// Translate the legacy presentational HTML attributes (`bgcolor`, `width`,
@@ -545,6 +570,14 @@ fn default_values(document: &Document, node_id: NodeId) -> PropertyMap {
         }
         "body" => {
             edge_defaults(&mut values, "margin", 8.0);
+        }
+        // Legacy `<center>`: text-align centers inline descendants
+        // (text, inline images, inline-block buttons). Centering of
+        // block children — the historical reason this tag still
+        // appears on real pages — is handled in `specified_values`
+        // by injecting `margin-left/right: auto` on those children.
+        "center" => {
+            values.insert("text-align".into(), Value::Keyword("center".into()));
         }
         "p" => {
             values.insert(
@@ -1770,6 +1803,53 @@ mod tests {
                 a: 255,
             })),
             "anchor without href must keep the UA-default link colour, not the author's :link rule"
+        );
+    }
+
+    #[test]
+    fn center_element_injects_auto_margins_on_block_children() {
+        // HN still wraps its main table in `<body><center><table>…</table></center>`
+        // and relies on the legacy quirks-mode behaviour where `<center>` makes
+        // every block child auto-center. We approximate that with an
+        // `margin-left/right: auto` injection on direct children of a
+        // `<center>` parent — the existing block layout already centers
+        // explicit-width boxes when both margins are auto.
+        let (document, root) =
+            parse_html(r#"<center><table><tr><td>x</td></tr></table></center>"#);
+        let stylesheet = parse_css(r#""#);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let table = &styled.children[0];
+
+        assert_eq!(
+            table.value("margin-left"),
+            Some(&Value::Keyword("auto".into())),
+            "table inside <center> must get margin-left: auto"
+        );
+        assert_eq!(
+            table.value("margin-right"),
+            Some(&Value::Keyword("auto".into())),
+            "table inside <center> must get margin-right: auto"
+        );
+    }
+
+    #[test]
+    fn center_element_respects_author_supplied_margins() {
+        // The auto-margin injection only fires when the cascade hasn't
+        // already supplied a horizontal margin, so author CSS that pins
+        // the table to one side wins as expected.
+        let (document, root) =
+            parse_html(r#"<center><table id="hnmain"><tr><td>x</td></tr></table></center>"#);
+        let stylesheet = parse_css(r#"#hnmain { margin-left: 10px; margin-right: 20px; }"#);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let table = &styled.children[0];
+
+        assert_eq!(
+            table.value("margin-left"),
+            Some(&Value::Length(10.0, Unit::Px))
+        );
+        assert_eq!(
+            table.value("margin-right"),
+            Some(&Value::Length(20.0, Unit::Px))
         );
     }
 
