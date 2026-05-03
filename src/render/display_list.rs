@@ -173,14 +173,14 @@ fn paint_self(
     if let Some(command) = text_command(layout_box, alpha) {
         commands.push(command);
     }
-    // <input> draws its `value` attribute as text inside the content box.
-    // Sits after `text_command` so an author-styled element with both a
-    // child Text node and a `value` attribute would emit both — but real
-    // <input> is void per HTML5 (the parser enforces this), so in practice
-    // only this branch fires for inputs.
-    if let Some(command) = input_value_text_command(layout_box, alpha) {
-        commands.push(command);
-    }
+    // <input> / <textarea> draw their `value` attribute as text inside
+    // the content box. Sits after `text_command` so an author-styled
+    // element with both a child Text node and a `value` attribute
+    // would emit both — but real <input> is void per HTML5 (the parser
+    // enforces this), so in practice only this branch fires for
+    // inputs. <textarea> emits one Text command per `\n`-delimited
+    // line; the vector is empty when the value is empty.
+    commands.extend(input_value_text_commands(layout_box, alpha));
     // Push the inherited+own transform onto the commands this box just emitted.
     // The emitters work in logical (untransformed) coordinates; the affine
     // matrix is the only thing that maps logical → screen pixels.
@@ -565,36 +565,74 @@ fn text_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
     }))
 }
 
-// Emits the `value` attribute of an <input> element as a Text command sitting
-// inside the input's content box. This is what gives an unfocused input its
-// readable text — the value attribute IS the visible text in the toy browser
-// (the "value 속성 = 표시 텍스트" decision from the Step 4 design notes).
-// Returns None for non-input elements and for inputs whose value is empty
-// (placeholder rendering is deferred). Half-leading mirrors `text_command`
-// so a tall padded input still vertically centers its glyphs.
-fn input_value_text_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
-    let node = layout_box.styled_node()?;
+// Emits the `value` attribute of an <input> / <textarea> element as
+// Text commands sitting inside the field's content box. This is what
+// gives an unfocused field its readable text — the value attribute IS
+// the visible text in the toy browser (the "value 속성 = 표시 텍스트"
+// decision from the Step 4 design notes). Returns an empty vector for
+// non-field elements and for fields whose value is empty (placeholder
+// rendering is deferred).
+//
+// For `<input>` we keep the original single-line layout: half-leading
+// vertically centers the glyph row inside a tall padded box. For
+// `<textarea>` we split the value on `\n` and emit one Text command per
+// line, stacked top-to-bottom from the content origin. Author content
+// with a long unwrapped line still over-runs the right edge — soft
+// wrapping at the box width is a follow-up.
+fn input_value_text_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayCommand> {
+    let Some(node) = layout_box.styled_node() else {
+        return Vec::new();
+    };
     let element = match &node.node_type {
         NodeType::Element(element) => element,
-        NodeType::Text(_) => return None,
+        NodeType::Text(_) => return Vec::new(),
     };
-    if element.tag_name != "input" {
-        return None;
-    }
-    let value = element.attributes.get("value")?;
+    let is_textarea = match element.tag_name.as_str() {
+        "input" => false,
+        "textarea" => true,
+        _ => return Vec::new(),
+    };
+    let Some(value) = element.attributes.get("value") else {
+        return Vec::new();
+    };
     if value.is_empty() {
-        return None;
+        return Vec::new();
     }
 
     let glyph_size = font_size(node);
-    let half_leading = ((layout_box.dimensions.content.height - glyph_size) / 2.0).max(0.0);
-    Some(DisplayCommand::Text(TextCommand {
-        text: value.clone(),
-        x: layout_box.dimensions.content.x,
-        y: layout_box.dimensions.content.y + half_leading,
-        color: apply_alpha(text_color(node), alpha),
-        font_size: glyph_size,
-    }))
+    let color = apply_alpha(text_color(node), alpha);
+    let content = layout_box.dimensions.content;
+
+    if !is_textarea {
+        let half_leading = ((content.height - glyph_size) / 2.0).max(0.0);
+        return vec![DisplayCommand::Text(TextCommand {
+            text: value.clone(),
+            x: content.x,
+            y: content.y + half_leading,
+            color,
+            font_size: glyph_size,
+        })];
+    }
+
+    // `split('\n')` keeps trailing empty entries — important so a
+    // value ending in `\n` reserves a blank caret row. Empty lines are
+    // dropped from the paint list (no glyphs to draw) but the caret
+    // path counts them through `value.split('\n').count()` so they
+    // still occupy a row visually.
+    value
+        .split('\n')
+        .enumerate()
+        .filter(|(_, line)| !line.is_empty())
+        .map(|(row, line)| {
+            DisplayCommand::Text(TextCommand {
+                text: line.to_string(),
+                x: content.x,
+                y: content.y + glyph_size * row as f32,
+                color,
+                font_size: glyph_size,
+            })
+        })
+        .collect()
 }
 
 fn border_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayCommand> {

@@ -273,6 +273,23 @@ pub(super) fn intrinsic_height(node: &StyledNode) -> f32 {
         NodeType::Element(element) if element.tag_name == "input" => {
             length_value(node, "font-size", 0.0).unwrap_or(16.0)
         }
+        // <textarea> is the same atomic widget as <input> but tall:
+        // one font-size row per `rows` attribute (default 2, matching
+        // the HTML spec's textarea reflection default). The value text
+        // wraps purely on `\n` characters — author content with long
+        // unwrapped lines still over-runs the right edge for now,
+        // which is the same trade-off the rest of the toy makes for
+        // single-line `<input>`.
+        NodeType::Element(element) if element.tag_name == "textarea" => {
+            let font_size = length_value(node, "font-size", 0.0).unwrap_or(16.0);
+            let rows = element
+                .attributes
+                .get("rows")
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(2);
+            font_size * rows as f32
+        }
         NodeType::Element(_) => 0.0,
     }
 }

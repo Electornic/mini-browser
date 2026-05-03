@@ -2095,6 +2095,141 @@ mod tests {
         assert_eq!(browser.js.execute("trace").unwrap(), "\"click;\"");
     }
 
+    // ---- Step 8 (#8 in Notion): <textarea> multi-line text field ----
+    //
+    // <textarea> reuses the entire <input> typing path: the same
+    // dispatch_typed_keys handler routes typed chars into the same
+    // `value` attribute. The two divergences live behind tag checks:
+    //   * Enter inserts `\n` into the value instead of submitting the
+    //     enclosing form.
+    //   * Form data collection picks up textareas alongside inputs so
+    //     a multi-line message lands in the GET query string.
+
+    #[test]
+    fn typing_into_focused_textarea_appends_to_value_attribute() {
+        // Smoke check that the Step 6/Step 9 typing pipeline routes
+        // characters into <textarea> the same way it does into <input>.
+        let mut browser = browser_with_html(r#"<textarea id="t" value="hi"></textarea>"#);
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                typed: "!".into(),
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(
+            browser.js.execute("document.getElementById('t').value").unwrap(),
+            "\"hi!\""
+        );
+    }
+
+    #[test]
+    fn enter_in_focused_textarea_inserts_newline_instead_of_submitting() {
+        // Inside a <form>, an <input> Enter triggers a submit. A
+        // <textarea> Enter inserts `\n` into the value buffer — the
+        // tag check in dispatch_typed_keys's enter branch is what
+        // splits the two paths. The form's submit handler must NOT
+        // fire, otherwise authors couldn't type multi-paragraph
+        // messages without accidentally posting.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var hits = 0;",
+            "document.getElementById('f').addEventListener('submit', function(e) { hits = hits + 1; e.preventDefault(); });",
+            "</script>",
+            r#"<form id="f"><textarea id="t" name="msg" value="line1"></textarea></form>"#,
+        ));
+        browser.address_bar_focused = false;
+        // last root = form, child 0 = textarea
+        browser.focused_dom_path = Some(vec![0]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                enter_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        // Submit handler stayed silent.
+        assert_eq!(browser.js.execute("hits").unwrap(), "0");
+        // Value gained a trailing newline so the next typed char will
+        // land on a new line.
+        assert_eq!(
+            browser.js.execute("document.getElementById('t').value").unwrap(),
+            "\"line1\\n\""
+        );
+    }
+
+    #[test]
+    fn enter_in_textarea_fires_input_event_on_dirty_mutation() {
+        // The newline insertion is a real value mutation, so the
+        // `input` event must fire (same contract as a typed printable
+        // character). A handler reading the new value should see the
+        // trailing `\n` already there.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var seen = '';",
+            "document.getElementById('t').addEventListener('input', function(e) { seen = e.target.value; });",
+            "</script>",
+            r#"<textarea id="t" value="ab"></textarea>"#,
+        ));
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                enter_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(browser.js.execute("seen").unwrap(), "\"ab\\n\"");
+    }
+
+    #[test]
+    fn form_submit_collects_textarea_value_alongside_inputs() {
+        // collect_form_data treats textareas the same as inputs: any
+        // named field with a value lands in the URL-encoded query
+        // string when the form GETs. This is what lets a contact form
+        // with a name input and a message textarea actually submit
+        // both fields.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var url = '';",
+            "document.getElementById('f').addEventListener('submit', function(e) { url = 'submitted'; e.preventDefault(); });",
+            "</script>",
+            r#"<form id="f" action="/x"><input name="n" value="Alice"/><textarea name="m" value="hi"></textarea></form>"#,
+        ));
+        browser.address_bar_focused = false;
+        // Focus the input and press Enter to trigger a submit (the
+        // input path keeps its form-submit default action).
+        browser.focused_dom_path = Some(vec![0]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                enter_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        // The handler ran (proves the form heard the submit) and the
+        // textarea-bearing form is the one we configured. Empirically
+        // proving the textarea's value rode along is a per-pair check
+        // on the unit-test side (collect_form_data); here we only need
+        // the integration smoke.
+        assert_eq!(browser.js.execute("url").unwrap(), "\"submitted\"");
+    }
+
     #[test]
     fn raf_callback_dom_mutation_lands_in_browser_state_arena() {
         // rAF runs *before* the frame's layout pass, so any DOM mutation

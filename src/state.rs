@@ -637,20 +637,37 @@ impl BrowserState {
         }
 
         if input.enter_pressed {
-            // Enter's default action is "submit the enclosing form" if
-            // the focused element lives inside one. preventDefault on
-            // keydown blocks that — same gate as the typed-char path.
-            // Resolving the form is a separate borrow from
-            // `try_submit_form` so the dispatch inside it doesn't see
-            // an outstanding read borrow on the document.
+            // Enter splits two ways depending on the focused field:
+            //   * <textarea>: insert a literal newline into the value
+            //     buffer (the value-text paint splits on `\n` and the
+            //     caret rides the trailing line).
+            //   * Anything else: submit the enclosing <form>, if any.
+            // preventDefault on keydown blocks both paths — same gate
+            // as the typed-char path. Resolving the form is a separate
+            // borrow from `try_submit_form` so the dispatch inside it
+            // doesn't see an outstanding read borrow on the document.
             let prevented = self
                 .js
                 .dispatch_keyboard_event(focused_id, "keydown", "Enter");
             if !prevented {
-                let form_id =
-                    find_enclosing_form(&self.parsed_document.borrow(), focused_id);
-                if let Some(form_id) = form_id {
-                    self.try_submit_form(form_id);
+                let is_textarea = matches!(
+                    self.parsed_document
+                        .borrow()
+                        .element_data(focused_id)
+                        .map(|elem| elem.tag_name.as_str()),
+                    Some("textarea")
+                );
+                if is_textarea {
+                    if push_char_to_input_value(&self.parsed_document, focused_id, '\n') {
+                        self.focused_input_dirty = true;
+                        self.js.dispatch_event(focused_id, "input");
+                    }
+                } else {
+                    let form_id =
+                        find_enclosing_form(&self.parsed_document.borrow(), focused_id);
+                    if let Some(form_id) = form_id {
+                        self.try_submit_form(form_id);
+                    }
                 }
             }
             self.js.dispatch_keyboard_event(focused_id, "keyup", "Enter");
@@ -1055,7 +1072,7 @@ pub fn page_step(viewport_height: usize) -> f32 {
 // the value actually changed — that's the signal the caller uses to fire
 // the `input` event and mark the input dirty. Silent no-op (returns false)
 // when the slot has been removed by a previous handler or the focused
-// element is not an `<input>`.
+// element is not an `<input>` or `<textarea>`.
 fn push_char_to_input_value(
     document: &Rc<RefCell<dom::Document>>,
     node_id: NodeId,
@@ -1065,7 +1082,7 @@ fn push_char_to_input_value(
     let Some(elem) = document.element_data_mut(node_id) else {
         return false;
     };
-    if elem.tag_name != "input" {
+    if !is_text_field_tag(&elem.tag_name) {
         return false;
     }
     let mut value = elem.attributes.get("value").cloned().unwrap_or_default();
@@ -1074,7 +1091,7 @@ fn push_char_to_input_value(
     true
 }
 
-// Pop the last character off the focused input's `value` attribute.
+// Pop the last character off the focused field's `value` attribute.
 // Returns true only when there was a character to pop — pop on an empty
 // value reports false so the caller can skip the `input` event (real
 // browsers don't fire `input` when there's no actual change).
@@ -1083,7 +1100,7 @@ fn pop_char_from_input_value(document: &Rc<RefCell<dom::Document>>, node_id: Nod
     let Some(elem) = document.element_data_mut(node_id) else {
         return false;
     };
-    if elem.tag_name != "input" {
+    if !is_text_field_tag(&elem.tag_name) {
         return false;
     }
     let mut value = elem.attributes.get("value").cloned().unwrap_or_default();
@@ -1093,6 +1110,14 @@ fn pop_char_from_input_value(document: &Rc<RefCell<dom::Document>>, node_id: Nod
     value.pop();
     elem.attributes.insert("value".into(), value);
     true
+}
+
+// Single source of truth for "is this element one of the typeable form
+// controls the toy understands?". The typing path, the form-data
+// collector, and the layout/render code all gate on the same set so
+// that <textarea> picks up the same affordances <input> already had.
+fn is_text_field_tag(tag: &str) -> bool {
+    matches!(tag, "input" | "textarea")
 }
 
 // Walks the parent chain from `start` looking for the nearest
@@ -1143,9 +1168,10 @@ fn find_enclosing_form(document: &dom::Document, start: NodeId) -> Option<NodeId
 }
 
 // Walks the form subtree and collects (name, value) pairs from every
-// `<input>` with a `name` attribute. Inputs without `name` are not
-// submittable per the HTML spec — same rule real browsers apply.
-// Recursive so inputs nested inside `<div>`/`<fieldset>` still surface.
+// text field (`<input>` / `<textarea>`) with a `name` attribute. Fields
+// without `name` are not submittable per the HTML spec — same rule
+// real browsers apply. Recursive so fields nested inside
+// `<div>`/`<fieldset>` still surface.
 fn collect_form_data(document: &dom::Document, form_id: NodeId) -> Vec<(String, String)> {
     let mut out = Vec::new();
     walk_form_subtree(document, form_id, &mut out);
@@ -1161,7 +1187,7 @@ fn walk_form_subtree(
         return;
     };
     if let NodeType::Element(elem) = &node.node_type
-        && elem.tag_name == "input"
+        && is_text_field_tag(&elem.tag_name)
         && let Some(name) = elem.attributes.get("name")
     {
         let value = elem.attributes.get("value").cloned().unwrap_or_default();

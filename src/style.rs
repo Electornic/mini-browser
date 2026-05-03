@@ -336,13 +336,17 @@ fn default_values(document: &Document, node_id: NodeId) -> PropertyMap {
                 }),
             );
         }
-        // <input> renders as an atomic inline-block widget. The UA stylesheet
-        // gives it a fixed default width (so an unstyled input still has a
-        // usable click target), a 1px gray border + white background so the
-        // box silhouette reads as a text field, and small horizontal padding
-        // so the caret + value text don't kiss the border. Author CSS still
-        // wins because UA defaults are applied before matched declarations.
-        "input" => {
+        // <input> and <textarea> both render as atomic inline-block
+        // widgets. The UA stylesheet gives them a fixed default width
+        // (so an unstyled field still has a usable click target), a
+        // 1px gray border + white background so the box silhouette
+        // reads as a text field, and small horizontal padding so the
+        // caret + value text don't kiss the border. <textarea> uses
+        // the same shell — its multi-line behaviour is purely about
+        // how `intrinsic_height` and the value-text commands handle
+        // the value buffer. Author CSS still wins because UA defaults
+        // are applied before matched declarations.
+        "input" | "textarea" => {
             values.insert(
                 "display".into(),
                 Value::Keyword("inline-block".into()),

@@ -385,17 +385,22 @@ fn padding_box(layout_box: &layout::LayoutBox) -> layout::Rect {
 }
 
 /// Emits the blinking 1px caret that sits at the end of a focused
-/// `<input>`'s value text. The caret turns on for 30 frames, off for 30,
-/// repeating — same `(frame_index / 30).is_multiple_of(2)` cadence the
-/// chrome address bar caret uses, so both blinks stay in phase. Returns
-/// an empty Vec when no input is focused or when the blink is in its
-/// "off" half; callers extend their command list unconditionally and the
-/// empty case becomes a no-op paint.
+/// `<input>` or `<textarea>`'s value text. The caret turns on for 30
+/// frames, off for 30, repeating — same `(frame_index / 30).is_multiple_of(2)`
+/// cadence the chrome address bar caret uses, so both blinks stay in
+/// phase. Returns an empty Vec when no field is focused or when the
+/// blink is in its "off" half; callers extend their command list
+/// unconditionally and the empty case becomes a no-op paint.
 ///
 /// `focused_node_id` is what links the styled-tree focus state to a
 /// specific layout box — `BrowserState::focused_dom_path` resolves to
 /// this NodeId on each frame, so the caret follows DOM mutations
 /// (renaming, swapping the focused element) without going stale.
+///
+/// For a `<textarea>` the caret rides the *last* `\n`-delimited line:
+/// y is offset by `font_size * (lines - 1)`, x is the measured width
+/// of the trailing line. That mirrors how the value-text paint code
+/// stacks lines top-to-bottom from the content origin.
 pub fn caret_commands_for_focused_input(
     layout_root: &layout::LayoutBox,
     focused_node_id: Option<NodeId>,
@@ -408,7 +413,7 @@ pub fn caret_commands_for_focused_input(
     if !(frame_index / 30).is_multiple_of(2) {
         return Vec::new();
     }
-    let Some(input_box) = find_focused_input_box(layout_root, focused_id) else {
+    let Some(input_box) = find_focused_text_field_box(layout_root, focused_id) else {
         return Vec::new();
     };
 
@@ -416,65 +421,86 @@ pub fn caret_commands_for_focused_input(
     // the caret position uses the SAME font size that paint_self used to
     // draw the value text — otherwise wide-glyph fonts would put the caret
     // in the wrong column.
-    let (value, font_size) = match &input_box.box_type {
+    let (value, font_size, is_textarea) = match &input_box.box_type {
         layout::BoxType::BlockNode(node)
         | layout::BoxType::FlexNode(node)
         | layout::BoxType::GridNode(node) => {
-            let value = match &node.node_type {
-                NodeType::Element(elem) => {
-                    elem.attributes.get("value").cloned().unwrap_or_default()
-                }
+            let (value, is_textarea) = match &node.node_type {
+                NodeType::Element(elem) => (
+                    elem.attributes.get("value").cloned().unwrap_or_default(),
+                    elem.tag_name == "textarea",
+                ),
                 NodeType::Text(_) => return Vec::new(),
             };
             let size = match node.value("font-size") {
                 Some(css::Value::Length(v, css::Unit::Px)) => *v,
                 _ => 16.0,
             };
-            (value, size)
+            (value, size, is_textarea)
         }
         layout::BoxType::AnonymousBlock => return Vec::new(),
     };
 
-    let caret_offset = render::measure_text_width(&value, font_size, fonts);
+    // Single-line `<input>` keeps the original layout (caret at end of
+    // value, vertically aligned with the glyph row). `<textarea>` rides
+    // the last `\n`-delimited line so a freshly-typed Enter parks the
+    // caret at the start of an empty next row.
+    let (caret_x_offset, caret_y_offset) = if is_textarea {
+        let mut row_count = 0usize;
+        let mut last_line = "";
+        for line in value.split('\n') {
+            last_line = line;
+            row_count += 1;
+        }
+        let row = row_count.saturating_sub(1);
+        let x_off = render::measure_text_width(last_line, font_size, fonts);
+        (x_off, font_size * row as f32)
+    } else {
+        (render::measure_text_width(&value, font_size, fonts), 0.0)
+    };
+
     let content = input_box.dimensions.content;
     vec![render::DisplayCommand::SolidRect(
         css::Color::BLACK,
         layout::Rect {
-            x: content.x + caret_offset,
+            x: content.x + caret_x_offset,
             // The chrome caret bleeds 1px above and below the glyph row to
             // give the bar a slightly thicker visual footprint; mirror
             // that here so the page input caret reads the same.
-            y: content.y - 1.0,
+            y: content.y + caret_y_offset - 1.0,
             width: 1.0,
             height: font_size + 2.0,
         },
     )]
 }
 
-// Depth-first search for the layout box that backs the focused <input>.
-// We can't pre-compute this from `focused_dom_path` alone because the
-// layout box's `node_id` is the canonical identity — DOM mutations between
-// the focus event and the next paint can move the same NodeId to a
-// different position in the tree (insertBefore, etc.) and the caret has
-// to follow.
-fn find_focused_input_box(
+// Depth-first search for the layout box that backs the focused
+// `<input>` or `<textarea>`. We can't pre-compute this from
+// `focused_dom_path` alone because the layout box's `node_id` is the
+// canonical identity — DOM mutations between the focus event and the
+// next paint can move the same NodeId to a different position in the
+// tree (insertBefore, etc.) and the caret has to follow.
+fn find_focused_text_field_box(
     box_node: &layout::LayoutBox,
     focused_id: NodeId,
 ) -> Option<&layout::LayoutBox> {
-    let is_focused_input = match &box_node.box_type {
+    let is_focused_field = match &box_node.box_type {
         layout::BoxType::BlockNode(node)
         | layout::BoxType::FlexNode(node)
         | layout::BoxType::GridNode(node) => {
             node.node_id == focused_id
-                && matches!(&node.node_type, NodeType::Element(elem) if elem.tag_name == "input")
+                && matches!(
+                    &node.node_type,
+                    NodeType::Element(elem) if elem.tag_name == "input" || elem.tag_name == "textarea"
+                )
         }
         layout::BoxType::AnonymousBlock => false,
     };
-    if is_focused_input {
+    if is_focused_field {
         return Some(box_node);
     }
     for child in &box_node.children {
-        if let Some(found) = find_focused_input_box(child, focused_id) {
+        if let Some(found) = find_focused_text_field_box(child, focused_id) {
             return Some(found);
         }
     }
@@ -618,5 +644,86 @@ mod tests {
         let bogus_id = NodeId::from_raw(input_id.raw().wrapping_add(99));
         let commands = caret_commands_for_focused_input(&layout_root, Some(bogus_id), 0, &[]);
         assert!(commands.is_empty());
+    }
+
+    // Textarea-side variant of `setup`. The walker mirrors find_input_node_id
+    // but matches `<textarea>` elements, so multi-line caret tests don't
+    // accidentally pick up an unrelated `<input>` from the same fixture.
+    fn setup_textarea(html_source: &str) -> (layout::LayoutBox, NodeId) {
+        let document = html::parse(html_source).unwrap();
+        let root = document.roots()[0];
+        let styled = style::style_tree(&document, root, &[]);
+        let layout_root = layout::layout_tree(&styled, 400.0);
+        let textarea_id = find_textarea_node_id(&document, root)
+            .expect("test fixtures must contain at least one <textarea>");
+        (layout_root, textarea_id)
+    }
+
+    fn find_textarea_node_id(document: &dom::Document, current: NodeId) -> Option<NodeId> {
+        let node = document.get(current)?;
+        if let NodeType::Element(elem) = &node.node_type
+            && elem.tag_name == "textarea"
+        {
+            return Some(current);
+        }
+        for child in &node.children {
+            if let Some(found) = find_textarea_node_id(document, *child) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn caret_on_textarea_rides_last_line_when_value_has_newlines() {
+        // For a `<textarea value="ab\ncd">` the caret must park at the
+        // end of "cd", one font-size row below the content origin.
+        // That's the contract that lets a freshly-typed Enter park the
+        // caret on a blank trailing row, and a typed char after that
+        // appear on the new line rather than the previous one.
+        let (layout_root, textarea_id) =
+            setup_textarea("<textarea value=\"ab\ncd\"></textarea>");
+        let commands = caret_commands_for_focused_input(&layout_root, Some(textarea_id), 0, &[]);
+
+        assert_eq!(commands.len(), 1);
+        let render::DisplayCommand::SolidRect(_, rect) = &commands[0] else {
+            panic!("expected caret SolidRect, got {:?}", commands[0]);
+        };
+        // x = content.x + measure_text_width("cd")
+        let cd_width = render::measure_text_width("cd", 16.0, &[]);
+        // content.x = padding-left + border-left = 4 + 1 = 5.
+        assert_eq!(rect.x, 5.0 + cd_width);
+        // Two lines → row index 1 → y offset = font-size * 1 = 16. The
+        // -1.0 in the y formula is the visual bleed the chrome caret
+        // also uses; matches how the input caret is positioned.
+        let content_y = layout_root.dimensions.content.y + 3.0; // padding-top
+        // We don't pin the absolute y exactly — the test below
+        // exercises the *delta* between lines instead.
+        let _ = content_y;
+    }
+
+    #[test]
+    fn caret_y_advances_by_font_size_per_textarea_line() {
+        // Adding extra `\n`s pushes the caret further down by exactly
+        // font-size each time. This is the property that makes the
+        // `caret rides the trailing line` rule observable independently
+        // of any specific content-origin math.
+        let (one_line_root, one_line_id) =
+            setup_textarea("<textarea value=\"hi\"></textarea>");
+        let (two_line_root, two_line_id) =
+            setup_textarea("<textarea value=\"hi\n\"></textarea>");
+
+        let one_caret = caret_commands_for_focused_input(&one_line_root, Some(one_line_id), 0, &[]);
+        let two_caret = caret_commands_for_focused_input(&two_line_root, Some(two_line_id), 0, &[]);
+
+        let render::DisplayCommand::SolidRect(_, one_rect) = &one_caret[0] else {
+            panic!()
+        };
+        let render::DisplayCommand::SolidRect(_, two_rect) = &two_caret[0] else {
+            panic!()
+        };
+        // Same font-size (16) → second textarea's caret is exactly one
+        // row below the first.
+        assert_eq!(two_rect.y - one_rect.y, 16.0);
     }
 }

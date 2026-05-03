@@ -371,6 +371,62 @@ mod tests {
     }
 
     #[test]
+    fn textarea_emits_one_text_command_per_newline_delimited_line() {
+        // <textarea value="a\nb\nc"> should emit three Text commands —
+        // one per line — stacked top-to-bottom from the content origin.
+        // The y deltas equal the cascaded font-size (16px UA default),
+        // and each command's text is the line in source order.
+        let commands = display_list(
+            "<textarea value=\"a\nb\nc\"></textarea>",
+            "",
+        );
+
+        let texts: Vec<_> = commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DisplayCommand::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 3, "three lines should produce three Text commands");
+        assert_eq!(texts[0].text, "a");
+        assert_eq!(texts[1].text, "b");
+        assert_eq!(texts[2].text, "c");
+        // Lines stack vertically by font-size; x stays pinned to the
+        // content origin since soft wrapping is not implemented.
+        assert_eq!(texts[1].y - texts[0].y, 16.0);
+        assert_eq!(texts[2].y - texts[1].y, 16.0);
+        assert_eq!(texts[0].x, texts[1].x);
+        assert_eq!(texts[0].x, texts[2].x);
+    }
+
+    #[test]
+    fn textarea_skips_empty_lines_in_paint_but_keeps_following_lines_offset() {
+        // A blank middle line (`a\n\nb`) emits no Text command for the
+        // empty entry — there's nothing to paint — but the following
+        // line still sits two rows below the first because the caret
+        // path counts blank rows separately.
+        let commands = display_list(
+            "<textarea value=\"a\n\nb\"></textarea>",
+            "",
+        );
+
+        let texts: Vec<_> = commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DisplayCommand::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 2);
+        assert_eq!(texts[0].text, "a");
+        assert_eq!(texts[1].text, "b");
+        // Two-row gap between the two visible lines (the empty middle
+        // line still consumes a row even though it didn't paint).
+        assert_eq!(texts[1].y - texts[0].y, 32.0);
+    }
+
+    #[test]
     fn paints_rect_before_descendant_text() {
         let commands = display_list(
             r#"<div id="card"><p>Hello</p></div>"#,
