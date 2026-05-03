@@ -30,6 +30,7 @@ mod document;
 mod element;
 mod event;
 mod fetch;
+mod storage;
 mod timers;
 mod util;
 mod window;
@@ -112,6 +113,7 @@ impl JsRuntime {
             raf_callbacks.clone(),
         );
         fetch::register_fetch(&mut context);
+        storage::register_storage(&mut context);
         xhr::register_xmlhttprequest(&mut context);
         Self {
             context,
@@ -723,6 +725,120 @@ mod tests {
                 .execute("document.getElementsByClassName('row hot').length")
                 .unwrap(),
             "2"
+        );
+    }
+
+    #[test]
+    fn local_and_session_storage_are_globals_with_storage_interface() {
+        // Both globals must exist and expose the same minimal Storage
+        // surface; quite a few client libraries probe `typeof
+        // localStorage !== 'undefined' && typeof
+        // localStorage.getItem === 'function'` before using it.
+        let mut runtime = runtime_with("");
+        for global in ["localStorage", "sessionStorage"] {
+            assert_eq!(
+                runtime.execute(&format!("typeof {global}")).unwrap(),
+                "\"object\"",
+            );
+            for method in ["getItem", "setItem", "removeItem", "clear", "key"] {
+                assert_eq!(
+                    runtime
+                        .execute(&format!("typeof {global}.{method}"))
+                        .unwrap(),
+                    "\"function\"",
+                );
+            }
+            assert_eq!(
+                runtime.execute(&format!("{global}.length")).unwrap(),
+                "0"
+            );
+        }
+    }
+
+    #[test]
+    fn local_storage_round_trips_string_values_and_coerces_non_strings() {
+        // setItem stores; getItem returns the stored string; missing keys
+        // produce null. Non-string values are ToString-coerced (the spec
+        // requirement that turns numbers and booleans into their string
+        // forms) — many sites rely on this for `setItem('count', 1)`.
+        let mut runtime = runtime_with("");
+        runtime
+            .execute("localStorage.setItem('a', 'hello'); localStorage.setItem('b', 42);")
+            .unwrap();
+        assert_eq!(
+            runtime.execute("localStorage.getItem('a')").unwrap(),
+            "\"hello\""
+        );
+        assert_eq!(
+            runtime.execute("localStorage.getItem('b')").unwrap(),
+            "\"42\""
+        );
+        assert_eq!(
+            runtime.execute("localStorage.getItem('absent')").unwrap(),
+            "null"
+        );
+        assert_eq!(runtime.execute("localStorage.length").unwrap(), "2");
+    }
+
+    #[test]
+    fn local_storage_remove_and_clear_drop_entries() {
+        // removeItem deletes a single key; clear empties the entire store.
+        // length tracks both. Removing a missing key is a no-op (per spec).
+        let mut runtime = runtime_with("");
+        runtime
+            .execute("localStorage.setItem('a','1'); localStorage.setItem('b','2');")
+            .unwrap();
+        runtime.execute("localStorage.removeItem('a')").unwrap();
+        assert_eq!(
+            runtime.execute("localStorage.getItem('a')").unwrap(),
+            "null"
+        );
+        assert_eq!(runtime.execute("localStorage.length").unwrap(), "1");
+        runtime.execute("localStorage.removeItem('absent')").unwrap();
+        assert_eq!(runtime.execute("localStorage.length").unwrap(), "1");
+        runtime.execute("localStorage.clear()").unwrap();
+        assert_eq!(runtime.execute("localStorage.length").unwrap(), "0");
+    }
+
+    #[test]
+    fn local_storage_key_returns_inserted_position_or_null() {
+        // key(n) reflects insertion order; out-of-range indices return null.
+        // Re-setting an existing key keeps its position so the index of
+        // earlier keys doesn't shift under the script's feet.
+        let mut runtime = runtime_with("");
+        runtime
+            .execute("localStorage.setItem('a','1'); localStorage.setItem('b','2');")
+            .unwrap();
+        assert_eq!(runtime.execute("localStorage.key(0)").unwrap(), "\"a\"");
+        assert_eq!(runtime.execute("localStorage.key(1)").unwrap(), "\"b\"");
+        assert_eq!(runtime.execute("localStorage.key(2)").unwrap(), "null");
+        runtime.execute("localStorage.setItem('a','99')").unwrap();
+        assert_eq!(runtime.execute("localStorage.key(0)").unwrap(), "\"a\"");
+        assert_eq!(
+            runtime.execute("localStorage.getItem('a')").unwrap(),
+            "\"99\""
+        );
+    }
+
+    #[test]
+    fn local_storage_and_session_storage_are_independent_buckets() {
+        // Writes to one must not leak to the other — every real script
+        // uses sessionStorage for "this tab only" data and localStorage
+        // for "across visits", and conflating them would corrupt both.
+        let mut runtime = runtime_with("");
+        runtime
+            .execute("localStorage.setItem('shared','local');")
+            .unwrap();
+        runtime
+            .execute("sessionStorage.setItem('shared','session');")
+            .unwrap();
+        assert_eq!(
+            runtime.execute("localStorage.getItem('shared')").unwrap(),
+            "\"local\""
+        );
+        assert_eq!(
+            runtime.execute("sessionStorage.getItem('shared')").unwrap(),
+            "\"session\""
         );
     }
 
