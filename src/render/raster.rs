@@ -34,7 +34,16 @@ pub fn measure_text_width(text: &str, font_size: f32, fonts: &[fontdue::Font]) -
             .find(|f| f.lookup_glyph_index(ch) != 0 || ch == ' ');
         match font_match {
             Some(font) => {
-                let (metrics, _) = font.rasterize(ch, size);
+                // `font.metrics(ch, size)` returns advance + bounding box
+                // *without* rasterising the glyph bitmap; `rasterize` does
+                // both and is dramatically more expensive (a 16px latin
+                // glyph allocates ~hundreds of bytes and runs the
+                // antialiased outline pipeline). Layout calls this once
+                // per character every frame, so using `rasterize` here was
+                // making the per-frame cost scale with page text length —
+                // HN-sized pages spent the bulk of each frame inside
+                // glyph rasterisation just to read the advance number.
+                let metrics = font.metrics(ch, size);
                 width += metrics.advance_width;
             }
             None => width += font_size * 0.75,
