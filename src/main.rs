@@ -1142,6 +1142,140 @@ mod tests {
         assert_eq!(browser.js.execute("hits").unwrap(), "1");
     }
 
+    // ---- Step 6 (#6 in Notion): page input keyboard typing ----
+
+    #[test]
+    fn typed_chars_append_to_focused_input_value_attribute() {
+        // <input> wrapped in a div so the input sits at DOM path [0].
+        // Setting focused_dom_path directly skips the click+hit-test
+        // dance — the typing logic itself is what's under test.
+        let mut browser = browser_with_html(r#"<div><input value="ab"/></div>"#);
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![0]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                typed: "cd".into(),
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        let document = browser.parsed_document.borrow();
+        let input_id = document.get(document.roots()[0]).unwrap().children[0];
+        let elem = document.element_data(input_id).unwrap();
+        assert_eq!(elem.attributes.get("value").map(String::as_str), Some("abcd"));
+    }
+
+    #[test]
+    fn backspace_pops_last_char_from_focused_input() {
+        let mut browser = browser_with_html(r#"<div><input value="hello"/></div>"#);
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![0]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                backspace_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        let document = browser.parsed_document.borrow();
+        let input_id = document.get(document.roots()[0]).unwrap().children[0];
+        let elem = document.element_data(input_id).unwrap();
+        assert_eq!(elem.attributes.get("value").map(String::as_str), Some("hell"));
+    }
+
+    #[test]
+    fn typing_with_no_focus_does_not_mutate_dom() {
+        // Nothing focused → keystrokes are silently dropped. Input attribute
+        // stays exactly as parsed; no panic on the missing focus path.
+        let mut browser = browser_with_html(r#"<input value="frozen"/>"#);
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = None;
+
+        browser.apply_input(
+            &window::WindowInput {
+                typed: "abc".into(),
+                backspace_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        let document = browser.parsed_document.borrow();
+        let input_id = document.roots()[0];
+        let elem = document.element_data(input_id).unwrap();
+        assert_eq!(
+            elem.attributes.get("value").map(String::as_str),
+            Some("frozen")
+        );
+    }
+
+    #[test]
+    fn typing_into_focused_non_input_element_is_no_op() {
+        // Focus on a <div> (e.g. a future tabbable surface) — typing must
+        // not corrupt arbitrary attributes on it. The protective tag check
+        // in `type_into_focused_input` is what locks this contract.
+        let mut browser = browser_with_html(r#"<div id="host"></div>"#);
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                typed: "x".into(),
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        let document = browser.parsed_document.borrow();
+        let div_id = document.roots()[0];
+        let elem = document.element_data(div_id).unwrap();
+        // Only `id` should be present — no rogue `value` attribute appeared.
+        assert_eq!(elem.attributes.get("value"), None);
+    }
+
+    #[test]
+    fn address_bar_focus_takes_priority_over_page_input() {
+        // Both flags set → address bar wins (matches the order in
+        // apply_input). This is what makes Cmd+L "rescue" navigation
+        // even when a page input had keyboard focus.
+        let mut browser = browser_with_html(r#"<div><input value=""/></div>"#);
+        browser.address_bar_focused = true;
+        browser.address_bar_selected = false;
+        browser.focused_dom_path = Some(vec![0]);
+        // Reset the seeded "about:blank" address so we can pin the typed
+        // suffix exactly. Real users would already be typing into a fresh
+        // bar after Cmd+L (which sets selected=true and clears on first key).
+        browser.address_input.clear();
+
+        browser.apply_input(
+            &window::WindowInput {
+                typed: "y".into(),
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        // Address bar absorbed the keystroke …
+        assert_eq!(browser.address_input, "y");
+        // … the page input value attribute stayed empty.
+        let document = browser.parsed_document.borrow();
+        let input_id = document.get(document.roots()[0]).unwrap().children[0];
+        let elem = document.element_data(input_id).unwrap();
+        assert_eq!(
+            elem.attributes.get("value").map(String::as_str),
+            Some("")
+        );
+    }
+
     #[test]
     fn raf_callback_dom_mutation_lands_in_browser_state_arena() {
         // rAF runs *before* the frame's layout pass, so any DOM mutation

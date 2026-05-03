@@ -479,6 +479,14 @@ impl BrowserState {
                 self.navigate();
                 self.address_bar_focused = false;
             }
+        } else if let Some(focused_path) = self.focused_dom_path.clone() {
+            // Address bar didn't claim the keystrokes — try to feed them
+            // to a focused page <input>. Anything else (focused link,
+            // focused div, no focus at all) silently drops the keys, same
+            // way the address-bar branch falls through when nothing is
+            // focused. Enter is reserved for #7 (form submit) so it stays
+            // a no-op here.
+            self.type_into_focused_input(&focused_path, input);
         }
 
         if input.back_pressed {
@@ -503,6 +511,46 @@ impl BrowserState {
         if input.page_down_pressed {
             self.scroll_offset += page_step(viewport_height);
         }
+    }
+
+    // Routes typed characters and backspace into the `value` attribute of
+    // a focused page <input>. Silent no-op when `focused_path` doesn't
+    // resolve to an input element — keeps focus on a non-text-field
+    // (e.g. a link picked up by a future tab-focus path) from corrupting
+    // its own attributes. Enter is intentionally NOT consumed here:
+    // Step 4 (#7 in Notion) wires it to form submit later.
+    fn type_into_focused_input(&mut self, focused_path: &[usize], input: &window::WindowInput) {
+        if input.typed.is_empty() && !input.backspace_pressed {
+            return;
+        }
+        let mut document = self.parsed_document.borrow_mut();
+        let Some(node_id) = node_id_for_dom_path(&document, focused_path) else {
+            return;
+        };
+        let Some(elem) = document.element_data_mut(node_id) else {
+            return;
+        };
+        if elem.tag_name != "input" {
+            return;
+        }
+        // Read-modify-write the `value` attribute. The next frame's style
+        // pass picks up the new attribute and the input re-paints with
+        // the updated text + caret position automatically — no separate
+        // invalidation hop needed.
+        let mut value = elem
+            .attributes
+            .get("value")
+            .cloned()
+            .unwrap_or_default();
+        for ch in input.typed.chars() {
+            if !ch.is_control() {
+                value.push(ch);
+            }
+        }
+        if input.backspace_pressed {
+            value.pop();
+        }
+        elem.attributes.insert("value".into(), value);
     }
 
     fn navigate(&mut self) {
