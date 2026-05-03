@@ -322,6 +322,55 @@ mod tests {
     }
 
     #[test]
+    fn input_emits_background_border_and_value_text() {
+        // Step 6.1: an unstyled <input value="hi"> renders as background +
+        // four border edges + a Text command for the value attribute. UA
+        // defaults give it 200×16 content, 1px borders, 4×2 padding, so
+        // the value text sits at the content origin (5, 3).
+        let commands = display_list(r#"<input type="text" value="hi"/>"#, "");
+
+        let solid_rects: Vec<_> = commands
+            .iter()
+            .filter(|cmd| matches!(cmd, DisplayCommand::SolidRect(_, _)))
+            .collect();
+        // Expect: 1 white background + 4 border edges (top/bottom/left/right).
+        assert_eq!(solid_rects.len(), 5);
+
+        // The value attribute drives a Text command. We don't pin the exact
+        // coordinates because the underlying intrinsic-height math may
+        // legitimately drift; what matters is that the *value string* is
+        // what gets painted (not, e.g., the placeholder, not nothing).
+        let value_text = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DisplayCommand::Text(text) if text.text == "hi" => Some(text),
+                _ => None,
+            })
+            .expect("input must paint its value attribute as a Text command");
+        assert_eq!(value_text.font_size, 16.0);
+    }
+
+    #[test]
+    fn input_with_empty_value_skips_text_command() {
+        // No value attribute → no Text command emitted (no placeholder
+        // rendering yet). The bg + border still paint so the field is
+        // visible as a clickable target.
+        let commands = display_list(r#"<input type="text"/>"#, "");
+
+        assert!(
+            commands
+                .iter()
+                .all(|cmd| !matches!(cmd, DisplayCommand::Text(_))),
+            "empty <input> should not emit any Text commands"
+        );
+        let solid_count = commands
+            .iter()
+            .filter(|cmd| matches!(cmd, DisplayCommand::SolidRect(_, _)))
+            .count();
+        assert_eq!(solid_count, 5, "bg + 4 borders still paint");
+    }
+
+    #[test]
     fn paints_rect_before_descendant_text() {
         let commands = display_list(
             r#"<div id="card"><p>Hello</p></div>"#,

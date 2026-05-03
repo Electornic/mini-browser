@@ -265,6 +265,14 @@ pub(super) fn intrinsic_height(node: &StyledNode) -> f32 {
         NodeType::Element(element) if element.tag_name == "img" => {
             attribute_length(element, "height").unwrap_or(150.0)
         }
+        // <input> is an atomic widget with no children, so its content height
+        // has to come from somewhere — use the font-size so a single-line
+        // text field is exactly tall enough for one glyph row. Authoring
+        // `height: …` still overrides because explicit height takes
+        // precedence over intrinsic in `layout_inline_block_node`.
+        NodeType::Element(element) if element.tag_name == "input" => {
+            length_value(node, "font-size", 0.0).unwrap_or(16.0)
+        }
         NodeType::Element(_) => 0.0,
     }
 }
@@ -459,6 +467,32 @@ mod tests {
         let text = &layout.children[0];
 
         assert_eq!(text.dimensions.content.height, 18.0);
+    }
+
+    #[test]
+    fn input_uses_widget_defaults_and_renders_atomically() {
+        // The UA stylesheet (style::default_values) gives <input> a 200px
+        // width, 1px border on all sides, and 4×2 padding. With 16px default
+        // font-size driving intrinsic_height, the input's content box ends
+        // up 200×16 and its border box (= what other inline-blocks see for
+        // line packing) ends up 210×22. Wrap in a div so layout_tree picks
+        // the parent as root and we can pluck the input as a child.
+        let styled = styled_root(r#"<div><input type="text"/></div>"#, "");
+        let layout = layout_tree(&styled, 400.0);
+        let input = &layout.children[0];
+
+        assert_eq!(input.dimensions.content.width, 200.0);
+        assert_eq!(input.dimensions.content.height, 16.0);
+        assert_eq!(input.dimensions.padding.left, 4.0);
+        assert_eq!(input.dimensions.padding.right, 4.0);
+        assert_eq!(input.dimensions.padding.top, 2.0);
+        assert_eq!(input.dimensions.padding.bottom, 2.0);
+        assert_eq!(input.dimensions.border.left, 1.0);
+        assert_eq!(input.dimensions.border.top, 1.0);
+        // Atomic widget: even if the parser somehow handed us children,
+        // <input> shouldn't recurse into them. Void-element parsing already
+        // guarantees this in practice; the assertion locks the contract.
+        assert!(input.children.is_empty());
     }
 
     #[test]

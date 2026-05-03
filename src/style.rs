@@ -336,6 +336,66 @@ fn default_values(document: &Document, node_id: NodeId) -> PropertyMap {
                 }),
             );
         }
+        // <input> renders as an atomic inline-block widget. The UA stylesheet
+        // gives it a fixed default width (so an unstyled input still has a
+        // usable click target), a 1px gray border + white background so the
+        // box silhouette reads as a text field, and small horizontal padding
+        // so the caret + value text don't kiss the border. Author CSS still
+        // wins because UA defaults are applied before matched declarations.
+        "input" => {
+            values.insert(
+                "display".into(),
+                Value::Keyword("inline-block".into()),
+            );
+            values.insert(
+                "width".into(),
+                Value::Length(200.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "background-color".into(),
+                Value::Color(crate::css::Color {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                    a: 255,
+                }),
+            );
+            values.insert(
+                "color".into(),
+                Value::Color(crate::css::Color {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }),
+            );
+            edge_defaults(&mut values, "border", 1.0);
+            values.insert(
+                "border-color".into(),
+                Value::Color(crate::css::Color {
+                    r: 118,
+                    g: 118,
+                    b: 118,
+                    a: 255,
+                }),
+            );
+            values.insert(
+                "padding-left".into(),
+                Value::Length(4.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "padding-right".into(),
+                Value::Length(4.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "padding-top".into(),
+                Value::Length(2.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "padding-bottom".into(),
+                Value::Length(2.0, crate::css::Unit::Px),
+            );
+        }
         _ => {}
     }
 
@@ -601,6 +661,85 @@ mod tests {
                 r: 0,
                 g: 102,
                 b: 204,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn input_gets_widget_user_agent_defaults() {
+        // <input> needs a visible silhouette without any author CSS, so the
+        // UA default sketches it as a 200px-wide inline-block with white bg,
+        // gray border, and small horizontal padding. This is what makes an
+        // unstyled <input> render as a recognizable text field rather than
+        // collapsing to a zero-sized text node.
+        let (document, root) =
+            parse_html(r#"<div><input type="text" value="hello"/></div>"#);
+        let styled = style::style_tree(&document, root, &[]);
+        let input = &styled.children[0];
+
+        assert_eq!(
+            input.value("display"),
+            Some(&Value::Keyword("inline-block".into()))
+        );
+        assert_eq!(
+            input.value("width"),
+            Some(&Value::Length(200.0, Unit::Px))
+        );
+        assert_eq!(
+            input.value("background-color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 255,
+            }))
+        );
+        assert_eq!(
+            input.value("border-color"),
+            Some(&Value::Color(Color {
+                r: 118,
+                g: 118,
+                b: 118,
+                a: 255,
+            }))
+        );
+        // 1px border on every side so border_commands actually paints.
+        assert_eq!(
+            input.value("border-top"),
+            Some(&Value::Length(1.0, Unit::Px))
+        );
+        assert_eq!(
+            input.value("padding-left"),
+            Some(&Value::Length(4.0, Unit::Px))
+        );
+    }
+
+    #[test]
+    fn input_user_agent_defaults_are_overridable_by_author_styles() {
+        // UA defaults run before matched declarations, so an author rule that
+        // declares `border-color` or `width` on an input still wins. Same
+        // override mechanism `body { margin-top: ...}` already relies on.
+        let (document, root) = parse_html(r#"<input type="text"/>"#);
+        let stylesheet = parse_css(
+            r#"
+                input {
+                    width: 320px;
+                    border-color: #ff0000;
+                }
+            "#,
+        );
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        assert_eq!(
+            styled.value("width"),
+            Some(&Value::Length(320.0, Unit::Px))
+        );
+        assert_eq!(
+            styled.value("border-color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
                 a: 255,
             }))
         );

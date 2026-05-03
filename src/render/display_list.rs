@@ -173,6 +173,14 @@ fn paint_self(
     if let Some(command) = text_command(layout_box, alpha) {
         commands.push(command);
     }
+    // <input> draws its `value` attribute as text inside the content box.
+    // Sits after `text_command` so an author-styled element with both a
+    // child Text node and a `value` attribute would emit both — but real
+    // <input> is void per HTML5 (the parser enforces this), so in practice
+    // only this branch fires for inputs.
+    if let Some(command) = input_value_text_command(layout_box, alpha) {
+        commands.push(command);
+    }
     // Push the inherited+own transform onto the commands this box just emitted.
     // The emitters work in logical (untransformed) coordinates; the affine
     // matrix is the only thing that maps logical → screen pixels.
@@ -550,6 +558,38 @@ fn text_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
 
     Some(DisplayCommand::Text(TextCommand {
         text,
+        x: layout_box.dimensions.content.x,
+        y: layout_box.dimensions.content.y + half_leading,
+        color: apply_alpha(text_color(node), alpha),
+        font_size: glyph_size,
+    }))
+}
+
+// Emits the `value` attribute of an <input> element as a Text command sitting
+// inside the input's content box. This is what gives an unfocused input its
+// readable text — the value attribute IS the visible text in the toy browser
+// (the "value 속성 = 표시 텍스트" decision from the Step 4 design notes).
+// Returns None for non-input elements and for inputs whose value is empty
+// (placeholder rendering is deferred). Half-leading mirrors `text_command`
+// so a tall padded input still vertically centers its glyphs.
+fn input_value_text_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
+    let node = layout_box.styled_node()?;
+    let element = match &node.node_type {
+        NodeType::Element(element) => element,
+        NodeType::Text(_) => return None,
+    };
+    if element.tag_name != "input" {
+        return None;
+    }
+    let value = element.attributes.get("value")?;
+    if value.is_empty() {
+        return None;
+    }
+
+    let glyph_size = font_size(node);
+    let half_leading = ((layout_box.dimensions.content.height - glyph_size) / 2.0).max(0.0);
+    Some(DisplayCommand::Text(TextCommand {
+        text: value.clone(),
         x: layout_box.dimensions.content.x,
         y: layout_box.dimensions.content.y + half_leading,
         color: apply_alpha(text_color(node), alpha),
