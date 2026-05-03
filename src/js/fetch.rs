@@ -1,5 +1,5 @@
-// Browser-style `fetch(url)` global. Wraps `crate::net::fetch`, which is
-// synchronous, in a Promise so the JS surface mirrors a real browser:
+// Browser-style `fetch(url, init?)` global. Wraps `crate::net` which
+// is synchronous in a Promise so the JS surface mirrors a real browser:
 // `fetch(url).then(r => r.text())` and `await fetch(url)` both work.
 //
 // The async-ness is approximated — we run the HTTP exchange on the main
@@ -7,6 +7,17 @@
 // with an already-built Response. That blocks the UI for the duration
 // of a request, which is fine for a toy and avoids the worker-pool
 // machinery a real engine maintains.
+//
+// `init` (second argument) is an optional object. The toy understands
+// three of its WHATWG-spec fields:
+//   - `method` (string)  — defaults to "GET"
+//   - `headers` (object) — plain `{name: value}` map; the Headers
+//     class is not implemented, but real-world callers
+//     (`fetch(u, { headers: { 'X-Foo': 'bar' } })`) hand in a plain
+//     object literal anyway, which round-trips through here.
+//   - `body` (string)    — sent verbatim, with a `Content-Length`
+//     header tacked on by the network layer. Blob/FormData/URLSearchParams
+//     are not implemented yet.
 //
 // Errors (URL parse failure, network/TLS failure, redirect-limit) reject
 // the Promise as a TypeError so the standard `try { await fetch(...) }
@@ -25,7 +36,7 @@ use boa_engine::{
     Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
     js_string,
     object::{ObjectInitializer, builtins::JsPromise},
-    property::Attribute,
+    property::{Attribute, PropertyKey},
 };
 
 use crate::net::{self, FetchResult};
@@ -35,12 +46,12 @@ use super::util::first_arg_as_string;
 pub(super) fn register_fetch(context: &mut Context) {
     let _ = context.register_global_builtin_callable(
         js_string!("fetch"),
-        1,
+        2,
         NativeFunction::from_fn_ptr(fetch_global),
     );
 }
 
-// `fetch(url)` — sync HTTP exchange wrapped in a Promise. Always
+// `fetch(url, init?)` — sync HTTP exchange wrapped in a Promise. Always
 // returns a Promise: success branches resolve with a Response; URL
 // parse / network failures reject with a TypeError so callers can
 // `.catch(...)` or `try { await ... } catch`.
@@ -62,7 +73,21 @@ fn fetch_global(
         }
     };
 
-    match net::fetch(&url) {
+    // Parse the optional `init` object once, up front. A bad `init`
+    // (non-object, non-stringifiable header value, etc.) propagates
+    // synchronously — the spec also rejects these synchronously
+    // rather than as a Promise rejection.
+    let request_init = match parse_request_init(args.get(1), context) {
+        Ok(init) => init,
+        Err(err) => return Ok(JsValue::from(JsPromise::reject(err, context))),
+    };
+
+    match net::fetch_with_request(
+        &url,
+        &request_init.method,
+        &request_init.headers,
+        &request_init.body,
+    ) {
         Ok(result) => {
             let response = build_response_object(result, context);
             Ok(JsValue::from(JsPromise::resolve(JsValue::from(response), context)))
@@ -75,6 +100,87 @@ fn fetch_global(
             Ok(JsValue::from(JsPromise::reject(err, context)))
         }
     }
+}
+
+// Decoded `init` argument for the network layer. Keeping the parsed
+// shape behind a struct (instead of three separate locals) makes the
+// fetch_global body read top-down and keeps the spec field names
+// visible at the call site.
+struct RequestInit {
+    method: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+// Pulls the spec-significant fields off the `init` argument. A
+// missing / undefined / null `init` collapses to a plain GET with no
+// body and no extra headers — same default a single-arg fetch would
+// have produced. Anything else must be an Object; primitives raise
+// TypeError so callers don't accidentally send a stringified number.
+fn parse_request_init(init: Option<&JsValue>, context: &mut Context) -> JsResult<RequestInit> {
+    let mut parsed = RequestInit {
+        method: "GET".to_string(),
+        headers: Vec::new(),
+        body: Vec::new(),
+    };
+    let Some(init_value) = init else {
+        return Ok(parsed);
+    };
+    if init_value.is_undefined() || init_value.is_null() {
+        return Ok(parsed);
+    }
+    let Some(init_obj) = init_value.as_object() else {
+        return Err(JsError::from_native(
+            JsNativeError::typ().with_message("fetch: init argument must be an object"),
+        ));
+    };
+
+    // method is read first; an upper-cased copy keeps the toy's
+    // outgoing request line consistent regardless of how the JS
+    // caller spelled it (`'post'`, `'POST'`, `'PoSt'` all become
+    // `POST`). Empty / undefined falls back to GET.
+    let method_value = init_obj.get(js_string!("method"), context)?;
+    if !method_value.is_undefined() && !method_value.is_null() {
+        parsed.method = method_value
+            .to_string(context)?
+            .to_std_string_escaped()
+            .to_uppercase();
+    }
+
+    let headers_value = init_obj.get(js_string!("headers"), context)?;
+    if !headers_value.is_undefined() && !headers_value.is_null() {
+        let Some(headers_obj) = headers_value.as_object() else {
+            return Err(JsError::from_native(
+                JsNativeError::typ().with_message("fetch: headers must be an object"),
+            ));
+        };
+        // Walk own keys in source order so handlers that care about
+        // ordering (some servers do) see the same sequence the JS
+        // author wrote. Symbol keys are skipped — HTTP header names
+        // are strings.
+        for key in headers_obj.own_property_keys(context)? {
+            let name = match &key {
+                PropertyKey::String(s) => s.to_std_string_escaped(),
+                PropertyKey::Index(n) => n.get().to_string(),
+                PropertyKey::Symbol(_) => continue,
+            };
+            let value = headers_obj
+                .get(key, context)?
+                .to_string(context)?
+                .to_std_string_escaped();
+            parsed.headers.push((name, value));
+        }
+    }
+
+    let body_value = init_obj.get(js_string!("body"), context)?;
+    if !body_value.is_undefined() && !body_value.is_null() {
+        parsed.body = body_value
+            .to_string(context)?
+            .to_std_string_escaped()
+            .into_bytes();
+    }
+
+    Ok(parsed)
 }
 
 // Builds the Response wrapper with the per-fetch metadata locked in

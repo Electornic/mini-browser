@@ -2624,4 +2624,227 @@ mod tests {
             "expected SyntaxError from JSON.parse, got: {caught}"
         );
     }
+
+    // ---- Step 8c (#17 leftover in Notion): fetch POST + headers ----
+    //
+    // The `init` second arg routes the request through
+    // net::fetch_with_request, so coverage focuses on the wire-level
+    // shape: a POST stays a POST on the request line, the body is
+    // forwarded verbatim, and author headers ride alongside the
+    // toy's defaults. The test server captures what it received and
+    // hands it back over JoinHandle so the assertion can read it.
+
+    /// Read a complete HTTP request off `stream` (header block plus
+    /// `Content-Length`-bounded body). Returns the entire raw bytes
+    /// the client sent so the test can assert against the request
+    /// line, individual headers, and the body in one shot. Reading
+    /// in two passes (headers first, then exactly N body bytes) is
+    /// required because the toy uses keep-alive — a naive single
+    /// `read` may stop after the headers and miss the body that's
+    /// already in the kernel buffer.
+    fn read_full_request(stream: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        // Read until we see the end-of-headers marker.
+        let header_end = loop {
+            let n = stream.read(&mut chunk).unwrap();
+            if n == 0 {
+                break buf.len();
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(idx) = find_subsequence(&buf, b"\r\n\r\n") {
+                break idx + 4;
+            }
+        };
+        // If a Content-Length header announced more body bytes than
+        // we already buffered, drain those too. Real servers parse
+        // the headers properly; the test only needs Content-Length
+        // because all the test scripts send fixed-size string bodies.
+        let so_far = String::from_utf8_lossy(&buf[..header_end]).to_string();
+        let body_len = so_far
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+            .and_then(|line| line.split_once(':'))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        let already_buffered = buf.len() - header_end;
+        if body_len > already_buffered {
+            let need = body_len - already_buffered;
+            let mut tail = vec![0u8; need];
+            stream.read_exact(&mut tail).unwrap();
+            buf.extend_from_slice(&tail);
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    #[test]
+    fn fetch_with_post_method_sends_post_on_the_request_line() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let received = read_full_request(&mut stream);
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+            received
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var ok;\
+             fetch('http://127.0.0.1:{port}/api', {{ method: 'POST' }})\
+                 .then(function (r) {{ ok = r.ok; }});"
+        );
+        runtime.execute(&script).unwrap();
+        let received = server.join().unwrap();
+
+        assert_eq!(runtime.execute("ok").unwrap(), "true");
+        assert!(
+            received.starts_with("POST /api HTTP/1.1"),
+            "expected POST request line, got: {received:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_lowercase_method_is_normalised_to_uppercase_on_the_wire() {
+        // The HTTP spec is case-sensitive on the request line. JS
+        // authors routinely write `method: 'post'`, so we upper-case
+        // before sending — the same normalisation real browsers do.
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let received = read_full_request(&mut stream);
+            let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+            received
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "fetch('http://127.0.0.1:{port}/x', {{ method: 'put' }}).then(function () {{}});"
+        );
+        runtime.execute(&script).unwrap();
+        let received = server.join().unwrap();
+
+        assert!(
+            received.starts_with("PUT /x HTTP/1.1"),
+            "method should be upper-cased on the wire, got: {received:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_post_body_is_forwarded_with_content_length() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let received = read_full_request(&mut stream);
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+            received
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "fetch('http://127.0.0.1:{port}/post', {{ method: 'POST', body: 'hello world' }})\
+                 .then(function () {{}});",
+        );
+        runtime.execute(&script).unwrap();
+        let received = server.join().unwrap();
+
+        // Content-Length tracks the body, and the body sits at the
+        // very end after the blank line that terminates the header
+        // block. Both invariants matter: a server that only reads
+        // Content-Length bytes after CRLFCRLF needs both to line up.
+        assert!(
+            received.contains("Content-Length: 11"),
+            "expected Content-Length: 11 (length of 'hello world'), got: {received:?}"
+        );
+        assert!(
+            received.ends_with("hello world"),
+            "body must be appended after the headers, got: {received:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_init_headers_are_appended_to_the_default_headers() {
+        // Author headers ride after the toy's User-Agent / Accept /
+        // Accept-Encoding defaults. The order is fixed so a server
+        // looking for X-Auth doesn't have to scan past anything
+        // unexpected.
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let received = read_full_request(&mut stream);
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+            received
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "fetch('http://127.0.0.1:{port}/', {{ headers: {{ 'X-Auth': 'token123', 'X-Trace': 'abc' }} }})\
+                 .then(function () {{}});",
+        );
+        runtime.execute(&script).unwrap();
+        let received = server.join().unwrap();
+
+        assert!(
+            received.contains("X-Auth: token123"),
+            "expected X-Auth header in request, got: {received:?}"
+        );
+        assert!(
+            received.contains("X-Trace: abc"),
+            "expected X-Trace header in request, got: {received:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_init_must_be_an_object_or_omitted() {
+        // Passing a primitive (number, boolean, …) for init is a
+        // synchronous TypeError — same shape real browsers raise. The
+        // toy rejects the returned Promise rather than throwing
+        // synchronously so existing `fetch(...).catch` patterns still
+        // work, but the message identifies the offender.
+        let mut runtime = runtime_with("");
+        runtime
+            .execute(
+                "var caught = '';\
+                 fetch('http://127.0.0.1:1/', 42)\
+                     .catch(function (e) { caught = String(e); });",
+            )
+            .unwrap();
+        let caught = runtime.execute("caught").unwrap();
+        assert!(
+            caught.to_lowercase().contains("init")
+                || caught.to_lowercase().contains("object")
+                || caught.to_lowercase().contains("typeerror"),
+            "expected init-must-be-object error, got: {caught}"
+        );
+    }
 }

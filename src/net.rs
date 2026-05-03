@@ -233,11 +233,30 @@ pub fn load_image(url: &Url) -> Result<Vec<u8>, NetworkError> {
 }
 
 pub fn fetch(url: &Url) -> Result<FetchResult, NetworkError> {
+    fetch_with_request(url, "GET", &[], &[])
+}
+
+/// Generalised fetch that lets callers pick the HTTP method and tack
+/// on extra headers / a request body. `extra_headers` are appended
+/// after the toy's defaults (Host, Connection, User-Agent, Accept,
+/// Accept-Encoding); duplicate names are sent verbatim — the toy does
+/// not deduplicate. The body is sent verbatim and the request also
+/// gains a `Content-Length` header when non-empty.
+///
+/// On 3xx the toy follows redirects with the same method (no GET
+/// downgrade for 303). That's good enough for the common case where
+/// a POST endpoint redirects to the same origin's success page; a
+/// real browser would distinguish 303 vs 307/308.
+pub fn fetch_with_request(
+    url: &Url,
+    method: &str,
+    extra_headers: &[(String, String)],
+    body: &[u8],
+) -> Result<FetchResult, NetworkError> {
     let mut current_url = url.clone();
 
-    // Redirects are followed in-place so callers always see the final document URL.
     for _ in 0..10 {
-        let response = http_get(&current_url)?;
+        let response = http_request(method, &current_url, extra_headers, body)?;
 
         if is_redirect_status(response.status_code) {
             let location = response
@@ -257,12 +276,23 @@ pub fn fetch(url: &Url) -> Result<FetchResult, NetworkError> {
 }
 
 pub fn http_get(url: &Url) -> Result<HttpResponse, NetworkError> {
-    // Fast path: try a pooled connection. If the server already closed the
-    // idle keep-alive (silent half-close), the read fails and we fall through
-    // to a fresh connection. We retry exactly once — repeated failures are
-    // real errors and shouldn't loop.
+    http_request("GET", url, &[], &[])
+}
+
+// Single send-and-receive for any HTTP/1.1 method. The connection
+// pool is method-agnostic — keep-alive sockets work fine for back-
+// to-back POSTs as long as the server returns Content-Length /
+// chunked framing (same condition `read_response` already enforces).
+// Mirrors the same one-retry policy http_get used: a stale pooled
+// socket fails the first exchange and we fall back to a fresh conn.
+fn http_request(
+    method: &str,
+    url: &Url,
+    extra_headers: &[(String, String)],
+    body: &[u8],
+) -> Result<HttpResponse, NetworkError> {
     if let Some(mut conn) = take_conn(&url.scheme, &url.host, url.port)
-        && let Ok((response, reusable)) = exchange(&mut conn, url)
+        && let Ok((response, reusable)) = exchange(&mut conn, url, method, extra_headers, body)
     {
         if reusable {
             return_conn(&url.scheme, &url.host, url.port, conn);
@@ -271,20 +301,44 @@ pub fn http_get(url: &Url) -> Result<HttpResponse, NetworkError> {
     }
 
     let mut conn = create_conn(url)?;
-    let (response, reusable) = exchange(&mut conn, url)?;
+    let (response, reusable) = exchange(&mut conn, url, method, extra_headers, body)?;
     if reusable {
         return_conn(&url.scheme, &url.host, url.port, conn);
     }
     Ok(response)
 }
 
-fn exchange(conn: &mut PoolConn, url: &Url) -> Result<(HttpResponse, bool), NetworkError> {
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nUser-Agent: mini-browser/0.1\r\nAccept: text/html,*/*\r\nAccept-Encoding: identity\r\n\r\n",
-        url.path, url.host
+fn exchange(
+    conn: &mut PoolConn,
+    url: &Url,
+    method: &str,
+    extra_headers: &[(String, String)],
+    body: &[u8],
+) -> Result<(HttpResponse, bool), NetworkError> {
+    let mut request = format!(
+        "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\nUser-Agent: mini-browser/0.1\r\nAccept: text/html,*/*\r\nAccept-Encoding: identity\r\n",
+        method, url.path, url.host
     );
+    // Author-supplied headers ride after the defaults so they can
+    // override Accept/User-Agent for callers that need to. The toy
+    // does not deduplicate — if the same header lands twice the
+    // server sees both copies.
+    for (name, value) in extra_headers {
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(value);
+        request.push_str("\r\n");
+    }
+    if !body.is_empty() {
+        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    request.push_str("\r\n");
     conn.write_all(request.as_bytes())
         .map_err(|error| NetworkError::Io(error.to_string()))?;
+    if !body.is_empty() {
+        conn.write_all(body)
+            .map_err(|error| NetworkError::Io(error.to_string()))?;
+    }
     read_response(conn)
 }
 
