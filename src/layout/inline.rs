@@ -241,8 +241,51 @@ fn is_inline_node(node: &StyledNode) -> bool {
 
     match &node.node_type {
         NodeType::Text(_) => true,
-        // Keep the inline set small and predictable instead of trying to emulate full HTML layout.
-        NodeType::Element(element) => matches!(element.tag_name.as_str(), "a" | "span" | "img"),
+        // The inline set covers HTML5 "phrasing content" — the tags that
+        // real pages mix freely with text inside paragraphs, headings, and
+        // table cells. The full phrasing-content list is much larger; this
+        // subset is the one that actually appears on the pages we test
+        // against (HN, Wikipedia, blog posts). The crucial entries beyond
+        // the obvious `a`/`span`/`img` are the text-styling tags
+        // (b, i, em, strong, small, mark) — without them, a snippet like
+        // `<span><b>name</b> hello</span>` falls into block flow and
+        // stacks each child vertically, which is the failure mode that
+        // turned the HN nav bar into a vertical list.
+        NodeType::Element(element) => matches!(
+            element.tag_name.as_str(),
+            "a" | "abbr"
+                | "b"
+                | "bdi"
+                | "bdo"
+                | "big"
+                | "br"
+                | "cite"
+                | "code"
+                | "del"
+                | "dfn"
+                | "em"
+                | "font"
+                | "i"
+                | "img"
+                | "ins"
+                | "kbd"
+                | "label"
+                | "mark"
+                | "nobr"
+                | "q"
+                | "s"
+                | "samp"
+                | "small"
+                | "span"
+                | "strong"
+                | "sub"
+                | "sup"
+                | "time"
+                | "tt"
+                | "u"
+                | "var"
+                | "wbr"
+        ),
     }
 }
 

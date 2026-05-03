@@ -1339,6 +1339,44 @@ mod tests {
     }
 
     #[test]
+    fn phrasing_tags_keep_their_parent_in_inline_flow() {
+        // The HN nav bar packs `<b><a>Hacker News</a></b>` next to plain
+        // `<a>new</a>` and pipe-separated text inside one `<span>`. With a
+        // narrow inline whitelist, `<b>` would be classified as block and
+        // flip the span into block flow, stacking every link on its own
+        // row — exactly the visual regression that motivated widening the
+        // whitelist. The assertion here is that every visible child of
+        // the span shares the same y coordinate (one line) on a wide
+        // viewport. The toy HTML parser drops pure-whitespace text
+        // between elements, so the four element siblings sit directly
+        // next to each other in the child vector; a fifth text-bearing
+        // sibling proves text rides the same line too.
+        let styled = styled_root(
+            r#"<span><b>One</b><em>Two</em><a>Three</a><strong>Four</strong>tail</span>"#,
+            r#""#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        assert_eq!(layout.children.len(), 5);
+        let line_y = layout.children[0].dimensions.content.y;
+        for child in &layout.children {
+            assert_eq!(
+                child.dimensions.content.y, line_y,
+                "every inline child must sit on the same line"
+            );
+        }
+        // Failure mode pre-fix would have second child at line_y +
+        // line_height (vertical stacking). After the fix the children
+        // are packed left-to-right, so each sibling's x advances over
+        // the previous one's width.
+        for window in layout.children.windows(2) {
+            assert!(
+                window[1].dimensions.content.x > window[0].dimensions.content.x,
+                "siblings must advance horizontally, not stack vertically"
+            );
+        }
+    }
+
+    #[test]
     fn position_fixed_is_removed_from_in_flow_cursor() {
         // Same out-of-flow semantics as absolute: a fixed sibling should not
         // shift the next in-flow box down.
