@@ -292,6 +292,7 @@ impl BrowserState {
                 self.current_url.as_ref(),
                 &self.images,
                 interaction,
+                fonts,
             )
         };
         let document_view = layout_result.unwrap_or_else(|build_error| {

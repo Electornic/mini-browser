@@ -48,6 +48,7 @@ pub fn build_document_view(
     current_url: Option<&net::Url>,
     images: &HashMap<String, resource::LoadedImage>,
     interaction: style::InteractionState<'_>,
+    fonts: &[fontdue::Font],
 ) -> Result<DocumentView, String> {
     // The HTML/CSS parse steps used to live here and run every frame; they now
     // happen once at navigate time (see `BrowserState::install_document`) and
@@ -69,7 +70,7 @@ pub fn build_document_view(
         std::slice::from_ref(parsed_stylesheet),
         interaction,
     );
-    let layout = layout::layout_tree(&styled, viewport_width as f32);
+    let layout = layout::layout_tree_with_fonts(&styled, viewport_width as f32, fonts);
     let mut commands = render::build_display_list(&layout);
     commands.extend(collect_image_commands(&layout, current_url, images));
     let links = collect_link_targets(&layout, None, false, render::Affine::IDENTITY);

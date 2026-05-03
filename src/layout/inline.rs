@@ -367,9 +367,7 @@ fn inline_block_shrink_to_fit_width(node: &StyledNode, available_width: f32) -> 
         // single space, so width must be measured against the collapsed
         // form, not the raw source. Same form display_list emits, so the
         // glyph row aligns with the inline box.
-        NodeType::Text(text) => {
-            collapsed_text(node, text).chars().count() as f32 * inline_char_width(node)
-        }
+        NodeType::Text(text) => measure_inline_text(node, &collapsed_text(node, text)),
         NodeType::Element(_) => node
             .children
             .iter()
@@ -434,14 +432,13 @@ pub(super) fn layout_inline_block_node(node: &StyledNode, x: f32, y: f32, availa
 }
 
 fn inline_content_width(node: &StyledNode, parent_width: f32) -> f32 {
-    // Text width is approximated from character count because this toy renderer does not do
-    // real font shaping or glyph measurement.
+    // Text width comes from `measure_inline_text`, which prefers fontdue
+    // advance widths when the layout pass has fonts installed and falls
+    // back to a `font_size * 0.75` per-char estimate for tests.
     length_value(node, "width", parent_width)
         .or_else(|| intrinsic_width(node))
         .unwrap_or_else(|| match &node.node_type {
-            NodeType::Text(text) => {
-                collapsed_text(node, text).chars().count() as f32 * inline_char_width(node)
-            }
+            NodeType::Text(text) => measure_inline_text(node, &collapsed_text(node, text)),
             NodeType::Element(element) if element.tag_name == "img" => 200.0,
             NodeType::Element(_) => node
                 .children
@@ -492,4 +489,18 @@ pub(crate) fn inline_line_height_px(node: &StyledNode) -> f32 {
 
 fn inline_char_width(node: &StyledNode) -> f32 {
     inline_font_size(node) * 0.75
+}
+
+// Measure the rendered width of `text` at `node`'s font size, preferring
+// real fontdue advance widths when the layout pass has fonts installed
+// and falling back to the legacy character-count × `font_size * 0.75`
+// estimate otherwise. The fallback path keeps every layout test that
+// calls bare `layout_tree` (no fonts) producing the same widths it did
+// before fontdue plumbing landed.
+fn measure_inline_text(node: &StyledNode, text: &str) -> f32 {
+    let fonts = super::current_fonts();
+    if fonts.is_empty() {
+        return text.chars().count() as f32 * inline_char_width(node);
+    }
+    crate::render::measure_text_width(text, inline_font_size(node), fonts)
 }
