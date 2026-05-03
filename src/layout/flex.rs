@@ -6,8 +6,8 @@ use crate::{
 };
 
 use super::{
-    LayoutBox, is_display_none, is_out_of_flow, length_value, outer_rect,
-    shift_layout_subtree,
+    LayoutBox, is_display_none, is_layout_whitespace_text, is_out_of_flow, length_value,
+    outer_rect, shift_layout_subtree,
 };
 use super::inline::{layout_inline_block_node, layout_inline_or_inline_block};
 
@@ -65,6 +65,13 @@ pub(super) fn layout_flex_children(
 
     for child in children {
         if is_display_none(child) {
+            continue;
+        }
+        // Inter-element whitespace text nodes (preserved by the HTML
+        // parser to keep inline runs spaced) must not become flex
+        // items — they would steal a slot in the main-axis packing
+        // and break grow/shrink/align math.
+        if is_layout_whitespace_text(child) {
             continue;
         }
         if is_out_of_flow(child) {

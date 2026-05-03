@@ -460,6 +460,21 @@ pub(super) fn is_display_none(node: &StyledNode) -> bool {
     matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "none")
 }
 
+/// Whether `node` is a text node consisting purely of HTML whitespace.
+/// The HTML parser preserves inter-element whitespace as `" "` text nodes
+/// so inline runs keep their separating spaces; in non-inline layout modes
+/// (block flow, flex item placement, grid placement, table cell stacking)
+/// that whitespace would otherwise become a visible empty box / phantom
+/// item. Inline layout intentionally does NOT filter on this — there the
+/// whitespace text contributes the space the author wrote between
+/// adjacent inline elements.
+pub(super) fn is_layout_whitespace_text(node: &StyledNode) -> bool {
+    matches!(
+        &node.node_type,
+        NodeType::Text(text) if text.chars().all(char::is_whitespace)
+    )
+}
+
 pub(super) fn relative_offset(node: &StyledNode, base: f32) -> Option<(f32, f32)> {
     // CSS spec: top/bottom percent resolves against the containing block's height
     // and left/right against its width. The layout walk only carries width on hand,

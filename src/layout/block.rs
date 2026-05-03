@@ -9,7 +9,7 @@ use crate::{
 use super::{
     Dimensions, EdgeSizes, LayoutBox, Rect, apply_relative_offset, child_height,
     container_box_type, edge_sizes, intrinsic_height, intrinsic_width, is_auto, is_display_none,
-    is_out_of_flow, length_value, outer_rect, shift_layout_subtree,
+    is_layout_whitespace_text, is_out_of_flow, length_value, outer_rect, shift_layout_subtree,
 };
 use super::flex::{is_flex_container, layout_flex_children};
 use super::grid::{is_grid_container, layout_grid_children};
@@ -100,6 +100,18 @@ pub(super) fn layout_node(
         let mut children: Vec<LayoutBox> = Vec::with_capacity(node.children.len());
         for child in &node.children {
             if is_display_none(child) {
+                continue;
+            }
+            // Pure-whitespace text children come from the HTML parser's
+            // inter-element whitespace preservation (so inline runs keep
+            // their separating spaces). In block flow that whitespace
+            // would otherwise lay out as a font-size-tall full-width
+            // line — a visible vertical gap between every pair of block
+            // siblings on the page. Real browsers anonymous-inline this
+            // whitespace and then collapse it to nothing in pure-block
+            // context; the toy approximates the same observable result
+            // by dropping the child outright.
+            if is_layout_whitespace_text(child) {
                 continue;
             }
             if is_out_of_flow(child) {

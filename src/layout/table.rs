@@ -20,7 +20,7 @@ use crate::{css::Value, dom::NodeType, style::StyledNode};
 
 use super::{
     Dimensions, LayoutBox, Rect, container_box_type, edge_sizes, intrinsic_height,
-    is_display_none, length_value, outer_rect,
+    is_display_none, is_layout_whitespace_text, length_value, outer_rect,
 };
 use super::block::layout_node;
 use super::inline::layout_inline_block_node;
@@ -286,6 +286,14 @@ fn layout_table_cell(cell: &StyledNode, x: f32, y: f32, cell_outer_width: f32) -
     let mut children: Vec<LayoutBox> = Vec::new();
     for child in &cell.children {
         if is_display_none(child) {
+            continue;
+        }
+        // Inter-element whitespace text (preserved by the parser to keep
+        // inline runs spaced) would otherwise lay out as a font-size-tall
+        // full-width row inside the cell — a phantom block strip stacked
+        // above / below the real cell content. Block flow drops the same
+        // pattern for the same reason.
+        if is_layout_whitespace_text(child) {
             continue;
         }
         children.push(layout_node(child, content_x, &mut child_cursor_y, content_width));

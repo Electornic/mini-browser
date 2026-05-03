@@ -88,12 +88,28 @@ impl<'a, 'd> Parser<'a, 'd> {
 
     fn parse_nodes(&mut self) -> Result<Vec<NodeId>, ParseError> {
         let mut nodes = Vec::new();
+        let mut had_node = false;
 
         loop {
+            let ws_start = self.pos;
             self.consume_whitespace();
 
             if self.eof() || self.starts_with("</") {
                 break;
+            }
+
+            // Whitespace that sits *between* two siblings (not at the start
+            // or end of the parent) becomes a single-space text node so
+            // inline runs like `<a>new</a> | <a>past</a>` keep the
+            // separating space the author wrote. Without this, parsing
+            // would fuse the two anchors into "new|past" and every
+            // wrapping `<span>` of a real page (HN nav, story metadata)
+            // collapses into one unbroken word. Block-level callers
+            // (block layout) drop pure-whitespace text children so this
+            // never inserts a vertical gap between block siblings.
+            if had_node && self.pos > ws_start {
+                let space = self.document.create_text(" ".to_string());
+                nodes.push(space);
             }
 
             // Repeatedly parse siblings until a closing tag or end-of-input ends this level.
@@ -101,6 +117,7 @@ impl<'a, 'd> Parser<'a, 'd> {
             // empty text runs; those simply don't add a child.
             if let Some(id) = self.parse_node()? {
                 nodes.push(id);
+                had_node = true;
             }
         }
 
@@ -527,6 +544,33 @@ mod tests {
         assert_eq!(paragraph_element.tag_name, "p");
         assert_eq!(paragraph.children.len(), 1);
         assert_eq!(document.text(paragraph.children[0]), Some("Hello"));
+    }
+
+    #[test]
+    fn preserves_whitespace_between_sibling_elements_as_single_space_text() {
+        // HN's nav bar separates anchors with `<a>new</a> | <a>past</a>`
+        // and the menu falls apart visually if the space text disappears
+        // on parse. The parser injects a single-space text node between
+        // any two adjacent siblings whose source had whitespace between
+        // them — even when the whitespace was newlines and indent.
+        let document = parse("<span><a>x</a>\n  <a>y</a></span>").unwrap();
+        let root = document.get(document.roots()[0]).unwrap();
+        // Children: <a>x</a>, " ", <a>y</a> — three nodes total.
+        assert_eq!(root.children.len(), 3);
+        let middle = document.text(root.children[1]);
+        assert_eq!(middle, Some(" "));
+    }
+
+    #[test]
+    fn does_not_inject_whitespace_at_start_or_end_of_a_parent() {
+        // Whitespace before the first sibling and after the last one
+        // collapses away — only inter-sibling gaps produce a text node.
+        // Without this rule, every nested element would gain a stray
+        // leading/trailing space and the box-tree would be cluttered.
+        let document = parse("<span>  <a>x</a>  </span>").unwrap();
+        let root = document.get(document.roots()[0]).unwrap();
+        // Just the single anchor child; leading and trailing whitespace gone.
+        assert_eq!(root.children.len(), 1);
     }
 
     #[test]

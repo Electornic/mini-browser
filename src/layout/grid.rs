@@ -7,8 +7,8 @@ use crate::{
 };
 
 use super::{
-    LayoutBox, is_display_none, is_out_of_flow, length_value, outer_rect,
-    shift_layout_subtree,
+    LayoutBox, is_display_none, is_layout_whitespace_text, is_out_of_flow, length_value,
+    outer_rect, shift_layout_subtree,
 };
 use super::inline::{layout_inline_block_node, layout_inline_or_inline_block};
 
@@ -72,6 +72,14 @@ pub(super) fn layout_grid_children<'a>(
 
     for child in children {
         if is_display_none(child) {
+            continue;
+        }
+        // Inter-element whitespace text (preserved by the parser to keep
+        // inline runs spaced) must not consume a grid cell. Without this
+        // filter, a grid container with HTML like `<div></div>\n<div></div>`
+        // sees one extra whitespace item per gap and the named placement
+        // / auto-flow / track sizing all drift accordingly.
+        if is_layout_whitespace_text(child) {
             continue;
         }
         if is_out_of_flow(child) {
