@@ -247,6 +247,43 @@ pub(super) fn child_height(node: &StyledNode, content_y: f32, child_cursor_y: f3
     }
 }
 
+/// Apply CSS whitespace processing to a raw text-node string. With the
+/// default `white-space: normal` (or `nowrap`), runs of any whitespace
+/// (space, tab, newline, CR) collapse to a single ASCII space — which
+/// is what turns source markup like `<p>Hello\n  world</p>` into the
+/// expected single-spaced output. `pre`, `pre-wrap`, and `pre-line`
+/// keep the input verbatim (the spec says `pre-line` collapses non-
+/// newline whitespace, but our renderer doesn't honor newlines yet, so
+/// the looser fallback gives the same visible result).
+///
+/// Layout and render both call this on their text reads so widths and
+/// painted glyphs stay aligned. The original buffer in the DOM stays
+/// untouched, so JS observers (textContent, innerHTML) keep seeing the
+/// authored source.
+pub fn collapsed_text(node: &StyledNode, raw: &str) -> String {
+    let preserve = matches!(
+        node.value("white-space"),
+        Some(crate::css::Value::Keyword(kw)) if kw == "pre" || kw == "pre-wrap" || kw == "pre-line"
+    );
+    if preserve {
+        return raw.to_string();
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut prev_was_space = false;
+    for ch in raw.chars() {
+        if ch.is_whitespace() {
+            if !prev_was_space {
+                out.push(' ');
+                prev_was_space = true;
+            }
+        } else {
+            out.push(ch);
+            prev_was_space = false;
+        }
+    }
+    out
+}
+
 pub(super) fn intrinsic_width(node: &StyledNode) -> Option<f32> {
     match &node.node_type {
         // Images need a visible box even when no author CSS width is provided.
@@ -2664,5 +2701,41 @@ mod tests {
         // Main-axis stacking still works.
         assert_eq!(a.dimensions.content.x, 0.0);
         assert_eq!(b.dimensions.content.x, 50.0);
+    }
+
+    #[test]
+    fn collapsed_text_normalises_runs_of_whitespace_to_single_space() {
+        // Default white-space:normal — the helper reduces every run of
+        // whitespace (spaces, tabs, newlines) to one ASCII space. A
+        // multi-space inline like "Hello   world" must paint with a
+        // single visual gap, matching what real browsers display.
+        let styled = styled_root(r#"<p>x</p>"#, r#"p { font-size: 16px; }"#);
+        let collapsed = super::collapsed_text(&styled, "Hello   world\n\t  again");
+        assert_eq!(collapsed, "Hello world again");
+    }
+
+    #[test]
+    fn collapsed_text_keeps_a_leading_or_trailing_whitespace_as_single_space() {
+        // The helper doesn't trim — a leading space is preserved (just
+        // collapsed) so the gap between adjacent inlines like
+        // `<b>foo</b> bar` still shows.
+        let styled = styled_root(r#"<p>x</p>"#, r#"p { font-size: 16px; }"#);
+        assert_eq!(super::collapsed_text(&styled, "   foo"), " foo");
+        assert_eq!(super::collapsed_text(&styled, "foo   "), "foo ");
+    }
+
+    #[test]
+    fn collapsed_text_preserves_source_when_white_space_is_pre() {
+        // `white-space: pre` opts out of the collapse — newlines, tabs,
+        // and runs of spaces stay verbatim, so `<pre>` source can carry
+        // ASCII art / code samples without the renderer eating gaps.
+        let styled = styled_root(
+            r#"<pre>x</pre>"#,
+            r#"pre { white-space: pre; }"#,
+        );
+        assert_eq!(
+            super::collapsed_text(&styled, "Hello\n  world"),
+            "Hello\n  world"
+        );
     }
 }

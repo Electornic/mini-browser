@@ -519,7 +519,7 @@ fn text_shadow_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayComm
     // boxes never carry text on their own, so they short-circuit here.
     let node = layout_box.styled_node()?;
     let text = match &node.node_type {
-        NodeType::Text(text) => text.clone(),
+        NodeType::Text(text) => crate::layout::collapsed_text(node, text),
         NodeType::Element(_) => return None,
     };
     let shadow = match node.value("text-shadow") {
@@ -545,7 +545,12 @@ fn text_shadow_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayComm
 fn text_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
     let node = layout_box.styled_node()?;
     let text = match &node.node_type {
-        NodeType::Text(text) => text.clone(),
+        // CSS whitespace processing: collapse multi-space / newline runs
+        // to a single space when white-space is normal/nowrap. The DOM
+        // text node itself stays untouched — only the painted glyph row
+        // sees the collapsed form, matching what real browsers do at
+        // layout time.
+        NodeType::Text(text) => crate::layout::collapsed_text(node, text),
         NodeType::Element(_) => return None,
     };
 

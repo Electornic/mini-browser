@@ -9,7 +9,7 @@ use crate::{
 };
 
 use super::{
-    BoxType, Dimensions, LayoutBox, Rect, apply_relative_offset, child_height,
+    BoxType, Dimensions, LayoutBox, Rect, apply_relative_offset, child_height, collapsed_text,
     container_box_type, edge_sizes, intrinsic_height, intrinsic_width, is_display_none,
     is_out_of_flow, length_value, outer_rect,
 };
@@ -320,7 +320,13 @@ fn inline_block_shrink_to_fit_width(node: &StyledNode, available_width: f32) -> 
     // sum of inline child widths, capped to the available content width so a
     // long run still wraps rather than overflowing the container.
     let natural = match &node.node_type {
-        NodeType::Text(text) => text.chars().count() as f32 * inline_char_width(node),
+        // CSS-collapsed character count: runs of whitespace render as a
+        // single space, so width must be measured against the collapsed
+        // form, not the raw source. Same form display_list emits, so the
+        // glyph row aligns with the inline box.
+        NodeType::Text(text) => {
+            collapsed_text(node, text).chars().count() as f32 * inline_char_width(node)
+        }
         NodeType::Element(_) => node
             .children
             .iter()
@@ -390,7 +396,9 @@ fn inline_content_width(node: &StyledNode, parent_width: f32) -> f32 {
     length_value(node, "width", parent_width)
         .or_else(|| intrinsic_width(node))
         .unwrap_or_else(|| match &node.node_type {
-            NodeType::Text(text) => text.chars().count() as f32 * inline_char_width(node),
+            NodeType::Text(text) => {
+                collapsed_text(node, text).chars().count() as f32 * inline_char_width(node)
+            }
             NodeType::Element(element) if element.tag_name == "img" => 200.0,
             NodeType::Element(_) => node
                 .children

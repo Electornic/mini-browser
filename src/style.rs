@@ -149,6 +149,11 @@ fn style_tree_inner(
         "text-align",
         "line-height",
         "text-shadow",
+        // white-space inherits per CSS spec; the layout/render whitespace
+        // collapse helper consults this on the text node, which is always
+        // a child of an element — without inheritance the text wouldn't
+        // see `<pre>`'s `white-space: pre` declaration.
+        "white-space",
     ] {
         if !specified_values.contains_key(property)
             && let Some(value) = parent_values.and_then(|values| values.get(property))
@@ -1468,6 +1473,23 @@ mod tests {
         assert_eq!(
             styled.value("width"),
             Some(&Value::Length(50.0, Unit::Percent))
+        );
+    }
+
+    #[test]
+    fn white_space_inherits_from_parent_to_text_child() {
+        // The text-collapse helper reads `white-space` off the *text*
+        // node's specified style. Without inheritance, a parent <pre>
+        // declaring `white-space: pre` wouldn't reach the text child
+        // and the renderer would still collapse newlines.
+        let (document, root) = parse_html(r#"<pre>line one</pre>"#);
+        let stylesheet = parse_css("pre { white-space: pre; }");
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let text_child = &styled.children[0];
+
+        assert_eq!(
+            text_child.value("white-space"),
+            Some(&Value::Keyword("pre".into()))
         );
     }
 
