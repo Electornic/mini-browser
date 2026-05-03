@@ -69,6 +69,13 @@ pub struct BrowserState {
     // outside the page (chrome buttons, the address bar, off-window).
     pub focused_dom_path: Option<Vec<usize>>,
 
+    // True once the focused <input> has had its value mutated by a user
+    // keystroke since focus arrived. Read on focus-change to decide
+    // whether to fire `change` before `blur`; reset whenever focus
+    // moves. Pure JS-driven `.value =` never sets this — per the HTML
+    // spec, programmatic value assignments don't fire input/change.
+    pub focused_input_dirty: bool,
+
     // JavaScript runtime. Globals (var bindings, declared functions) survive across
     // `<script>` tags within the same document but reset when the user navigates,
     // because `install_document` allocates a fresh runtime for the new page.
@@ -137,6 +144,7 @@ impl BrowserState {
             forward_stack: Vec::new(),
             hovered_dom_path: None,
             focused_dom_path: None,
+            focused_input_dirty: false,
             js,
             external_scripts,
         };
@@ -175,6 +183,11 @@ impl BrowserState {
         // The new runtime takes a clone of the same Rc so JS mutations during
         // run_scripts land in the document we're about to render.
         self.js = js::JsRuntime::new(self.parsed_document.clone());
+        // Each navigated document starts with a clean dirty flag —
+        // a value edited on the previous page must not be allowed to
+        // ride into the new page and trigger a spurious `change` on
+        // the next focus move.
+        self.focused_input_dirty = false;
         self.run_scripts();
     }
 
@@ -336,8 +349,21 @@ impl BrowserState {
                     )
                 };
                 if let Some(id) = old_id {
+                    // `change` fires when focus leaves an input whose
+                    // value was edited during this focus session. Spec
+                    // order is change-then-blur, and it bubbles (modern
+                    // spec), so use `dispatch_event` not `dispatch_event_at`.
+                    // The dirty flag is set only by user keystrokes —
+                    // pure JS-driven `.value =` never trips it, matching
+                    // the HTML spec's "user committed change" semantics.
+                    if self.focused_input_dirty {
+                        self.js.dispatch_event(id, "change");
+                    }
                     self.js.dispatch_event_at(id, "blur");
                 }
+                // Reset for the next focus session whether or not we
+                // fired change — the new input starts with a clean slate.
+                self.focused_input_dirty = false;
                 if let Some(id) = new_id {
                     self.js.dispatch_event_at(id, "focus");
                 }
@@ -540,8 +566,17 @@ impl BrowserState {
             // typed buffer) but the default action drops them.
             let key = ch.to_string();
             let prevented = self.js.dispatch_keyboard_event(focused_id, "keydown", &key);
-            if !prevented && !ch.is_control() {
-                push_char_to_input_value(&self.parsed_document, focused_id, ch);
+            if !prevented
+                && !ch.is_control()
+                && push_char_to_input_value(&self.parsed_document, focused_id, ch)
+            {
+                // Per spec, `input` fires after the value is updated and
+                // before `keyup`. Bubbles, so handlers on ancestors see
+                // it too. Only after a real mutation — control chars and
+                // a tag mismatch leave the helper as a no-op and we skip
+                // the event so observers don't see phantom changes.
+                self.focused_input_dirty = true;
+                self.js.dispatch_event(focused_id, "input");
             }
             self.js.dispatch_keyboard_event(focused_id, "keyup", &key);
         }
@@ -550,8 +585,11 @@ impl BrowserState {
             let prevented = self
                 .js
                 .dispatch_keyboard_event(focused_id, "keydown", "Backspace");
-            if !prevented {
-                pop_char_from_input_value(&self.parsed_document, focused_id);
+            if !prevented && pop_char_from_input_value(&self.parsed_document, focused_id) {
+                // Backspace on an empty value reports no mutation, so we
+                // skip the `input` event — real browsers do the same.
+                self.focused_input_dirty = true;
+                self.js.dispatch_event(focused_id, "input");
             }
             self.js.dispatch_keyboard_event(focused_id, "keyup", "Backspace");
         }
@@ -895,37 +933,48 @@ pub fn page_step(viewport_height: usize) -> f32 {
     (viewport_height as f32 - CHROME_HEIGHT - 24.0).max(24.0)
 }
 
-// Append `ch` to the focused input's `value` attribute. Silent no-op when
-// the slot has been removed by a previous handler or the focused element
-// is not an `<input>`. The next frame's style/layout pass picks up the
-// mutated attribute and re-paints automatically.
-fn push_char_to_input_value(document: &Rc<RefCell<dom::Document>>, node_id: NodeId, ch: char) {
+// Append `ch` to the focused input's `value` attribute. Returns true when
+// the value actually changed — that's the signal the caller uses to fire
+// the `input` event and mark the input dirty. Silent no-op (returns false)
+// when the slot has been removed by a previous handler or the focused
+// element is not an `<input>`.
+fn push_char_to_input_value(
+    document: &Rc<RefCell<dom::Document>>,
+    node_id: NodeId,
+    ch: char,
+) -> bool {
     let mut document = document.borrow_mut();
     let Some(elem) = document.element_data_mut(node_id) else {
-        return;
+        return false;
     };
     if elem.tag_name != "input" {
-        return;
+        return false;
     }
     let mut value = elem.attributes.get("value").cloned().unwrap_or_default();
     value.push(ch);
     elem.attributes.insert("value".into(), value);
+    true
 }
 
-// Pop the last character off the focused input's `value` attribute. Same
-// silent-degrade contract as `push_char_to_input_value`: a stale or non-
-// input focus is a no-op, never a panic.
-fn pop_char_from_input_value(document: &Rc<RefCell<dom::Document>>, node_id: NodeId) {
+// Pop the last character off the focused input's `value` attribute.
+// Returns true only when there was a character to pop — pop on an empty
+// value reports false so the caller can skip the `input` event (real
+// browsers don't fire `input` when there's no actual change).
+fn pop_char_from_input_value(document: &Rc<RefCell<dom::Document>>, node_id: NodeId) -> bool {
     let mut document = document.borrow_mut();
     let Some(elem) = document.element_data_mut(node_id) else {
-        return;
+        return false;
     };
     if elem.tag_name != "input" {
-        return;
+        return false;
     }
     let mut value = elem.attributes.get("value").cloned().unwrap_or_default();
+    if value.is_empty() {
+        return false;
+    }
     value.pop();
     elem.attributes.insert("value".into(), value);
+    true
 }
 
 // Walks a stored hover/focus path back to its NodeId. The path is a

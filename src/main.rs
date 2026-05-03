@@ -1612,6 +1612,253 @@ mod tests {
         assert_eq!(elem.attributes.get("value"), None);
     }
 
+    // ---- Step 5b (#9 in Notion): input / change event dispatch ----
+
+    #[test]
+    fn typing_into_focused_input_fires_input_event_with_updated_value() {
+        // The `input` event fires after the value is updated, so a
+        // handler reading `event.target.value` sees the new string,
+        // not the pre-keydown string. That's the contract real
+        // frameworks build on (controlled-input bindings, etc.).
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var trace = '';",
+            "document.getElementById('q').addEventListener('input', function(e) { trace += 'in:' + e.target.value + ';'; });",
+            "</script>",
+            r#"<input id="q" value="ab"/>"#,
+        ));
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                typed: "c".into(),
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(browser.js.execute("trace").unwrap(), "\"in:abc;\"");
+    }
+
+    #[test]
+    fn backspace_on_non_empty_value_fires_input_event() {
+        // Successful pop is "real input" too — fires the event.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var hits = 0;",
+            "document.getElementById('q').addEventListener('input', function() { hits = hits + 1; });",
+            "</script>",
+            r#"<input id="q" value="x"/>"#,
+        ));
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                backspace_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(browser.js.execute("hits").unwrap(), "1");
+    }
+
+    #[test]
+    fn backspace_on_empty_value_does_not_fire_input_event() {
+        // Pop on an already-empty value isn't a value change, so the
+        // `input` event must stay silent — matches real-browser
+        // semantics where `input` fires only on actual changes.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var hits = 0;",
+            "document.getElementById('q').addEventListener('input', function() { hits = hits + 1; });",
+            "</script>",
+            r#"<input id="q" value=""/>"#,
+        ));
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                backspace_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(browser.js.execute("hits").unwrap(), "0");
+    }
+
+    #[test]
+    fn keydown_prevent_default_also_suppresses_input_event() {
+        // No value mutation → no `input`. The same preventDefault
+        // path that gates the value-edit also gates the event.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var hits = 0;",
+            "document.getElementById('q').addEventListener('keydown', function(e) { e.preventDefault(); });",
+            "document.getElementById('q').addEventListener('input',   function() { hits = hits + 1; });",
+            "</script>",
+            r#"<input id="q"/>"#,
+        ));
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                typed: "abc".into(),
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(browser.js.execute("hits").unwrap(), "0");
+    }
+
+    #[test]
+    fn js_value_assignment_does_not_fire_input_event() {
+        // Per the HTML spec, programmatic `.value = ...` does not fire
+        // `input` — only user-driven changes do. This is the contract
+        // that lets frameworks set the value during a render without
+        // re-entering their own change handler.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var hits = 0;",
+            "document.getElementById('q').addEventListener('input', function() { hits = hits + 1; });",
+            "</script>",
+            r#"<input id="q"/>"#,
+        ));
+
+        browser
+            .js
+            .execute("document.getElementById('q').value = 'set';")
+            .unwrap();
+
+        assert_eq!(browser.js.execute("hits").unwrap(), "0");
+    }
+
+    #[test]
+    fn change_event_fires_on_blur_after_user_typed() {
+        // End-to-end: type into a focused input, then click outside the
+        // page. `change` fires before `blur` and bubbles per the modern
+        // spec — both contracts pinned by trace ordering.
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                "<script>",
+                "var trace = '';",
+                "document.getElementById('q').addEventListener('change', function() { trace += 'change;'; });",
+                "document.getElementById('q').addEventListener('blur',   function() { trace += 'blur;'; });",
+                "</script>",
+                r#"<input id="q"/>"#,
+            ),
+            "",
+        );
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        // Type a character — sets the dirty flag.
+        browser.apply_input(
+            &window::WindowInput {
+                typed: "a".into(),
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        // Click in the chrome band: new_focus = None, focus changes,
+        // change-then-blur fires on the previously-focused input.
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((10.0, CHROME_HEIGHT - 1.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+
+        assert_eq!(browser.js.execute("trace").unwrap(), "\"change;blur;\"");
+    }
+
+    #[test]
+    fn change_event_silent_when_no_user_edit_during_focus() {
+        // Same focus session as the previous test — but no typing, so
+        // the dirty flag is never set and `change` must stay silent
+        // even though `blur` fires on the focus move.
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                "<script>",
+                "var trace = '';",
+                "document.getElementById('q').addEventListener('change', function() { trace += 'change;'; });",
+                "document.getElementById('q').addEventListener('blur',   function() { trace += 'blur;'; });",
+                "</script>",
+                r#"<input id="q"/>"#,
+            ),
+            "",
+        );
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((10.0, CHROME_HEIGHT - 1.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+
+        assert_eq!(browser.js.execute("trace").unwrap(), "\"blur;\"");
+    }
+
+    #[test]
+    fn js_value_assignment_does_not_dirty_focused_input_for_change() {
+        // The focused input's value is set programmatically — that
+        // must not arm the dirty flag, so the subsequent blur fires
+        // alone with no `change` event.
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                "<script>",
+                "var trace = '';",
+                "document.getElementById('q').addEventListener('change', function() { trace += 'change;'; });",
+                "document.getElementById('q').addEventListener('blur',   function() { trace += 'blur;'; });",
+                "</script>",
+                r#"<input id="q"/>"#,
+            ),
+            "",
+        );
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser
+            .js
+            .execute("document.getElementById('q').value = 'set';")
+            .unwrap();
+
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((10.0, CHROME_HEIGHT - 1.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+
+        assert_eq!(browser.js.execute("trace").unwrap(), "\"blur;\"");
+    }
+
     #[test]
     fn raf_callback_dom_mutation_lands_in_browser_state_arena() {
         // rAF runs *before* the frame's layout pass, so any DOM mutation
