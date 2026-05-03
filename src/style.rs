@@ -652,6 +652,13 @@ fn default_values(document: &Document, node_id: NodeId) -> PropertyMap {
                 "border-spacing".into(),
                 Value::Length(2.0, crate::css::Unit::Px),
             );
+            // CSS spec says text-align inherits, but real browsers reset
+            // it at the table boundary so an outer `<center>` (or any
+            // ancestor with `text-align: center`) does not centre every
+            // cell's content. Without this reset, HN inside `<center>`
+            // ends up with all cell text centred — visually wrong even
+            // though the cell columns themselves align correctly.
+            values.insert("text-align".into(), Value::Keyword("left".into()));
         }
         "thead" | "tbody" | "tfoot" => {
             values.insert(
@@ -1850,6 +1857,38 @@ mod tests {
         assert_eq!(
             table.value("margin-right"),
             Some(&Value::Length(20.0, Unit::Px))
+        );
+    }
+
+    #[test]
+    fn table_blocks_text_align_inheritance_from_center_ancestor() {
+        // HN wraps its main table in `<center>`, which sets
+        // `text-align: center`. CSS technically inherits text-align,
+        // but real browsers stop the inheritance at the table boundary
+        // — otherwise every cell's content would be centred. The UA
+        // default `table { text-align: left }` is what blocks the
+        // inheritance: it puts an explicit value on the table so the
+        // cells beneath it inherit "left" instead of the ancestor's
+        // "center".
+        let (document, root) = parse_html(
+            r#"<center><table><tr><td>cell</td></tr></table></center>"#,
+        );
+        let stylesheet = parse_css(r#""#);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        // Walk: <center> → <table> → <tr> → <td>.
+        let table = &styled.children[0];
+        let tr = &table.children[0];
+        let td = &tr.children[0];
+
+        assert_eq!(
+            table.value("text-align"),
+            Some(&Value::Keyword("left".into())),
+            "table itself must reset text-align"
+        );
+        assert_eq!(
+            td.value("text-align"),
+            Some(&Value::Keyword("left".into())),
+            "cell must inherit the table's reset, not the <center> ancestor"
         );
     }
 
