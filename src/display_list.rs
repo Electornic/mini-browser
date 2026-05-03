@@ -195,7 +195,8 @@ fn has_text_decoration_none(layout_box: &layout::LayoutBox) -> bool {
     match &layout_box.box_type {
         layout::BoxType::BlockNode(node)
         | layout::BoxType::FlexNode(node)
-        | layout::BoxType::GridNode(node) => matches!(
+        | layout::BoxType::GridNode(node)
+        | layout::BoxType::TableNode(node) => matches!(
             node.value("text-decoration"),
             Some(css::Value::Keyword(keyword)) if keyword == "none"
         ),
@@ -231,6 +232,7 @@ fn should_collect_link_target(layout_box: &layout::LayoutBox, own_href: Option<&
         layout::BoxType::BlockNode(styled_node)
             | layout::BoxType::FlexNode(styled_node)
             | layout::BoxType::GridNode(styled_node)
+            | layout::BoxType::TableNode(styled_node)
             if matches!(styled_node.node_type, NodeType::Text(_))
     )
 }
@@ -239,7 +241,8 @@ fn href_for_layout_box(layout_box: &layout::LayoutBox) -> Option<&str> {
     match &layout_box.box_type {
         layout::BoxType::BlockNode(styled_node)
         | layout::BoxType::FlexNode(styled_node)
-        | layout::BoxType::GridNode(styled_node) => match &styled_node.node_type {
+        | layout::BoxType::GridNode(styled_node)
+        | layout::BoxType::TableNode(styled_node) => match &styled_node.node_type {
             NodeType::Element(element) => element.attributes.get("href").map(String::as_str),
             NodeType::Text(_) => None,
         },
@@ -251,7 +254,8 @@ fn src_for_layout_box(layout_box: &layout::LayoutBox) -> Option<&str> {
     match &layout_box.box_type {
         layout::BoxType::BlockNode(styled_node)
         | layout::BoxType::FlexNode(styled_node)
-        | layout::BoxType::GridNode(styled_node) => match &styled_node.node_type {
+        | layout::BoxType::GridNode(styled_node)
+        | layout::BoxType::TableNode(styled_node) => match &styled_node.node_type {
             NodeType::Element(element) if element.tag_name == "img" => {
                 element.attributes.get("src").map(String::as_str)
             }
@@ -367,7 +371,8 @@ fn node_id_for_layout_box(layout_box: &layout::LayoutBox) -> Option<NodeId> {
     match &layout_box.box_type {
         layout::BoxType::BlockNode(node)
         | layout::BoxType::FlexNode(node)
-        | layout::BoxType::GridNode(node) => Some(node.node_id),
+        | layout::BoxType::GridNode(node)
+        | layout::BoxType::TableNode(node) => Some(node.node_id),
         layout::BoxType::AnonymousBlock => None,
     }
 }
@@ -424,7 +429,8 @@ pub fn caret_commands_for_focused_input(
     let (value, font_size, is_textarea) = match &input_box.box_type {
         layout::BoxType::BlockNode(node)
         | layout::BoxType::FlexNode(node)
-        | layout::BoxType::GridNode(node) => {
+        | layout::BoxType::GridNode(node)
+        | layout::BoxType::TableNode(node) => {
             let (value, is_textarea) = match &node.node_type {
                 NodeType::Element(elem) => (
                     elem.attributes.get("value").cloned().unwrap_or_default(),
@@ -487,7 +493,8 @@ fn find_focused_text_field_box(
     let is_focused_field = match &box_node.box_type {
         layout::BoxType::BlockNode(node)
         | layout::BoxType::FlexNode(node)
-        | layout::BoxType::GridNode(node) => {
+        | layout::BoxType::GridNode(node)
+        | layout::BoxType::TableNode(node) => {
             node.node_id == focused_id
                 && matches!(
                     &node.node_type,

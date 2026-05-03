@@ -16,10 +16,12 @@ mod block;
 mod flex;
 mod grid;
 mod inline;
+mod table;
 
 use block::layout_node;
 use flex::is_flex_container;
 use grid::is_grid_container;
+use table::is_table_container;
 
 // Layout uses a single rectangular box model for both block and simple inline flow.
 // Every node becomes a box with a content rect plus margin/padding/border around it.
@@ -68,6 +70,14 @@ pub enum BoxType {
     // `grid-template-rows`. Auto-flow is row-major. Layout dispatch happens
     // in `layout_grid_children`.
     GridNode(StyledNode),
+    // A table container (`display: table`): outer box behaves like a block
+    // (the parent block flow stacks it normally), but its children are
+    // placed by `layout_table_children` — rows get harvested from any
+    // intermediate row groups (thead/tbody/tfoot), columns are sized from
+    // cell intrinsic widths, and every cell in the same column shares an x
+    // and width. Rows themselves are flattened into the children vector so
+    // the renderer doesn't need a separate row box type.
+    TableNode(StyledNode),
     AnonymousBlock,
 }
 
@@ -179,7 +189,10 @@ fn absolute_offset_delta(layout_box: &LayoutBox, cb: ContainingBlock) -> (f32, f
 
 pub(super) fn box_styled_node(layout_box: &LayoutBox) -> Option<&StyledNode> {
     match &layout_box.box_type {
-        BoxType::BlockNode(node) | BoxType::FlexNode(node) | BoxType::GridNode(node) => Some(node),
+        BoxType::BlockNode(node)
+        | BoxType::FlexNode(node)
+        | BoxType::GridNode(node)
+        | BoxType::TableNode(node) => Some(node),
         BoxType::AnonymousBlock => None,
     }
 }
@@ -233,6 +246,8 @@ pub(super) fn container_box_type(node: &StyledNode) -> BoxType {
         BoxType::FlexNode(node.clone())
     } else if is_grid_container(node) {
         BoxType::GridNode(node.clone())
+    } else if is_table_container(node) {
+        BoxType::TableNode(node.clone())
     } else {
         BoxType::BlockNode(node.clone())
     }

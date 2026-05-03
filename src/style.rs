@@ -597,6 +597,46 @@ fn default_values(document: &Document, node_id: NodeId) -> PropertyMap {
         // how `intrinsic_height` and the value-text commands handle
         // the value buffer. Author CSS still wins because UA defaults
         // are applied before matched declarations.
+        // Table-family tags get the display values that flip them onto the
+        // dedicated table layout path. Without these the parser still produces
+        // the right tree shape but every <td> would render as a block, so
+        // tabular content collapses into a single column. Author CSS still
+        // wins because UA defaults run before matched declarations — pages
+        // that explicitly do `table { display: block }` (mobile reflow trick)
+        // still get the override they expect.
+        //
+        // thead/tbody/tfoot map to `table-row-group`; the table layout walker
+        // treats those groups as transparent and harvests their <tr> children
+        // directly. caption / col / colgroup are not yet handled by the
+        // layout walker, so they fall through to default block rendering.
+        "table" => {
+            values.insert("display".into(), Value::Keyword("table".into()));
+            // Default border-spacing matches HTML's traditional 2px gap
+            // between cells. presentational_hints already overrides this
+            // when `cellspacing` is on the tag — and author CSS overrides
+            // both.
+            values.insert(
+                "border-spacing".into(),
+                Value::Length(2.0, crate::css::Unit::Px),
+            );
+        }
+        "thead" | "tbody" | "tfoot" => {
+            values.insert(
+                "display".into(),
+                Value::Keyword("table-row-group".into()),
+            );
+        }
+        "tr" => {
+            values.insert("display".into(), Value::Keyword("table-row".into()));
+        }
+        "td" | "th" => {
+            values.insert("display".into(), Value::Keyword("table-cell".into()));
+            // No UA padding default for now: the toy CSS parser doesn't expand
+            // the `padding` shorthand, so a non-zero default here would be
+            // permanently locked in for any page that resets cell padding via
+            // `td { padding: 0 }`. Real browsers default to ~1px; once
+            // shorthand expansion lands we can restore that.
+        }
         "input" | "textarea" => {
             values.insert(
                 "display".into(),

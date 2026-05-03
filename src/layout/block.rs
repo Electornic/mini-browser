@@ -14,6 +14,7 @@ use super::{
 use super::flex::{is_flex_container, layout_flex_children};
 use super::grid::{is_grid_container, layout_grid_children};
 use super::inline::{inline_align_for, layout_inline_children, uses_inline_flow};
+use super::table::{is_table_container, layout_table_children};
 
 pub(super) fn layout_node(
     node: &StyledNode,
@@ -77,6 +78,8 @@ pub(super) fn layout_node(
         layout_flex_children(node, &node.children, content_x, content_y, content_width)
     } else if is_grid_container(node) {
         layout_grid_children(node, &node.children, content_x, content_y, content_width)
+    } else if is_table_container(node) {
+        layout_table_children(node, &node.children, content_x, content_y, content_width)
     } else if uses_inline_flow(node) {
         let align = inline_align_for(node);
         layout_inline_children(&node.children, content_x, content_y, content_width, align)
