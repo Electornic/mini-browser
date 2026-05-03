@@ -1220,7 +1220,8 @@ mod tests {
     fn typing_into_focused_non_input_element_is_no_op() {
         // Focus on a <div> (e.g. a future tabbable surface) — typing must
         // not corrupt arbitrary attributes on it. The protective tag check
-        // in `type_into_focused_input` is what locks this contract.
+        // inside `dispatch_typed_keys`'s default-action helpers is what
+        // locks this contract.
         let mut browser = browser_with_html(r#"<div id="host"></div>"#);
         browser.address_bar_focused = false;
         browser.focused_dom_path = Some(vec![]);
@@ -1326,6 +1327,289 @@ mod tests {
             elem.attributes.get("value").map(String::as_str),
             Some("changed")
         );
+    }
+
+    // ---- Step 5 (#5 in Notion): keydown / keyup dispatch ----
+
+    #[test]
+    fn typing_fires_keydown_then_keyup_on_focused_input() {
+        // A typed character should fire `keydown` first, then run the
+        // default text-insert action, then fire `keyup` — the same
+        // ordering real browsers expose. Tracing the order pins both
+        // events as actually wired in.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var trace = '';",
+            "document.getElementById('q').addEventListener('keydown', function(e) { trace += 'down:' + e.key + ';'; });",
+            "document.getElementById('q').addEventListener('keyup',   function(e) { trace += 'up:'   + e.key + ';'; });",
+            "</script>",
+            r#"<input id="q"/>"#,
+        ));
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                typed: "x".into(),
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(
+            browser.js.execute("trace").unwrap(),
+            "\"down:x;up:x;\""
+        );
+    }
+
+    #[test]
+    fn backspace_dispatches_keydown_with_backspace_key() {
+        // event.key for the Backspace key must be the spec string
+        // "Backspace" — handlers commonly switch on it.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var seen = '';",
+            "document.getElementById('q').addEventListener('keydown', function(e) { seen = e.key; });",
+            "</script>",
+            r#"<input id="q" value="ab"/>"#,
+        ));
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                backspace_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(browser.js.execute("seen").unwrap(), "\"Backspace\"");
+    }
+
+    #[test]
+    fn enter_dispatches_keydown_with_enter_key_even_without_default_action() {
+        // Enter has no default action yet (#7 will own form-submit), but
+        // the keydown/keyup events must still fire so listeners can react.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var seen = '';",
+            "document.getElementById('q').addEventListener('keydown', function(e) { seen = e.key; });",
+            "</script>",
+            r#"<input id="q"/>"#,
+        ));
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                enter_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(browser.js.execute("seen").unwrap(), "\"Enter\"");
+    }
+
+    #[test]
+    fn keydown_prevent_default_suppresses_typing_into_value() {
+        // A `keydown` handler that calls `preventDefault()` must block
+        // the default text-insert action — the input's `value`
+        // attribute stays untouched, mirroring how preventDefault on a
+        // link click suppresses navigation.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "document.getElementById('q').addEventListener('keydown', function(e) { e.preventDefault(); });",
+            "</script>",
+            r#"<input id="q" value=""/>"#,
+        ));
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                typed: "abc".into(),
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        // The script root is roots()[0]; the input is roots()[1].
+        let document = browser.parsed_document.borrow();
+        let input_id = document.roots()[1];
+        let elem = document.element_data(input_id).unwrap();
+        assert_eq!(
+            elem.attributes.get("value").map(String::as_str),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn keydown_prevent_default_suppresses_backspace_pop() {
+        // Same suppression contract on the Backspace path: preventDefault
+        // on `keydown` blocks the value-pop default action.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "document.getElementById('q').addEventListener('keydown', function(e) { e.preventDefault(); });",
+            "</script>",
+            r#"<input id="q" value="hello"/>"#,
+        ));
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                backspace_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        // The script root is roots()[0]; the input is roots()[1].
+        let document = browser.parsed_document.borrow();
+        let input_id = document.roots()[1];
+        let elem = document.element_data(input_id).unwrap();
+        assert_eq!(
+            elem.attributes.get("value").map(String::as_str),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn keydown_bubbles_to_ancestor_listener() {
+        // Same bubble contract `click` proved out: a `keydown` on the
+        // focused <input> walks up to the surrounding <div>'s listener.
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                "<script>",
+                "var trace = '';",
+                "document.getElementById('outer').addEventListener('keydown', function() { trace += 'outer;'; });",
+                "document.getElementById('inner').addEventListener('keydown', function() { trace += 'inner;'; });",
+                "</script>",
+                r#"<div id="outer"><input id="inner"/></div>"#,
+            ),
+            "",
+        );
+        browser.address_bar_focused = false;
+        // last root is the <div>, whose first child (index 0) is the input.
+        browser.focused_dom_path = Some(vec![0]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                typed: "x".into(),
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(
+            browser.js.execute("trace").unwrap(),
+            "\"inner;outer;\""
+        );
+    }
+
+    #[test]
+    fn keydown_event_target_is_the_focused_element() {
+        // The Event object's `target` must point at the focused input,
+        // even when the handler that reads it lives on an ancestor.
+        // `tagName` (uppercase per the HTML spec) is the only Element
+        // accessor reliably exposed today, so we read that to identify
+        // the target — `INPUT` proves the bubble-aware retarget worked.
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                "<script>",
+                "var seen = '';",
+                "document.getElementById('outer').addEventListener('keydown', function(e) { seen = e.target.tagName; });",
+                "</script>",
+                r#"<div id="outer"><input id="inner"/></div>"#,
+            ),
+            "",
+        );
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![0]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                typed: "y".into(),
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(browser.js.execute("seen").unwrap(), "\"INPUT\"");
+    }
+
+    #[test]
+    fn address_bar_focus_suppresses_page_keydown_dispatch() {
+        // When the address bar owns keyboard focus (Cmd+L state) the
+        // page-side keydown path must not fire — typing rescues
+        // navigation, it doesn't double-deliver to a stale page input.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var hits = 0;",
+            "document.getElementById('q').addEventListener('keydown', function() { hits = hits + 1; });",
+            "</script>",
+            r#"<input id="q"/>"#,
+        ));
+        browser.address_bar_focused = true;
+        browser.address_bar_selected = false;
+        browser.focused_dom_path = Some(vec![]);
+        browser.address_input.clear();
+
+        browser.apply_input(
+            &window::WindowInput {
+                typed: "z".into(),
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        // Address bar absorbed the keystroke …
+        assert_eq!(browser.address_input, "z");
+        // … the page-side keydown listener saw nothing.
+        assert_eq!(browser.js.execute("hits").unwrap(), "0");
+    }
+
+    #[test]
+    fn keydown_fires_on_focused_non_input_without_value_mutation() {
+        // Focus on a non-input element (a future tabbable surface):
+        // keyboard events must still dispatch so handlers can react,
+        // but the default text-insert is gated by the input tag check
+        // and must not invent a `value` attribute on a `<div>`.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var hits = 0;",
+            "document.getElementById('host').addEventListener('keydown', function() { hits = hits + 1; });",
+            "</script>",
+            r#"<div id="host"></div>"#,
+        ));
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                typed: "k".into(),
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(browser.js.execute("hits").unwrap(), "1");
+        // The script root is roots()[0]; the host div is roots()[1].
+        let document = browser.parsed_document.borrow();
+        let div_id = document.roots()[1];
+        let elem = document.element_data(div_id).unwrap();
+        assert_eq!(elem.attributes.get("value"), None);
     }
 
     #[test]

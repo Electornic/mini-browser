@@ -480,13 +480,14 @@ impl BrowserState {
                 self.address_bar_focused = false;
             }
         } else if let Some(focused_path) = self.focused_dom_path.clone() {
-            // Address bar didn't claim the keystrokes — try to feed them
-            // to a focused page <input>. Anything else (focused link,
-            // focused div, no focus at all) silently drops the keys, same
-            // way the address-bar branch falls through when nothing is
-            // focused. Enter is reserved for #7 (form submit) so it stays
-            // a no-op here.
-            self.type_into_focused_input(&focused_path, input);
+            // Address bar didn't claim the keystrokes — fire JS keyboard
+            // events on the focused page element, then (if not prevented
+            // and the target is an <input>) apply the default text-edit
+            // action. Anything else — focused link, focused div, no focus
+            // at all — still gets the keydown/keyup events but skips the
+            // default action; Enter is reserved for #7 (form submit) and
+            // currently has no default action of its own.
+            self.dispatch_typed_keys(&focused_path, input);
         }
 
         if input.back_pressed {
@@ -513,44 +514,56 @@ impl BrowserState {
         }
     }
 
-    // Routes typed characters and backspace into the `value` attribute of
-    // a focused page <input>. Silent no-op when `focused_path` doesn't
-    // resolve to an input element — keeps focus on a non-text-field
-    // (e.g. a link picked up by a future tab-focus path) from corrupting
-    // its own attributes. Enter is intentionally NOT consumed here:
-    // Step 4 (#7 in Notion) wires it to form submit later.
-    fn type_into_focused_input(&mut self, focused_path: &[usize], input: &window::WindowInput) {
-        if input.typed.is_empty() && !input.backspace_pressed {
+    // Per-key dispatch path. For each typed character (and Backspace /
+    // Enter) we fire a `keydown`, run the default action only if no
+    // handler called `preventDefault()` AND the target is an <input>,
+    // and finish with a `keyup`. Events bubble per spec. The default
+    // action for a typed character is "append the char to the input's
+    // `value` attribute"; for Backspace it's "pop the last char". Enter
+    // dispatches but has no default action yet — #7 (form submit) is
+    // where that gets wired in. Non-input focus (a div picked up by a
+    // future tab path, etc.) still receives the events; only the value
+    // mutation is gated by the tag check.
+    fn dispatch_typed_keys(&mut self, focused_path: &[usize], input: &window::WindowInput) {
+        if input.typed.is_empty() && !input.backspace_pressed && !input.enter_pressed {
             return;
         }
-        let mut document = self.parsed_document.borrow_mut();
-        let Some(node_id) = node_id_for_dom_path(&document, focused_path) else {
+        let Some(focused_id) =
+            node_id_for_dom_path(&self.parsed_document.borrow(), focused_path)
+        else {
             return;
         };
-        let Some(elem) = document.element_data_mut(node_id) else {
-            return;
-        };
-        if elem.tag_name != "input" {
-            return;
-        }
-        // Read-modify-write the `value` attribute. The next frame's style
-        // pass picks up the new attribute and the input re-paints with
-        // the updated text + caret position automatically — no separate
-        // invalidation hop needed.
-        let mut value = elem
-            .attributes
-            .get("value")
-            .cloned()
-            .unwrap_or_default();
+
         for ch in input.typed.chars() {
-            if !ch.is_control() {
-                value.push(ch);
+            // `event.key` for printable characters is the character itself
+            // ("a", " ", "2"); we surface even control chars (rare in the
+            // typed buffer) but the default action drops them.
+            let key = ch.to_string();
+            let prevented = self.js.dispatch_keyboard_event(focused_id, "keydown", &key);
+            if !prevented && !ch.is_control() {
+                push_char_to_input_value(&self.parsed_document, focused_id, ch);
             }
+            self.js.dispatch_keyboard_event(focused_id, "keyup", &key);
         }
+
         if input.backspace_pressed {
-            value.pop();
+            let prevented = self
+                .js
+                .dispatch_keyboard_event(focused_id, "keydown", "Backspace");
+            if !prevented {
+                pop_char_from_input_value(&self.parsed_document, focused_id);
+            }
+            self.js.dispatch_keyboard_event(focused_id, "keyup", "Backspace");
         }
-        elem.attributes.insert("value".into(), value);
+
+        if input.enter_pressed {
+            // `event.preventDefault()` has nothing to suppress today —
+            // Enter's default action lands in #7. We still call it so a
+            // handler that *does* call preventDefault doesn't blow up,
+            // and the return value is intentionally discarded.
+            self.js.dispatch_keyboard_event(focused_id, "keydown", "Enter");
+            self.js.dispatch_keyboard_event(focused_id, "keyup", "Enter");
+        }
     }
 
     fn navigate(&mut self) {
@@ -880,6 +893,39 @@ fn collect_script_sources(
 
 pub fn page_step(viewport_height: usize) -> f32 {
     (viewport_height as f32 - CHROME_HEIGHT - 24.0).max(24.0)
+}
+
+// Append `ch` to the focused input's `value` attribute. Silent no-op when
+// the slot has been removed by a previous handler or the focused element
+// is not an `<input>`. The next frame's style/layout pass picks up the
+// mutated attribute and re-paints automatically.
+fn push_char_to_input_value(document: &Rc<RefCell<dom::Document>>, node_id: NodeId, ch: char) {
+    let mut document = document.borrow_mut();
+    let Some(elem) = document.element_data_mut(node_id) else {
+        return;
+    };
+    if elem.tag_name != "input" {
+        return;
+    }
+    let mut value = elem.attributes.get("value").cloned().unwrap_or_default();
+    value.push(ch);
+    elem.attributes.insert("value".into(), value);
+}
+
+// Pop the last character off the focused input's `value` attribute. Same
+// silent-degrade contract as `push_char_to_input_value`: a stale or non-
+// input focus is a no-op, never a panic.
+fn pop_char_from_input_value(document: &Rc<RefCell<dom::Document>>, node_id: NodeId) {
+    let mut document = document.borrow_mut();
+    let Some(elem) = document.element_data_mut(node_id) else {
+        return;
+    };
+    if elem.tag_name != "input" {
+        return;
+    }
+    let mut value = elem.attributes.get("value").cloned().unwrap_or_default();
+    value.pop();
+    elem.attributes.insert("value".into(), value);
 }
 
 // Walks a stored hover/focus path back to its NodeId. The path is a

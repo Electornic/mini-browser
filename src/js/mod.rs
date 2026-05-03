@@ -195,7 +195,7 @@ impl JsRuntime {
     /// run the default action — e.g. skipping link navigation when JS
     /// handled the click itself.
     pub fn dispatch_event(&mut self, target: NodeId, event_type: &str) -> bool {
-        self.dispatch_event_inner(target, event_type, true)
+        self.dispatch_event_inner(target, event_type, None, true)
     }
 
     /// Direct dispatch — fires every listener registered on `target` for
@@ -206,13 +206,28 @@ impl JsRuntime {
     /// focused element directly, so a bubble would erroneously fire
     /// ancestor listeners that expected only their own focus state.
     pub fn dispatch_event_at(&mut self, target: NodeId, event_type: &str) -> bool {
-        self.dispatch_event_inner(target, event_type, false)
+        self.dispatch_event_inner(target, event_type, None, false)
+    }
+
+    /// Bubbling dispatch with a `key` payload exposed on the Event object.
+    /// Used by BrowserState for `keydown`/`keyup` — handlers commonly read
+    /// `event.key` (e.g. `if (event.key === "Enter")`), and `preventDefault`
+    /// on `keydown` suppresses the default text-insertion / backspace
+    /// action the BrowserState typing path would otherwise apply.
+    pub fn dispatch_keyboard_event(
+        &mut self,
+        target: NodeId,
+        event_type: &str,
+        key: &str,
+    ) -> bool {
+        self.dispatch_event_inner(target, event_type, Some(key), true)
     }
 
     fn dispatch_event_inner(
         &mut self,
         target: NodeId,
         event_type: &str,
+        key: Option<&str>,
         bubbles: bool,
     ) -> bool {
         let event_target = {
@@ -258,6 +273,7 @@ impl JsRuntime {
         let (event, event_state) = event::build_event_object(
             event_type,
             event_target,
+            key,
             self.dom.clone(),
             self.listeners.clone(),
             &mut self.context,

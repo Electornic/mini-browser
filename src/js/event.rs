@@ -50,6 +50,7 @@ pub(super) struct EventState {
 pub(super) fn build_event_object(
     event_type: &str,
     target: NodeId,
+    key: Option<&str>,
     dom: Rc<RefCell<Document>>,
     listeners: Rc<RefCell<ListenerMap>>,
     context: &mut Context,
@@ -120,7 +121,8 @@ pub(super) fn build_event_object(
         })
     };
 
-    let event_obj = ObjectInitializer::new(context)
+    let mut builder = ObjectInitializer::new(context);
+    builder
         .property(
             js_string!("type"),
             JsString::from(event_type),
@@ -149,8 +151,19 @@ pub(super) fn build_event_object(
             stop_immediate_propagation,
             js_string!("stopImmediatePropagation"),
             0,
-        )
-        .build();
+        );
+    // Keyboard events carry the pressed key as a string (e.g. "a", "Enter",
+    // "Backspace"). The dispatcher passes `Some(...)` for keydown/keyup and
+    // `None` for non-keyboard events; the property is omitted in the latter
+    // case, matching real browsers where `event.key` is undefined on a click.
+    if let Some(key) = key {
+        builder.property(
+            js_string!("key"),
+            JsString::from(key),
+            Attribute::all(),
+        );
+    }
+    let event_obj = builder.build();
 
     (event_obj, state)
 }
