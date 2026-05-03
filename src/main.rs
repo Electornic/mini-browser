@@ -1859,6 +1859,242 @@ mod tests {
         assert_eq!(browser.js.execute("trace").unwrap(), "\"blur;\"");
     }
 
+    // ---- Step 5c (#7 in Notion): <button> + <form> submit ----
+
+    #[test]
+    fn enter_in_input_inside_form_dispatches_submit_event_on_the_form() {
+        // Pressing Enter on a focused input that lives inside a form
+        // is the classic "submit by keyboard" path. The submit handler
+        // calls preventDefault so the browser doesn't try to navigate
+        // (the action is relative + no current_url, which would land
+        // on the error page and disturb subsequent assertions).
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var hits = 0;",
+            "document.getElementById('f').addEventListener('submit', function(e) { hits = hits + 1; e.preventDefault(); });",
+            "</script>",
+            r#"<form id="f" action="/search"><input id="q" name="q" value="hi"/></form>"#,
+        ));
+        browser.address_bar_focused = false;
+        // last root = form, child 0 = input
+        browser.focused_dom_path = Some(vec![0]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                enter_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(browser.js.execute("hits").unwrap(), "1");
+    }
+
+    #[test]
+    fn submit_event_target_is_the_form_not_the_input() {
+        // The Event object's `target` must point at the <form>, not
+        // at the input that triggered the submit. Real-world handlers
+        // read e.target to read the form's attributes (action,
+        // method) — this is the contract that lets them work.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var seen = '';",
+            "document.getElementById('f').addEventListener('submit', function(e) { seen = e.target.tagName; e.preventDefault(); });",
+            "</script>",
+            r#"<form id="f"><input name="q"/></form>"#,
+        ));
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![0]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                enter_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(browser.js.execute("seen").unwrap(), "\"FORM\"");
+    }
+
+    #[test]
+    fn enter_in_input_outside_form_does_not_attempt_navigation() {
+        // No enclosing form → Enter is just keydown/keyup, no submit
+        // is dispatched, no navigation attempted. The document HTML
+        // stays exactly as parsed at construction time.
+        let mut browser = browser_with_html(r#"<input id="q" value="hi"/>"#);
+        let original_html = browser.document_html.clone();
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                enter_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        // No form means no navigation: the document stayed the same.
+        assert_eq!(browser.document_html, original_html);
+    }
+
+    #[test]
+    fn submit_prevent_default_blocks_form_navigation() {
+        // The "JS suppresses a default browser action" path, applied
+        // to form submit: the handler calls preventDefault and the
+        // browser must not navigate. Without this, a relative action
+        // + no current_url would replace the document with an error
+        // page, mutating `document_html`.
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "document.getElementById('f').addEventListener('submit', function(e) { e.preventDefault(); });",
+            "</script>",
+            r#"<form id="f" action="/search"><input id="q" name="q" value="hi"/></form>"#,
+        ));
+        let original_html = browser.document_html.clone();
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![0]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                enter_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(browser.document_html, original_html);
+    }
+
+    #[test]
+    fn keydown_prevent_default_on_enter_blocks_form_submit_dispatch() {
+        // The earlier preventDefault gate (on `keydown`) must also
+        // suppress the form submit — otherwise the same key press
+        // would still trigger the form even though the script said
+        // "don't act on this key".
+        let mut browser = browser_with_html(concat!(
+            "<script>",
+            "var trace = '';",
+            "document.getElementById('q').addEventListener('keydown', function(e) { e.preventDefault(); });",
+            "document.getElementById('f').addEventListener('submit',  function() { trace += 'submit;'; });",
+            "</script>",
+            r#"<form id="f"><input id="q" name="q"/></form>"#,
+        ));
+        browser.address_bar_focused = false;
+        browser.focused_dom_path = Some(vec![0]);
+
+        browser.apply_input(
+            &window::WindowInput {
+                enter_pressed: true,
+                ..window::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert_eq!(browser.js.execute("trace").unwrap(), "\"\"");
+    }
+
+    #[test]
+    fn button_click_inside_form_dispatches_submit() {
+        // A `<button>` with no explicit type defaults to type="submit"
+        // per the HTML spec. Clicking it inside a form must fire the
+        // submit event on that form. preventDefault keeps the test
+        // off the navigation path.
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                "<script>",
+                "var hits = 0;",
+                "document.getElementById('f').addEventListener('submit', function(e) { hits = hits + 1; e.preventDefault(); });",
+                "</script>",
+                r#"<form id="f" action="/go"><button id="b">Submit</button></form>"#,
+            ),
+            r#"#b { display: block; width: 200px; height: 50px; }"#,
+        );
+
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((10.0, CHROME_HEIGHT + 10.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+
+        assert_eq!(browser.js.execute("hits").unwrap(), "1");
+    }
+
+    #[test]
+    fn button_with_explicit_type_button_does_not_submit() {
+        // type="button" opts out of the default-submit behaviour.
+        // Clicking it must NOT fire the submit event on the form,
+        // matching real browsers — `<button type="button">` is the
+        // standard "non-submitting button" used for plain JS hooks.
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                "<script>",
+                "var hits = 0;",
+                "document.getElementById('f').addEventListener('submit', function() { hits = hits + 1; });",
+                "</script>",
+                r#"<form id="f"><button id="b" type="button">Click</button></form>"#,
+            ),
+            r#"#b { display: block; width: 200px; height: 50px; }"#,
+        );
+
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((10.0, CHROME_HEIGHT + 10.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+
+        assert_eq!(browser.js.execute("hits").unwrap(), "0");
+    }
+
+    #[test]
+    fn button_outside_any_form_does_not_dispatch_submit() {
+        // A bare `<button>` with no enclosing form has nothing to
+        // submit; the click runs through dispatch_event for the click
+        // event itself (handled elsewhere) but the form-submit lookup
+        // returns None and does nothing.
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                "<script>",
+                "var trace = '';",
+                "document.getElementById('b').addEventListener('click',  function() { trace += 'click;'; });",
+                "document.getElementById('b').addEventListener('submit', function() { trace += 'submit;'; });",
+                "</script>",
+                r#"<button id="b">Lonely</button>"#,
+            ),
+            r#"#b { display: block; width: 200px; height: 50px; }"#,
+        );
+
+        let _ = browser.display_list(
+            800,
+            600,
+            &window::WindowInput {
+                mouse_position: Some((10.0, CHROME_HEIGHT + 10.0)),
+                left_mouse_pressed: true,
+                ..window::WindowInput::default()
+            },
+            &[],
+        );
+
+        // Click fired (proves the button was hit), submit didn't.
+        assert_eq!(browser.js.execute("trace").unwrap(), "\"click;\"");
+    }
+
     #[test]
     fn raf_callback_dom_mutation_lands_in_browser_state_arena() {
         // rAF runs *before* the frame's layout pass, so any DOM mutation

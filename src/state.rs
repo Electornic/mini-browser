@@ -298,22 +298,46 @@ impl BrowserState {
         // then fall through to link navigation unless a handler called
         // `event.preventDefault()`. Dispatch returns true in that case;
         // the toy's first "JS suppresses a default browser action" path.
-        let click_default_prevented = if input.left_mouse_pressed
-            && input.mouse_position.is_some_and(|(_, y)| y >= CHROME_HEIGHT)
-            && let Some(node_id) = hover_hit.as_ref().and_then(|hit| hit.node_id)
+        let click_in_page = input.left_mouse_pressed
+            && input.mouse_position.is_some_and(|(_, y)| y >= CHROME_HEIGHT);
+        let click_node_id = hover_hit.as_ref().and_then(|hit| hit.node_id);
+        let click_default_prevented = if click_in_page
+            && let Some(node_id) = click_node_id
         {
             self.js.dispatch_event(node_id, "click")
         } else {
             false
         };
 
-        // Page clicks are handled after layout exists so hit testing can use
-        // real rectangles. preventDefault on the click bubble suppresses the
-        // navigation entirely — the click was "consumed" by JS.
-        if !click_default_prevented
-            && let Some(link_target) = self.clicked_link(input, &document_view.links)
+        // A click that lands on a default-submit `<button>` inside a
+        // `<form>` resolves the form node now, so the post-dispatch
+        // default action below can submit it. We do the resolution
+        // here (before the borrow-mut path of navigation) but defer
+        // the actual submit until we know preventDefault wasn't called.
+        let submit_form_id = if click_in_page
+            && let Some(id) = click_node_id
         {
-            self.navigate_to_link(link_target);
+            let document = self.parsed_document.borrow();
+            find_default_submit_button(&document, id)
+                .and_then(|btn_id| find_enclosing_form(&document, btn_id))
+        } else {
+            None
+        };
+
+        // Page clicks are handled after layout exists so hit testing
+        // can use real rectangles. preventDefault on the click bubble
+        // suppresses both default actions (form submit and link nav).
+        // Form submit takes priority over link navigation since you
+        // don't typically nest a default-submit button inside a link.
+        if !click_default_prevented {
+            if let Some(form_id) = submit_form_id {
+                self.try_submit_form(form_id);
+            } else if let Some(link_target) =
+                self.clicked_link(input, &document_view.links)
+            {
+                let href = link_target.href.clone();
+                self.navigate_to_href(&href);
+            }
         }
 
         self.clamp_scroll(viewport_height, document_height(&document_view.commands));
@@ -595,11 +619,22 @@ impl BrowserState {
         }
 
         if input.enter_pressed {
-            // `event.preventDefault()` has nothing to suppress today —
-            // Enter's default action lands in #7. We still call it so a
-            // handler that *does* call preventDefault doesn't blow up,
-            // and the return value is intentionally discarded.
-            self.js.dispatch_keyboard_event(focused_id, "keydown", "Enter");
+            // Enter's default action is "submit the enclosing form" if
+            // the focused element lives inside one. preventDefault on
+            // keydown blocks that — same gate as the typed-char path.
+            // Resolving the form is a separate borrow from
+            // `try_submit_form` so the dispatch inside it doesn't see
+            // an outstanding read borrow on the document.
+            let prevented = self
+                .js
+                .dispatch_keyboard_event(focused_id, "keydown", "Enter");
+            if !prevented {
+                let form_id =
+                    find_enclosing_form(&self.parsed_document.borrow(), focused_id);
+                if let Some(form_id) = form_id {
+                    self.try_submit_form(form_id);
+                }
+            }
             self.js.dispatch_keyboard_event(focused_id, "keyup", "Enter");
         }
     }
@@ -639,8 +674,65 @@ impl BrowserState {
         }
     }
 
-    fn navigate_to_link(&mut self, link_target: &LinkTarget) {
-        let resolved = match self.resolve_href(&link_target.href) {
+    // Synthesise a `submit` event on `form_id` and, if no handler
+    // calls `preventDefault()`, run the form's default action: a GET
+    // navigation to `action` with the URL-encoded form data appended
+    // as a query string. POST is intentionally not wired yet — once
+    // the network goal lands (#15-17 in the Notion plan) it can route
+    // through here too. Empty action falls back to the current URL so
+    // self-submitting forms (`<form>` with no action attribute) work.
+    fn try_submit_form(&mut self, form_id: NodeId) {
+        let prevented = self.js.dispatch_event(form_id, "submit");
+        if prevented {
+            return;
+        }
+
+        // Read form attributes + data under a short borrow so the
+        // navigation path below (which may rebuild the JS runtime)
+        // doesn't overlap with our read.
+        let (action, method, data) = {
+            let document = self.parsed_document.borrow();
+            let Some(elem) = document.element_data(form_id) else {
+                return;
+            };
+            let action = elem.attributes.get("action").cloned().unwrap_or_default();
+            let method = elem
+                .attributes
+                .get("method")
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_else(|| "get".to_string());
+            let data = collect_form_data(&document, form_id);
+            (action, method, data)
+        };
+
+        if method != "get" {
+            // POST/PUT/DELETE land in the network goal later; for now
+            // log and skip so a misconfigured form doesn't silently
+            // navigate as if it were GET.
+            eprintln!("[form] method={method} not supported yet, skipping submit");
+            return;
+        }
+
+        // Empty action means "self-post"; fall back to the current
+        // URL so a query-string-only update still navigates somewhere.
+        let target_action = if action.is_empty() {
+            match self.current_url.as_ref() {
+                Some(url) => url.to_string(),
+                None => {
+                    eprintln!("[form] empty action and no current url, skipping submit");
+                    return;
+                }
+            }
+        } else {
+            action
+        };
+
+        let submit_url = build_form_submit_url(&target_action, &data);
+        self.navigate_to_href(&submit_url);
+    }
+
+    fn navigate_to_href(&mut self, href: &str) {
+        let resolved = match self.resolve_href(href) {
             Ok(url) => url,
             Err(error) => {
                 eprintln!("{error}");
@@ -977,6 +1069,124 @@ fn pop_char_from_input_value(document: &Rc<RefCell<dom::Document>>, node_id: Nod
     true
 }
 
+// Walks the parent chain from `start` looking for the nearest
+// `<button>` ancestor whose default action is "submit the form" —
+// i.e. it has no explicit `type="button"` or `type="reset"`. The HTML
+// spec defaults a `<button>` to `type="submit"` when the attribute is
+// missing or unknown, and that's the case the click path turns into a
+// form submission. Returns None when the click landed outside any
+// button (or inside a non-submit one), in which case the caller falls
+// through to link navigation / nothing.
+fn find_default_submit_button(document: &dom::Document, start: NodeId) -> Option<NodeId> {
+    let mut cur = Some(start);
+    while let Some(id) = cur {
+        let node = document.get(id)?;
+        if let NodeType::Element(elem) = &node.node_type
+            && elem.tag_name == "button"
+        {
+            let button_type = elem
+                .attributes
+                .get("type")
+                .map(|s| s.to_ascii_lowercase());
+            return match button_type.as_deref() {
+                Some("button") | Some("reset") => None,
+                _ => Some(id),
+            };
+        }
+        cur = node.parent;
+    }
+    None
+}
+
+// Walks the parent chain from `start` looking for the nearest `<form>`
+// ancestor. Returns the form's NodeId, or None if `start` isn't inside
+// a form. Used by both the Enter-in-input path and the button-click
+// path to figure out which form a submission targets.
+fn find_enclosing_form(document: &dom::Document, start: NodeId) -> Option<NodeId> {
+    let mut cur = Some(start);
+    while let Some(id) = cur {
+        let node = document.get(id)?;
+        if let NodeType::Element(elem) = &node.node_type
+            && elem.tag_name == "form"
+        {
+            return Some(id);
+        }
+        cur = node.parent;
+    }
+    None
+}
+
+// Walks the form subtree and collects (name, value) pairs from every
+// `<input>` with a `name` attribute. Inputs without `name` are not
+// submittable per the HTML spec — same rule real browsers apply.
+// Recursive so inputs nested inside `<div>`/`<fieldset>` still surface.
+fn collect_form_data(document: &dom::Document, form_id: NodeId) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    walk_form_subtree(document, form_id, &mut out);
+    out
+}
+
+fn walk_form_subtree(
+    document: &dom::Document,
+    node_id: NodeId,
+    out: &mut Vec<(String, String)>,
+) {
+    let Some(node) = document.get(node_id) else {
+        return;
+    };
+    if let NodeType::Element(elem) = &node.node_type
+        && elem.tag_name == "input"
+        && let Some(name) = elem.attributes.get("name")
+    {
+        let value = elem.attributes.get("value").cloned().unwrap_or_default();
+        out.push((name.clone(), value));
+    }
+    for child in &node.children {
+        walk_form_subtree(document, *child, out);
+    }
+}
+
+// Percent-encode a single form field per `application/x-www-form-urlencoded`
+// — unreserved chars pass through, spaces become `+`, everything else
+// becomes `%HH` per UTF-8 byte. Good enough for a toy GET form; the
+// spec's full algorithm has more nuance around CR/LF normalisation that
+// real apps rarely depend on.
+fn url_encode(input: &str) -> String {
+    let mut out = String::new();
+    for ch in input.chars() {
+        match ch {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => out.push(ch),
+            ' ' => out.push('+'),
+            _ => {
+                let mut buf = [0u8; 4];
+                let bytes = ch.encode_utf8(&mut buf);
+                for &b in bytes.as_bytes() {
+                    out.push_str(&format!("%{b:02X}"));
+                }
+            }
+        }
+    }
+    out
+}
+
+// Build the GET-form submission URL: `action` with the encoded query
+// appended. If `action` already has a `?`, fields append with `&`;
+// otherwise we introduce `?`. An empty data list returns `action`
+// unchanged so a buttonless form with no fields still routes through
+// the navigator (rare, but exercises the same path).
+fn build_form_submit_url(action: &str, data: &[(String, String)]) -> String {
+    let query = data
+        .iter()
+        .map(|(name, value)| format!("{}={}", url_encode(name), url_encode(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    if query.is_empty() {
+        return action.to_string();
+    }
+    let separator = if action.contains('?') { '&' } else { '?' };
+    format!("{action}{separator}{query}")
+}
+
 // Walks a stored hover/focus path back to its NodeId. The path is a
 // sequence of child indices starting at the document's last root —
 // matching the convention in `display_list::build_document_view`, which
@@ -1140,4 +1350,78 @@ pub fn build_font_cache(font_data: &[Vec<u8>]) -> Vec<fontdue::Font> {
     }
 
     fonts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_encode_passes_unreserved_chars_unchanged() {
+        // The four "unreserved" punctuation chars (- _ . ~) plus
+        // alphanumerics ride through as-is; this matches RFC 3986's
+        // unreserved set, which the form-urlencoded layer inherits.
+        assert_eq!(url_encode("abc123-_.~"), "abc123-_.~");
+    }
+
+    #[test]
+    fn url_encode_replaces_space_with_plus() {
+        // application/x-www-form-urlencoded specifically maps space
+        // to `+` (not `%20`) — the legacy form-encoding contract real
+        // backends still parse against.
+        assert_eq!(url_encode("hello world"), "hello+world");
+    }
+
+    #[test]
+    fn url_encode_percent_encodes_special_ascii() {
+        // `&` and `=` are the field separators in a query string;
+        // they must escape so a value of "a&b=c" doesn't smuggle
+        // extra fields into the URL.
+        assert_eq!(url_encode("a&b=c"), "a%26b%3Dc");
+    }
+
+    #[test]
+    fn url_encode_emits_one_percent_pair_per_utf8_byte() {
+        // Korean "한" is three bytes in UTF-8; each byte gets its own
+        // %HH pair so the server-side decoder can reassemble it.
+        assert_eq!(url_encode("한"), "%ED%95%9C");
+    }
+
+    #[test]
+    fn build_form_submit_url_appends_query_with_question_mark() {
+        let data = vec![("q".to_string(), "hi".to_string())];
+        assert_eq!(build_form_submit_url("/search", &data), "/search?q=hi");
+    }
+
+    #[test]
+    fn build_form_submit_url_appends_with_amp_when_action_has_query() {
+        // The action already carries a `?lang=en`, so the form data
+        // joins with `&` instead of introducing a second `?`.
+        let data = vec![("q".to_string(), "hi".to_string())];
+        assert_eq!(
+            build_form_submit_url("/search?lang=en", &data),
+            "/search?lang=en&q=hi"
+        );
+    }
+
+    #[test]
+    fn build_form_submit_url_returns_action_unchanged_when_no_data() {
+        // No name'd fields → no query string → action passes through.
+        let data: Vec<(String, String)> = Vec::new();
+        assert_eq!(build_form_submit_url("/search", &data), "/search");
+    }
+
+    #[test]
+    fn build_form_submit_url_encodes_field_names_and_values() {
+        // Both halves of each pair go through the encoder, so a name
+        // with a space and a value with `&` both round-trip cleanly.
+        let data = vec![
+            ("first name".to_string(), "Alice".to_string()),
+            ("note".to_string(), "a&b".to_string()),
+        ];
+        assert_eq!(
+            build_form_submit_url("/save", &data),
+            "/save?first+name=Alice&note=a%26b"
+        );
+    }
 }
