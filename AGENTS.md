@@ -76,11 +76,13 @@
 - `html`: HTML 파싱
 - `css`: CSS 파싱
 - `style`: selector matching, inheritance, computed/specified values
-- `layout`: block / inline / inline-block / position / float / flex / grid 계산
-- `render` (또는 `paint`): display command 생성 및 화면 출력 연결
+- `layout/`: block / inline / inline-block / position / float / flex / grid 계산. 알고리즘별로 `block.rs`, `inline.rs`, `flex.rs`, `grid.rs` 로 분리. 공유 자료형 (`LayoutBox`, `Rect`, …) 과 cross-cutting helper, `layout_tree` entry 는 `mod.rs` 에 둠
+- `render/`: `display_list.rs` (LayoutBox → DisplayCommand) + `raster.rs` (DisplayCommand → 픽셀 버퍼) 두 단계로 분리. `mod.rs` 에 `Affine`, `DisplayCommand` enum, 공용 색상 상수만 유지하고 entry 함수는 re-export
 - `net`: URL parsing, HTTP GET, keep-alive 풀, redirect
 - `resource`: HTML 에서 stylesheet / 이미지 / 스크립트 추출 후 병렬 fetch
-- `js`: Boa engine wrapper, document/window globals, 이벤트 디스패치, microtask/timer/rAF 드라이버
+- `js/`: Boa engine wrapper. `mod.rs` 에 `JsRuntime` + 공유 타입(`ListenerMap`, `RafQueue`, `NODE_ID_PROP`), 호스트 API 등록은 `console.rs`, `window.rs`, `document.rs`, `timers.rs`, `element.rs`, `event.rs`, `util.rs` 로 분리. 외부에는 `pub struct JsRuntime` + 좁은 메서드만 노출
+- `chrome`: 탭 strip, toolbar, 주소창, 네비/리프레시/메뉴 버튼의 픽셀 그리기 + hit-region rect. `BrowserState` 는 `ChromeState`/`ChromeAction` 만 다루고 페인팅 디테일은 모름
+- `navigation`: `load_remote_document` (네트워크 → HTML/CSS/이미지/스크립트), `error_document`/`text_document` 같은 fallback 템플릿, `describe_*_error`. 순수 함수 — `BrowserState` 외부에서 호출
 - `main` (`BrowserState`): 전체 파이프라인 조립, history, chrome 입력 처리
 
 한 모듈이 다른 단계의 내부 구현 세부사항을 직접 알지 않도록 유지한다.

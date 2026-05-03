@@ -131,7 +131,7 @@ Window/Event Loop
 비고:
 - 최소 구현에서는 UA stylesheet 없이 기본값만 제공한다.
 
-### `layout`
+### `layout/`
 
 역할:
 - styled tree를 layout tree/box tree로 변환
@@ -144,25 +144,48 @@ Window/Event Loop
 출력:
 - `LayoutBox`
 
-### `paint` 또는 `render`
+서브모듈 분리:
+- `layout/mod.rs` — 공유 자료형 (`Rect`, `EdgeSizes`, `Dimensions`, `LayoutBox`, `BoxType`), `layout_tree` entry, abs/fixed reposition pass, cross-cutting helper (`edge_sizes`, `length_value`, `intrinsic_*`, position 헬퍼, `relative_offset`, `shift_layout_subtree`, …) + 테스트
+- `layout/block.rs` — `layout_node` (block flow body), float / clear / collapse_margins
+- `layout/inline.rs` — `layout_inline_children`, `layout_inline_or_inline_block`, `layout_inline_block_node`, inline atom 배치
+- `layout/flex.rs` — `layout_flex_children`, `FlexDirection`/`JustifyContent`/`AlignItems`, grow/shrink/justify/align
+- `layout/grid.rs` — `layout_grid_children`, named-line / grid-area / auto-flow placement, `Occupancy`, `resolve_grid_rows`/`resolve_grid_columns`
+
+### `render/`
 
 역할:
 - layout tree를 그릴 수 있는 명령 목록으로 변환
 - rect/text 중심 primitive 생성
+- DisplayCommand → 픽셀 버퍼 라스터화
 
 입력:
 - layout tree
 
 출력:
-- `DisplayCommand` 목록
+- `DisplayCommand` 목록 + 라스터화된 `Vec<u32>` 픽셀 버퍼
 
-### `js`
+서브모듈 분리:
+- `render/mod.rs` — 공용 자료형 (`Affine`, `DisplayCommand` enum, `CornerRadii`, `TextCommand`, `ImageCommand`, `ShadowCommand`, `GradientCommand`, `ResolvedStop`), `Color` 상수, entry 함수 re-export, 테스트
+- `render/display_list.rs` — LayoutBox → DisplayCommand pipeline. stacking context 순회, 투명도/transform 상속, 박스별 command 빌더 (배경, 테두리, 그림자, 그라디언트, 텍스트, 텍스트 그림자), `transform_for`, `translate`
+- `render/raster.rs` — DisplayCommand → 픽셀. `rasterize` (entry), 사각형/둥근 사각형/그라디언트/그림자 채우기, 텍스트 페인트 (fontdue + 비트맵 fallback), 이미지 합성, `measure_text_width`
+
+### `js/`
 
 역할:
 - Boa engine wrapper (`JsRuntime`) — 페이지 단위 `Context` 보유
 - DOM 바인딩 (`document` / `window` / `self` globals, Element / Text wrapper, getter/setter, mutation, 이벤트 listener registry)
 - 이벤트 디스패치 (`dispatch_event(target, "click")` — text → Element retarget, bubble dispatch)
 - 비동기 잡 큐 — 커스텀 `FrameJobExecutor` 로 microtask + 만료된 timer 만 비블로킹 drain, `requestAnimationFrame` 스냅샷 큐
+
+서브모듈 분리:
+- `js/mod.rs` — `JsRuntime` + 공유 타입 (`ListenerMap`, `RafQueue`, `NODE_ID_PROP`) + 테스트
+- `js/console.rs` — `console.log/warn/error`
+- `js/window.rs` — `window` / `self` aliases
+- `js/document.rs` — `document` global, `getElementById` / `querySelector` / `createElement` / `createTextNode`
+- `js/timers.rs` — `FrameJobExecutor`, `setTimeout` / `setInterval` / `requestAnimationFrame` 등록
+- `js/element.rs` — Element / Text wrapper factory (`make_element`, `make_text`, mutation API)
+- `js/event.rs` — `build_event_object`
+- `js/util.rs` — 인자 추출 헬퍼 (`first_arg_as_string`, `read_node_id`)
 
 입력:
 - 공유 `Rc<RefCell<Document>>`
@@ -174,6 +197,39 @@ Window/Event Loop
 비고:
 - 외부 모듈은 Boa 타입 (`Context`, `JsObject`, `JsValue`) 을 직접 import 하지 않는다 — `JsRuntime` 의 좁은 메서드 (`execute`, `dispatch_event`, `drain_pending_jobs`, `run_animation_frame_callbacks`) 만 호출한다.
 - `Rc<RefCell<Document>>` 는 `JsRuntime` 과 BrowserState 가 같은 arena 를 공유하므로 JS mutation → 다음 frame 의 layout 에 즉시 반영된다.
+
+### `chrome`
+
+역할:
+- 탭 strip / toolbar / 주소창 (pill) / back·forward·refresh·menu 버튼의 픽셀 그리기
+- chrome 영역 hit-region rect (`back_button_rect()` 등)
+- chrome 레이아웃 상수 (`CHROME_HEIGHT`, `TAB_*`, `ADDRESS_BOX_*`, …) 한 곳에 모음
+
+입력:
+- `ChromeState<'_>` (현재 주소바 텍스트, focus/select 여부, hover action, can_go_back/forward, tab title 등)
+- `&[fontdue::Font]` (caret 측정용)
+
+출력:
+- `Vec<DisplayCommand>` (chrome 페인트만)
+
+비고:
+- BrowserState 는 chrome 의 픽셀 디테일을 모름. chrome 모듈만 보면 chrome UI 가 어떻게 그려지는지 한눈에 파악 가능.
+
+### `navigation`
+
+역할:
+- `load_remote_document` — 사용자가 입력한 URL 을 fetch + content-type 분기 → 표시할 HTML / CSS / 이미지 / 스크립트 / 폰트 묶음
+- `error_document` / `text_document` fallback 페이지 템플릿
+- `describe_network_error` / `describe_resource_error` 에러 메시지 변환
+
+입력:
+- raw URL string
+
+출력:
+- `LoadedDocument` 튜플 또는 사람 친화적 에러 문자열
+
+비고:
+- 순수 함수 모음. `BrowserState` 의 navigation 흐름 (`navigate` / `navigate_to_link` / `reload_current` / `error_entry` / `load_initial_state`) 가 호출.
 
 ### `app` (`main.rs::BrowserState`)
 
@@ -193,8 +249,10 @@ Window/Event Loop
 ## Recommended Dependency Direction
 
 ```text
-app
+app (BrowserState)
   -> window
+  -> chrome           (페인트 only; BrowserState 가 ChromeState 채워서 호출)
+  -> navigation       (URL → LoadedDocument; 순수 함수)
   -> net
   -> resource
   -> html
@@ -207,9 +265,11 @@ app
 html -> dom
 style -> dom, css
 layout -> style
-render -> layout
+render -> layout, css
 js -> dom, css (selector parser 재사용)
 resource -> net, html, dom
+chrome -> css, layout, render
+navigation -> net, resource, html
 ```
 
 원칙:
@@ -217,6 +277,8 @@ resource -> net, html, dom
 - `layout`은 네트워크나 파서 구현을 알지 못한다.
 - `render`는 CSS selector나 HTML token을 알지 못한다.
 - `js`는 layout/render 단계를 모른다 — DOM 만 mutate 하고 다음 frame 의 layout 가 자동으로 새 트리를 본다.
+- `chrome` 은 `BrowserState` 를 모른다 — `ChromeState<'_>` snapshot 만 받음.
+- `navigation` 은 `BrowserState` 를 모른다 — raw URL 받아 `LoadedDocument` 또는 에러 문자열만 반환.
 
 ## Main Flow
 
