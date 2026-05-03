@@ -727,6 +727,54 @@ mod tests {
     }
 
     #[test]
+    fn document_body_and_head_return_first_matching_element_or_null() {
+        // `document.body.appendChild(...)` is one of the most common boot
+        // patterns; the accessor must resolve to the live <body> element so
+        // mutations land in the right place. Same for <head> when scripts
+        // inject <script>/<link>/<style> tags into the document head.
+        let mut runtime = runtime_with(
+            r#"<html><head><meta charset="utf-8"/></head><body><p>hi</p></body></html>"#,
+        );
+        assert_eq!(
+            runtime.execute("document.body.tagName").unwrap(),
+            "\"BODY\""
+        );
+        assert_eq!(
+            runtime.execute("document.body.children[0].tagName").unwrap(),
+            "\"P\""
+        );
+        assert_eq!(
+            runtime.execute("document.head.tagName").unwrap(),
+            "\"HEAD\""
+        );
+    }
+
+    #[test]
+    fn document_body_and_head_return_null_when_missing() {
+        // A fragment without an explicit <body>/<head> wrapper — the
+        // accessors must surface null rather than throw, so script defenses
+        // like `document.body && document.body.classList.add(...)` work.
+        let mut runtime = runtime_with(r#"<div>only this</div>"#);
+        assert_eq!(runtime.execute("document.body").unwrap(), "null");
+        assert_eq!(runtime.execute("document.head").unwrap(), "null");
+    }
+
+    #[test]
+    fn document_body_reflects_text_content_writes_through_the_wrapper() {
+        // Confirm the accessor returns a live wrapper, not a one-shot
+        // snapshot — writing through `document.body.textContent` and
+        // reading it back must round-trip via the same Document handle.
+        let mut runtime = runtime_with(r#"<body><p>old</p></body>"#);
+        runtime
+            .execute("document.body.textContent = 'new copy';")
+            .unwrap();
+        assert_eq!(
+            runtime.execute("document.body.textContent").unwrap(),
+            "\"new copy\""
+        );
+    }
+
+    #[test]
     fn get_elements_by_class_name_returns_empty_array_for_no_match() {
         // A miss must still return an array (not null) so `.length` and
         // for-loops on the call site stay safe. Same goes for an empty input.

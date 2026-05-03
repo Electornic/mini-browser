@@ -139,7 +139,7 @@ pub(super) fn register_document(
         })
     };
 
-    let dom_for_text = dom;
+    let dom_for_text = dom.clone();
     let create_text_node = unsafe {
         NativeFunction::from_closure(move |_this, args, ctx| {
             let text = first_arg_as_string(args, ctx)?;
@@ -147,6 +147,54 @@ pub(super) fn register_document(
             Ok(JsValue::from(make_text(new_id, dom_for_text.clone(), ctx)))
         })
     };
+
+    // `document.body` and `document.head` are spec-mandated getters: scripts
+    // routinely call `document.body.appendChild(...)` at boot time, and a
+    // missing accessor turns into "TypeError: Cannot read properties of
+    // undefined" on the first line of the inline script. The closures walk
+    // every root for the first matching element each call (no cache), so
+    // post-mutation reads observe the live tree just like getElementById.
+    let dom_for_body = dom.clone();
+    let listeners_for_body = listeners.clone();
+    let body_get = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let node_id = {
+                let document = dom_for_body.borrow();
+                find_first_tag(&document, "body")
+            };
+            match node_id {
+                Some(id) => Ok(JsValue::from(make_element(
+                    id,
+                    dom_for_body.clone(),
+                    listeners_for_body.clone(),
+                    ctx,
+                ))),
+                None => Ok(JsValue::null()),
+            }
+        })
+    }
+    .to_js_function(context.realm());
+
+    let dom_for_head = dom.clone();
+    let listeners_for_head = listeners.clone();
+    let head_get = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let node_id = {
+                let document = dom_for_head.borrow();
+                find_first_tag(&document, "head")
+            };
+            match node_id {
+                Some(id) => Ok(JsValue::from(make_element(
+                    id,
+                    dom_for_head.clone(),
+                    listeners_for_head.clone(),
+                    ctx,
+                ))),
+                None => Ok(JsValue::null()),
+            }
+        })
+    }
+    .to_js_function(context.realm());
 
     let document = ObjectInitializer::new(context)
         .function(get_element_by_id, js_string!("getElementById"), 1)
@@ -158,6 +206,18 @@ pub(super) fn register_document(
         )
         .function(create_element, js_string!("createElement"), 1)
         .function(create_text_node, js_string!("createTextNode"), 1)
+        .accessor(
+            js_string!("body"),
+            Some(body_get),
+            None,
+            Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
+        )
+        .accessor(
+            js_string!("head"),
+            Some(head_get),
+            None,
+            Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
+        )
         // Silent no-op stubs. `document.addEventListener('DOMContentLoaded', …)`
         // is one of the most common top-level calls on real pages; without a
         // method here the call throws and the rest of the script never runs.
@@ -203,6 +263,30 @@ fn walk_for_id(document: &Document, node_id: NodeId, id: &str) -> Option<NodeId>
     }
     for child in &node.children {
         if let Some(found) = walk_for_id(document, *child, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_first_tag(document: &Document, tag: &str) -> Option<NodeId> {
+    for &root in document.roots() {
+        if let Some(found) = walk_for_tag(document, root, tag) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn walk_for_tag(document: &Document, node_id: NodeId, tag: &str) -> Option<NodeId> {
+    let node = document.get(node_id)?;
+    if let NodeType::Element(elem) = &node.node_type
+        && elem.tag_name == tag
+    {
+        return Some(node_id);
+    }
+    for child in &node.children {
+        if let Some(found) = walk_for_tag(document, *child, tag) {
             return Some(found);
         }
     }
