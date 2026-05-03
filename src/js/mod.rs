@@ -672,8 +672,76 @@ mod tests {
             "\"function\""
         );
         assert_eq!(
+            runtime.execute("typeof document.getElementsByClassName").unwrap(),
+            "\"function\""
+        );
+        assert_eq!(
             runtime.execute("typeof document.createElement").unwrap(),
             "\"function\""
+        );
+    }
+
+    #[test]
+    fn get_elements_by_class_name_collects_every_matching_element() {
+        // HN-style helpers (`byClass('athing')`) iterate the result, so the
+        // surface needs `.length` and indexed access. The match is
+        // whitespace-tokenized: an element with `class="row hot"` is hit by
+        // either `'row'` or `'hot'`. Document order is preserved.
+        let mut runtime = runtime_with(
+            r#"<div class="row hot"><span class="row">a</span><span class="row hot">b</span></div>"#,
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementsByClassName('row').length")
+                .unwrap(),
+            "3"
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementsByClassName('row')[0].tagName")
+                .unwrap(),
+            "\"DIV\""
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementsByClassName('row')[1].tagName")
+                .unwrap(),
+            "\"SPAN\""
+        );
+    }
+
+    #[test]
+    fn get_elements_by_class_name_requires_all_tokens_to_match() {
+        // Multi-token argument: every whitespace-separated token must appear
+        // in the element's class list. `'row hot'` matches an element classed
+        // `"row hot"` but not one classed only `"row"`.
+        let mut runtime = runtime_with(
+            r#"<div class="row hot"><span class="row">a</span><span class="row hot">b</span></div>"#,
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementsByClassName('row hot').length")
+                .unwrap(),
+            "2"
+        );
+    }
+
+    #[test]
+    fn get_elements_by_class_name_returns_empty_array_for_no_match() {
+        // A miss must still return an array (not null) so `.length` and
+        // for-loops on the call site stay safe. Same goes for an empty input.
+        let mut runtime = runtime_with(r#"<div class="row">x</div>"#);
+        assert_eq!(
+            runtime
+                .execute("document.getElementsByClassName('absent').length")
+                .unwrap(),
+            "0"
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementsByClassName('   ').length")
+                .unwrap(),
+            "0"
         );
     }
 

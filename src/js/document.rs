@@ -9,7 +9,8 @@ use std::rc::Rc;
 
 use boa_engine::{
     Context, JsNativeError, JsResult, JsValue, NativeFunction, js_string,
-    object::ObjectInitializer, property::Attribute,
+    object::{ObjectInitializer, builtins::JsArray},
+    property::Attribute,
 };
 
 use crate::{
@@ -81,6 +82,42 @@ pub(super) fn register_document(
         })
     };
 
+    let dom_for_class = dom.clone();
+    let listeners_for_class = listeners.clone();
+    let get_elements_by_class_name = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            // Spec: argument is a string of one-or-more whitespace-separated
+            // class tokens; an element matches when its class list contains
+            // every token. Modeled as a snapshot here (not the spec's live
+            // HTMLCollection) — every call walks the current Document and
+            // returns a fresh JS array, which is enough for HN-style helpers
+            // like `byClass()` that just iterate once.
+            let raw = first_arg_as_string(args, ctx)?;
+            let tokens: Vec<String> =
+                raw.split_whitespace().map(|s| s.to_string()).collect();
+            // Empty token list (the spec would return everything, but real
+            // call sites pass at least one class) — return [] instead of
+            // every element on the page.
+            let collected: Vec<NodeId> = if tokens.is_empty() {
+                Vec::new()
+            } else {
+                let document = dom_for_class.borrow();
+                collect_by_class(&document, &tokens)
+            };
+            let array = JsArray::new(ctx);
+            for node_id in collected {
+                let element = make_element(
+                    node_id,
+                    dom_for_class.clone(),
+                    listeners_for_class.clone(),
+                    ctx,
+                );
+                array.push(JsValue::from(element), ctx)?;
+            }
+            Ok(array.into())
+        })
+    };
+
     let dom_for_create = dom.clone();
     let listeners_for_create = listeners.clone();
     let create_element = unsafe {
@@ -114,6 +151,11 @@ pub(super) fn register_document(
     let document = ObjectInitializer::new(context)
         .function(get_element_by_id, js_string!("getElementById"), 1)
         .function(query_selector, js_string!("querySelector"), 1)
+        .function(
+            get_elements_by_class_name,
+            js_string!("getElementsByClassName"),
+            1,
+        )
         .function(create_element, js_string!("createElement"), 1)
         .function(create_text_node, js_string!("createTextNode"), 1)
         // Silent no-op stubs. `document.addEventListener('DOMContentLoaded', …)`
@@ -165,6 +207,40 @@ fn walk_for_id(document: &Document, node_id: NodeId, id: &str) -> Option<NodeId>
         }
     }
     None
+}
+
+fn collect_by_class(document: &Document, tokens: &[String]) -> Vec<NodeId> {
+    let mut hits: Vec<NodeId> = Vec::new();
+    for &root in document.roots() {
+        walk_collect_by_class(document, root, tokens, &mut hits);
+    }
+    hits
+}
+
+fn walk_collect_by_class(
+    document: &Document,
+    node_id: NodeId,
+    tokens: &[String],
+    hits: &mut Vec<NodeId>,
+) {
+    let Some(node) = document.get(node_id) else {
+        return;
+    };
+    if let NodeType::Element(elem) = &node.node_type
+        && let Some(class_attr) = elem.attributes.get("class")
+    {
+        let classes: Vec<&str> = class_attr.split_whitespace().collect();
+        // Spec: every requested token must appear in the element's class
+        // list (whitespace-separated). Match is case-sensitive in standards
+        // mode, which matches what we model elsewhere.
+        if tokens.iter().all(|t| classes.iter().any(|c| *c == t)) {
+            hits.push(node_id);
+        }
+    }
+    let children = node.children.clone();
+    for child in children {
+        walk_collect_by_class(document, child, tokens, hits);
+    }
 }
 
 fn find_first_match(document: &Document, selector: &Selector) -> Option<NodeId> {
