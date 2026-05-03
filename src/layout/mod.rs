@@ -313,6 +313,14 @@ pub(super) fn is_out_of_flow(node: &StyledNode) -> bool {
     is_position_absolute(node) || is_position_fixed(node)
 }
 
+pub(super) fn is_display_none(node: &StyledNode) -> bool {
+    // `display: none` removes the element (and its subtree) from the box tree
+    // entirely — no layout, no paint, no hit test. Every algorithm's child
+    // iteration filters on this so a hidden node never contributes to flow,
+    // line packing, flex tracks, grid placement, or inline-flow detection.
+    matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "none")
+}
+
 pub(super) fn relative_offset(node: &StyledNode, base: f32) -> Option<(f32, f32)> {
     // CSS spec: top/bottom percent resolves against the containing block's height
     // and left/right against its width. The layout walk only carries width on hand,
@@ -392,6 +400,28 @@ mod tests {
         // Adjacent vertical margins collapse: gap between blocks is max(7, 5) = 7,
         // not sum (12). Second block's content_y = first bottom (25) + 7 = 32.
         assert_eq!(second.dimensions.content.y, 32.0);
+    }
+
+    #[test]
+    fn display_none_children_drop_out_of_the_box_tree() {
+        // <script>/<style> picked up `display: none` from the UA defaults, and
+        // every flow algorithm now skips display:none children. The visible
+        // <p> should be the root's only laid-out child, and its y position
+        // should be the same with or without the hidden siblings around it.
+        let styled = styled_root(
+            r#"<div id="root"><script>var x = 1;</script><p>visible</p><style>p{color:red}</style></div>"#,
+            r#"
+                #root { width: 300px; }
+                p { margin-top: 5px; font-size: 20px; }
+            "#,
+        );
+
+        let layout = layout_tree(&styled, 800.0);
+        // Root has exactly one child after the filter; <script> and <style>
+        // contribute no boxes. Their absence also means the surviving <p>
+        // starts at the top of the parent (margin: 5).
+        assert_eq!(layout.children.len(), 1);
+        assert_eq!(layout.children[0].dimensions.content.y, 5.0);
     }
 
     #[test]

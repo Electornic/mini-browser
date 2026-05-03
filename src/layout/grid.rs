@@ -7,7 +7,7 @@ use crate::{
 };
 
 use super::{
-    LayoutBox, is_out_of_flow, length_value, outer_rect,
+    LayoutBox, is_display_none, is_out_of_flow, length_value, outer_rect,
     shift_layout_subtree,
 };
 use super::inline::{layout_inline_block_node, layout_inline_or_inline_block};
@@ -71,6 +71,9 @@ pub(super) fn layout_grid_children<'a>(
     let mut cursor = (0usize, 0usize);
 
     for child in children {
+        if is_display_none(child) {
+            continue;
+        }
         if is_out_of_flow(child) {
             let abs_box = layout_inline_or_inline_block(child, content_x, content_y, content_width);
             boxes.push(abs_box);

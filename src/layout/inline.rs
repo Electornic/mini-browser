@@ -10,8 +10,8 @@ use crate::{
 
 use super::{
     BoxType, Dimensions, LayoutBox, Rect, apply_relative_offset, child_height,
-    container_box_type, edge_sizes, intrinsic_height, intrinsic_width, is_out_of_flow,
-    length_value, outer_rect,
+    container_box_type, edge_sizes, intrinsic_height, intrinsic_width, is_display_none,
+    is_out_of_flow, length_value, outer_rect,
 };
 use super::block::layout_node;
 use super::flex::{is_flex_container, layout_flex_children};
@@ -34,6 +34,12 @@ pub(super) fn layout_inline_children(
     let mut current_width: f32 = 0.0;
 
     for (idx, child) in children.iter().enumerate() {
+        // `display: none` removes the child entirely — no width contribution,
+        // no slot in the second-pass placement. Skipped before the out-of-flow
+        // check so a hidden absolute also drops out.
+        if is_display_none(child) {
+            continue;
+        }
         // Absolute children are out of flow — they neither contribute to line
         // width nor cause line breaks. They get laid out separately below.
         if is_out_of_flow(child) {
@@ -85,7 +91,10 @@ pub(super) fn layout_inline_children(
     // Lay out absolute children at the parent's content origin (their static
     // position approximation). Pass 2 will replace this with the offsets
     // resolved against their containing block.
-    for child in children.iter().filter(|child| is_out_of_flow(child)) {
+    for child in children
+        .iter()
+        .filter(|child| is_out_of_flow(child) && !is_display_none(child))
+    {
         let abs_box = layout_inline_or_inline_block(child, content_x, content_y, content_width);
         boxes.push(abs_box);
     }
@@ -170,10 +179,11 @@ fn layout_inline_sequence_no_wrap(
 ) -> Vec<LayoutBox> {
     // Sum widths first so we know how much horizontal slack the line has
     // before placing boxes. Absolute children sit out of flow so they don't
-    // contribute to the line.
+    // contribute to the line, and `display: none` children don't exist as
+    // far as layout is concerned.
     let total_width: f32 = children
         .iter()
-        .filter(|child| !is_out_of_flow(child))
+        .filter(|child| !is_out_of_flow(child) && !is_display_none(child))
         .map(|child| inline_total_size(child, content_width).width)
         .sum();
     let line_offset = match align {
@@ -186,6 +196,9 @@ fn layout_inline_sequence_no_wrap(
     let mut boxes = Vec::new();
 
     for child in children {
+        if is_display_none(child) {
+            continue;
+        }
         if is_out_of_flow(child) {
             // Static position approximation: at the parent's content origin.
             // Pass 2 will move it once the containing block is known.
@@ -202,9 +215,17 @@ fn layout_inline_sequence_no_wrap(
 }
 
 pub(super) fn uses_inline_flow(node: &StyledNode) -> bool {
-    // Inline flow only kicks in when all children are inline-ish.
-    // Mixed block/inline trees still fall back to the simpler vertical block algorithm.
-    !node.children.is_empty() && node.children.iter().all(is_inline_node)
+    // Inline flow only kicks in when all visible children are inline-ish.
+    // `display: none` siblings are invisible to flow detection — a hidden
+    // <script> alongside inline text should not flip the parent into block
+    // flow. Mixed block/inline trees still fall back to the simpler
+    // vertical block algorithm.
+    let mut visible = node
+        .children
+        .iter()
+        .filter(|child| !is_display_none(child))
+        .peekable();
+    visible.peek().is_some() && visible.all(is_inline_node)
 }
 
 fn is_inline_node(node: &StyledNode) -> bool {

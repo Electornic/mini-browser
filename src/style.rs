@@ -291,6 +291,13 @@ fn default_values(document: &Document, node_id: NodeId) -> PropertyMap {
 
     // These defaults act like a tiny user-agent stylesheet so unstyled pages remain legible.
     match element.tag_name.as_str() {
+        // HTML5 default: these are non-rendered "metadata" / scripting elements.
+        // Without this, a `<script>` body shows up as raw text in the page (the
+        // single biggest visual noise on naver-style sites). The full set
+        // matches the spec category for "metadata content + scripting".
+        "head" | "title" | "meta" | "link" | "script" | "style" | "noscript" => {
+            values.insert("display".into(), Value::Keyword("none".into()));
+        }
         "body" => {
             edge_defaults(&mut values, "margin", 8.0);
         }
@@ -597,6 +604,28 @@ mod tests {
                 a: 255,
             }))
         );
+    }
+
+    #[test]
+    fn metadata_and_script_tags_default_to_display_none() {
+        // <head>, <title>, <meta>, <link>, <script>, <style>, <noscript> are
+        // non-rendered per HTML5; without this UA default a `<script>` body
+        // shows up as raw text in the page, which dominates the visual noise
+        // on real-world pages like the naver landing page.
+        let (document, root) = parse_html(
+            r#"<body><script>var x = 1;</script><style>p{color:red}</style><div>visible</div></body>"#,
+        );
+        let styled = style::style_tree(&document, root, &[]);
+
+        let none = Value::Keyword("none".into());
+        let script = &styled.children[0];
+        let style_tag = &styled.children[1];
+        let div = &styled.children[2];
+
+        assert_eq!(script.value("display"), Some(&none));
+        assert_eq!(style_tag.value("display"), Some(&none));
+        // The visible sibling is unaffected.
+        assert_ne!(div.value("display"), Some(&none));
     }
 
     #[test]

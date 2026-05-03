@@ -6,7 +6,7 @@ use crate::{
 };
 
 use super::{
-    LayoutBox, is_out_of_flow, length_value, outer_rect,
+    LayoutBox, is_display_none, is_out_of_flow, length_value, outer_rect,
     shift_layout_subtree,
 };
 use super::inline::{layout_inline_block_node, layout_inline_or_inline_block};
@@ -64,6 +64,9 @@ pub(super) fn layout_flex_children(
     let mut in_flow: Vec<(usize, &StyledNode)> = Vec::new();
 
     for child in children {
+        if is_display_none(child) {
+            continue;
+        }
         if is_out_of_flow(child) {
             // Static-position approximation, same trick as inline flow: drop
             // the absolute child at the container's content origin and let

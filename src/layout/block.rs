@@ -8,8 +8,8 @@ use crate::{
 
 use super::{
     Dimensions, EdgeSizes, LayoutBox, Rect, apply_relative_offset, child_height,
-    container_box_type, edge_sizes, intrinsic_height, intrinsic_width, is_auto, is_out_of_flow,
-    length_value, outer_rect, shift_layout_subtree,
+    container_box_type, edge_sizes, intrinsic_height, intrinsic_width, is_auto, is_display_none,
+    is_out_of_flow, length_value, outer_rect, shift_layout_subtree,
 };
 use super::flex::{is_flex_container, layout_flex_children};
 use super::grid::{is_grid_container, layout_grid_children};
@@ -96,6 +96,9 @@ pub(super) fn layout_node(
         let mut float_bottom_right: f32 = content_y;
         let mut children: Vec<LayoutBox> = Vec::with_capacity(node.children.len());
         for child in &node.children {
+            if is_display_none(child) {
+                continue;
+            }
             if is_out_of_flow(child) {
                 let mut frozen = child_cursor_y;
                 children.push(layout_node(child, content_x, &mut frozen, content_width));
