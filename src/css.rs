@@ -24,6 +24,14 @@ pub enum PseudoClass {
     Hover,
     Focus,
     Active,
+    /// `:link` — unvisited anchor. Without browsing-history tracking we
+    /// treat every `<a href>` as unvisited, so `:link` always matches a
+    /// real anchor and `:visited` never does. That choice keeps author
+    /// rules like HN's `a:link { color: black }` / `a:visited { ... }`
+    /// behaving the way fresh visitors see the page.
+    Link,
+    /// `:visited` — visited anchor. See `Link` above; this never matches.
+    Visited,
 }
 
 /// A single simple selector position: a tag/class/id base plus an optional
@@ -539,6 +547,8 @@ impl<'a> Parser<'a> {
                 "hover" => Some(PseudoClass::Hover),
                 "focus" => Some(PseudoClass::Focus),
                 "active" => Some(PseudoClass::Active),
+                "link" => Some(PseudoClass::Link),
+                "visited" => Some(PseudoClass::Visited),
                 // Unknown pseudo-classes parse silently to None so the surrounding rule
                 // is still applied; the selector just never matches `:unknown` cases.
                 _ => None,
@@ -1636,6 +1646,29 @@ mod tests {
 
         assert_eq!(focus_part.pseudo, Some(PseudoClass::Focus));
         assert_eq!(active_part.pseudo, Some(PseudoClass::Active));
+    }
+
+    #[test]
+    fn parses_link_and_visited_pseudo_classes() {
+        // Anchor link/visited pseudos are common enough on real pages
+        // (HN's `a:link { color: black }` is a representative example)
+        // that the parser needs to recognise them as their own variants
+        // rather than collapsing to the bare `a` selector — otherwise
+        // the visited rule would source-order-win over the link rule
+        // and every anchor would render in the visited colour.
+        let stylesheet = parse(
+            r#"
+                a:link { color: red; }
+                a:visited { color: blue; }
+            "#,
+        )
+        .unwrap();
+
+        let link_part = &stylesheet.rules[0].selectors[0].parts[0];
+        let visited_part = &stylesheet.rules[1].selectors[0].parts[0];
+
+        assert_eq!(link_part.pseudo, Some(PseudoClass::Link));
+        assert_eq!(visited_part.pseudo, Some(PseudoClass::Visited));
     }
 
     #[test]

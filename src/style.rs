@@ -821,6 +821,19 @@ fn matches_simple(
         Some(PseudoClass::Hover) => pseudo.hover,
         Some(PseudoClass::Focus) => pseudo.focus,
         Some(PseudoClass::Active) => pseudo.active,
+        // CSS spec: `:link` matches anchors with an href that haven't been
+        // visited yet. Without browsing-history tracking we treat every
+        // such anchor as unvisited — which is what a fresh-eyes visitor
+        // sees and what HN's `a:link { color: black }` rules expect.
+        Some(PseudoClass::Link) => {
+            element.tag_name.eq_ignore_ascii_case("a")
+                && element.attributes.contains_key("href")
+        }
+        // `:visited` is the dual of `:link` and never matches because we
+        // have no visited set to consult. Author rules targeting
+        // `a:visited` therefore drop out of the cascade entirely instead
+        // of stomping on `a:link` declarations through source order.
+        Some(PseudoClass::Visited) => false,
     }
 }
 
@@ -1703,6 +1716,88 @@ mod tests {
                 r: 255,
                 g: 0,
                 b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn link_pseudo_matches_anchors_with_href_so_link_color_wins_over_visited() {
+        // Real HN ships `a:link { color: black } a:visited { color: gray }`.
+        // Without `:link`/`:visited` matching, both rules collapse to bare
+        // `a` and source order makes the visited rule win — every link
+        // (including unvisited story titles) renders gray. The fix:
+        // `:link` matches every `<a href>` (we have no visited set), and
+        // `:visited` never matches, so the `a:link` rule's value is the
+        // one that survives the cascade.
+        let (document, root) = parse_html(r#"<a href="/next">Next</a>"#);
+        let stylesheet = parse_css(
+            r#"
+                a:link { color: #000000; }
+                a:visited { color: #828282; }
+            "#,
+        );
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+
+        assert_eq!(
+            styled.value("color"),
+            Some(&Value::Color(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn link_pseudo_does_not_match_anchors_missing_href() {
+        // CSS spec: `:link` only matches anchors that are hyperlinks
+        // (i.e. carry an href). A bare `<a>name="…">` style fragment
+        // should fall through, so the author's red `a:link` rule does
+        // not apply — the anchor keeps the UA default `<a>` colour
+        // (~#0066CC) instead of becoming red.
+        let (document, root) = parse_html(r#"<a>Just a label</a>"#);
+        let stylesheet = parse_css(r#"a:link { color: #ff0000; }"#);
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+
+        assert_eq!(
+            styled.value("color"),
+            Some(&Value::Color(Color {
+                r: 0,
+                g: 102,
+                b: 204,
+                a: 255,
+            })),
+            "anchor without href must keep the UA-default link colour, not the author's :link rule"
+        );
+    }
+
+    #[test]
+    fn descendant_link_selector_wins_over_bare_anchor_link() {
+        // The HN cascade also relies on `.subtext a:link { color: gray }`
+        // overriding the bare `a:link { color: black }` for anchors that
+        // sit inside `.subtext`. The descendant selector has higher
+        // specificity (one class + one tag) than the bare tag selector,
+        // so its colour wins regardless of source order.
+        let (document, root) = parse_html(
+            r#"<div class="subtext"><a href="/x">child</a></div>"#,
+        );
+        let stylesheet = parse_css(
+            r#"
+                a:link { color: #000000; }
+                .subtext a:link { color: #828282; }
+            "#,
+        );
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let anchor = &styled.children[0];
+
+        assert_eq!(
+            anchor.value("color"),
+            Some(&Value::Color(Color {
+                r: 130,
+                g: 130,
+                b: 130,
                 a: 255,
             }))
         );
