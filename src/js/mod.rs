@@ -62,6 +62,12 @@ pub struct JsRuntime {
     listeners: Rc<RefCell<ListenerMap>>,
     raf_callbacks: Rc<RefCell<RafQueue>>,
     cancelled_timers: Rc<RefCell<HashSet<u32>>>,
+    // Backing buffer for `window.location.*`. The accessors registered
+    // on the `location` global capture a clone of this Rc and re-parse
+    // the buffer on every read, so `set_location_url` is enough to
+    // change what JS observes after a navigation — no property-redefine
+    // dance required.
+    location_url: Rc<RefCell<String>>,
 }
 
 impl JsRuntime {
@@ -94,8 +100,9 @@ impl JsRuntime {
         let raf_callbacks: Rc<RefCell<RafQueue>> = Rc::new(RefCell::new(Vec::new()));
         let cancelled_timers: Rc<RefCell<HashSet<u32>>> = Rc::new(RefCell::new(HashSet::new()));
         let next_timer_id: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+        let location_url: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
         console::register_console(&mut context);
-        window::register_window_aliases(&mut context);
+        window::register_window_aliases(&mut context, location_url.clone());
         document::register_document(&mut context, dom.clone(), listeners.clone());
         timers::register_timers(
             &mut context,
@@ -110,7 +117,19 @@ impl JsRuntime {
             listeners,
             raf_callbacks,
             cancelled_timers,
+            location_url,
         }
+    }
+
+    /// Update the URL backing `window.location.*`. Production callers go
+    /// through this once at runtime construction (after the page loader
+    /// resolves the address) and again on every navigation, so the
+    /// accessors registered against the `location` global observe the
+    /// new URL on the next read. An empty string represents "no URL
+    /// bound yet" — every accessor collapses to the empty string until
+    /// a real value lands here.
+    pub fn set_location_url(&self, url: impl Into<String>) {
+        *self.location_url.borrow_mut() = url.into();
     }
 
     /// Returns a clone of the shared DOM handle. Mainly useful in tests where
@@ -500,6 +519,142 @@ mod tests {
             runtime.execute("console.log('hi', 42, true)").unwrap(),
             "undefined"
         );
+    }
+
+    // ---- navigator / location / history (Step 18 stubs) ----
+    //
+    // These globals exist mostly so author scripts that read them at
+    // module top-level (UA branches, client-side routers binding to
+    // pushState, code that mirrors `location.href` into in-app state)
+    // don't crash before the page renders. Coverage therefore focuses
+    // on shape rather than behaviour: the right properties exist, the
+    // `location` accessors decompose the URL the way the WHATWG URL
+    // spec says they should, and `history` mutators silently accept.
+
+    #[test]
+    fn navigator_user_agent_is_present_and_versioned() {
+        let mut runtime = runtime_with("");
+        assert_eq!(runtime.execute("typeof navigator").unwrap(), "\"object\"");
+        let ua = runtime.execute("navigator.userAgent").unwrap();
+        assert!(
+            ua.contains("MiniBrowser"),
+            "navigator.userAgent should advertise MiniBrowser, got: {ua}"
+        );
+    }
+
+    #[test]
+    fn location_accessors_collapse_to_empty_when_no_url_bound() {
+        // Default JsRuntime starts with an empty URL buffer (the
+        // bootstrap before BrowserState pushes a real URL through).
+        // Every accessor must surface "" rather than throwing on the
+        // failed Url::parse — scripts at module top often read these
+        // before the loader has resolved anything.
+        let mut runtime = runtime_with("");
+        assert_eq!(runtime.execute("location.href").unwrap(), "\"\"");
+        assert_eq!(runtime.execute("location.protocol").unwrap(), "\"\"");
+        assert_eq!(runtime.execute("location.host").unwrap(), "\"\"");
+        assert_eq!(runtime.execute("location.hostname").unwrap(), "\"\"");
+        assert_eq!(runtime.execute("location.pathname").unwrap(), "\"\"");
+        assert_eq!(runtime.execute("location.search").unwrap(), "\"\"");
+        assert_eq!(runtime.execute("location.hash").unwrap(), "\"\"");
+        assert_eq!(runtime.execute("location.origin").unwrap(), "\"\"");
+    }
+
+    #[test]
+    fn location_decomposes_url_into_whatwg_components() {
+        let mut runtime = runtime_with("");
+        runtime.set_location_url("https://example.com:8443/foo/bar?q=1&n=2#frag");
+        assert_eq!(
+            runtime.execute("location.href").unwrap(),
+            "\"https://example.com:8443/foo/bar?q=1&n=2#frag\""
+        );
+        assert_eq!(runtime.execute("location.protocol").unwrap(), "\"https:\"");
+        assert_eq!(
+            runtime.execute("location.hostname").unwrap(),
+            "\"example.com\""
+        );
+        assert_eq!(
+            runtime.execute("location.host").unwrap(),
+            "\"example.com:8443\""
+        );
+        assert_eq!(
+            runtime.execute("location.pathname").unwrap(),
+            "\"/foo/bar\""
+        );
+        assert_eq!(runtime.execute("location.search").unwrap(), "\"?q=1&n=2\"");
+        assert_eq!(runtime.execute("location.hash").unwrap(), "\"#frag\"");
+        assert_eq!(
+            runtime.execute("location.origin").unwrap(),
+            "\"https://example.com:8443\""
+        );
+    }
+
+    #[test]
+    fn location_host_drops_default_port_for_http_and_https() {
+        // Default-port-aware host serialisation matches the WHATWG URL
+        // spec: an http URL on 80 and an https URL on 443 both expose
+        // `host` without the port (`hostname` is the same either way).
+        let mut runtime = runtime_with("");
+        runtime.set_location_url("https://example.com/page");
+        assert_eq!(
+            runtime.execute("location.host").unwrap(),
+            "\"example.com\""
+        );
+        assert_eq!(
+            runtime.execute("location.origin").unwrap(),
+            "\"https://example.com\""
+        );
+        runtime.set_location_url("http://example.com/page");
+        assert_eq!(
+            runtime.execute("location.host").unwrap(),
+            "\"example.com\""
+        );
+    }
+
+    #[test]
+    fn location_observes_subsequent_set_location_url_updates() {
+        // The accessors capture an Rc<RefCell<String>> and re-parse on
+        // every read, so back-to-back `set_location_url` calls flow
+        // through to JS without re-defining any property.
+        let mut runtime = runtime_with("");
+        runtime.set_location_url("https://a.example/x");
+        assert_eq!(
+            runtime.execute("location.hostname").unwrap(),
+            "\"a.example\""
+        );
+        runtime.set_location_url("https://b.example/y");
+        assert_eq!(
+            runtime.execute("location.hostname").unwrap(),
+            "\"b.example\""
+        );
+    }
+
+    #[test]
+    fn history_stub_exposes_length_state_and_silent_mutators() {
+        let mut runtime = runtime_with("");
+        assert_eq!(runtime.execute("typeof history").unwrap(), "\"object\"");
+        // Stub: a single entry, null state. Real values come once
+        // the JS bridge plumbs the BrowserState back/forward stack.
+        assert_eq!(runtime.execute("history.length").unwrap(), "1");
+        assert_eq!(runtime.execute("history.state").unwrap(), "null");
+        // Mutators accept their canonical arg shapes without throwing.
+        // Client-side routers call pushState during init; an exception
+        // here would break the page before it could render.
+        assert_eq!(
+            runtime
+                .execute("history.pushState({a:1}, '', '/x')")
+                .unwrap(),
+            "undefined"
+        );
+        assert_eq!(
+            runtime
+                .execute("history.replaceState(null, 't', '/y')")
+                .unwrap(),
+            "undefined"
+        );
+        assert_eq!(runtime.execute("history.back()").unwrap(), "undefined");
+        assert_eq!(runtime.execute("history.forward()").unwrap(), "undefined");
+        assert_eq!(runtime.execute("history.go(-1)").unwrap(), "undefined");
     }
 
     #[test]

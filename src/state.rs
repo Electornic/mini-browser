@@ -125,6 +125,13 @@ impl BrowserState {
         // The runtime shares the document handle so JS-side mutations land
         // in the same arena BrowserState reads for layout.
         let js = js::JsRuntime::new(parsed_document.clone());
+        // Bind the URL the script-bound globals (`location.href` etc.)
+        // observe. Pages with no resolved URL yet (the about:blank
+        // bootstrap and most tests) leave the buffer empty — every
+        // location accessor collapses to "" in that state.
+        if let Some(url) = current_url.as_ref() {
+            js.set_location_url(url.to_string());
+        }
         let mut state = Self {
             address_input,
             address_bar_focused: true,
@@ -183,6 +190,17 @@ impl BrowserState {
         // The new runtime takes a clone of the same Rc so JS mutations during
         // run_scripts land in the document we're about to render.
         self.js = js::JsRuntime::new(self.parsed_document.clone());
+        // Mirror the live current_url into the new runtime so the
+        // `location` global reflects the page the script is running
+        // against. Callers that swap `current_url` must do so *before*
+        // calling `install_document`; restore_entry and reload_current
+        // both honour that contract.
+        self.js.set_location_url(
+            self.current_url
+                .as_ref()
+                .map(|u| u.to_string())
+                .unwrap_or_default(),
+        );
         // Each navigated document starts with a clean dirty flag —
         // a value edited on the previous page must not be allowed to
         // ride into the new page and trigger a spurious `change` on
@@ -852,10 +870,14 @@ impl BrowserState {
 
     fn restore_entry(&mut self, entry: HistoryEntry) {
         self.address_input = entry.address_input;
+        // Set the URL before install_document so the new JsRuntime's
+        // `location` accessors observe the restored page's URL on the
+        // very first script execution rather than the stale previous
+        // page (or empty buffer on the bootstrap path).
+        self.current_url = entry.current_url;
         self.install_document(entry.document_html, entry.stylesheet, entry.external_scripts);
         self.images = entry.images;
         self.font_data = entry.font_data;
-        self.current_url = entry.current_url;
         self.status_text = entry.status_text;
         self.status_color = entry.status_color;
         self.scroll_offset = 0.0;
@@ -909,10 +931,14 @@ impl BrowserState {
 
         match load_remote_document(&url.to_string()) {
             Ok((document_html, stylesheet, images, font_data, external_scripts, resolved_url)) => {
+                // Same install_document precondition as restore_entry:
+                // current_url has to land first so the runtime's
+                // `location` global picks up the reloaded URL instead
+                // of the previous page's.
+                self.current_url = Some(resolved_url);
                 self.install_document(document_html, stylesheet, external_scripts);
                 self.images = images;
                 self.font_data = font_data;
-                self.current_url = Some(resolved_url);
                 self.scroll_offset = 0.0;
                 self.set_status(
                     "loaded",
