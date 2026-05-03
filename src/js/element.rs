@@ -83,6 +83,88 @@ pub(super) fn make_element(
     }
     .to_js_function(context.realm());
 
+    // Resolve a sibling NodeId once (under a single borrow), then drop
+    // the borrow before building the wrapper — `make_element` re-borrows
+    // to read tag names, so overlapping borrows would panic. Same shape
+    // as the children getter below; pulled out so parentElement /
+    // previousElementSibling / nextElementSibling all share one helper.
+    let dom_pe = dom.clone();
+    let listeners_pe = listeners.clone();
+    let parent_element_get = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let parent_id = {
+                let document = dom_pe.borrow();
+                // Stale receiver returns null per the getter-side lenient
+                // policy. parent_element only points at Element parents:
+                // an arena where the parent slot is a Text node (or the
+                // root with no parent at all) collapses to null, matching
+                // the parentElement vs parentNode distinction in the
+                // standard.
+                document
+                    .get(node_id)
+                    .and_then(|n| n.parent)
+                    .filter(|pid| {
+                        matches!(
+                            document.get(*pid).map(|n| &n.node_type),
+                            Some(NodeType::Element(_))
+                        )
+                    })
+            };
+            match parent_id {
+                Some(pid) => Ok(JsValue::from(make_element(
+                    pid,
+                    dom_pe.clone(),
+                    listeners_pe.clone(),
+                    ctx,
+                ))),
+                None => Ok(JsValue::null()),
+            }
+        })
+    }
+    .to_js_function(context.realm());
+
+    let dom_pes = dom.clone();
+    let listeners_pes = listeners.clone();
+    let previous_element_sibling_get = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let sibling_id = {
+                let document = dom_pes.borrow();
+                element_sibling(&document, node_id, SiblingDirection::Previous)
+            };
+            match sibling_id {
+                Some(id) => Ok(JsValue::from(make_element(
+                    id,
+                    dom_pes.clone(),
+                    listeners_pes.clone(),
+                    ctx,
+                ))),
+                None => Ok(JsValue::null()),
+            }
+        })
+    }
+    .to_js_function(context.realm());
+
+    let dom_nes = dom.clone();
+    let listeners_nes = listeners.clone();
+    let next_element_sibling_get = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            let sibling_id = {
+                let document = dom_nes.borrow();
+                element_sibling(&document, node_id, SiblingDirection::Next)
+            };
+            match sibling_id {
+                Some(id) => Ok(JsValue::from(make_element(
+                    id,
+                    dom_nes.clone(),
+                    listeners_nes.clone(),
+                    ctx,
+                ))),
+                None => Ok(JsValue::null()),
+            }
+        })
+    }
+    .to_js_function(context.realm());
+
     let dom_c = dom.clone();
     let listeners_c = listeners.clone();
     let children_get = unsafe {
@@ -502,6 +584,24 @@ pub(super) fn make_element(
             Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
         )
         .accessor(
+            js_string!("parentElement"),
+            Some(parent_element_get),
+            None,
+            Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
+        )
+        .accessor(
+            js_string!("previousElementSibling"),
+            Some(previous_element_sibling_get),
+            None,
+            Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
+        )
+        .accessor(
+            js_string!("nextElementSibling"),
+            Some(next_element_sibling_get),
+            None,
+            Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
+        )
+        .accessor(
             js_string!("classList"),
             Some(class_list_get),
             None,
@@ -775,6 +875,50 @@ fn stale_node_error() -> boa_engine::JsError {
     JsNativeError::typ()
         .with_message("operation on detached or removed node")
         .into()
+}
+
+// Direction selector for the shared previous/next sibling lookup. Pulled
+// out so the two accessors don't duplicate the parent-children scan.
+#[derive(Clone, Copy)]
+enum SiblingDirection {
+    Previous,
+    Next,
+}
+
+// Resolve `node_id`'s nearest preceding or following *element* sibling.
+// Text-node siblings are skipped — that's the previousElementSibling /
+// nextElementSibling contract; previousSibling / nextSibling (which we
+// don't expose yet) would include them. Stale receiver / orphaned node
+// (no parent) collapses to None, which the accessors surface as JS null.
+fn element_sibling(
+    document: &Document,
+    node_id: NodeId,
+    direction: SiblingDirection,
+) -> Option<NodeId> {
+    let parent_id = document.get(node_id)?.parent?;
+    let parent = document.get(parent_id)?;
+    let pos = parent.children.iter().position(|c| *c == node_id)?;
+    match direction {
+        SiblingDirection::Previous => parent.children[..pos]
+            .iter()
+            .rev()
+            .copied()
+            .find(|cid| {
+                matches!(
+                    document.get(*cid).map(|n| &n.node_type),
+                    Some(NodeType::Element(_))
+                )
+            }),
+        SiblingDirection::Next => parent.children[pos + 1..]
+            .iter()
+            .copied()
+            .find(|cid| {
+                matches!(
+                    document.get(*cid).map(|n| &n.node_type),
+                    Some(NodeType::Element(_))
+                )
+            }),
+    }
 }
 
 fn collect_text_content(document: &Document, node_id: NodeId) -> String {

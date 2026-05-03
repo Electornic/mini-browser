@@ -819,6 +819,122 @@ mod tests {
         );
     }
 
+    // ---- parentElement / previousElementSibling / nextElementSibling ----
+    //
+    // Element-only sibling traversal: text nodes are intentionally skipped
+    // so authors who whitespace-format their HTML don't have to filter them
+    // out client-side. `parentElement` collapses to null when the parent is
+    // the implicit document root (matches the parentElement vs parentNode
+    // distinction in the standard).
+
+    #[test]
+    fn parent_element_returns_immediate_element_parent() {
+        let mut runtime = runtime_with(
+            r#"<section><article><p id="target">hi</p></article></section>"#,
+        );
+        let target = "document.getElementById('target')";
+        assert_eq!(
+            runtime
+                .execute(&format!("{target}.parentElement.tagName"))
+                .unwrap(),
+            "\"ARTICLE\""
+        );
+        assert_eq!(
+            runtime
+                .execute(&format!("{target}.parentElement.parentElement.tagName"))
+                .unwrap(),
+            "\"SECTION\""
+        );
+    }
+
+    #[test]
+    fn parent_element_is_null_at_root() {
+        // Walking off the top of the document yields null — the section's
+        // parent in our arena is "no node", not a Document wrapper.
+        let mut runtime = runtime_with(r#"<section id="root"><p>hi</p></section>"#);
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('root').parentElement")
+                .unwrap(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn previous_and_next_element_sibling_skip_text_nodes() {
+        // The whitespace between tags in source HTML becomes Text nodes in
+        // the arena; the *Element* sibling getters must hop over them and
+        // hand back the next real element on either side.
+        let mut runtime = runtime_with(
+            r#"<section>
+                 <p class="a">first</p>
+                 <p id="target" class="b">middle</p>
+                 <p class="c">last</p>
+               </section>"#,
+        );
+        let target = "document.getElementById('target')";
+        assert_eq!(
+            runtime
+                .execute(&format!(
+                    "{target}.previousElementSibling.getAttribute('class')"
+                ))
+                .unwrap(),
+            "\"a\""
+        );
+        assert_eq!(
+            runtime
+                .execute(&format!(
+                    "{target}.nextElementSibling.getAttribute('class')"
+                ))
+                .unwrap(),
+            "\"c\""
+        );
+    }
+
+    #[test]
+    fn sibling_accessors_return_null_at_edges() {
+        let mut runtime = runtime_with(
+            r#"<section><p id="first">a</p><p id="last">b</p></section>"#,
+        );
+        // The first child has no preceding element; the last has no
+        // following element — both must surface as JS null rather than
+        // wrapping around or returning the parent.
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('first').previousElementSibling")
+                .unwrap(),
+            "null"
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('last').nextElementSibling")
+                .unwrap(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn sibling_accessors_chain_across_multiple_hops() {
+        // Chained traversal in both directions — the accessors return real
+        // wrappers (not lazy proxies) so each hop re-reads the underlying
+        // arena with no caching surprises.
+        let mut runtime = runtime_with(
+            r#"<section><p id="a">a</p><p id="b">b</p><p id="c">c</p></section>"#,
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('a').nextElementSibling.nextElementSibling.getAttribute('id')")
+                .unwrap(),
+            "\"c\""
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('c').previousElementSibling.previousElementSibling.getAttribute('id')")
+                .unwrap(),
+            "\"a\""
+        );
+    }
+
     #[test]
     fn swapping_dom_under_runtime_redirects_subsequent_lookups() {
         // The closures capture an Rc<RefCell<…>>, not a Document snapshot —
