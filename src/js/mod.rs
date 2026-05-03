@@ -1672,6 +1672,231 @@ mod tests {
         );
     }
 
+    // ---- innerHTML (Step 13) ----
+
+    #[test]
+    fn inner_html_get_serializes_children_to_html_string() {
+        let mut runtime =
+            runtime_with(r#"<div id="host"><p class="lead">hi</p><span>!</span></div>"#);
+        // Children only — the host element itself is NOT in the output.
+        // Attribute order is alphabetical (BTreeMap), so `class="lead"`
+        // comes out as written here.
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('host').innerHTML")
+                .unwrap(),
+            "\"<p class=\\\"lead\\\">hi</p><span>!</span>\""
+        );
+    }
+
+    #[test]
+    fn inner_html_get_returns_empty_string_for_a_leaf_element() {
+        let mut runtime = runtime_with(r#"<div id="host"></div>"#);
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('host').innerHTML")
+                .unwrap(),
+            "\"\""
+        );
+    }
+
+    #[test]
+    fn inner_html_set_replaces_children_with_parsed_fragment() {
+        let mut runtime = runtime_with(r#"<div id="host"><p>old</p></div>"#);
+        runtime
+            .execute(
+                "var fresh = '<span>fresh</span>';\
+                 document.getElementById('host').innerHTML = fresh;",
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('host').children.length")
+                .unwrap(),
+            "1"
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('host').children[0].tagName")
+                .unwrap(),
+            "\"SPAN\""
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('host').children[0].textContent")
+                .unwrap(),
+            "\"fresh\""
+        );
+    }
+
+    #[test]
+    fn inner_html_set_supports_multiple_top_level_siblings() {
+        // The fragment parser is not document-level: zero, one, or many
+        // top-level siblings are all valid input. `host` should end up
+        // with three Element children.
+        let mut runtime = runtime_with(r#"<div id="host"></div>"#);
+        runtime
+            .execute(
+                "var sibs = '<span>a</span><em>b</em><b>c</b>';\
+                 document.getElementById('host').innerHTML = sibs;",
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('host').children.length")
+                .unwrap(),
+            "3"
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('host').textContent")
+                .unwrap(),
+            "\"abc\""
+        );
+    }
+
+    #[test]
+    fn inner_html_set_with_empty_string_clears_children() {
+        let mut runtime = runtime_with(r#"<div id="host"><p>old</p><span>x</span></div>"#);
+        runtime
+            .execute(
+                "var blank = '';\
+                 document.getElementById('host').innerHTML = blank;",
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('host').children.length")
+                .unwrap(),
+            "0"
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('host').textContent")
+                .unwrap(),
+            "\"\""
+        );
+    }
+
+    #[test]
+    fn inner_html_set_invalidates_handles_to_replaced_children() {
+        // The standard says the old subtree is detached. Our toy goes a
+        // step further and tombstones the slots so outstanding wrappers
+        // resolve to None — same convention `removeChild` follows. A read
+        // through the dead handle should degrade to null per the lenient
+        // getter policy.
+        let mut runtime = runtime_with(r#"<div id="host"><p id="old">old</p></div>"#);
+        runtime
+            .execute(
+                "var oldKid = document.getElementById('old');\
+                 var fresh = '<p>new</p>';\
+                 document.getElementById('host').innerHTML = fresh;",
+            )
+            .unwrap();
+        assert_eq!(runtime.execute("oldKid.textContent").unwrap(), "null");
+        assert_eq!(
+            runtime.execute("document.getElementById('old')").unwrap(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn inner_html_set_throws_syntax_error_on_malformed_fragment() {
+        // Mismatched closing tag is exactly the kind of input scripts
+        // shouldn't be feeding innerHTML; surface it as SyntaxError so
+        // `try { …innerHTML = unsafeString }` works.
+        let mut runtime = runtime_with(r#"<div id="host"></div>"#);
+        let err = runtime
+            .execute(
+                "var bad = '<div><p></div>';\
+                 document.getElementById('host').innerHTML = bad;",
+            )
+            .unwrap_err();
+        assert!(
+            err.to_lowercase().contains("innerhtml"),
+            "expected innerHTML SyntaxError, got: {err}"
+        );
+    }
+
+    #[test]
+    fn inner_html_set_throws_on_a_stale_receiver() {
+        let mut runtime = runtime_with(
+            r#"<div id="parent"><div id="host"><p>old</p></div></div>"#,
+        );
+        runtime
+            .execute(
+                "var host = document.getElementById('host');\
+                 document.getElementById('parent').removeChild(host);",
+            )
+            .unwrap();
+        let err = runtime
+            .execute(
+                "var fresh = '<span>fresh</span>';\
+                 host.innerHTML = fresh;",
+            )
+            .unwrap_err();
+        assert!(
+            err.to_lowercase().contains("detached") || err.to_lowercase().contains("removed"),
+            "expected stale-handle TypeError, got: {err}"
+        );
+    }
+
+    #[test]
+    fn inner_html_set_drops_listeners_registered_on_replaced_subtree() {
+        // A listener on the soon-to-be-replaced kid must not fire after
+        // the swap. The map is also pruned so it can't grow without
+        // bound on innerHTML-heavy pages.
+        let mut runtime = runtime_with(r#"<div id="host"><p id="kid">old</p></div>"#);
+        runtime
+            .execute(
+                "var hits = 0;\
+                 document.getElementById('kid').addEventListener('click', function () { hits = hits + 1; });",
+            )
+            .unwrap();
+        // Sanity: the listener fires before the swap.
+        let kid_id_before = {
+            let dom = runtime.dom_handle();
+            let dom = dom.borrow();
+            let host = dom.roots()[0];
+            dom.get(host).unwrap().children[0]
+        };
+        runtime.dispatch_event(kid_id_before, "click");
+        assert_eq!(runtime.execute("hits").unwrap(), "1");
+
+        // Swap. The old <p> is tombstoned, the listener entry pruned.
+        runtime
+            .execute(
+                "var fresh = '<p>new</p>';\
+                 document.getElementById('host').innerHTML = fresh;",
+            )
+            .unwrap();
+        // Dispatching against the (now stale) old NodeId should be a
+        // no-op — the dispatcher skips tombstoned targets.
+        runtime.dispatch_event(kid_id_before, "click");
+        assert_eq!(runtime.execute("hits").unwrap(), "1");
+    }
+
+    #[test]
+    fn inner_html_get_escapes_special_characters_and_emits_void_open_tag() {
+        // <br> serializes as `<br>` (no `</br>`), and a text node containing
+        // `<` / `&` / `>` is escaped per the HTML serialization spec so the
+        // output stays well-formed if fed back through the parser later.
+        let mut runtime = runtime_with(r#"<div id="host"></div>"#);
+        runtime
+            .execute(
+                "var host = document.getElementById('host');\
+                 host.appendChild(document.createElement('br'));\
+                 var t = document.createElement('p');\
+                 t.textContent = 'a<b>&c';\
+                 host.appendChild(t);",
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.execute("host.innerHTML").unwrap(),
+            "\"<br><p>a&lt;b&gt;&amp;c</p>\""
+        );
+    }
+
     // ---- Step 6 events ----
 
     #[test]

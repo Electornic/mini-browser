@@ -44,6 +44,33 @@ pub fn parse(source: &str) -> Result<Document, ParseError> {
     Ok(document)
 }
 
+/// Parse `source` as a fragment — zero or more sibling nodes — into the
+/// existing `document`. Returns the freshly created top-level NodeIds; they
+/// are detached (not in `document.roots()` and have no parent) so callers
+/// can splice them under any existing element via `append_child`. Used by
+/// the JS `innerHTML` setter to swap an element's children without
+/// destroying the rest of the tree.
+pub fn parse_fragment(
+    source: &str,
+    document: &mut Document,
+) -> Result<Vec<NodeId>, ParseError> {
+    let (roots, trailing_pos, trailing_eof) = {
+        let mut parser = Parser::new(source, document);
+        let roots = parser.parse_nodes()?;
+        parser.consume_whitespace();
+        (roots, parser.pos, parser.eof())
+    };
+
+    if !trailing_eof {
+        return Err(ParseError::new(
+            trailing_pos,
+            "unexpected trailing input after parsing fragment",
+        ));
+    }
+
+    Ok(roots)
+}
+
 struct Parser<'a, 'd> {
     pos: usize,
     input: &'a str,
@@ -326,7 +353,11 @@ fn is_raw_text_element(tag_name: &str) -> bool {
     matches!(tag_name, "script" | "style")
 }
 
-fn is_void_element(tag_name: &str) -> bool {
+/// Tags whose HTML serialization has no content and no closing tag (`<br>`,
+/// `<img>`, `<input>`, …). Exposed for the JS `innerHTML` getter, which
+/// emits an opening tag only for void elements and skips both the children
+/// and the close — matching the HTML serialization spec.
+pub fn is_void_element(tag_name: &str) -> bool {
     matches!(
         tag_name,
         "area"

@@ -17,6 +17,7 @@ use boa_engine::{
 
 use crate::css;
 use crate::dom::{Document, NodeId, NodeType};
+use crate::html;
 
 use super::ListenerMap;
 use super::NODE_ID_PROP;
@@ -239,6 +240,98 @@ pub(super) fn make_element(
                 }
                 None => Err(stale_node_error()),
             }
+        })
+    }
+    .to_js_function(context.realm());
+
+    // `Element.innerHTML` accessor.
+    //
+    // Getter serializes the receiver's children to an HTML string per the
+    // standard fragment serialization algorithm (open tag with attributes,
+    // recursively-serialized children, close tag — void elements stop at
+    // the open tag). Stale receivers degrade to "" rather than throwing,
+    // matching the lenient read policy textContent / getAttribute already
+    // use.
+    //
+    // Setter parses `new_html` as a fragment, drops every existing child
+    // (tombstoning the subtrees so outstanding handles resolve to None),
+    // reaps any listener registrations on the freed NodeIds, and splices
+    // the parsed siblings in. A parse error surfaces as SyntaxError so
+    // scripts can `try { …innerHTML = unsafeString }`. Stale receivers
+    // throw — same write-vs-read split as the textContent / setAttribute
+    // setters.
+    let dom_ihg = dom.clone();
+    let inner_html_get = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let document = dom_ihg.borrow();
+            if document.get(node_id).is_none() {
+                return Ok(JsValue::from(JsString::from("")));
+            }
+            let mut buf = String::new();
+            serialize_children(&document, node_id, &mut buf);
+            Ok(JsValue::from(JsString::from(buf.as_str())))
+        })
+    }
+    .to_js_function(context.realm());
+
+    let dom_ihs = dom.clone();
+    let listeners_ihs = listeners.clone();
+    let inner_html_set = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let new_html = first_arg_as_string(args, ctx)?;
+            let dropped_ids: Vec<NodeId> = {
+                let mut document = dom_ihs.borrow_mut();
+                if document.get(node_id).is_none() {
+                    return Err(stale_node_error());
+                }
+                // Snapshot every NodeId in the soon-to-be-detached subtrees
+                // *before* tombstoning so the listener registry can be
+                // pruned without re-walking the dead arena slots.
+                let old_kids: Vec<NodeId> = document
+                    .get(node_id)
+                    .map(|n| n.children.clone())
+                    .unwrap_or_default();
+                let mut dropped = Vec::new();
+                for kid in &old_kids {
+                    collect_subtree_ids(&document, *kid, &mut dropped);
+                }
+                // Unhook from the parent's children list first so the
+                // receiver looks empty even if the fragment parse below
+                // bails — matching browser semantics: a SyntaxError leaves
+                // the element with no children rather than restoring the
+                // old subtree.
+                if let Some(node) = document.get_mut(node_id) {
+                    node.children.clear();
+                }
+                for kid in old_kids {
+                    document.tombstone_subtree(kid);
+                }
+                let parsed = match html::parse_fragment(&new_html, &mut document) {
+                    Ok(ids) => ids,
+                    Err(err) => {
+                        return Err(JsNativeError::syntax()
+                            .with_message(format!(
+                                "innerHTML: parse error at byte {}: {}",
+                                err.position, err.message
+                            ))
+                            .into());
+                    }
+                };
+                for child in parsed {
+                    document.append_child(node_id, child);
+                }
+                dropped
+            };
+            // Drop listener entries on the freed NodeIds. Without this,
+            // a removed-but-still-registered subtree would leak into the
+            // map for the rest of the runtime's life — harmless for
+            // correctness (dispatch checks `dom.get(...)` before firing)
+            // but a slow leak as innerHTML churns through pages.
+            if !dropped_ids.is_empty() {
+                let mut map = listeners_ihs.borrow_mut();
+                map.retain(|(id, _), _| !dropped_ids.contains(id));
+            }
+            Ok(JsValue::undefined())
         })
     }
     .to_js_function(context.realm());
@@ -613,6 +706,12 @@ pub(super) fn make_element(
             Some(value_set),
             Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
         )
+        .accessor(
+            js_string!("innerHTML"),
+            Some(inner_html_get),
+            Some(inner_html_set),
+            Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
+        )
         .function(get_attribute, js_string!("getAttribute"), 1)
         .function(set_attribute, js_string!("setAttribute"), 2)
         .function(append_child, js_string!("appendChild"), 1)
@@ -918,6 +1017,99 @@ fn element_sibling(
                     Some(NodeType::Element(_))
                 )
             }),
+    }
+}
+
+// HTML fragment serialization for the `innerHTML` getter. Walks `id`'s
+// children in order and appends each child's serialized form to `buf`.
+// `id` itself is NOT emitted — `innerHTML` returns the *content* of the
+// element, not the element. Stale ids no-op.
+fn serialize_children(document: &Document, id: NodeId, buf: &mut String) {
+    let Some(node) = document.get(id) else {
+        return;
+    };
+    for child in &node.children {
+        serialize_node(document, *child, buf);
+    }
+}
+
+fn serialize_node(document: &Document, id: NodeId, buf: &mut String) {
+    let Some(node) = document.get(id) else {
+        return;
+    };
+    match &node.node_type {
+        NodeType::Text(text) => escape_html_text(text, buf),
+        NodeType::Element(elem) => {
+            buf.push('<');
+            buf.push_str(&elem.tag_name);
+            // Attribute iteration is ordered by name because AttrMap is a
+            // BTreeMap; that gives stable serialization output across runs
+            // and makes round-trip tests deterministic.
+            for (name, value) in &elem.attributes {
+                buf.push(' ');
+                buf.push_str(name);
+                buf.push_str("=\"");
+                escape_html_attr(value, buf);
+                buf.push('"');
+            }
+            buf.push('>');
+            // Void elements (br, img, input, …) have no content and no
+            // closing tag in the HTML serialization — even if a script
+            // had stuffed children into the arena, the spec says we
+            // emit only the open tag.
+            if html::is_void_element(&elem.tag_name) {
+                return;
+            }
+            for child in &node.children {
+                serialize_node(document, *child, buf);
+            }
+            buf.push_str("</");
+            buf.push_str(&elem.tag_name);
+            buf.push('>');
+        }
+    }
+}
+
+// Minimal text-context escapes: `&`, `<`, `>`. The HTML spec also escapes
+// non-breaking space (U+00A0); the toy parser doesn't decode entities so
+// the round-trip is already imperfect, and skipping NBSP keeps the output
+// readable in the common ASCII case.
+fn escape_html_text(text: &str, buf: &mut String) {
+    for ch in text.chars() {
+        match ch {
+            '&' => buf.push_str("&amp;"),
+            '<' => buf.push_str("&lt;"),
+            '>' => buf.push_str("&gt;"),
+            _ => buf.push(ch),
+        }
+    }
+}
+
+// Attribute-context escapes: `&` and `"` (we always emit double-quoted
+// values). `<` / `>` are legal in attribute values and don't need escaping
+// per the HTML serialization spec.
+fn escape_html_attr(value: &str, buf: &mut String) {
+    for ch in value.chars() {
+        match ch {
+            '&' => buf.push_str("&amp;"),
+            '"' => buf.push_str("&quot;"),
+            _ => buf.push(ch),
+        }
+    }
+}
+
+// Collect `id` and every descendant NodeId into `out` in pre-order. Used
+// by the `innerHTML` setter to record the soon-to-be-tombstoned NodeIds
+// so the listener registry can be pruned after the arena tear-down.
+// Skips stale slots silently — the caller passes only live ids in.
+fn collect_subtree_ids(document: &Document, id: NodeId, out: &mut Vec<NodeId>) {
+    let Some(node) = document.get(id) else {
+        return;
+    };
+    out.push(id);
+    let kids = node.children.clone();
+    for kid in kids {
+        collect_subtree_ids(document, kid, out);
     }
 }
 
