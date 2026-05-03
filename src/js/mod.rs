@@ -1861,4 +1861,105 @@ mod tests {
             .unwrap();
         assert_eq!(runtime.execute("captured").unwrap(), "true");
     }
+
+    // ---- Step 8 (#14 in Notion): async / await + queueMicrotask ----
+
+    #[test]
+    fn async_function_returns_a_promise_that_resolves_to_its_return_value() {
+        // The bare `async function` syntax compiles into a Promise
+        // wrapper at parse time; awaiting nothing returns a resolved
+        // Promise carrying the function's return value. Confirms the
+        // engine surface (already in Boa) reaches scripts unchanged.
+        let mut runtime = runtime_with("");
+        runtime
+            .execute(
+                "var resolved;\
+                 async function answer() { return 42; }\
+                 answer().then(function (v) { resolved = v; });",
+            )
+            .unwrap();
+        // execute() drains microtasks, so the .then callback already ran.
+        assert_eq!(runtime.execute("resolved").unwrap(), "42");
+    }
+
+    #[test]
+    fn await_inside_async_function_resumes_with_resolved_value() {
+        // The `await` keyword pauses the async function until the
+        // awaited Promise settles, then resumes with the resolved
+        // value. Without microtask drain at end of execute() the
+        // continuation wouldn't run before our assertion.
+        let mut runtime = runtime_with("");
+        runtime
+            .execute(
+                "var seen;\
+                 async function chain() {\
+                   var first = await Promise.resolve(7);\
+                   var second = await Promise.resolve(first + 1);\
+                   seen = second;\
+                 }\
+                 chain();",
+            )
+            .unwrap();
+        assert_eq!(runtime.execute("seen").unwrap(), "8");
+    }
+
+    #[test]
+    fn await_propagates_rejection_into_catch() {
+        // The "throw across an await boundary" path: a rejected
+        // Promise inside `await` raises in the async function,
+        // matching real browsers' control-flow semantics.
+        let mut runtime = runtime_with("");
+        runtime
+            .execute(
+                "var caught = '';\
+                 async function blow() { await Promise.reject('boom'); }\
+                 blow().catch(function (e) { caught = e; });",
+            )
+            .unwrap();
+        assert_eq!(runtime.execute("caught").unwrap(), "\"boom\"");
+    }
+
+    #[test]
+    fn queue_microtask_runs_callback_during_drain() {
+        // The polyfill-equivalent path: `queueMicrotask(fn)` schedules
+        // `fn` on the same microtask queue that Promise jobs use, and
+        // execute()'s end-of-run drain flushes it before returning.
+        let mut runtime = runtime_with("");
+        runtime
+            .execute(
+                "var hits = 0;\
+                 queueMicrotask(function () { hits = hits + 1; });",
+            )
+            .unwrap();
+        assert_eq!(runtime.execute("hits").unwrap(), "1");
+    }
+
+    #[test]
+    fn queue_microtask_with_non_callable_first_arg_throws_type_error() {
+        // Spec contract: a non-function argument is a TypeError. Real
+        // engines surface this so authors don't silently lose work
+        // when they pass `undefined` from a misconfigured config.
+        let mut runtime = runtime_with("");
+        let err = runtime.execute("queueMicrotask(123);").unwrap_err();
+        assert!(
+            err.to_lowercase().contains("function"),
+            "TypeError should mention `function`, got: {err}"
+        );
+    }
+
+    #[test]
+    fn queue_microtask_runs_after_synchronous_code() {
+        // The microtask runs *after* the rest of the script body
+        // returns, never re-entering it. The trace pin captures the
+        // ordering: sync work first, then the queued microtask.
+        let mut runtime = runtime_with("");
+        runtime
+            .execute(
+                "var trace = '';\
+                 queueMicrotask(function () { trace += 'micro;'; });\
+                 trace += 'sync;';",
+            )
+            .unwrap();
+        assert_eq!(runtime.execute("trace").unwrap(), "\"sync;micro;\"");
+    }
 }
