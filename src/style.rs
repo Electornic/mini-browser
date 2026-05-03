@@ -335,6 +335,12 @@ fn default_values(document: &Document, node_id: NodeId) -> PropertyMap {
                     a: 255,
                 }),
             );
+            // The visual underline already lives in display_list (a link with
+            // an href emits an underline command unless `text-decoration: none`
+            // is in scope). Surfacing it here as a UA default makes the cascade
+            // spec-correct: author CSS or runtime style queries see the same
+            // value the renderer is acting on.
+            values.insert("text-decoration".into(), Value::Keyword("underline".into()));
         }
         // <input> and <textarea> both render as atomic inline-block
         // widgets. The UA stylesheet gives them a fixed default width
@@ -668,6 +674,28 @@ mod tests {
                 a: 255,
             }))
         );
+        // <a> also defaults to text-decoration: underline so the cascade matches
+        // the underline the renderer paints; queries on specified style see it.
+        assert_eq!(
+            styled.children[2].value("text-decoration"),
+            Some(&Value::Keyword("underline".into()))
+        );
+    }
+
+    #[test]
+    fn anchor_text_decoration_default_does_not_inherit_to_children() {
+        // text-decoration is not on the inherit list, so a <span> inside an <a>
+        // does NOT pick up the underline default. (display_list still emits
+        // underline commands for the link's text descendants — that's a render
+        // concern, not a style cascade one.)
+        let (document, root) = parse_html(r#"<a href="/x"><span>label</span></a>"#);
+        let styled = style::style_tree(&document, root, &[]);
+
+        assert_eq!(
+            styled.value("text-decoration"),
+            Some(&Value::Keyword("underline".into()))
+        );
+        assert_eq!(styled.children[0].value("text-decoration"), None);
     }
 
     #[test]
