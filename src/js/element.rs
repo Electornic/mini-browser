@@ -118,6 +118,47 @@ pub(super) fn make_element(
     }
     .to_js_function(context.realm());
 
+    // `Element.value` accessor: round-trips with the `value` attribute so
+    // scripts can read or set the field text without going through
+    // get/setAttribute. Defined on every Element wrapper rather than just
+    // <input> to match how toy bridge accessors stay tag-agnostic
+    // (`children`, `classList`, etc. all do the same) — real DOM only
+    // hangs `.value` on form controls, but a `<div>.value = …` here just
+    // writes a custom attribute, which is harmless for the toy.
+    //
+    // Getter returns "" for missing/stale slots (matches the empty-string
+    // default real `<input>.value` exposes), while the setter throws on a
+    // tombstoned receiver — same write-vs-read stale-handle split the
+    // textContent / setAttribute pair already follows.
+    let dom_vg = dom.clone();
+    let value_get = unsafe {
+        NativeFunction::from_closure(move |_this, _args, _ctx| {
+            let document = dom_vg.borrow();
+            let value = document
+                .element_data(node_id)
+                .and_then(|elem| elem.attributes.get("value").cloned())
+                .unwrap_or_default();
+            Ok(JsValue::from(JsString::from(value.as_str())))
+        })
+    }
+    .to_js_function(context.realm());
+
+    let dom_vs = dom.clone();
+    let value_set = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let new_value = first_arg_as_string(args, ctx)?;
+            let mut document = dom_vs.borrow_mut();
+            match document.element_data_mut(node_id) {
+                Some(elem) => {
+                    elem.attributes.insert("value".into(), new_value);
+                    Ok(JsValue::undefined())
+                }
+                None => Err(stale_node_error()),
+            }
+        })
+    }
+    .to_js_function(context.realm());
+
     let dom_cl = dom.clone();
     let class_list_get = unsafe {
         NativeFunction::from_closure(move |_this, _args, ctx| {
@@ -379,6 +420,12 @@ pub(super) fn make_element(
             js_string!("classList"),
             Some(class_list_get),
             None,
+            Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
+        )
+        .accessor(
+            js_string!("value"),
+            Some(value_get),
+            Some(value_set),
             Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
         )
         .function(get_attribute, js_string!("getAttribute"), 1)

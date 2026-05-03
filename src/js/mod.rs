@@ -720,6 +720,69 @@ mod tests {
         );
     }
 
+    // ---- Element.value accessor (#6 in Notion: <input type=text>) ----
+
+    #[test]
+    fn value_accessor_reads_initial_value_attribute() {
+        // The getter pulls straight from the `value` attribute the parser
+        // recorded — same data path the layout/render pipeline already
+        // uses to draw the field text.
+        let mut runtime = runtime_with(r#"<input id="q" value="hi"/>"#);
+        assert_eq!(
+            runtime.execute("document.getElementById('q').value").unwrap(),
+            "\"hi\""
+        );
+    }
+
+    #[test]
+    fn value_accessor_returns_empty_string_when_attribute_missing() {
+        // Real <input>.value is the empty string when the attribute is
+        // absent (NOT undefined / null). Diverging from that would surprise
+        // any script that does `if (input.value === '')` or string-concat.
+        let mut runtime = runtime_with(r#"<input id="q"/>"#);
+        assert_eq!(
+            runtime.execute("document.getElementById('q').value").unwrap(),
+            "\"\""
+        );
+    }
+
+    #[test]
+    fn value_setter_writes_value_attribute_observable_via_get_attribute() {
+        // Writing `.value = …` lands in the SAME attribute slot the toy's
+        // typing pipeline writes to. That's what makes JS-driven default
+        // values and live read/write parity work uniformly with keyboard
+        // input.
+        let mut runtime = runtime_with(r#"<input id="q" value="old"/>"#);
+        runtime
+            .execute("document.getElementById('q').value = 'fresh';")
+            .unwrap();
+        assert_eq!(
+            runtime.execute("document.getElementById('q').value").unwrap(),
+            "\"fresh\""
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('q').getAttribute('value')")
+                .unwrap(),
+            "\"fresh\""
+        );
+    }
+
+    #[test]
+    fn value_setter_coerces_non_string_arguments() {
+        // ToString-coercion mirrors how setAttribute handles non-string
+        // arguments — JS scripts often assign numbers (`.value = 42`)
+        // and expect the field to display "42".
+        let mut runtime = runtime_with(r#"<input id="q"/>"#);
+        runtime
+            .execute("document.getElementById('q').value = 42;")
+            .unwrap();
+        assert_eq!(
+            runtime.execute("document.getElementById('q').value").unwrap(),
+            "\"42\""
+        );
+    }
+
     // ---- classList: add / remove / toggle / contains ----
 
     #[test]
