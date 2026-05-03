@@ -362,6 +362,60 @@ mod tests {
     }
 
     #[test]
+    fn window_and_document_add_event_listener_stubs_silently_accept_registrations() {
+        // Author scripts routinely register `load` / `DOMContentLoaded`
+        // listeners at module top level; without a window/document
+        // addEventListener method the call throws and the rest of the
+        // script never runs. The stub returns undefined and drops the
+        // registration so subsequent code keeps executing.
+        let mut runtime = runtime_with("");
+        assert_eq!(
+            runtime.execute("typeof window.addEventListener").unwrap(),
+            "\"function\""
+        );
+        assert_eq!(
+            runtime.execute("typeof window.removeEventListener").unwrap(),
+            "\"function\""
+        );
+        assert_eq!(
+            runtime
+                .execute("typeof document.addEventListener")
+                .unwrap(),
+            "\"function\""
+        );
+        assert_eq!(
+            runtime
+                .execute("typeof document.removeEventListener")
+                .unwrap(),
+            "\"function\""
+        );
+        // No-op contract: real call shapes return undefined and must not
+        // throw, even with arbitrary handler shapes (which the spec'd
+        // method would normally validate).
+        assert_eq!(
+            runtime
+                .execute("window.addEventListener('load', function () {})")
+                .unwrap(),
+            "undefined"
+        );
+        assert_eq!(
+            runtime
+                .execute(
+                    "document.addEventListener('DOMContentLoaded', function () {}); 'after'"
+                )
+                .unwrap(),
+            "\"after\""
+        );
+        // `self`/bare also resolve to the same global stub (window === self === globalThis).
+        assert_eq!(
+            runtime
+                .execute("self.addEventListener('load', function () {})")
+                .unwrap(),
+            "undefined"
+        );
+    }
+
+    #[test]
     fn console_object_is_registered_with_log_warn_error() {
         let mut runtime = runtime_with("");
         assert_eq!(runtime.execute("typeof console").unwrap(), "\"object\"");

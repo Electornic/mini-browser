@@ -8,8 +8,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use boa_engine::{
-    Context, JsNativeError, JsValue, NativeFunction, js_string, object::ObjectInitializer,
-    property::Attribute,
+    Context, JsNativeError, JsResult, JsValue, NativeFunction, js_string,
+    object::ObjectInitializer, property::Attribute,
 };
 
 use crate::{
@@ -116,9 +116,31 @@ pub(super) fn register_document(
         .function(query_selector, js_string!("querySelector"), 1)
         .function(create_element, js_string!("createElement"), 1)
         .function(create_text_node, js_string!("createTextNode"), 1)
+        // Silent no-op stubs. `document.addEventListener('DOMContentLoaded', …)`
+        // is one of the most common top-level calls on real pages; without a
+        // method here the call throws and the rest of the script never runs.
+        // Real dispatch (e.g. promoting click bubble to document, firing
+        // DOMContentLoaded) is a follow-up — for now the registration is
+        // accepted and dropped.
+        .function(
+            NativeFunction::from_fn_ptr(noop_event_listener),
+            js_string!("addEventListener"),
+            2,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(noop_event_listener),
+            js_string!("removeEventListener"),
+            2,
+        )
         .build();
 
     let _ = context.register_global_property(js_string!("document"), document, Attribute::all());
+}
+
+// Shared no-op for document-level add/removeEventListener. See window.rs
+// for the matching global-object stub — same shape, same rationale.
+fn noop_event_listener(_this: &JsValue, _args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
 }
 
 fn find_by_id(document: &Document, id: &str) -> Option<NodeId> {
