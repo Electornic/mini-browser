@@ -29,6 +29,7 @@ mod console;
 mod document;
 mod element;
 mod event;
+mod fetch;
 mod timers;
 mod util;
 mod window;
@@ -102,6 +103,7 @@ impl JsRuntime {
             next_timer_id.clone(),
             raf_callbacks.clone(),
         );
+        fetch::register_fetch(&mut context);
         Self {
             context,
             dom,
@@ -1961,5 +1963,246 @@ mod tests {
             )
             .unwrap();
         assert_eq!(runtime.execute("trace").unwrap(), "\"sync;micro;\"");
+    }
+
+    // ---- Step 8b (#16/#17 in Notion): fetch + Response ----
+    //
+    // The HTTP exchange uses `crate::net::fetch`, which is sync, so a
+    // single `execute()` plus its end-of-run microtask drain is enough
+    // to land the resolved Promise's `.then` callbacks. Each test
+    // spawns a tiny local TCP responder and tears it down via a
+    // `JoinHandle`, mirroring the pattern in `net.rs` integration tests.
+
+    #[test]
+    fn fetch_resolves_with_response_carrying_status_and_url() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var status; var ok; var url;\
+             fetch('http://127.0.0.1:{port}/').then(function (r) {{\
+                 status = r.status; ok = r.ok; url = r.url;\
+             }});",
+        );
+        runtime.execute(&script).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(runtime.execute("status").unwrap(), "200");
+        assert_eq!(runtime.execute("ok").unwrap(), "true");
+        assert_eq!(
+            runtime.execute("url").unwrap(),
+            format!("\"http://127.0.0.1:{port}/\"")
+        );
+    }
+
+    #[test]
+    fn fetch_response_text_returns_body_as_resolved_promise() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = "hello fetch";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var body;\
+             fetch('http://127.0.0.1:{port}/')\
+                 .then(function (r) {{ return r.text(); }})\
+                 .then(function (t) {{ body = t; }});",
+        );
+        runtime.execute(&script).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(runtime.execute("body").unwrap(), "\"hello fetch\"");
+    }
+
+    #[test]
+    fn fetch_response_json_parses_body_via_json_parse() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = r#"{"name":"alice","score":42}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var name; var score;\
+             fetch('http://127.0.0.1:{port}/')\
+                 .then(function (r) {{ return r.json(); }})\
+                 .then(function (j) {{ name = j.name; score = j.score; }});",
+        );
+        runtime.execute(&script).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(runtime.execute("name").unwrap(), "\"alice\"");
+        assert_eq!(runtime.execute("score").unwrap(), "42");
+    }
+
+    #[test]
+    fn fetch_non_2xx_status_resolves_with_ok_false() {
+        // 404 is a successful HTTP exchange — fetch resolves, the
+        // caller inspects `ok`/`status` to decide the outcome. This
+        // is the standard contract real backends rely on for
+        // optimistic fetches that handle "missing" inline.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var ok; var status;\
+             fetch('http://127.0.0.1:{port}/missing')\
+                 .then(function (r) {{ ok = r.ok; status = r.status; }});",
+        );
+        runtime.execute(&script).unwrap();
+        // Allow the server to finish writing/closing before joining.
+        let _ = server.join();
+
+        assert_eq!(runtime.execute("status").unwrap(), "404");
+        assert_eq!(runtime.execute("ok").unwrap(), "false");
+    }
+
+    #[test]
+    fn fetch_with_invalid_url_rejects_promise() {
+        // No scheme separator → URL parse fails before we touch the
+        // network. The Promise rejects with a TypeError; the script's
+        // `.catch` handler captures it.
+        let mut runtime = runtime_with("");
+        runtime
+            .execute(
+                "var caught = '';\
+                 fetch('not a url').catch(function (e) { caught = String(e); });",
+            )
+            .unwrap();
+        let caught = runtime.execute("caught").unwrap();
+        assert!(
+            caught.contains("invalid URL") || caught.to_lowercase().contains("typeerror"),
+            "expected invalid-URL TypeError, got: {caught}"
+        );
+    }
+
+    #[test]
+    fn await_fetch_in_async_function_resumes_with_response() {
+        // Closes the loop with the async/await tests above: the same
+        // microtask drain that lets `await Promise.resolve(...)` resume
+        // also lets `await fetch(...)` resume with a Response object,
+        // since `fetch` returns a Promise like any other.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = "awaited";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var got;\
+             (async function () {{\
+                 var r = await fetch('http://127.0.0.1:{port}/');\
+                 got = await r.text();\
+             }})();",
+        );
+        runtime.execute(&script).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(runtime.execute("got").unwrap(), "\"awaited\"");
+    }
+
+    #[test]
+    fn fetch_response_json_with_invalid_body_rejects() {
+        // Malformed JSON: text() would still succeed, but json()
+        // surfaces the underlying `JSON.parse` SyntaxError as a
+        // rejected Promise so callers can `.catch` it.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = "not-json";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut runtime = runtime_with("");
+        let script = format!(
+            "var caught = '';\
+             fetch('http://127.0.0.1:{port}/')\
+                 .then(function (r) {{ return r.json(); }})\
+                 .catch(function (e) {{ caught = String(e); }});",
+        );
+        runtime.execute(&script).unwrap();
+        server.join().unwrap();
+
+        let caught = runtime.execute("caught").unwrap();
+        assert!(
+            caught.to_lowercase().contains("syntax")
+                || caught.to_lowercase().contains("json"),
+            "expected SyntaxError from JSON.parse, got: {caught}"
+        );
     }
 }
