@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use boa_engine::{
-    Context, JsNativeError, JsObject, JsString, JsValue, NativeFunction, js_string,
+    Context, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string,
     object::{ObjectInitializer, builtins::JsArray},
     property::Attribute,
 };
@@ -114,6 +114,20 @@ pub(super) fn make_element(
                 let _ = array.push(JsValue::from(child_obj), ctx);
             }
             Ok(JsValue::from(array))
+        })
+    }
+    .to_js_function(context.realm());
+
+    let dom_cl = dom.clone();
+    let class_list_get = unsafe {
+        NativeFunction::from_closure(move |_this, _args, ctx| {
+            // Return a fresh DOMTokenList wrapper on every read. Real
+            // browsers cache one per element, but every wrapper observes
+            // the same `class` attribute through the shared Document, so
+            // a stateless factory is observably equivalent for the toy.
+            // No stale-handle check here — the returned object's methods
+            // re-borrow on each call and surface the tombstone there.
+            Ok(JsValue::from(make_class_list(node_id, dom_cl.clone(), ctx)))
         })
     }
     .to_js_function(context.realm());
@@ -361,6 +375,12 @@ pub(super) fn make_element(
             None,
             Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
         )
+        .accessor(
+            js_string!("classList"),
+            Some(class_list_get),
+            None,
+            Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
+        )
         .function(get_attribute, js_string!("getAttribute"), 1)
         .function(set_attribute, js_string!("setAttribute"), 2)
         .function(append_child, js_string!("appendChild"), 1)
@@ -432,6 +452,158 @@ pub(super) fn make_text(
             Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
         )
         .build()
+}
+
+// DOMTokenList wrapper for `Element.classList`. Backs the four methods
+// scripts reach for most often: add/remove/toggle/contains. Each method
+// re-borrows the shared Document on call so a fresh wrapper is observably
+// equivalent to a cached one — every read sees the latest class string.
+//
+// Stale-handle policy mirrors the rest of the bridge: mutating methods
+// (add/remove/toggle) throw when the underlying slot is tombstoned;
+// `contains` silently reports false (consistent with attribute getters).
+fn make_class_list(
+    node_id: NodeId,
+    dom: Rc<RefCell<Document>>,
+    context: &mut Context,
+) -> JsObject {
+    let dom_add = dom.clone();
+    let add = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            // Validate every token first so a single bad arg leaves the
+            // class string untouched (DOMTokenList is atomic per spec).
+            let mut new_tokens = Vec::with_capacity(args.len());
+            for arg in args {
+                let token = arg.to_string(ctx)?.to_std_string_escaped();
+                validate_class_token(&token)?;
+                new_tokens.push(token);
+            }
+            let mut document = dom_add.borrow_mut();
+            let elem = document
+                .element_data_mut(node_id)
+                .ok_or_else(stale_node_error)?;
+            let mut tokens =
+                parse_class_tokens(elem.attributes.get("class").map(String::as_str).unwrap_or(""));
+            for token in new_tokens {
+                if !tokens.iter().any(|existing| existing == &token) {
+                    tokens.push(token);
+                }
+            }
+            elem.attributes.insert("class".into(), tokens.join(" "));
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let dom_remove = dom.clone();
+    let remove = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let mut drop_tokens = Vec::with_capacity(args.len());
+            for arg in args {
+                let token = arg.to_string(ctx)?.to_std_string_escaped();
+                validate_class_token(&token)?;
+                drop_tokens.push(token);
+            }
+            let mut document = dom_remove.borrow_mut();
+            let elem = document
+                .element_data_mut(node_id)
+                .ok_or_else(stale_node_error)?;
+            let mut tokens =
+                parse_class_tokens(elem.attributes.get("class").map(String::as_str).unwrap_or(""));
+            tokens.retain(|t| !drop_tokens.iter().any(|d| d == t));
+            elem.attributes.insert("class".into(), tokens.join(" "));
+            Ok(JsValue::undefined())
+        })
+    };
+
+    let dom_toggle = dom.clone();
+    let toggle = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            // toggle(name [, force]). With `force` undefined the token is
+            // flipped; with force=true it's force-added; false force-removed.
+            // Returns whether the token is in the list afterwards.
+            let token = first_arg_as_string(args, ctx)?;
+            validate_class_token(&token)?;
+            // toggle's spec says: only an explicitly-supplied non-undefined
+            // value forces the outcome; an absent or `undefined` second arg
+            // falls back to the flip behaviour.
+            let force = match args.get(1) {
+                Some(value) if !value.is_undefined() => Some(value.to_boolean()),
+                _ => None,
+            };
+            let mut document = dom_toggle.borrow_mut();
+            let elem = document
+                .element_data_mut(node_id)
+                .ok_or_else(stale_node_error)?;
+            let mut tokens =
+                parse_class_tokens(elem.attributes.get("class").map(String::as_str).unwrap_or(""));
+            let already_present = tokens.iter().any(|t| t == &token);
+            let should_be_present = match force {
+                Some(forced) => forced,
+                None => !already_present,
+            };
+            if should_be_present && !already_present {
+                tokens.push(token);
+            } else if !should_be_present && already_present {
+                tokens.retain(|t| t != &token);
+            }
+            elem.attributes.insert("class".into(), tokens.join(" "));
+            Ok(JsValue::from(should_be_present))
+        })
+    };
+
+    let dom_contains = dom;
+    let contains = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let token = first_arg_as_string(args, ctx)?;
+            // Empty / whitespace-bearing argument is a SyntaxError per spec
+            // even on the read side — keeps add/remove/toggle/contains
+            // contracts symmetric.
+            validate_class_token(&token)?;
+            let document = dom_contains.borrow();
+            let Some(elem) = document.element_data(node_id) else {
+                // Stale read: silent false, same lenient policy as the
+                // attribute getters — reads on detached nodes shouldn't
+                // crash cleanup code.
+                return Ok(JsValue::from(false));
+            };
+            let tokens =
+                parse_class_tokens(elem.attributes.get("class").map(String::as_str).unwrap_or(""));
+            Ok(JsValue::from(tokens.iter().any(|t| t == &token)))
+        })
+    };
+
+    ObjectInitializer::new(context)
+        .function(add, js_string!("add"), 1)
+        .function(remove, js_string!("remove"), 1)
+        .function(toggle, js_string!("toggle"), 1)
+        .function(contains, js_string!("contains"), 1)
+        .build()
+}
+
+// Whitespace-separated tokenisation of the `class` attribute. The HTML
+// spec calls this an "ordered set of unique space-separated tokens", but
+// callers feed in raw author strings that may contain duplicates — the
+// caller dedupes when re-inserting. Empty input -> empty Vec.
+fn parse_class_tokens(value: &str) -> Vec<String> {
+    value.split_whitespace().map(String::from).collect()
+}
+
+// DOMTokenList rejects empty strings and any token containing ASCII
+// whitespace as a SyntaxError. The toy enforces both so author code that
+// relies on the throw (e.g. validation flows that catch the error) sees
+// the same shape.
+fn validate_class_token(token: &str) -> JsResult<()> {
+    if token.is_empty() {
+        return Err(JsNativeError::syntax()
+            .with_message("classList: token must not be empty")
+            .into());
+    }
+    if token.chars().any(|c| c.is_ascii_whitespace()) {
+        return Err(JsNativeError::syntax()
+            .with_message("classList: token must not contain whitespace")
+            .into());
+    }
+    Ok(())
 }
 
 // Dispatch helper: hand back the right wrapper for whatever kind of node

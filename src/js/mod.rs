@@ -671,6 +671,151 @@ mod tests {
         );
     }
 
+    // ---- classList: add / remove / toggle / contains ----
+
+    #[test]
+    fn class_list_add_appends_unique_tokens_to_class_attribute() {
+        // Add dedupes against existing tokens (the second `active` is a no-op)
+        // and accepts variadic args. Read-back via getAttribute confirms the
+        // mutation lands in the same Document arena BrowserState reads.
+        let mut runtime = runtime_with(r#"<div id="x" class="card"></div>"#);
+        runtime
+            .execute(
+                "var el = document.getElementById('x');\
+                 el.classList.add('active', 'theme-dark');\
+                 el.classList.add('active');",
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.execute("el.getAttribute('class')").unwrap(),
+            "\"card active theme-dark\""
+        );
+    }
+
+    #[test]
+    fn class_list_remove_drops_tokens_and_keeps_others() {
+        let mut runtime = runtime_with(r#"<div id="x" class="a b c"></div>"#);
+        runtime
+            .execute(
+                "var el = document.getElementById('x');\
+                 el.classList.remove('b');\
+                 el.classList.remove('missing');",
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.execute("el.getAttribute('class')").unwrap(),
+            "\"a c\""
+        );
+    }
+
+    #[test]
+    fn class_list_toggle_flips_membership_and_returns_new_state() {
+        let mut runtime = runtime_with(r#"<div id="x" class="a"></div>"#);
+        // Without `force`: present → removed (returns false), absent → added (returns true).
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('x').classList.toggle('a')")
+                .unwrap(),
+            "false"
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('x').classList.toggle('b')")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('x').getAttribute('class')")
+                .unwrap(),
+            "\"b\""
+        );
+        // With `force`: idempotent add / idempotent remove.
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('x').classList.toggle('b', true)")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('x').classList.toggle('b', false)")
+                .unwrap(),
+            "false"
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('x').getAttribute('class')")
+                .unwrap(),
+            "\"\""
+        );
+    }
+
+    #[test]
+    fn class_list_contains_reports_token_membership() {
+        let mut runtime = runtime_with(r#"<div id="x" class="a b"></div>"#);
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('x').classList.contains('a')")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('x').classList.contains('missing')")
+                .unwrap(),
+            "false"
+        );
+        // Element with no class attribute reads as zero-token list.
+        let mut runtime = runtime_with(r#"<div id="y"></div>"#);
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('y').classList.contains('foo')")
+                .unwrap(),
+            "false"
+        );
+    }
+
+    #[test]
+    fn class_list_rejects_empty_or_whitespace_tokens() {
+        // DOMTokenList raises SyntaxError on these per spec; the toy mirrors
+        // the throw so author code that catches it (rare but real) sees the
+        // expected shape.
+        let mut runtime = runtime_with(r#"<div id="x"></div>"#);
+        assert!(
+            runtime
+                .execute("document.getElementById('x').classList.add('')")
+                .is_err()
+        );
+        assert!(
+            runtime
+                .execute("document.getElementById('x').classList.add('a b')")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn class_list_mutations_are_visible_to_style_pass_via_class_attribute() {
+        // Smoke check that classList writes flow through to the same DOM arena
+        // BrowserState reads for layout — same shared-arena contract Step 5.x
+        // pinned for textContent / appendChild.
+        let mut runtime = runtime_with(r#"<div id="x" class="card"></div>"#);
+        runtime
+            .execute(
+                "document.getElementById('x').classList.add('active');\
+                 document.getElementById('x').classList.toggle('card');",
+            )
+            .unwrap();
+        let dom = runtime.dom_handle();
+        let document = dom.borrow();
+        let target = document.roots()[0];
+        let class_attr = document
+            .element_data(target)
+            .and_then(|e| e.attributes.get("class"))
+            .map(|s| s.as_str());
+        assert_eq!(class_attr, Some("active"));
+    }
+
     #[test]
     fn append_child_attaches_freshly_created_element_into_parent() {
         let mut runtime = runtime_with(r#"<div id="host"></div>"#);
