@@ -1,8 +1,25 @@
+// Layout uses a single rectangular box model for both block and simple inline flow.
+// Every node becomes a box with a content rect plus margin/padding/border around it.
+//
+// The algorithm split lives in sibling submodules (`block`, `inline`, `flex`,
+// `grid`) and each owns its own paint-recursive entry. mod.rs keeps the box
+// types, `layout_tree` (the public entry) and the cross-cutting helpers every
+// algorithm needs (containing-block math, edge sizes, intrinsic sizes, …).
+
 use crate::{
-    css::{GridLine, TrackSize, Unit, Value},
+    css::{Unit, Value},
     dom::{ElementData, NodeType},
     style::StyledNode,
 };
+
+mod block;
+mod flex;
+mod grid;
+mod inline;
+
+use block::layout_node;
+use flex::is_flex_container;
+use grid::is_grid_container;
 
 // Layout uses a single rectangular box model for both block and simple inline flow.
 // Every node becomes a box with a content rect plus margin/padding/border around it.
@@ -73,6 +90,7 @@ pub fn layout_tree(root: &StyledNode, viewport_width: f32) -> LayoutBox {
     layout_box
 }
 
+
 #[derive(Debug, Clone, Copy)]
 struct ContainingBlock {
     x: f32,
@@ -114,6 +132,7 @@ fn reposition_absolutes(
         }
     }
 }
+
 
 fn padding_box_as_cb(layout_box: &LayoutBox) -> ContainingBlock {
     let d = &layout_box.dimensions;
@@ -158,36 +177,36 @@ fn absolute_offset_delta(layout_box: &LayoutBox, cb: ContainingBlock) -> (f32, f
     (target_outer_x - outer.x, target_outer_y - outer.y)
 }
 
-fn box_styled_node(layout_box: &LayoutBox) -> Option<&StyledNode> {
+pub(super) fn box_styled_node(layout_box: &LayoutBox) -> Option<&StyledNode> {
     match &layout_box.box_type {
         BoxType::BlockNode(node) | BoxType::FlexNode(node) | BoxType::GridNode(node) => Some(node),
         BoxType::AnonymousBlock => None,
     }
 }
 
-fn box_position_keyword(layout_box: &LayoutBox) -> Option<&str> {
+pub(super) fn box_position_keyword(layout_box: &LayoutBox) -> Option<&str> {
     match box_styled_node(layout_box).and_then(|node| node.value("position"))? {
         Value::Keyword(keyword) => Some(keyword.as_str()),
         _ => None,
     }
 }
 
-fn box_is_positioned(layout_box: &LayoutBox) -> bool {
+pub(super) fn box_is_positioned(layout_box: &LayoutBox) -> bool {
     matches!(
         box_position_keyword(layout_box),
         Some("relative" | "absolute" | "fixed")
     )
 }
 
-fn box_is_absolute(layout_box: &LayoutBox) -> bool {
+pub(super) fn box_is_absolute(layout_box: &LayoutBox) -> bool {
     matches!(box_position_keyword(layout_box), Some("absolute"))
 }
 
-fn box_is_fixed(layout_box: &LayoutBox) -> bool {
+pub(super) fn box_is_fixed(layout_box: &LayoutBox) -> bool {
     matches!(box_position_keyword(layout_box), Some("fixed"))
 }
 
-fn outer_rect(layout_box: &LayoutBox) -> Rect {
+pub(super) fn outer_rect(layout_box: &LayoutBox) -> Rect {
     let d = &layout_box.dimensions;
     Rect {
         x: d.content.x - d.padding.left - d.border.left - d.margin.left,
@@ -209,527 +228,7 @@ fn outer_rect(layout_box: &LayoutBox) -> Rect {
     }
 }
 
-fn layout_node(
-    node: &StyledNode,
-    parent_x: f32,
-    cursor_y: &mut f32,
-    parent_width: f32,
-) -> LayoutBox {
-    let raw_margin = edge_sizes(node, "margin", parent_width);
-    let padding = edge_sizes(node, "padding", parent_width);
-    let border = edge_sizes(node, "border", parent_width);
-
-    // CSS auto-margin centering only applies when a width is specified.
-    let explicit_width =
-        length_value(node, "width", parent_width).or_else(|| intrinsic_width(node));
-    let left_auto = is_auto(node, "margin-left");
-    let right_auto = is_auto(node, "margin-right");
-
-    let (content_width, margin_left, margin_right) = if let Some(width) = explicit_width {
-        let used = padding.left + padding.right + border.left + border.right + width;
-        let total_margin_space = (parent_width - used).max(0.0);
-        let (ml, mr) = match (left_auto, right_auto) {
-            (true, true) => (total_margin_space / 2.0, total_margin_space / 2.0),
-            (true, false) => (
-                (total_margin_space - raw_margin.right).max(0.0),
-                raw_margin.right,
-            ),
-            (false, true) => (
-                raw_margin.left,
-                (total_margin_space - raw_margin.left).max(0.0),
-            ),
-            (false, false) => (raw_margin.left, raw_margin.right),
-        };
-        (width, ml, mr)
-    } else {
-        // With width: auto, an auto horizontal margin collapses to 0 and the
-        // content stretches to fill the parent.
-        let ml = if left_auto { 0.0 } else { raw_margin.left };
-        let mr = if right_auto { 0.0 } else { raw_margin.right };
-        let horizontal_non_content =
-            ml + mr + padding.left + padding.right + border.left + border.right;
-        let width = (parent_width - horizontal_non_content).max(0.0);
-        (width, ml, mr)
-    };
-
-    let margin = EdgeSizes {
-        left: margin_left,
-        right: margin_right,
-        top: raw_margin.top,
-        bottom: raw_margin.bottom,
-    };
-
-    let content_x = parent_x + margin.left + border.left + padding.left;
-    let content_y = *cursor_y + margin.top + border.top + padding.top;
-
-    // Flex / Grid containers run their own child-placement algorithms and
-    // bypass the inline-flow/block-flow paths entirely. Both ignore margin
-    // collapse and floats per spec.
-    // Otherwise: parents with only inline children lay them out left-to-right;
-    // everything else stays block.
-    let (children, auto_content_height) = if is_flex_container(node) {
-        layout_flex_children(node, &node.children, content_x, content_y, content_width)
-    } else if is_grid_container(node) {
-        layout_grid_children(node, &node.children, content_x, content_y, content_width)
-    } else if uses_inline_flow(node) {
-        let align = inline_align_for(node);
-        layout_inline_children(&node.children, content_x, content_y, content_width, align)
-    } else {
-        // Block flow: stack children top-to-bottom while collapsing the
-        // previous in-flow child's margin-bottom against the next child's
-        // margin-top. Out-of-flow children skip both the cursor advance and
-        // the collapse chain — they neither push siblings down nor break
-        // adjacency between the in-flow neighbours that surround them.
-        // Floats are also out of flow but they DO take horizontal space at
-        // the current cursor and let `clear` push later siblings past them.
-        let mut child_cursor_y = content_y;
-        let mut prev_margin_bottom: f32 = 0.0;
-        let mut next_left_float_x = content_x;
-        let mut next_right_float_right = content_x + content_width;
-        let mut float_bottom_left: f32 = content_y;
-        let mut float_bottom_right: f32 = content_y;
-        let mut children: Vec<LayoutBox> = Vec::with_capacity(node.children.len());
-        for child in &node.children {
-            if is_out_of_flow(child) {
-                let mut frozen = child_cursor_y;
-                children.push(layout_node(child, content_x, &mut frozen, content_width));
-                continue;
-            }
-
-            if is_float_left(child) {
-                // Place at the next available x in the left-float column. The
-                // float's outer top sits at the current in-flow cursor, but
-                // we never write back to the cursor — siblings flow past it.
-                let mut throwaway = child_cursor_y;
-                let float_box =
-                    layout_node(child, next_left_float_x, &mut throwaway, content_width);
-                let outer = outer_rect(&float_box);
-                next_left_float_x += outer.width;
-                float_bottom_left = float_bottom_left.max(throwaway);
-                children.push(float_box);
-                continue;
-            }
-            if is_float_right(child) {
-                // Right floats need their outer width before placement, so we
-                // lay out at the left edge first to measure, then shift the
-                // whole subtree to (right_edge - outer_width).
-                let mut throwaway = child_cursor_y;
-                let mut float_box = layout_node(child, content_x, &mut throwaway, content_width);
-                let outer_width = outer_rect(&float_box).width;
-                let dx = (next_right_float_right - outer_width) - content_x;
-                if dx != 0.0 {
-                    shift_layout_subtree(&mut float_box, dx, 0.0);
-                }
-                next_right_float_right -= outer_width;
-                float_bottom_right = float_bottom_right.max(throwaway);
-                children.push(float_box);
-                continue;
-            }
-
-            // `clear` jumps the cursor past prior floats on the named side(s)
-            // and resets the float-stack column for that side because no
-            // earlier floats are adjacent at the new cursor anymore.
-            let cleared = clear_target_y(child, float_bottom_left, float_bottom_right);
-            if cleared > child_cursor_y {
-                child_cursor_y = cleared;
-                prev_margin_bottom = 0.0;
-                if cleared >= float_bottom_left {
-                    next_left_float_x = content_x;
-                }
-                if cleared >= float_bottom_right {
-                    next_right_float_right = content_x + content_width;
-                }
-            }
-
-            // The cursor at this point already includes prev_margin_bottom from
-            // the previous in-flow child's tail. Subtracting `(sum - combined)`
-            // collapses it against the next margin-top before the child uses
-            // the cursor as its own starting position.
-            let next_margin_top = length_value(child, "margin-top", content_width).unwrap_or(0.0);
-            let combined = collapse_margins(prev_margin_bottom, next_margin_top);
-            child_cursor_y += combined - (prev_margin_bottom + next_margin_top);
-            let laid_out = layout_node(child, content_x, &mut child_cursor_y, content_width);
-            prev_margin_bottom = laid_out.dimensions.margin.bottom;
-            children.push(laid_out);
-        }
-        // Parent height needs to cover both the in-flow cursor and the
-        // tallest float — without this, floats would spill below the parent's
-        // background.
-        let in_flow_height = child_height(node, content_y, child_cursor_y);
-        let float_height = (float_bottom_left.max(float_bottom_right) - content_y).max(0.0);
-        (children, in_flow_height.max(float_height))
-    };
-
-    // Percent-on-height technically resolves against the parent's height in CSS, but the
-    // layout walk does not yet track parent height (heights are computed bottom-up). For
-    // now we use parent_width as the base, which is wrong only for explicit `height: x%`
-    // declarations — none of our toy pages exercise that path.
-    let content_height = length_value(node, "height", parent_width)
-        .unwrap_or_else(|| auto_content_height.max(intrinsic_height(node)));
-
-    let dimensions = Dimensions {
-        content: Rect {
-            x: content_x,
-            y: content_y,
-            width: content_width,
-            height: content_height,
-        },
-        padding,
-        border,
-        margin,
-    };
-
-    // Sibling cursor advances based on the *unoffset* outer bottom: a relative
-    // element only shifts its own subtree, never its in-flow neighbors.
-    *cursor_y = content_y + content_height + padding.bottom + border.bottom + margin.bottom;
-
-    let mut layout_box = LayoutBox {
-        box_type: container_box_type(node),
-        dimensions,
-        children,
-    };
-    apply_relative_offset(&mut layout_box, node, parent_width);
-    layout_box
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FlexDirection {
-    Row,
-    Column,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum JustifyContent {
-    FlexStart,
-    Center,
-    FlexEnd,
-    SpaceBetween,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AlignItems {
-    Stretch,
-    FlexStart,
-    Center,
-    FlexEnd,
-}
-
-fn layout_flex_children(
-    container: &StyledNode,
-    children: &[StyledNode],
-    content_x: f32,
-    content_y: f32,
-    content_width: f32,
-) -> (Vec<LayoutBox>, f32) {
-    // Two-pass placement. Pass 1: lay out every in-flow item at the container's
-    // content origin so we can measure each item's outer main/cross size
-    // without committing to a final position. Pass 2: read justify-content
-    // (main axis) and align-items (cross axis), shift each item by its
-    // computed offset on each axis. For align-items: stretch, items without
-    // an explicit cross size also have their content cross size grown to fill
-    // the container.
-    //
-    // Sizing comes from the inline-block path (explicit width wins, otherwise
-    // shrink-to-fit). Margin collapse and floats are skipped on flex items
-    // per spec.
-    let direction = flex_direction(container);
-    let justify = justify_content(container);
-    let align = align_items(container);
-
-    let mut boxes: Vec<LayoutBox> = Vec::with_capacity(children.len());
-    // Track (boxes index, source styled node) for each in-flow item so pass 2
-    // can read the styled node again to decide whether stretch should grow
-    // the item.
-    let mut in_flow: Vec<(usize, &StyledNode)> = Vec::new();
-
-    for child in children {
-        if is_out_of_flow(child) {
-            // Static-position approximation, same trick as inline flow: drop
-            // the absolute child at the container's content origin and let
-            // the absolute reposition pass at the tree root move it.
-            let abs_box = layout_inline_or_inline_block(child, content_x, content_y, content_width);
-            boxes.push(abs_box);
-            continue;
-        }
-        in_flow.push((boxes.len(), child));
-        boxes.push(layout_flex_item(child, content_x, content_y, content_width));
-    }
-
-    // Apply explicit `flex-basis: <length>` as a content-axis override on
-    // top of pass-1 sizing. CSS spec: flex-basis takes precedence over the
-    // item's `width`/`height` along the main axis, so the override happens
-    // after pass 1 even though it would also have been valid to substitute
-    // the basis upstream.
-    for &(i, child) in &in_flow {
-        if let Some(basis) = flex_basis_content_main(child) {
-            force_item_content_main(&mut boxes[i], basis, direction);
-        }
-    }
-
-    let total_basis: f32 = in_flow
-        .iter()
-        .map(|&(i, _)| main_axis_outer(&boxes[i], direction))
-        .sum();
-
-    // Container's main-axis content size. Row direction is anchored to the
-    // already-resolved content_width. Column direction needs an explicit
-    // height for `justify-content`/grow to have any leftover to distribute —
-    // height: auto falls back to total_basis so free space is zero.
-    let container_main_size = match direction {
-        FlexDirection::Row => content_width,
-        FlexDirection::Column => {
-            length_value(container, "height", content_width).unwrap_or(total_basis)
-        }
-    };
-
-    // Distribute free space along the main axis. Positive free space goes to
-    // flex-grow (proportional to grow weight). Negative free space goes to
-    // flex-shrink (proportional to shrink weight × basis, per spec, so larger
-    // items absorb more shrinkage). Items with zero weight are skipped on
-    // their respective passes.
-    let free = container_main_size - total_basis;
-    if free > 0.0 {
-        let total_grow: f32 = in_flow.iter().map(|&(_, child)| flex_grow(child)).sum();
-        if total_grow > 0.0 {
-            for &(i, child) in &in_flow {
-                let grow = flex_grow(child);
-                if grow > 0.0 {
-                    let delta = free * grow / total_grow;
-                    grow_item_main(&mut boxes[i], delta, direction);
-                }
-            }
-        }
-    } else if free < 0.0 {
-        let total_shrink_weight: f32 = in_flow
-            .iter()
-            .map(|&(i, child)| flex_shrink(child) * main_axis_outer(&boxes[i], direction))
-            .sum();
-        if total_shrink_weight > 0.0 {
-            for &(i, child) in &in_flow {
-                let weight = flex_shrink(child) * main_axis_outer(&boxes[i], direction);
-                if weight > 0.0 {
-                    // free is negative; delta is the (negative) size delta to
-                    // apply to this item, so larger weights shrink more.
-                    let delta = free * weight / total_shrink_weight;
-                    grow_item_main(&mut boxes[i], delta, direction);
-                }
-            }
-        }
-    }
-
-    // After grow/shrink, total_used reflects the actually-occupied main size.
-    // When grow consumed all positive free space (or shrink absorbed all
-    // negative free space) the leftover is zero and justify-content has
-    // nothing to distribute.
-    let total_used: f32 = in_flow
-        .iter()
-        .map(|&(i, _)| main_axis_outer(&boxes[i], direction))
-        .sum();
-    let leftover_main = (container_main_size - total_used).max(0.0);
-    let item_count = in_flow.len();
-
-    let (start_offset, between_gap) = match justify {
-        JustifyContent::FlexStart => (0.0, 0.0),
-        JustifyContent::Center => (leftover_main / 2.0, 0.0),
-        JustifyContent::FlexEnd => (leftover_main, 0.0),
-        JustifyContent::SpaceBetween if item_count > 1 => {
-            (0.0, leftover_main / (item_count - 1) as f32)
-        }
-        // Single-item space-between collapses to flex-start (no gap to distribute).
-        JustifyContent::SpaceBetween => (0.0, 0.0),
-    };
-
-    // Container's cross size — needed before pass 2 so each item knows what
-    // to align against. For row direction, height may be explicit or fall back
-    // to the tallest item's outer cross size; for column direction the cross
-    // axis is width, which is always already resolved.
-    let max_cross_natural: f32 = in_flow
-        .iter()
-        .map(|&(i, _)| cross_axis_outer(&boxes[i], direction))
-        .fold(0.0, f32::max);
-    let container_cross_size = match direction {
-        FlexDirection::Row => {
-            length_value(container, "height", content_width).unwrap_or(max_cross_natural)
-        }
-        FlexDirection::Column => content_width,
-    };
-
-    let mut cursor = start_offset;
-    for (idx_in_flow, &(i, child)) in in_flow.iter().enumerate() {
-        // Stretch grows the item's content cross size to fill the container,
-        // but only when the item didn't declare its own cross size — explicit
-        // sizes always win over stretch per spec. The growth happens before
-        // we read cross_axis_outer below so the post-stretch height feeds the
-        // alignment math correctly.
-        if matches!(align, AlignItems::Stretch) && !has_explicit_cross_size(child, direction) {
-            stretch_item_to_cross(&mut boxes[i], container_cross_size, direction);
-        }
-
-        let main_size = main_axis_outer(&boxes[i], direction);
-        let cross_size = cross_axis_outer(&boxes[i], direction);
-        let cross_offset = match align {
-            AlignItems::FlexStart | AlignItems::Stretch => 0.0,
-            AlignItems::Center => ((container_cross_size - cross_size) / 2.0).max(0.0),
-            AlignItems::FlexEnd => (container_cross_size - cross_size).max(0.0),
-        };
-
-        match direction {
-            FlexDirection::Row => shift_layout_subtree(&mut boxes[i], cursor, cross_offset),
-            FlexDirection::Column => shift_layout_subtree(&mut boxes[i], cross_offset, cursor),
-        }
-        cursor += main_size;
-        if idx_in_flow + 1 < item_count {
-            cursor += between_gap;
-        }
-    }
-
-    // Auto height for the container depends on direction:
-    // - row:    cross axis = height, so it grows to the tallest item
-    //           (post-stretch). When the container has explicit height, that
-    //           wins anyway in layout_node — this fallback only matters in the
-    //           auto case, where container_cross_size == max_cross_natural.
-    // - column: main axis  = height, so it grows to the cumulative cursor.
-    let auto_content_height = match direction {
-        FlexDirection::Row => container_cross_size,
-        FlexDirection::Column => cursor,
-    };
-    (boxes, auto_content_height)
-}
-
-fn stretch_item_to_cross(
-    layout_box: &mut LayoutBox,
-    container_cross_size: f32,
-    direction: FlexDirection,
-) {
-    // Grow the item's content rect on the cross axis so its outer size matches
-    // the container's cross. Margins/borders/padding stay as declared, so the
-    // delta lands on content size only. Children that already laid out inside
-    // do not move — they stay at their original positions and any gained
-    // space appears as background area at the trailing edge, which is the
-    // simplest reasonable visual approximation of stretch for a toy renderer.
-    let outer = outer_rect(layout_box);
-    let current_outer_cross = match direction {
-        FlexDirection::Row => outer.height,
-        FlexDirection::Column => outer.width,
-    };
-    if current_outer_cross >= container_cross_size {
-        return;
-    }
-    let delta = container_cross_size - current_outer_cross;
-    match direction {
-        FlexDirection::Row => layout_box.dimensions.content.height += delta,
-        FlexDirection::Column => layout_box.dimensions.content.width += delta,
-    }
-}
-
-fn align_items(node: &StyledNode) -> AlignItems {
-    match node.value("align-items") {
-        Some(Value::Keyword(keyword)) if keyword == "flex-start" => AlignItems::FlexStart,
-        Some(Value::Keyword(keyword)) if keyword == "center" => AlignItems::Center,
-        Some(Value::Keyword(keyword)) if keyword == "flex-end" => AlignItems::FlexEnd,
-        Some(Value::Keyword(keyword)) if keyword == "stretch" => AlignItems::Stretch,
-        // CSS default for align-items is `stretch`.
-        _ => AlignItems::Stretch,
-    }
-}
-
-fn has_explicit_cross_size(node: &StyledNode, direction: FlexDirection) -> bool {
-    let prop = match direction {
-        FlexDirection::Row => "height",
-        FlexDirection::Column => "width",
-    };
-    matches!(node.value(prop), Some(Value::Length(_, _)))
-}
-
-fn flex_grow(node: &StyledNode) -> f32 {
-    // CSS default is 0 — items don't grow unless the author opts in.
-    match node.value("flex-grow") {
-        Some(Value::Number(value)) if *value >= 0.0 => *value,
-        _ => 0.0,
-    }
-}
-
-fn flex_shrink(node: &StyledNode) -> f32 {
-    // CSS default is 1 — items shrink to fit by default.
-    match node.value("flex-shrink") {
-        Some(Value::Number(value)) if *value >= 0.0 => *value,
-        _ => 1.0,
-    }
-}
-
-fn flex_basis_content_main(node: &StyledNode) -> Option<f32> {
-    // Only the explicit `<length>` form drives the content-axis override.
-    // `auto` (default) leaves layout_flex_item's width/shrink-to-fit logic in
-    // charge, and percent / keyword forms are not yet implemented.
-    match node.value("flex-basis") {
-        Some(Value::Length(value, Unit::Px)) => Some(*value),
-        _ => None,
-    }
-}
-
-fn force_item_content_main(
-    layout_box: &mut LayoutBox,
-    content_main: f32,
-    direction: FlexDirection,
-) {
-    let value = content_main.max(0.0);
-    match direction {
-        FlexDirection::Row => layout_box.dimensions.content.width = value,
-        FlexDirection::Column => layout_box.dimensions.content.height = value,
-    }
-}
-
-fn grow_item_main(layout_box: &mut LayoutBox, delta: f32, direction: FlexDirection) {
-    // Resize is post-hoc on the item's content rect — children that were laid
-    // out in pass 1 keep their original positions, so any extra space appears
-    // as background area at the trailing edge. This is the same simplification
-    // already used by stretch_item_to_cross.
-    match direction {
-        FlexDirection::Row => {
-            layout_box.dimensions.content.width =
-                (layout_box.dimensions.content.width + delta).max(0.0);
-        }
-        FlexDirection::Column => {
-            layout_box.dimensions.content.height =
-                (layout_box.dimensions.content.height + delta).max(0.0);
-        }
-    }
-}
-
-fn main_axis_outer(layout_box: &LayoutBox, direction: FlexDirection) -> f32 {
-    let outer = outer_rect(layout_box);
-    match direction {
-        FlexDirection::Row => outer.width,
-        FlexDirection::Column => outer.height,
-    }
-}
-
-fn cross_axis_outer(layout_box: &LayoutBox, direction: FlexDirection) -> f32 {
-    let outer = outer_rect(layout_box);
-    match direction {
-        FlexDirection::Row => outer.height,
-        FlexDirection::Column => outer.width,
-    }
-}
-
-fn layout_flex_item(node: &StyledNode, x: f32, y: f32, available_width: f32) -> LayoutBox {
-    // Flex items are block-level boxes from the inside (their own children
-    // still lay out as block/inline/flex), but on the outside they get
-    // shrink-to-fit sizing rather than stretching to fill the parent. The
-    // inline-block path already implements exactly that sizing rule, so we
-    // reuse it directly.
-    layout_inline_block_node(node, x, y, available_width)
-}
-
-fn is_flex_container(node: &StyledNode) -> bool {
-    matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "flex")
-}
-
-fn is_grid_container(node: &StyledNode) -> bool {
-    matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "grid")
-}
-
-fn container_box_type(node: &StyledNode) -> BoxType {
+pub(super) fn container_box_type(node: &StyledNode) -> BoxType {
     if is_flex_container(node) {
         BoxType::FlexNode(node.clone())
     } else if is_grid_container(node) {
@@ -739,924 +238,8 @@ fn container_box_type(node: &StyledNode) -> BoxType {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct GridArea {
-    row_start: usize,
-    row_end: usize, // exclusive
-    col_start: usize,
-    col_end: usize, // exclusive
-}
 
-#[derive(Debug, Clone, Copy)]
-struct AxisHint {
-    explicit_start: Option<usize>, // 0-indexed cell
-    span: usize,                   // always >= 1
-}
-
-fn layout_grid_children<'a>(
-    container: &'a StyledNode,
-    children: &'a [StyledNode],
-    content_x: f32,
-    content_y: f32,
-    content_width: f32,
-) -> (Vec<LayoutBox>, f32) {
-    // Four-pass placement.
-    //   Pass 0: assign each in-flow item a GridArea via grid-column/grid-row
-    //           (when explicit) plus row-major auto-flow filling around the
-    //           explicit cells. Items spanning multiple cells claim a
-    //           rectangular block. Then lay each item out at the container
-    //           origin to measure natural outer widths.
-    //   Pass 1: resolve column tracks. Auto tracks pick the per-column max
-    //           natural width (spanned items contribute to col_start only —
-    //           a known toy simplification of spec's "distribute across
-    //           spanned tracks" rule).
-    //   Pass 2: shift each item to its column-start track and grow its
-    //           content to fill the spanned columns when no explicit width
-    //           was declared.
-    //   Pass 3: resolve row heights via grid-template-rows + natural per-row
-    //           max. Shift each item down by its row-start offset and grow
-    //           content height to fill spanned rows when no explicit height.
-    //
-    // Out-of-flow children skip the grid entirely — they sit at the container
-    // origin during pass 0 and the absolute reposition pass at the tree root
-    // moves them to their containing block.
-    let track_decls = match container.value("grid-template-columns") {
-        Some(Value::TrackList(tracks)) if !tracks.is_empty() => Some(tracks.as_slice()),
-        _ => None,
-    };
-    let n_cols = track_decls.map(|t| t.len()).unwrap_or(1).max(1);
-
-    let mut boxes: Vec<LayoutBox> = Vec::with_capacity(children.len());
-    // For each in-flow item: its area + boxes index + source styled node.
-    let mut cell_assignments: Vec<(GridArea, usize, &'a StyledNode)> = Vec::new();
-    let mut occupancy = Occupancy::new(n_cols);
-    let mut cursor = (0usize, 0usize);
-
-    for child in children {
-        if is_out_of_flow(child) {
-            let abs_box = layout_inline_or_inline_block(child, content_x, content_y, content_width);
-            boxes.push(abs_box);
-            continue;
-        }
-        let col_hint = axis_hint_from(child.value("grid-column"));
-        let row_hint = axis_hint_from(child.value("grid-row"));
-        // grid-area: <name> wins over both auto-flow and grid-column/-row when
-        // the container declares a matching template-area rectangle.
-        let template_area = grid_area_from_template(container, child);
-        let area = if let Some(rect) = template_area {
-            occupancy.mark(
-                rect.row_start,
-                rect.row_end - rect.row_start,
-                rect.col_start,
-                rect.col_end - rect.col_start,
-            );
-            rect
-        } else {
-            place_grid_item(&mut occupancy, &mut cursor, n_cols, col_hint, row_hint)
-        };
-        let box_idx = boxes.len();
-        cell_assignments.push((area, box_idx, child));
-        // Pre-pass: lay out at the container origin so we can read the
-        // item's natural outer width before knowing its track width.
-        boxes.push(layout_inline_block_node(
-            child,
-            content_x,
-            content_y,
-            content_width,
-        ));
-    }
-
-    // Per-column natural max outer width — feeds auto track sizing. Spanned
-    // items contribute to col_start only (toy simplification).
-    let mut natural_max_per_col = vec![0.0_f32; n_cols];
-    for &(area, box_idx, _) in &cell_assignments {
-        let w = outer_rect(&boxes[box_idx]).width;
-        if w > natural_max_per_col[area.col_start] {
-            natural_max_per_col[area.col_start] = w;
-        }
-    }
-
-    let columns = resolve_grid_columns(track_decls, content_width, &natural_max_per_col);
-    let mut col_offsets: Vec<f32> = Vec::with_capacity(columns.len());
-    let mut acc = 0.0;
-    for w in &columns {
-        col_offsets.push(acc);
-        acc += w;
-    }
-
-    // Pass 2: shift each item to its track-start x and grow content to fill
-    // the spanned columns (sum of widths from col_start..col_end).
-    for &(area, box_idx, child) in &cell_assignments {
-        let target_outer_x = content_x + col_offsets[area.col_start];
-        let current_outer_x = outer_rect(&boxes[box_idx]).x;
-        let dx = target_outer_x - current_outer_x;
-        if dx != 0.0 {
-            shift_layout_subtree(&mut boxes[box_idx], dx, 0.0);
-        }
-        if !matches!(child.value("width"), Some(Value::Length(_, _))) {
-            let span_width: f32 = columns[area.col_start..area.col_end.min(columns.len())]
-                .iter()
-                .sum();
-            let edges =
-                outer_rect(&boxes[box_idx]).width - boxes[box_idx].dimensions.content.width;
-            let target = (span_width - edges).max(0.0);
-            if boxes[box_idx].dimensions.content.width < target {
-                boxes[box_idx].dimensions.content.width = target;
-            }
-        }
-    }
-
-    // Pass 3: natural row heights = max(item outer height) per row, with
-    // spanned items contributing to row_start only.
-    let n_rows = cell_assignments
-        .iter()
-        .map(|&(area, _, _)| area.row_end)
-        .max()
-        .unwrap_or(0);
-    let mut natural_row_heights = vec![0.0_f32; n_rows];
-    for &(area, box_idx, _) in &cell_assignments {
-        let h = outer_rect(&boxes[box_idx]).height;
-        if h > natural_row_heights[area.row_start] {
-            natural_row_heights[area.row_start] = h;
-        }
-    }
-
-    let row_track_decls = match container.value("grid-template-rows") {
-        Some(Value::TrackList(tracks)) if !tracks.is_empty() => Some(tracks.as_slice()),
-        _ => None,
-    };
-    let container_explicit_height = length_value(container, "height", content_width);
-    let row_heights = resolve_grid_rows(
-        row_track_decls,
-        container_explicit_height,
-        &natural_row_heights,
-    );
-
-    let mut row_offsets: Vec<f32> = Vec::with_capacity(n_rows);
-    let mut acc = 0.0;
-    for h in &row_heights {
-        row_offsets.push(acc);
-        acc += h;
-    }
-    for &(area, box_idx, child) in &cell_assignments {
-        let dy = row_offsets[area.row_start];
-        if dy != 0.0 {
-            shift_layout_subtree(&mut boxes[box_idx], 0.0, dy);
-        }
-        // Fill content to span the row range when no explicit height. This
-        // covers single-row and multi-row spans uniformly: an item without
-        // its own height takes the row's resolved height (or the sum across
-        // a multi-row span). Items with explicit height keep their declared
-        // size — this matches the column-track post-hoc fill on the main
-        // axis.
-        if !matches!(child.value("height"), Some(Value::Length(_, _))) {
-            let span_height: f32 = row_heights[area.row_start..area.row_end.min(row_heights.len())]
-                .iter()
-                .sum();
-            let edges = outer_rect(&boxes[box_idx]).height
-                - boxes[box_idx].dimensions.content.height;
-            let target = (span_height - edges).max(0.0);
-            if boxes[box_idx].dimensions.content.height < target {
-                boxes[box_idx].dimensions.content.height = target;
-            }
-        }
-    }
-
-    let auto_content_height: f32 = row_heights.iter().sum();
-    (boxes, auto_content_height)
-}
-
-fn grid_area_from_template(container: &StyledNode, item: &StyledNode) -> Option<GridArea> {
-    let area_name = match item.value("grid-area") {
-        Some(Value::Keyword(name)) => name.as_str(),
-        _ => return None,
-    };
-    let rows = match container.value("grid-template-areas") {
-        Some(Value::TemplateAreas(rows)) => rows,
-        _ => return None,
-    };
-    // Sweep the map and build a bounding rectangle for cells matching the
-    // area name. CSS spec actually requires the area to be rectangular and
-    // contiguous; toy is lenient — we just take the bbox even if the named
-    // cells are non-contiguous.
-    let mut min_row: Option<usize> = None;
-    let mut max_row: usize = 0;
-    let mut min_col: Option<usize> = None;
-    let mut max_col: usize = 0;
-    for (r, row) in rows.iter().enumerate() {
-        for (c, cell) in row.iter().enumerate() {
-            if cell.as_deref() == Some(area_name) {
-                min_row = Some(min_row.map_or(r, |m| m.min(r)));
-                if r > max_row {
-                    max_row = r;
-                }
-                min_col = Some(min_col.map_or(c, |m| m.min(c)));
-                if c > max_col {
-                    max_col = c;
-                }
-            }
-        }
-    }
-    Some(GridArea {
-        row_start: min_row?,
-        row_end: max_row + 1,
-        col_start: min_col?,
-        col_end: max_col + 1,
-    })
-}
-
-fn axis_hint_from(value: Option<&Value>) -> AxisHint {
-    let placement = match value {
-        Some(Value::GridPlacement(p)) => *p,
-        _ => {
-            return AxisHint {
-                explicit_start: None,
-                span: 1,
-            };
-        }
-    };
-    match (placement.start, placement.end) {
-        (GridLine::Index(s), GridLine::Index(e)) if e > s => AxisHint {
-            explicit_start: Some((s - 1) as usize),
-            span: (e - s) as usize,
-        },
-        (GridLine::Index(s), GridLine::Span(n)) => AxisHint {
-            explicit_start: Some((s - 1) as usize),
-            span: n.max(1) as usize,
-        },
-        (GridLine::Index(s), GridLine::Auto) => AxisHint {
-            explicit_start: Some((s - 1) as usize),
-            span: 1,
-        },
-        // `span <n>` as the start side: no explicit anchor, but the item
-        // claims n cells when auto-placed.
-        (GridLine::Span(n), _) => AxisHint {
-            explicit_start: None,
-            span: n.max(1) as usize,
-        },
-        // Anything else (e.g. `auto / 3` — end-only) falls back to a
-        // single-cell auto placement. Toy doesn't try to honor end-only
-        // line constraints because they need a back-search through the
-        // already-placed items.
-        _ => AxisHint {
-            explicit_start: None,
-            span: 1,
-        },
-    }
-}
-
-#[derive(Debug)]
-struct Occupancy {
-    cells: Vec<Vec<bool>>,
-    n_cols: usize,
-}
-
-impl Occupancy {
-    fn new(n_cols: usize) -> Self {
-        Self {
-            cells: Vec::new(),
-            n_cols,
-        }
-    }
-
-    fn ensure_rows(&mut self, target_rows: usize) {
-        while self.cells.len() < target_rows {
-            self.cells.push(vec![false; self.n_cols]);
-        }
-    }
-
-    fn is_free(&self, row: usize, row_span: usize, col: usize, col_span: usize) -> bool {
-        for r in row..row + row_span {
-            for c in col..col + col_span {
-                if r < self.cells.len() && c < self.n_cols && self.cells[r][c] {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    fn mark(&mut self, row: usize, row_span: usize, col: usize, col_span: usize) {
-        self.ensure_rows(row + row_span);
-        for r in row..row + row_span {
-            for c in col..col + col_span {
-                if c < self.n_cols {
-                    self.cells[r][c] = true;
-                }
-            }
-        }
-    }
-}
-
-fn place_grid_item(
-    occupancy: &mut Occupancy,
-    cursor: &mut (usize, usize),
-    n_cols: usize,
-    col_hint: AxisHint,
-    row_hint: AxisHint,
-) -> GridArea {
-    // Clamp spans to the declared track count: a cell range overflowing the
-    // explicit grid would create implicit tracks per spec, but the toy
-    // ignores those.
-    let col_span = col_hint.span.clamp(1, n_cols.max(1));
-    let row_span = row_hint.span.max(1);
-
-    let (row_s, col_s) = match (row_hint.explicit_start, col_hint.explicit_start) {
-        // Both axes anchored — drop the item exactly at (rs, cs), clamped.
-        (Some(rs), Some(cs)) => {
-            let cs = cs.min(n_cols.saturating_sub(col_span));
-            (rs, cs)
-        }
-        // Column anchored — scan rows for one where the item's spanned
-        // columns are all free for `row_span` rows.
-        (None, Some(cs)) => {
-            let cs = cs.min(n_cols.saturating_sub(col_span));
-            let mut row = 0usize;
-            while !occupancy.is_free(row, row_span, cs, col_span) {
-                row += 1;
-            }
-            (row, cs)
-        }
-        // Row anchored — scan columns at that row for the first free run.
-        (Some(rs), None) => {
-            let mut col = 0usize;
-            while col + col_span <= n_cols && !occupancy.is_free(rs, row_span, col, col_span) {
-                col += 1;
-            }
-            // Items wider than n_cols overflow at col 0 (toy fallback).
-            let col = col.min(n_cols.saturating_sub(col_span));
-            (rs, col)
-        }
-        // No anchors — walk the auto-flow cursor row-major, wrapping when
-        // we'd exceed n_cols and skipping cells already occupied by the
-        // explicit-placed items above.
-        (None, None) => {
-            let (mut row, mut col) = *cursor;
-            loop {
-                if col + col_span > n_cols {
-                    row += 1;
-                    col = 0;
-                    continue;
-                }
-                if occupancy.is_free(row, row_span, col, col_span) {
-                    break;
-                }
-                col += 1;
-            }
-            *cursor = (row, col + col_span);
-            if cursor.1 >= n_cols {
-                cursor.0 += 1;
-                cursor.1 = 0;
-            }
-            (row, col)
-        }
-    };
-
-    occupancy.mark(row_s, row_span, col_s, col_span);
-    GridArea {
-        row_start: row_s,
-        row_end: row_s + row_span,
-        col_start: col_s,
-        col_end: col_s + col_span,
-    }
-}
-
-fn resolve_grid_rows(
-    tracks: Option<&[TrackSize]>,
-    container_height: Option<f32>,
-    natural_row_heights: &[f32],
-) -> Vec<f32> {
-    // Rows differ from columns in two ways:
-    //   - Container main-axis size (height) is often `auto`. fr rows can only
-    //     distribute leftover when the container has an explicit height; under
-    //     auto height they collapse to zero (matching the flex-column rule).
-    //   - The template can be shorter than the implicit row count (more
-    //     items than declared rows). Trailing rows beyond the template fall
-    //     back to natural max — the same auto-fallback that took row sizing
-    //     before this commit.
-    let template = tracks.unwrap_or(&[]);
-    let n_rows = natural_row_heights.len();
-    if n_rows == 0 {
-        return Vec::new();
-    }
-
-    let mut sizes = vec![0.0_f32; n_rows];
-    let mut total_fr = 0.0_f32;
-    let mut fixed_total = 0.0_f32;
-    for (i, &natural_h) in natural_row_heights.iter().enumerate() {
-        if let Some(track) = template.get(i) {
-            match track {
-                TrackSize::Length(value, Unit::Px) => {
-                    sizes[i] = *value;
-                    fixed_total += *value;
-                }
-                TrackSize::Length(value, Unit::Percent) => {
-                    let resolved = *value / 100.0 * container_height.unwrap_or(0.0);
-                    sizes[i] = resolved;
-                    fixed_total += resolved;
-                }
-                TrackSize::Length(value, _) => {
-                    sizes[i] = *value;
-                    fixed_total += *value;
-                }
-                TrackSize::Auto => {
-                    sizes[i] = natural_h;
-                    fixed_total += natural_h;
-                }
-                TrackSize::Fraction(weight) => {
-                    total_fr += *weight;
-                    // Filled in below if container_height is known.
-                }
-            }
-        } else {
-            sizes[i] = natural_h;
-            fixed_total += natural_h;
-        }
-    }
-
-    if total_fr > 0.0
-        && let Some(container_h) = container_height
-    {
-        let free = (container_h - fixed_total).max(0.0);
-        for (i, track) in template.iter().enumerate().take(n_rows) {
-            if let TrackSize::Fraction(weight) = track {
-                sizes[i] = free * *weight / total_fr;
-            }
-        }
-    }
-
-    sizes
-}
-
-fn resolve_grid_columns(
-    tracks: Option<&[TrackSize]>,
-    content_width: f32,
-    natural_max_per_col: &[f32],
-) -> Vec<f32> {
-    // Resolves `grid-template-columns` to a Vec of pixel widths. Length and
-    // Auto tracks contribute fixed budget; Fraction tracks split the leftover
-    // proportionally to their weight, like flex-grow. With no declaration,
-    // behave like a single full-width track so a bare `display: grid` still
-    // produces sensible single-column output.
-    let tracks = match tracks {
-        Some(t) if !t.is_empty() => t,
-        _ => return vec![content_width],
-    };
-
-    let mut fixed_total = 0.0_f32;
-    let mut total_fr = 0.0_f32;
-    for (i, track) in tracks.iter().enumerate() {
-        match track {
-            TrackSize::Length(value, Unit::Px) => fixed_total += *value,
-            TrackSize::Length(value, Unit::Percent) => {
-                fixed_total += *value / 100.0 * content_width;
-            }
-            // em/rem are resolved to Px during style; this fallback only
-            // matters if a future code path bypasses style-time resolution.
-            TrackSize::Length(value, _) => fixed_total += *value,
-            TrackSize::Auto => fixed_total += natural_max_per_col.get(i).copied().unwrap_or(0.0),
-            TrackSize::Fraction(weight) => total_fr += *weight,
-        }
-    }
-    let free = (content_width - fixed_total).max(0.0);
-
-    tracks
-        .iter()
-        .enumerate()
-        .map(|(i, track)| match track {
-            TrackSize::Length(value, Unit::Px) => *value,
-            TrackSize::Length(value, Unit::Percent) => *value / 100.0 * content_width,
-            TrackSize::Length(value, _) => *value,
-            TrackSize::Auto => natural_max_per_col.get(i).copied().unwrap_or(0.0),
-            TrackSize::Fraction(weight) if total_fr > 0.0 => free * *weight / total_fr,
-            TrackSize::Fraction(_) => 0.0,
-        })
-        .collect()
-}
-
-fn flex_direction(node: &StyledNode) -> FlexDirection {
-    match node.value("flex-direction") {
-        Some(Value::Keyword(keyword)) if keyword == "column" => FlexDirection::Column,
-        _ => FlexDirection::Row,
-    }
-}
-
-fn justify_content(node: &StyledNode) -> JustifyContent {
-    match node.value("justify-content") {
-        Some(Value::Keyword(keyword)) if keyword == "center" => JustifyContent::Center,
-        Some(Value::Keyword(keyword)) if keyword == "flex-end" => JustifyContent::FlexEnd,
-        Some(Value::Keyword(keyword)) if keyword == "space-between" => {
-            JustifyContent::SpaceBetween
-        }
-        _ => JustifyContent::FlexStart,
-    }
-}
-
-fn layout_inline_children(
-    children: &[StyledNode],
-    content_x: f32,
-    content_y: f32,
-    content_width: f32,
-    align: InlineAlign,
-) -> (Vec<LayoutBox>, f32) {
-    // First pass: pack children into lines using their measured widths so we can know
-    // each line's total width before placing any box. The placement pass uses that
-    // information to offset the line for non-left alignments. Percent-based widths on
-    // inline children resolve against `content_width`, which is the parent's content box.
-    let mut lines: Vec<Vec<usize>> = Vec::new();
-    let mut line_widths: Vec<f32> = Vec::new();
-    let mut current_line: Vec<usize> = Vec::new();
-    let mut current_width: f32 = 0.0;
-
-    for (idx, child) in children.iter().enumerate() {
-        // Absolute children are out of flow — they neither contribute to line
-        // width nor cause line breaks. They get laid out separately below.
-        if is_out_of_flow(child) {
-            continue;
-        }
-        let child_w = inline_total_size(child, content_width).width;
-        if !current_line.is_empty() && current_width + child_w > content_width {
-            lines.push(std::mem::take(&mut current_line));
-            line_widths.push(current_width);
-            current_width = 0.0;
-        }
-        current_line.push(idx);
-        current_width += child_w;
-    }
-    if !current_line.is_empty() {
-        lines.push(current_line);
-        line_widths.push(current_width);
-    }
-
-    // Second pass: place each line at its alignment-corrected offset. We read the
-    // actual outer height from the laid-out box (rather than re-measuring) so
-    // inline-block children, whose auto height is only known after their own
-    // layout pass, contribute the right line height here.
-    let mut boxes = Vec::new();
-    let mut line_y = content_y;
-    let mut max_bottom = content_y;
-
-    for (line_idx, line_children) in lines.iter().enumerate() {
-        let line_width = line_widths[line_idx];
-        let line_offset = match align {
-            InlineAlign::Left => 0.0,
-            InlineAlign::Center => ((content_width - line_width) / 2.0).max(0.0),
-            InlineAlign::Right => (content_width - line_width).max(0.0),
-        };
-        let mut line_x = content_x + line_offset;
-        let mut line_height = 0.0f32;
-        for &child_idx in line_children {
-            let child = &children[child_idx];
-            let child_box = layout_inline_or_inline_block(child, line_x, line_y, content_width);
-            let outer = outer_rect(&child_box);
-            line_x += outer.width;
-            line_height = line_height.max(outer.height);
-            boxes.push(child_box);
-        }
-        max_bottom = max_bottom.max(line_y + line_height);
-        line_y += line_height;
-    }
-
-    // Lay out absolute children at the parent's content origin (their static
-    // position approximation). Pass 2 will replace this with the offsets
-    // resolved against their containing block.
-    for child in children.iter().filter(|child| is_out_of_flow(child)) {
-        let abs_box = layout_inline_or_inline_block(child, content_x, content_y, content_width);
-        boxes.push(abs_box);
-    }
-
-    (boxes, max_bottom - content_y)
-}
-
-fn layout_inline_or_inline_block(
-    node: &StyledNode,
-    x: f32,
-    y: f32,
-    available_width: f32,
-) -> LayoutBox {
-    if is_inline_block(node) {
-        layout_inline_block_node(node, x, y, available_width)
-    } else {
-        layout_inline_node(node, x, y, available_width)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InlineAlign {
-    Left,
-    Center,
-    Right,
-}
-
-fn inline_align_for(node: &StyledNode) -> InlineAlign {
-    match node.value("text-align") {
-        Some(Value::Keyword(keyword)) if keyword == "center" => InlineAlign::Center,
-        Some(Value::Keyword(keyword)) if keyword == "right" => InlineAlign::Right,
-        _ => InlineAlign::Left,
-    }
-}
-
-fn layout_inline_node(node: &StyledNode, x: f32, y: f32, parent_width: f32) -> LayoutBox {
-    let margin = edge_sizes(node, "margin", parent_width);
-    let padding = edge_sizes(node, "padding", parent_width);
-    let border = edge_sizes(node, "border", parent_width);
-    let content_width = inline_content_width(node, parent_width);
-    let content_height = inline_content_height(node, parent_width);
-    let content_x = x + margin.left + border.left + padding.left;
-    let content_y = y + margin.top + border.top + padding.top;
-
-    // Nested inline children are positioned relative to their inline parent's content box,
-    // honoring text-align so labels inside an inline element (e.g. <a class="tile">) can
-    // be centered instead of always sticking to the left edge.
-    let children = if matches!(&node.node_type, NodeType::Element(element) if element.tag_name != "img")
-    {
-        let align = inline_align_for(node);
-        layout_inline_sequence_no_wrap(&node.children, content_x, content_y, content_width, align)
-    } else {
-        Vec::new()
-    };
-
-    let mut layout_box = LayoutBox {
-        box_type: BoxType::BlockNode(node.clone()),
-        dimensions: Dimensions {
-            content: Rect {
-                x: content_x,
-                y: content_y,
-                width: content_width,
-                height: content_height,
-            },
-            padding,
-            border,
-            margin,
-        },
-        children,
-    };
-    apply_relative_offset(&mut layout_box, node, parent_width);
-    layout_box
-}
-
-fn layout_inline_sequence_no_wrap(
-    children: &[StyledNode],
-    content_x: f32,
-    y: f32,
-    content_width: f32,
-    align: InlineAlign,
-) -> Vec<LayoutBox> {
-    // Sum widths first so we know how much horizontal slack the line has
-    // before placing boxes. Absolute children sit out of flow so they don't
-    // contribute to the line.
-    let total_width: f32 = children
-        .iter()
-        .filter(|child| !is_out_of_flow(child))
-        .map(|child| inline_total_size(child, content_width).width)
-        .sum();
-    let line_offset = match align {
-        InlineAlign::Left => 0.0,
-        InlineAlign::Center => ((content_width - total_width) / 2.0).max(0.0),
-        InlineAlign::Right => (content_width - total_width).max(0.0),
-    };
-
-    let mut cursor_x = content_x + line_offset;
-    let mut boxes = Vec::new();
-
-    for child in children {
-        if is_out_of_flow(child) {
-            // Static position approximation: at the parent's content origin.
-            // Pass 2 will move it once the containing block is known.
-            let abs_box = layout_inline_or_inline_block(child, content_x, y, content_width);
-            boxes.push(abs_box);
-            continue;
-        }
-        let child_box = layout_inline_or_inline_block(child, cursor_x, y, content_width);
-        cursor_x += outer_rect(&child_box).width;
-        boxes.push(child_box);
-    }
-
-    boxes
-}
-
-fn uses_inline_flow(node: &StyledNode) -> bool {
-    // Inline flow only kicks in when all children are inline-ish.
-    // Mixed block/inline trees still fall back to the simpler vertical block algorithm.
-    !node.children.is_empty() && node.children.iter().all(is_inline_node)
-}
-
-fn is_inline_node(node: &StyledNode) -> bool {
-    match node.value("display") {
-        Some(Value::Keyword(keyword)) if keyword == "block" => return false,
-        // inline-block participates in inline flow (sits on a line) but is sized
-        // and laid out internally like a block — that dispatch happens later.
-        Some(Value::Keyword(keyword)) if keyword == "inline" || keyword == "inline-block" => {
-            return true;
-        }
-        _ => {}
-    }
-
-    match &node.node_type {
-        NodeType::Text(_) => true,
-        // Keep the inline set small and predictable instead of trying to emulate full HTML layout.
-        NodeType::Element(element) => matches!(element.tag_name.as_str(), "a" | "span" | "img"),
-    }
-}
-
-fn is_inline_block(node: &StyledNode) -> bool {
-    matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "inline-block")
-}
-
-fn inline_total_size(node: &StyledNode, parent_width: f32) -> Rect {
-    if is_inline_block(node) {
-        return inline_block_outer_size(node, parent_width);
-    }
-    let margin = edge_sizes(node, "margin", parent_width);
-    let padding = edge_sizes(node, "padding", parent_width);
-    let border = edge_sizes(node, "border", parent_width);
-    let width = margin.left
-        + border.left
-        + padding.left
-        + inline_content_width(node, parent_width)
-        + padding.right
-        + border.right
-        + margin.right;
-    let height = margin.top
-        + border.top
-        + padding.top
-        + inline_content_height(node, parent_width)
-        + padding.bottom
-        + border.bottom
-        + margin.bottom;
-
-    Rect {
-        x: 0.0,
-        y: 0.0,
-        width,
-        height,
-    }
-}
-
-fn inline_block_outer_size(node: &StyledNode, available_width: f32) -> Rect {
-    // For line packing we only need an accurate width — height ends up being
-    // re-read from the laid-out box, so we approximate it from explicit
-    // height plus surrounding box edges.
-    let margin = edge_sizes(node, "margin", available_width);
-    let padding = edge_sizes(node, "padding", available_width);
-    let border = edge_sizes(node, "border", available_width);
-    let content_width = inline_block_resolved_width(node, available_width);
-    let content_height = length_value(node, "height", available_width).unwrap_or(0.0);
-    Rect {
-        x: 0.0,
-        y: 0.0,
-        width: margin.left
-            + border.left
-            + padding.left
-            + content_width
-            + padding.right
-            + border.right
-            + margin.right,
-        height: margin.top
-            + border.top
-            + padding.top
-            + content_height
-            + padding.bottom
-            + border.bottom
-            + margin.bottom,
-    }
-}
-
-fn inline_block_resolved_width(node: &StyledNode, available_width: f32) -> f32 {
-    length_value(node, "width", available_width)
-        .or_else(|| intrinsic_width(node))
-        .unwrap_or_else(|| inline_block_shrink_to_fit_width(node, available_width))
-}
-
-fn inline_block_shrink_to_fit_width(node: &StyledNode, available_width: f32) -> f32 {
-    // Toy shrink-to-fit: text uses approximate glyph width; element uses the
-    // sum of inline child widths, capped to the available content width so a
-    // long run still wraps rather than overflowing the container.
-    let natural = match &node.node_type {
-        NodeType::Text(text) => text.chars().count() as f32 * inline_char_width(node),
-        NodeType::Element(_) => node
-            .children
-            .iter()
-            .map(|child| inline_total_size(child, available_width).width)
-            .sum(),
-    };
-    natural.min(available_width)
-}
-
-fn layout_inline_block_node(node: &StyledNode, x: f32, y: f32, available_width: f32) -> LayoutBox {
-    // Inline-block ignores `margin: auto` (auto only collapses for in-flow
-    // blocks), so we just take the raw declared margins here.
-    let margin = edge_sizes(node, "margin", available_width);
-    let padding = edge_sizes(node, "padding", available_width);
-    let border = edge_sizes(node, "border", available_width);
-    let content_width = inline_block_resolved_width(node, available_width);
-
-    let content_x = x + margin.left + border.left + padding.left;
-    let content_y = y + margin.top + border.top + padding.top;
-
-    // Same dispatch as the regular block path with extra branches for flex
-    // and grid containers: dispatch to their respective placement algorithms
-    // first; else if every child is inline, run inline flow; otherwise stack
-    // block children top-to-bottom inside our content box.
-    let (children, auto_content_height) = if is_flex_container(node) {
-        layout_flex_children(node, &node.children, content_x, content_y, content_width)
-    } else if is_grid_container(node) {
-        layout_grid_children(node, &node.children, content_x, content_y, content_width)
-    } else if uses_inline_flow(node) {
-        let align = inline_align_for(node);
-        layout_inline_children(&node.children, content_x, content_y, content_width, align)
-    } else {
-        let mut child_cursor_y = content_y;
-        let children = node
-            .children
-            .iter()
-            .map(|child| layout_node(child, content_x, &mut child_cursor_y, content_width))
-            .collect::<Vec<_>>();
-        (children, child_height(node, content_y, child_cursor_y))
-    };
-
-    let content_height = length_value(node, "height", available_width)
-        .unwrap_or_else(|| auto_content_height.max(intrinsic_height(node)));
-
-    let mut layout_box = LayoutBox {
-        box_type: container_box_type(node),
-        dimensions: Dimensions {
-            content: Rect {
-                x: content_x,
-                y: content_y,
-                width: content_width,
-                height: content_height,
-            },
-            padding,
-            border,
-            margin,
-        },
-        children,
-    };
-    apply_relative_offset(&mut layout_box, node, available_width);
-    layout_box
-}
-
-fn inline_content_width(node: &StyledNode, parent_width: f32) -> f32 {
-    // Text width is approximated from character count because this toy renderer does not do
-    // real font shaping or glyph measurement.
-    length_value(node, "width", parent_width)
-        .or_else(|| intrinsic_width(node))
-        .unwrap_or_else(|| match &node.node_type {
-            NodeType::Text(text) => text.chars().count() as f32 * inline_char_width(node),
-            NodeType::Element(element) if element.tag_name == "img" => 200.0,
-            NodeType::Element(_) => node
-                .children
-                .iter()
-                .map(|child| inline_total_size(child, parent_width).width)
-                .sum(),
-        })
-}
-
-fn inline_content_height(node: &StyledNode, parent_width: f32) -> f32 {
-    // Same caveat as block height: percent on inline height should reference the parent's
-    // height, but we only have parent_width on hand. Toy pages have not exercised this yet.
-    length_value(node, "height", parent_width).unwrap_or_else(|| match &node.node_type {
-        // Text contributes its line-height (not just glyph height) so a parent
-        // line box stretches to fit `line-height: 1.5` even when no descendant
-        // declares an explicit height.
-        NodeType::Text(_) => inline_line_height_px(node),
-        NodeType::Element(element) if element.tag_name == "img" => intrinsic_height(node),
-        NodeType::Element(_) => node
-            .children
-            .iter()
-            .map(|child| inline_total_size(child, parent_width).height)
-            .fold(0.0, f32::max)
-            .max(intrinsic_height(node)),
-    })
-}
-
-fn inline_font_size(node: &StyledNode) -> f32 {
-    // font-size is always Px after the style pass, so the percent base is irrelevant here.
-    length_value(node, "font-size", 0.0).unwrap_or(16.0)
-}
-
-pub(crate) fn inline_line_height_px(node: &StyledNode) -> f32 {
-    // CSS `line-height` resolves against the element's *own* font-size:
-    // - <number>: bare multiplier (inherits as the number, applied per element)
-    // - <length>: absolute (em/rem already converted to Px during style)
-    // - <percent>: applied to this node's font-size
-    // - keyword `normal` / unset: identity (= font-size); skip extra leading
-    let font_size = inline_font_size(node);
-    match node.value("line-height") {
-        Some(Value::Number(multiplier)) => font_size * multiplier,
-        Some(Value::Length(value, Unit::Px)) => *value,
-        Some(Value::Length(value, Unit::Percent)) => font_size * value / 100.0,
-        Some(Value::Length(value, _)) => *value,
-        _ => font_size,
-    }
-}
-
-fn inline_char_width(node: &StyledNode) -> f32 {
-    inline_font_size(node) * 0.75
-}
-
-fn child_height(node: &StyledNode, content_y: f32, child_cursor_y: f32) -> f32 {
+pub(super) fn child_height(node: &StyledNode, content_y: f32, child_cursor_y: f32) -> f32 {
     if matches!(node.node_type, NodeType::Text(_)) {
         0.0
     } else {
@@ -1664,7 +247,7 @@ fn child_height(node: &StyledNode, content_y: f32, child_cursor_y: f32) -> f32 {
     }
 }
 
-fn intrinsic_width(node: &StyledNode) -> Option<f32> {
+pub(super) fn intrinsic_width(node: &StyledNode) -> Option<f32> {
     match &node.node_type {
         // Images need a visible box even when no author CSS width is provided.
         NodeType::Element(element) if element.tag_name == "img" => {
@@ -1674,7 +257,7 @@ fn intrinsic_width(node: &StyledNode) -> Option<f32> {
     }
 }
 
-fn intrinsic_height(node: &StyledNode) -> f32 {
+pub(super) fn intrinsic_height(node: &StyledNode) -> f32 {
     match &node.node_type {
         // font-size is always Px after the style pass, so the percent base is irrelevant.
         NodeType::Text(_) => length_value(node, "font-size", 0.0).unwrap_or(16.0),
@@ -1686,7 +269,7 @@ fn intrinsic_height(node: &StyledNode) -> f32 {
     }
 }
 
-fn edge_sizes(node: &StyledNode, prefix: &str, base: f32) -> EdgeSizes {
+pub(super) fn edge_sizes(node: &StyledNode, prefix: &str, base: f32) -> EdgeSizes {
     // CSS resolves percent margin/padding against the containing block's *width*, even
     // for the top and bottom sides — a common gotcha worth keeping in mind here.
     EdgeSizes {
@@ -1697,7 +280,7 @@ fn edge_sizes(node: &StyledNode, prefix: &str, base: f32) -> EdgeSizes {
     }
 }
 
-fn length_value(node: &StyledNode, name: &str, base: f32) -> Option<f32> {
+pub(super) fn length_value(node: &StyledNode, name: &str, base: f32) -> Option<f32> {
     // `base` is the containing-block dimension a Percent length resolves against. For
     // properties that should never see a percent (font-size after style resolution, etc.)
     // callers can safely pass any value.
@@ -1708,64 +291,29 @@ fn length_value(node: &StyledNode, name: &str, base: f32) -> Option<f32> {
     }
 }
 
-fn is_auto(node: &StyledNode, name: &str) -> bool {
+pub(super) fn is_auto(node: &StyledNode, name: &str) -> bool {
     matches!(node.value(name), Some(Value::Keyword(keyword)) if keyword == "auto")
 }
 
-fn collapse_margins(prev: f32, next: f32) -> f32 {
-    // CSS adjacent-margin collapse rules:
-    // - both non-negative → max
-    // - both non-positive → most negative (min)
-    // - mixed signs → algebraic sum
-    if prev >= 0.0 && next >= 0.0 {
-        prev.max(next)
-    } else if prev <= 0.0 && next <= 0.0 {
-        prev.min(next)
-    } else {
-        prev + next
-    }
-}
-
-fn is_position_relative(node: &StyledNode) -> bool {
+pub(super) fn is_position_relative(node: &StyledNode) -> bool {
     matches!(node.value("position"), Some(Value::Keyword(keyword)) if keyword == "relative")
 }
 
-fn is_float_left(node: &StyledNode) -> bool {
-    matches!(node.value("float"), Some(Value::Keyword(keyword)) if keyword == "left")
-}
-
-fn is_float_right(node: &StyledNode) -> bool {
-    matches!(node.value("float"), Some(Value::Keyword(keyword)) if keyword == "right")
-}
-
-fn clear_target_y(node: &StyledNode, float_bottom_left: f32, float_bottom_right: f32) -> f32 {
-    // CSS `clear` makes the box's outer top jump down past preceding floats
-    // on the named side(s). Returning -∞ means the cursor is left untouched.
-    match node.value("clear") {
-        Some(Value::Keyword(keyword)) if keyword == "left" => float_bottom_left,
-        Some(Value::Keyword(keyword)) if keyword == "right" => float_bottom_right,
-        Some(Value::Keyword(keyword)) if keyword == "both" => {
-            float_bottom_left.max(float_bottom_right)
-        }
-        _ => f32::NEG_INFINITY,
-    }
-}
-
-fn is_position_absolute(node: &StyledNode) -> bool {
+pub(super) fn is_position_absolute(node: &StyledNode) -> bool {
     matches!(node.value("position"), Some(Value::Keyword(keyword)) if keyword == "absolute")
 }
 
-fn is_position_fixed(node: &StyledNode) -> bool {
+pub(super) fn is_position_fixed(node: &StyledNode) -> bool {
     matches!(node.value("position"), Some(Value::Keyword(keyword)) if keyword == "fixed")
 }
 
-fn is_out_of_flow(node: &StyledNode) -> bool {
+pub(super) fn is_out_of_flow(node: &StyledNode) -> bool {
     // Both `absolute` and `fixed` skip in-flow placement during pass 1; they
     // differ only in which containing block pass 2 resolves them against.
     is_position_absolute(node) || is_position_fixed(node)
 }
 
-fn relative_offset(node: &StyledNode, base: f32) -> Option<(f32, f32)> {
+pub(super) fn relative_offset(node: &StyledNode, base: f32) -> Option<(f32, f32)> {
     // CSS spec: top/bottom percent resolves against the containing block's height
     // and left/right against its width. The layout walk only carries width on hand,
     // so percent offsets reuse `base` for both axes — same shortcut already taken
@@ -1788,13 +336,13 @@ fn relative_offset(node: &StyledNode, base: f32) -> Option<(f32, f32)> {
     }
 }
 
-fn apply_relative_offset(layout_box: &mut LayoutBox, node: &StyledNode, base: f32) {
+pub(super) fn apply_relative_offset(layout_box: &mut LayoutBox, node: &StyledNode, base: f32) {
     if let Some((dx, dy)) = relative_offset(node, base) {
         shift_layout_subtree(layout_box, dx, dy);
     }
 }
 
-fn shift_layout_subtree(layout_box: &mut LayoutBox, dx: f32, dy: f32) {
+pub(super) fn shift_layout_subtree(layout_box: &mut LayoutBox, dx: f32, dy: f32) {
     // Relative positioning shifts the visual rect of the box and *every*
     // descendant — siblings and cursors keep using the unshifted geometry, so
     // we only mutate this subtree.
@@ -1805,7 +353,7 @@ fn shift_layout_subtree(layout_box: &mut LayoutBox, dx: f32, dy: f32) {
     }
 }
 
-fn attribute_length(element: &ElementData, name: &str) -> Option<f32> {
+pub(super) fn attribute_length(element: &ElementData, name: &str) -> Option<f32> {
     element
         .attributes
         .get(name)
