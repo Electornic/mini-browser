@@ -203,11 +203,28 @@ fn walk_for_match(
     None
 }
 
+// Walk parent links from `node_id` up to a root and return the chain
+// outermost-first (the document root sits at index 0, the immediate parent
+// of `node_id` is the last element). The receiver itself is excluded — that
+// matches what `matches_static_selector` expects in its `ancestors` slice.
+// Used by Element.matches / Element.closest so a parsed selector that uses
+// descendant or child combinators can be resolved against the live tree.
+pub(super) fn ancestors_outermost_first(document: &Document, node_id: NodeId) -> Vec<NodeId> {
+    let mut chain: Vec<NodeId> = Vec::new();
+    let mut cur = document.get(node_id).and_then(|n| n.parent);
+    while let Some(id) = cur {
+        chain.push(id);
+        cur = document.get(id).and_then(|n| n.parent);
+    }
+    chain.reverse();
+    chain
+}
+
 // Mirrors style::matches_selector but skips pseudo-class state — querySelector
 // is a static lookup against the parsed Document, no hover/focus context to
 // thread through. Pseudo-classes parse-but-ignore here: `.btn:hover` matches
 // the same set as `.btn`.
-fn matches_static_selector(
+pub(super) fn matches_static_selector(
     document: &Document,
     node_id: NodeId,
     ancestors: &[NodeId],

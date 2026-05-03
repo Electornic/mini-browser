@@ -15,10 +15,12 @@ use boa_engine::{
     property::Attribute,
 };
 
+use crate::css;
 use crate::dom::{Document, NodeId, NodeType};
 
 use super::ListenerMap;
 use super::NODE_ID_PROP;
+use super::document::{ancestors_outermost_first, matches_static_selector};
 use super::util::{first_arg_as_string, nth_arg_as_string, read_node_id};
 
 // Builds an Element wrapper that resolves every observable property against
@@ -388,6 +390,89 @@ pub(super) fn make_element(
         })
     };
 
+    // Element.matches(selector): does this element itself satisfy the
+    // selector? Reuses the same static matcher querySelector funnels
+    // through, so the parser's combinator/pseudo handling stays in lock-
+    // step across both entry points. Stale receiver returns false (read
+    // path, lenient like getAttribute) rather than throwing — matching a
+    // detached node legitimately yields "no, it does not match".
+    let dom_matches = dom.clone();
+    let matches_fn = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let selector_text = first_arg_as_string(args, ctx)?;
+            let selector = css::parse_selector(&selector_text).map_err(|err| {
+                JsNativeError::syntax().with_message(format!(
+                    "invalid selector `{selector_text}`: {} (at byte {})",
+                    err.message, err.position
+                ))
+            })?;
+            let document = dom_matches.borrow();
+            if document.get(node_id).is_none() {
+                return Ok(JsValue::from(false));
+            }
+            let ancestors = ancestors_outermost_first(&document, node_id);
+            Ok(JsValue::from(matches_static_selector(
+                &document, node_id, &ancestors, &selector,
+            )))
+        })
+    };
+
+    // Element.closest(selector): walk self-then-ancestors and return the
+    // first element wrapper that satisfies the selector, or null. This is
+    // the inverse direction of querySelector (down-the-tree) — same
+    // matcher, parent chain instead of subtree recursion. The ancestors
+    // slice is shrunk by one each step so that descendant/child
+    // combinators in the selector are evaluated against the candidate's
+    // own ancestor chain on every iteration.
+    let dom_closest = dom.clone();
+    let listeners_closest = listeners.clone();
+    let closest = unsafe {
+        NativeFunction::from_closure(move |_this, args, ctx| {
+            let selector_text = first_arg_as_string(args, ctx)?;
+            let selector = css::parse_selector(&selector_text).map_err(|err| {
+                JsNativeError::syntax().with_message(format!(
+                    "invalid selector `{selector_text}`: {} (at byte {})",
+                    err.message, err.position
+                ))
+            })?;
+            let found = {
+                let document = dom_closest.borrow();
+                if document.get(node_id).is_none() {
+                    return Ok(JsValue::null());
+                }
+                let mut ancestors = ancestors_outermost_first(&document, node_id);
+                let mut current = Some(node_id);
+                let mut hit: Option<NodeId> = None;
+                while let Some(id) = current {
+                    // Only Element nodes can match a CSS selector — a stray
+                    // text/document parent quietly fails the simple-selector
+                    // check inside `matches_static_selector`, so the loop
+                    // naturally skips non-elements without an explicit guard.
+                    if matches_static_selector(&document, id, &ancestors, &selector) {
+                        hit = Some(id);
+                        break;
+                    }
+                    let parent = document.get(id).and_then(|n| n.parent);
+                    // Drop the candidate's own immediate parent off the
+                    // ancestor stack so the next iteration treats it as the
+                    // new candidate (its own ancestors are everything above).
+                    ancestors.pop();
+                    current = parent;
+                }
+                hit
+            };
+            match found {
+                Some(id) => Ok(JsValue::from(make_element(
+                    id,
+                    dom_closest.clone(),
+                    listeners_closest.clone(),
+                    ctx,
+                ))),
+                None => Ok(JsValue::null()),
+            }
+        })
+    };
+
     ObjectInitializer::new(context)
         .property(
             js_string!(NODE_ID_PROP),
@@ -437,6 +522,8 @@ pub(super) fn make_element(
         .function(clone_node, js_string!("cloneNode"), 1)
         .function(add_event_listener, js_string!("addEventListener"), 2)
         .function(remove_event_listener, js_string!("removeEventListener"), 2)
+        .function(matches_fn, js_string!("matches"), 1)
+        .function(closest, js_string!("closest"), 1)
         .build()
 }
 

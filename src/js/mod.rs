@@ -671,6 +671,154 @@ mod tests {
         );
     }
 
+    // ---- Element.matches / Element.closest ----
+    //
+    // Both share the same parsed-selector path that querySelector uses, so
+    // the matcher coverage above already exercises the engine itself. The
+    // tests below pin down what's specific to the new entry points: matches
+    // is *node-local* (just the receiver) while closest walks self-then-
+    // parents and stops at the first hit.
+
+    #[test]
+    fn matches_reports_whether_self_satisfies_selector() {
+        let mut runtime = runtime_with(
+            r#"<section><article class="card"><p id="target" class="hit">hi</p></article></section>"#,
+        );
+        let target = "document.getElementById('target')";
+        // True positives: tag, class, descendant combinator, child combinator.
+        assert_eq!(
+            runtime.execute(&format!("{target}.matches('p')")).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            runtime
+                .execute(&format!("{target}.matches('.hit')"))
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            runtime
+                .execute(&format!("{target}.matches('section .hit')"))
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            runtime
+                .execute(&format!("{target}.matches('article > p')"))
+                .unwrap(),
+            "true"
+        );
+        // True negatives: wrong tag, wrong class, child combinator that
+        // skips an intermediate ancestor (`section > .hit` requires .hit
+        // to be a direct child of section, but article is in between).
+        assert_eq!(
+            runtime.execute(&format!("{target}.matches('div')")).unwrap(),
+            "false"
+        );
+        assert_eq!(
+            runtime
+                .execute(&format!("{target}.matches('.miss')"))
+                .unwrap(),
+            "false"
+        );
+        assert_eq!(
+            runtime
+                .execute(&format!("{target}.matches('section > .hit')"))
+                .unwrap(),
+            "false"
+        );
+    }
+
+    #[test]
+    fn matches_throws_on_invalid_selector() {
+        let mut runtime = runtime_with(r#"<p id="t">hi</p>"#);
+        let err = runtime
+            .execute("document.getElementById('t').matches('!!')")
+            .unwrap_err();
+        assert!(
+            err.to_lowercase().contains("selector"),
+            "error should mention the bad selector, got: {err}"
+        );
+    }
+
+    #[test]
+    fn closest_returns_self_when_selector_already_matches_receiver() {
+        let mut runtime = runtime_with(
+            r#"<article class="card"><p id="target" class="hit">hi</p></article>"#,
+        );
+        // Self-hit must be returned even though there is also an ancestor
+        // that matches a *different* selector — closest is a self-first walk.
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('target').closest('.hit').tagName")
+                .unwrap(),
+            "\"P\""
+        );
+    }
+
+    #[test]
+    fn closest_walks_parent_chain_until_match() {
+        let mut runtime = runtime_with(
+            r#"<section id="root"><article class="card"><p id="target">hi</p></article></section>"#,
+        );
+        let target = "document.getElementById('target')";
+        // Skips `<p>` (no match), hits `<article class="card">`.
+        assert_eq!(
+            runtime
+                .execute(&format!("{target}.closest('.card').tagName"))
+                .unwrap(),
+            "\"ARTICLE\""
+        );
+        // Walks two hops up: past article, lands on section.
+        assert_eq!(
+            runtime
+                .execute(&format!("{target}.closest('#root').tagName"))
+                .unwrap(),
+            "\"SECTION\""
+        );
+    }
+
+    #[test]
+    fn closest_returns_null_when_no_ancestor_matches() {
+        let mut runtime = runtime_with(r#"<article><p id="target">hi</p></article>"#);
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('target').closest('.absent')")
+                .unwrap(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn closest_evaluates_combinators_against_each_candidates_own_ancestors() {
+        // `section > article` must fail when checked against `<p>` (its
+        // ancestors are section→article, but the candidate must itself be
+        // an article that is the direct child of a section). Once the walk
+        // reaches `<article>`, the same selector now matches because the
+        // candidate's own parent is the section.
+        let mut runtime = runtime_with(
+            r#"<section><article class="card"><p id="target">hi</p></article></section>"#,
+        );
+        assert_eq!(
+            runtime
+                .execute("document.getElementById('target').closest('section > article').tagName")
+                .unwrap(),
+            "\"ARTICLE\""
+        );
+    }
+
+    #[test]
+    fn closest_throws_on_invalid_selector() {
+        let mut runtime = runtime_with(r#"<p id="t">hi</p>"#);
+        let err = runtime
+            .execute("document.getElementById('t').closest('!!')")
+            .unwrap_err();
+        assert!(
+            err.to_lowercase().contains("selector"),
+            "error should mention the bad selector, got: {err}"
+        );
+    }
+
     #[test]
     fn swapping_dom_under_runtime_redirects_subsequent_lookups() {
         // The closures capture an Rc<RefCell<…>>, not a Document snapshot —
