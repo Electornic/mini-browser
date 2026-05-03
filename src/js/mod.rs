@@ -163,6 +163,22 @@ impl JsRuntime {
         result
     }
 
+    // Same as `execute`, but tags any error with the source URL so that
+    // browser-side logging can point at the offending script. Inline
+    // scripts get a synthetic `{page_url}#inline-script-N` URL from the
+    // collector; external scripts get their `src` value verbatim. An empty
+    // `url` falls back to the bare error string — useful for one-off
+    // evaluations where there is no document context.
+    pub fn execute_with_url(&mut self, source: &str, url: &str) -> Result<String, String> {
+        self.execute(source).map_err(|err| {
+            if url.is_empty() {
+                err
+            } else {
+                format!("{url}: {err}")
+            }
+        })
+    }
+
     /// Drain every job currently queued on the runtime's executor: pending
     /// promise/microtask jobs first, then any setTimeout/setInterval handlers
     /// whose deadlines have arrived against the engine clock. The browser
@@ -421,6 +437,56 @@ mod tests {
         assert!(
             err.to_lowercase().contains("missing"),
             "error should reference the missing identifier, got: {err}"
+        );
+    }
+
+    #[test]
+    fn execute_with_url_prefixes_errors_with_source_label() {
+        // The URL is prepended to the error string so the script-error log
+        // can name the offending file. The bare Boa error follows the
+        // colon — both the label and the original message stay visible.
+        let mut runtime = runtime_with("");
+        let err = runtime
+            .execute_with_url("missing.prop", "https://example.com/app.js")
+            .unwrap_err();
+        assert!(
+            err.starts_with("https://example.com/app.js: "),
+            "error should be prefixed with the source URL, got: {err}"
+        );
+        assert!(
+            err.to_lowercase().contains("missing"),
+            "error should still reference the missing identifier, got: {err}"
+        );
+    }
+
+    #[test]
+    fn execute_with_url_returns_bare_error_when_url_is_empty() {
+        // An empty URL string falls back to the unprefixed error so callers
+        // that don't have a source URL (e.g. the REPL or one-off evals) get
+        // exactly the same output as `execute`.
+        let mut runtime = runtime_with("");
+        let err = runtime.execute_with_url("missing.prop", "").unwrap_err();
+        assert!(
+            !err.starts_with(": "),
+            "empty URL must not produce a leading separator, got: {err}"
+        );
+        assert!(
+            err.to_lowercase().contains("missing"),
+            "error should reference the missing identifier, got: {err}"
+        );
+    }
+
+    #[test]
+    fn execute_with_url_passes_through_success_values() {
+        // Successful evaluations do not get the URL prefix — the label is
+        // only attached to errors. This keeps the success path identical
+        // to `execute` for callers that only care about the value.
+        let mut runtime = runtime_with("");
+        assert_eq!(
+            runtime
+                .execute_with_url("1 + 2", "https://example.com/app.js")
+                .unwrap(),
+            "3"
         );
     }
 

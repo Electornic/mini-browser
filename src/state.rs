@@ -219,15 +219,28 @@ impl BrowserState {
         // Collect script bodies under a short-lived borrow so JS execution
         // (which may take a borrow_mut via the shared Document handle to
         // mutate the DOM) doesn't overlap with our read.
-        let mut sources = Vec::new();
+        let mut sources: Vec<(String, String)> = Vec::new();
+        let page_url = self
+            .current_url
+            .as_ref()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "about:blank".to_string());
         {
             let document = self.parsed_document.borrow();
+            let mut inline_counter = 0usize;
             for &root in document.roots() {
-                collect_script_sources(&document, root, &self.external_scripts, &mut sources);
+                collect_script_sources(
+                    &document,
+                    root,
+                    &self.external_scripts,
+                    &page_url,
+                    &mut inline_counter,
+                    &mut sources,
+                );
             }
         }
-        for source in sources {
-            if let Err(err) = self.js.execute(&source) {
+        for (source, url) in sources {
+            if let Err(err) = self.js.execute_with_url(&source, &url) {
                 eprintln!("script error: {err}");
             }
         }
@@ -1024,17 +1037,22 @@ impl BrowserState {
 }
 
 // Recursive helper that appends every `<script>` body found under `node` to
-// `out`, in document (tree) order. Inline scripts use their text-child
-// content; external scripts (with a `src` attribute) read from the pre-fetched
-// `externals` map keyed by the raw `src` value. A `src` whose body is missing
-// from the map silently produces no entry — it indicates a fetch failure that
-// was already logged upstream. Recursion stops at the script tag itself so a
-// `<script>` is captured exactly once.
+// `out`, in document (tree) order. Each entry is paired with a label used
+// for error reporting: external scripts (with a `src` attribute) keep the
+// raw `src` value; inline scripts get a synthetic `{page_url}#inline-script-N`
+// where `N` is a 1-based index incremented per inline script in document order.
+// `inline_counter` is threaded through the recursion so siblings and nested
+// trees share a single sequence — that keeps the labels stable across the
+// whole document. A `src` whose body is missing from the map silently
+// produces no entry (fetch failure already logged upstream). Recursion stops
+// at the script tag itself so a `<script>` is captured exactly once.
 fn collect_script_sources(
     document: &dom::Document,
     node_id: NodeId,
     externals: &HashMap<String, String>,
-    out: &mut Vec<String>,
+    page_url: &str,
+    inline_counter: &mut usize,
+    out: &mut Vec<(String, String)>,
 ) {
     let Some(node) = document.get(node_id) else {
         return;
@@ -1055,7 +1073,7 @@ fn collect_script_sources(
         }
         if let Some(src) = elem.attributes.get("src") {
             if let Some(body) = externals.get(src) {
-                out.push(body.clone());
+                out.push((body.clone(), src.clone()));
             }
             return;
         }
@@ -1066,12 +1084,13 @@ fn collect_script_sources(
             }
         }
         if !source.trim().is_empty() {
-            out.push(source);
+            *inline_counter += 1;
+            out.push((source, format!("{page_url}#inline-script-{inline_counter}")));
         }
         return;
     }
     for child in &node.children {
-        collect_script_sources(document, *child, externals, out);
+        collect_script_sources(document, *child, externals, page_url, inline_counter, out);
     }
 }
 
@@ -1590,9 +1609,105 @@ mod tests {
         let document = crate::html::parse(html).unwrap();
         let externals: HashMap<String, String> = HashMap::new();
         let mut out = Vec::new();
+        let mut counter = 0;
         for &root in document.roots() {
-            collect_script_sources(&document, root, &externals, &mut out);
+            collect_script_sources(
+                &document,
+                root,
+                &externals,
+                "https://example.com/page",
+                &mut counter,
+                &mut out,
+            );
         }
-        assert_eq!(out, vec!["var ok = 1;".to_string()]);
+        assert_eq!(
+            out,
+            vec![(
+                "var ok = 1;".to_string(),
+                "https://example.com/page#inline-script-1".to_string(),
+            )]
+        );
+    }
+
+    #[test]
+    fn collect_script_sources_labels_inline_scripts_with_running_index() {
+        // Multiple inline scripts in the same document each get a unique
+        // synthetic URL so the script-error log can name the offending
+        // block. The counter is global (document order), not per-parent —
+        // a script nested under a <body> still continues the sequence
+        // started by an earlier <head> script.
+        let html = "<head><script>var a = 1;</script></head>\
+                    <body><script>var b = 2;</script>\
+                    <div><script>var c = 3;</script></div></body>";
+        let document = crate::html::parse(html).unwrap();
+        let externals: HashMap<String, String> = HashMap::new();
+        let mut out = Vec::new();
+        let mut counter = 0;
+        for &root in document.roots() {
+            collect_script_sources(
+                &document,
+                root,
+                &externals,
+                "https://example.com/p",
+                &mut counter,
+                &mut out,
+            );
+        }
+        assert_eq!(
+            out,
+            vec![
+                (
+                    "var a = 1;".to_string(),
+                    "https://example.com/p#inline-script-1".to_string(),
+                ),
+                (
+                    "var b = 2;".to_string(),
+                    "https://example.com/p#inline-script-2".to_string(),
+                ),
+                (
+                    "var c = 3;".to_string(),
+                    "https://example.com/p#inline-script-3".to_string(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_script_sources_labels_external_scripts_with_src_attr() {
+        // External scripts (with a `src`) keep the raw attribute value as
+        // the label. The page URL is unused here because the `src` is
+        // already a more useful identifier — a developer scanning the
+        // log can grep their HTML for the matching tag directly.
+        let html = "<script src=\"/static/app.js\"></script>\
+                    <script src=\"https://cdn.example.com/lib.js\"></script>";
+        let document = crate::html::parse(html).unwrap();
+        let mut externals: HashMap<String, String> = HashMap::new();
+        externals.insert("/static/app.js".to_string(), "var app = 1;".to_string());
+        externals.insert(
+            "https://cdn.example.com/lib.js".to_string(),
+            "var lib = 2;".to_string(),
+        );
+        let mut out = Vec::new();
+        let mut counter = 0;
+        for &root in document.roots() {
+            collect_script_sources(
+                &document,
+                root,
+                &externals,
+                "https://example.com/page",
+                &mut counter,
+                &mut out,
+            );
+        }
+        assert_eq!(
+            out,
+            vec![
+                ("var app = 1;".to_string(), "/static/app.js".to_string()),
+                (
+                    "var lib = 2;".to_string(),
+                    "https://cdn.example.com/lib.js".to_string(),
+                ),
+            ]
+        );
     }
 }
