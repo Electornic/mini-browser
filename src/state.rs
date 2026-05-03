@@ -14,8 +14,8 @@ use crate::{
     },
     css,
     display_list::{
-        DocumentView, LinkTarget, build_document_view, compute_hovered_hit, document_height,
-        link_decoration_commands, point_in_rect,
+        DocumentView, LinkTarget, build_document_view, caret_commands_for_focused_input,
+        compute_hovered_hit, document_height, link_decoration_commands, point_in_rect,
     },
     dom,
     dom::{NodeId, NodeType},
@@ -366,6 +366,24 @@ impl BrowserState {
         );
         commands.extend(render::translate(
             link_decoration_commands(&document_view.links, hovered_href),
+            0.0,
+            CHROME_HEIGHT - self.scroll_offset,
+        ));
+        // Page input caret rides on top of the page's own painted commands
+        // and any link decorations, but underneath the chrome strip — same
+        // z-order story as link underlines. Translation matches the page
+        // commands so the caret scrolls with the input box it belongs to.
+        let focused_node_id = self
+            .focused_dom_path
+            .as_deref()
+            .and_then(|path| node_id_for_dom_path(&self.parsed_document.borrow(), path));
+        commands.extend(render::translate(
+            caret_commands_for_focused_input(
+                &document_view.layout_root,
+                focused_node_id,
+                self.frame_index,
+                fonts,
+            ),
             0.0,
             CHROME_HEIGHT - self.scroll_offset,
         ));

@@ -384,6 +384,103 @@ fn padding_box(layout_box: &layout::LayoutBox) -> layout::Rect {
     }
 }
 
+/// Emits the blinking 1px caret that sits at the end of a focused
+/// `<input>`'s value text. The caret turns on for 30 frames, off for 30,
+/// repeating — same `(frame_index / 30).is_multiple_of(2)` cadence the
+/// chrome address bar caret uses, so both blinks stay in phase. Returns
+/// an empty Vec when no input is focused or when the blink is in its
+/// "off" half; callers extend their command list unconditionally and the
+/// empty case becomes a no-op paint.
+///
+/// `focused_node_id` is what links the styled-tree focus state to a
+/// specific layout box — `BrowserState::focused_dom_path` resolves to
+/// this NodeId on each frame, so the caret follows DOM mutations
+/// (renaming, swapping the focused element) without going stale.
+pub fn caret_commands_for_focused_input(
+    layout_root: &layout::LayoutBox,
+    focused_node_id: Option<NodeId>,
+    frame_index: usize,
+    fonts: &[fontdue::Font],
+) -> Vec<render::DisplayCommand> {
+    let Some(focused_id) = focused_node_id else {
+        return Vec::new();
+    };
+    if !(frame_index / 30).is_multiple_of(2) {
+        return Vec::new();
+    }
+    let Some(input_box) = find_focused_input_box(layout_root, focused_id) else {
+        return Vec::new();
+    };
+
+    // Pull the cascaded font-size and current value off the styled node so
+    // the caret position uses the SAME font size that paint_self used to
+    // draw the value text — otherwise wide-glyph fonts would put the caret
+    // in the wrong column.
+    let (value, font_size) = match &input_box.box_type {
+        layout::BoxType::BlockNode(node)
+        | layout::BoxType::FlexNode(node)
+        | layout::BoxType::GridNode(node) => {
+            let value = match &node.node_type {
+                NodeType::Element(elem) => {
+                    elem.attributes.get("value").cloned().unwrap_or_default()
+                }
+                NodeType::Text(_) => return Vec::new(),
+            };
+            let size = match node.value("font-size") {
+                Some(css::Value::Length(v, css::Unit::Px)) => *v,
+                _ => 16.0,
+            };
+            (value, size)
+        }
+        layout::BoxType::AnonymousBlock => return Vec::new(),
+    };
+
+    let caret_offset = render::measure_text_width(&value, font_size, fonts);
+    let content = input_box.dimensions.content;
+    vec![render::DisplayCommand::SolidRect(
+        css::Color::BLACK,
+        layout::Rect {
+            x: content.x + caret_offset,
+            // The chrome caret bleeds 1px above and below the glyph row to
+            // give the bar a slightly thicker visual footprint; mirror
+            // that here so the page input caret reads the same.
+            y: content.y - 1.0,
+            width: 1.0,
+            height: font_size + 2.0,
+        },
+    )]
+}
+
+// Depth-first search for the layout box that backs the focused <input>.
+// We can't pre-compute this from `focused_dom_path` alone because the
+// layout box's `node_id` is the canonical identity — DOM mutations between
+// the focus event and the next paint can move the same NodeId to a
+// different position in the tree (insertBefore, etc.) and the caret has
+// to follow.
+fn find_focused_input_box(
+    box_node: &layout::LayoutBox,
+    focused_id: NodeId,
+) -> Option<&layout::LayoutBox> {
+    let is_focused_input = match &box_node.box_type {
+        layout::BoxType::BlockNode(node)
+        | layout::BoxType::FlexNode(node)
+        | layout::BoxType::GridNode(node) => {
+            node.node_id == focused_id
+                && matches!(&node.node_type, NodeType::Element(elem) if elem.tag_name == "input")
+        }
+        layout::BoxType::AnonymousBlock => false,
+    };
+    if is_focused_input {
+        return Some(box_node);
+    }
+    for child in &box_node.children {
+        if let Some(found) = find_focused_input_box(child, focused_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 pub fn link_decoration_commands(
     links: &[LinkTarget],
     hovered_href: Option<&str>,
@@ -420,4 +517,106 @@ pub fn link_decoration_commands(
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{html, render::DisplayCommand};
+
+    // Builds a layout tree from `html_source` and returns it together with
+    // the NodeId of the first <input> in document order. Lets the caret
+    // tests below stay terse: each test only cares about "the input" and
+    // the helper hides the parse/style/layout boilerplate.
+    fn setup(html_source: &str) -> (layout::LayoutBox, NodeId) {
+        let document = html::parse(html_source).unwrap();
+        let root = document.roots()[0];
+        let styled = style::style_tree(&document, root, &[]);
+        let layout_root = layout::layout_tree(&styled, 400.0);
+        let input_id = find_input_node_id(&document, root)
+            .expect("test fixtures must contain at least one <input>");
+        (layout_root, input_id)
+    }
+
+    fn find_input_node_id(document: &dom::Document, current: NodeId) -> Option<NodeId> {
+        let node = document.get(current)?;
+        if let NodeType::Element(elem) = &node.node_type
+            && elem.tag_name == "input"
+        {
+            return Some(current);
+        }
+        for child in &node.children {
+            if let Some(found) = find_input_node_id(document, *child) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn caret_is_emitted_for_focused_input_during_blink_on_phase() {
+        // Frame 0 lands in the "on" half of the 30-frame blink cadence,
+        // so a focused input must produce exactly one SolidRect command —
+        // the 1px black caret. Empty fonts make measure_text_width fall
+        // back to its fixed-width estimate, so the assertion is determinist.
+        let (layout_root, input_id) = setup(r#"<input type="text" value=""/>"#);
+        let commands = caret_commands_for_focused_input(&layout_root, Some(input_id), 0, &[]);
+
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            DisplayCommand::SolidRect(color, rect) => {
+                assert_eq!(*color, css::Color::BLACK);
+                assert_eq!(rect.width, 1.0);
+                // 16px default font + 1px bleed on each side = 18px tall.
+                assert_eq!(rect.height, 18.0);
+            }
+            other => panic!("expected SolidRect caret, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn caret_offsets_to_end_of_value_text() {
+        // The caret sits at content.x + measure_text_width(value). With
+        // the empty-fonts fallback (each char 12px @ 16pt), "ab" is 24px
+        // wide, so the caret lands 24px to the right of content.x.
+        let (layout_root, input_id) = setup(r#"<input type="text" value="ab"/>"#);
+        let commands = caret_commands_for_focused_input(&layout_root, Some(input_id), 0, &[]);
+        let rect = match &commands[0] {
+            DisplayCommand::SolidRect(_, rect) => *rect,
+            other => panic!("expected caret SolidRect, got {other:?}"),
+        };
+
+        // content.x for the input root = padding-left + border-left = 4 + 1 = 5.
+        let expected_offset = render::measure_text_width("ab", 16.0, &[]);
+        assert_eq!(rect.x, 5.0 + expected_offset);
+    }
+
+    #[test]
+    fn caret_disappears_during_blink_off_phase() {
+        // Frames 30..60 are the off half — no SolidRect emitted at all.
+        let (layout_root, input_id) = setup(r#"<input type="text"/>"#);
+        let commands = caret_commands_for_focused_input(&layout_root, Some(input_id), 30, &[]);
+        assert!(commands.is_empty());
+
+        // And the cycle resumes at 60 → on again.
+        let on_again = caret_commands_for_focused_input(&layout_root, Some(input_id), 60, &[]);
+        assert_eq!(on_again.len(), 1);
+    }
+
+    #[test]
+    fn caret_skips_when_no_focus() {
+        let (layout_root, _input_id) = setup(r#"<input type="text"/>"#);
+        let commands = caret_commands_for_focused_input(&layout_root, None, 0, &[]);
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn caret_skips_when_focused_node_is_not_an_input() {
+        // Focus pointed at a non-input NodeId → no caret. Uses a fake
+        // NodeId guaranteed to not match the input slot.
+        let (layout_root, input_id) = setup(r#"<input type="text"/>"#);
+        let bogus_id = NodeId::from_raw(input_id.raw().wrapping_add(99));
+        let commands = caret_commands_for_focused_input(&layout_root, Some(bogus_id), 0, &[]);
+        assert!(commands.is_empty());
+    }
 }
