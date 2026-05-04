@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 boa_engine = "0.21.1"
+cssparser = "0.37"
 fontdue = "0.9"
 html5ever = "0.38"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png"] }

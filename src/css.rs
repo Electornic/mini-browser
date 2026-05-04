@@ -1,5 +1,12 @@
 // CSS support is intentionally narrow: simple selectors and a handful of value types.
-// That keeps the parser small while still giving the rest of the browser realistic input.
+// The AST is unchanged from the original hand-rolled parser; only the tokeniser
+// and rule-iteration scaffolding are now driven by the `cssparser` crate.
+use cssparser::{
+    AtRuleParser as CssAtRuleParser, BasicParseErrorKind, CowRcStr, ParseError as CssParseError,
+    Parser as CssParser, ParserInput, ParserState, QualifiedRuleParser as CssQualifiedRuleParser,
+    StyleSheetParser, Token,
+};
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
@@ -291,9 +298,18 @@ impl ParseError {
 }
 
 pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
-    let mut parser = Parser::new(source);
-    let stylesheet = parser.parse_stylesheet_tolerant();
-    Ok(stylesheet)
+    let mut input = ParserInput::new(source);
+    let mut parser = CssParser::new(&mut input);
+    let mut handler = StylesheetHandler;
+    let iter = StyleSheetParser::new(&mut parser, &mut handler);
+    let mut rules = Vec::new();
+    // Tolerant recovery: `StyleSheetParser` itself walks past a broken rule's
+    // block before yielding the next item, so we just keep the successes and
+    // discard the errors — same semantic as the previous `skip_to_end_of_block`.
+    for rule in iter.flatten() {
+        rules.push(rule);
+    }
+    Ok(Stylesheet { rules })
 }
 
 /// Parse a single complex selector (e.g. `div.card > a`). Used by JS-facing
@@ -301,28 +317,14 @@ pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
 /// going through a full stylesheet rule. Trailing input after the selector is
 /// rejected so callers can't smuggle declarations through the same entry point.
 pub fn parse_selector(input: &str) -> Result<Selector, ParseError> {
-    let mut parser = Parser::new(input);
-    parser.skip_whitespace_and_comments();
-    let selector = parser.parse_selector()?;
-    parser.skip_whitespace_and_comments();
-    if !parser.eof() {
-        return Err(ParseError::new(
-            parser.pos,
-            "unexpected trailing input after selector",
-        ));
-    }
-    Ok(selector)
-}
-
-/// Flips the sign of a numeric value while leaving non-numeric values untouched.
-/// Used by the value parser to apply a leading minus to lengths and unitless
-/// numbers (e.g. `-10px`, `z-index: -2`).
-fn negate_numeric(value: Value) -> Value {
-    match value {
-        Value::Length(v, unit) => Value::Length(-v, unit),
-        Value::Number(v) => Value::Number(-v),
-        other => other,
-    }
+    let mut parser_input = ParserInput::new(input);
+    let mut parser = CssParser::new(&mut parser_input);
+    parser
+        .parse_entirely(|input| match parse_complex_selector(input) {
+            Ok(selector) => Ok(selector),
+            Err(err) => Err(input.new_custom_error(err)),
+        })
+        .map_err(|err| convert_error(err))
 }
 
 /// Returns the rgba color associated with a CSS named color keyword, if any.
@@ -357,1245 +359,1315 @@ pub fn named_color(name: &str) -> Option<Color> {
     }
 }
 
-struct Parser<'a> {
-    pos: usize,
-    input: &'a str,
-}
+// =============================================================================
+// cssparser glue: rule iteration via StyleSheetParser
+// =============================================================================
 
-impl<'a> Parser<'a> {
-    fn new(input: &'a str) -> Self {
-        Self { pos: 0, input }
+struct StylesheetHandler;
+
+/// Bundle a list of selectors with the source location where the selector list
+/// started, so `parse_block` can build a `Rule` with the original prelude.
+struct RulePrelude(Vec<Selector>);
+
+/// `cssparser` requires a custom error type; the toy parser converts everything
+/// back into the legacy `ParseError` shape on the way out.
+type CssError = ParseError;
+
+impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler {
+    type Prelude = RulePrelude;
+    type QualifiedRule = Rule;
+    type Error = CssError;
+
+    fn parse_prelude<'t>(
+        &mut self,
+        input: &mut CssParser<'i, 't>,
+    ) -> Result<Self::Prelude, CssParseError<'i, Self::Error>> {
+        let selectors = parse_selector_list(input).map_err(|err| input.new_custom_error(err))?;
+        Ok(RulePrelude(selectors))
     }
 
-    fn parse_stylesheet_tolerant(&mut self) -> Stylesheet {
-        let mut rules = Vec::new();
-
-        loop {
-            self.skip_whitespace_and_comments();
-
-            if self.eof() {
-                break;
-            }
-
-            // Skip at-rules (@media, @charset, @keyframes, etc.) the toy parser does not model.
-            if self.next_char() == Some('@') {
-                self.skip_at_rule();
-                continue;
-            }
-
-            // Try parsing a normal rule; skip to the next block boundary on failure.
-            let saved = self.pos;
-            match self.parse_rule() {
-                Ok(rule) => rules.push(rule),
-                Err(_) => {
-                    self.pos = saved;
-                    self.skip_to_end_of_block();
-                }
-            }
-        }
-
-        Stylesheet { rules }
-    }
-
-    fn skip_whitespace_and_comments(&mut self) {
-        loop {
-            self.consume_whitespace();
-            if self.starts_with("/*") {
-                self.pos += 2;
-                while !self.eof() && !self.starts_with("*/") {
-                    if let Some(ch) = self.next_char() {
-                        self.pos += ch.len_utf8();
-                    }
-                }
-                if self.starts_with("*/") {
-                    self.pos += 2;
-                }
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn skip_at_rule(&mut self) {
-        // At-rules either end with ';' or contain a '{...}' block.
-        let mut brace_depth = 0;
-        while let Some(ch) = self.next_char() {
-            self.pos += ch.len_utf8();
-            match ch {
-                '{' => brace_depth += 1,
-                '}' if brace_depth > 1 => brace_depth -= 1,
-                '}' if brace_depth == 1 => return,
-                ';' if brace_depth == 0 => return,
-                _ => {}
-            }
-        }
-    }
-
-    fn skip_to_end_of_block(&mut self) {
-        // Advance past the next '}' so the parser can attempt the next rule.
-        let mut brace_depth = 0;
-        while let Some(ch) = self.next_char() {
-            self.pos += ch.len_utf8();
-            match ch {
-                '{' => brace_depth += 1,
-                '}' if brace_depth > 1 => brace_depth -= 1,
-                '}' => return,
-                _ => {}
-            }
-        }
-    }
-
-    fn starts_with(&self, value: &str) -> bool {
-        self.input[self.pos..].starts_with(value)
-    }
-
-    fn parse_rule(&mut self) -> Result<Rule, ParseError> {
-        let selectors = self.parse_selectors()?;
-        self.consume_whitespace();
-        self.expect_char('{')?;
-        let declarations = self.parse_declarations()?;
-        self.expect_char('}')?;
-
+    fn parse_block<'t>(
+        &mut self,
+        prelude: Self::Prelude,
+        _start: &ParserState,
+        input: &mut CssParser<'i, 't>,
+    ) -> Result<Self::QualifiedRule, CssParseError<'i, Self::Error>> {
+        let declarations =
+            parse_declaration_block(input).map_err(|err| input.new_custom_error(err))?;
         Ok(Rule {
-            selectors,
+            selectors: prelude.0,
             declarations,
         })
     }
+}
 
-    fn parse_selectors(&mut self) -> Result<Vec<Selector>, ParseError> {
-        let mut selectors = Vec::new();
+impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
+    // At-rules (@media, @charset, @keyframes, etc.) are not modeled by the toy
+    // parser. Reject every prelude so cssparser cleanly skips both inline and
+    // block forms — same semantics as the previous `skip_at_rule` path.
+    type Prelude = ();
+    type AtRule = Rule;
+    type Error = CssError;
+}
 
-        loop {
-            self.skip_whitespace_and_comments();
-            selectors.push(self.parse_selector()?);
-            self.skip_whitespace_and_comments();
+// =============================================================================
+// Selector parsing (cssparser tokens → existing AST)
+// =============================================================================
 
-            // A single rule can target multiple simple selectors separated by commas.
-            if self.next_char() == Some(',') {
-                self.consume_char();
-                continue;
-            }
-
-            break;
-        }
-
-        Ok(selectors)
-    }
-
-    fn parse_selector(&mut self) -> Result<Selector, ParseError> {
-        // A complex selector is one or more simple selectors joined by combinators.
-        // Whitespace alone is the descendant combinator; `>` (optionally surrounded by
-        // whitespace) is the child combinator. Compound selectors like `.a.b` (no
-        // separator at all) are still rejected — we stop the chain as soon as we see
-        // another simple selector that is not preceded by whitespace or `>`.
-        let mut parts = vec![self.parse_simple_selector()?];
-        let mut combinators = Vec::new();
-
-        loop {
-            let saved = self.pos;
-            let ws_start = self.pos;
-            self.consume_whitespace();
-            let had_whitespace = self.pos > ws_start;
-
-            // `>` takes precedence over whitespace: the surrounding spaces are just
-            // formatting, the combinator itself is Child.
-            let combinator = if self.next_char() == Some('>') {
-                self.consume_char();
-                self.consume_whitespace();
-                Combinator::Child
-            } else if had_whitespace {
-                Combinator::Descendant
-            } else {
-                self.pos = saved;
-                break;
-            };
-
-            match self.next_char() {
-                Some(ch) if ch == '.' || ch == '#' || ch.is_ascii_alphabetic() || ch == '_' => {
-                    parts.push(self.parse_simple_selector()?);
-                    combinators.push(combinator);
+/// Parse a comma-separated list of complex selectors.
+fn parse_selector_list<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<Vec<Selector>, ParseError> {
+    let mut selectors = Vec::new();
+    loop {
+        input.skip_whitespace();
+        let selector = parse_complex_selector(input)?;
+        selectors.push(selector);
+        input.skip_whitespace();
+        match input.next_including_whitespace_and_comments() {
+            Ok(token) => match token {
+                Token::Comma => continue,
+                other => {
+                    let other = other.clone();
+                    return Err(token_error(input, &other, "expected ',' or '{'"));
                 }
-                _ => {
-                    self.pos = saved;
+            },
+            Err(_) => break,
+        }
+    }
+    Ok(selectors)
+}
+
+/// Parse a complex selector: simple selectors joined by `descendant` (whitespace)
+/// or `child` (`>`) combinators.
+fn parse_complex_selector<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<Selector, ParseError> {
+    let mut parts = vec![parse_simple_selector(input)?];
+    let mut combinators = Vec::new();
+
+    loop {
+        // Track whether whitespace separates the previous simple selector from
+        // whatever comes next. `next_including_whitespace_and_comments` lets us
+        // see the whitespace token explicitly so the combinator detection
+        // mirrors the previous hand-rolled behaviour.
+        let saved = input.state();
+        let mut had_whitespace = false;
+        let mut combinator: Option<Combinator> = None;
+
+        // Peek forward, swallowing whitespace and comments until we either land
+        // on `>` (child combinator) or on a token that could start the next
+        // simple selector (descendant combinator).
+        loop {
+            let probe = input.state();
+            match input.next_including_whitespace_and_comments() {
+                Ok(Token::WhiteSpace(_)) | Ok(Token::Comment(_)) => {
+                    had_whitespace = true;
+                }
+                Ok(Token::Delim('>')) => {
+                    combinator = Some(Combinator::Child);
+                    break;
+                }
+                Ok(_) => {
+                    input.reset(&probe);
+                    break;
+                }
+                Err(_) => {
+                    input.reset(&probe);
                     break;
                 }
             }
         }
 
-        Ok(Selector { parts, combinators })
-    }
+        if combinator.is_none() && had_whitespace {
+            combinator = Some(Combinator::Descendant);
+        }
 
-    fn parse_simple_selector(&mut self) -> Result<SimpleSelector, ParseError> {
-        let kind = match self.next_char() {
-            Some('.') => {
-                self.consume_char();
-                SimpleSelectorKind::Class(self.parse_identifier()?)
-            }
-            Some('#') => {
-                self.consume_char();
-                SimpleSelectorKind::Id(self.parse_identifier()?)
-            }
-            Some(_) => SimpleSelectorKind::Tag(self.parse_identifier()?),
+        let combinator = match combinator {
+            Some(c) => c,
             None => {
-                return Err(ParseError::new(
-                    self.pos,
-                    "unexpected end of input while parsing selector",
-                ));
-            }
-        };
-
-        // Optional pseudo-class suffix glued directly to the kind (e.g. `.btn:hover`).
-        let pseudo = if self.next_char() == Some(':') {
-            self.consume_char();
-            let name = self.parse_identifier()?;
-            match name.as_str() {
-                "hover" => Some(PseudoClass::Hover),
-                "focus" => Some(PseudoClass::Focus),
-                "active" => Some(PseudoClass::Active),
-                "link" => Some(PseudoClass::Link),
-                "visited" => Some(PseudoClass::Visited),
-                // Unknown pseudo-classes parse silently to None so the surrounding rule
-                // is still applied; the selector just never matches `:unknown` cases.
-                _ => None,
-            }
-        } else {
-            None
-        };
-
-        Ok(SimpleSelector { kind, pseudo })
-    }
-
-    fn parse_declarations(&mut self) -> Result<Vec<Declaration>, ParseError> {
-        let mut declarations = Vec::new();
-
-        loop {
-            self.skip_whitespace_and_comments();
-
-            if self.eof() || self.next_char() == Some('}') {
+                input.reset(&saved);
                 break;
             }
-
-            // Try parsing a declaration; skip to the next ';' or '}' on failure.
-            // Shorthands like `border-radius` expand into multiple per-corner declarations,
-            // so each call may contribute more than one entry.
-            let saved = self.pos;
-            match self.parse_declaration() {
-                Ok(decls) => declarations.extend(decls),
-                Err(_) => {
-                    self.pos = saved;
-                    self.consume_while(|ch| ch != ';' && ch != '}');
-                }
-            }
-
-            self.skip_whitespace_and_comments();
-            if self.next_char() == Some(';') {
-                self.consume_char();
-            }
-        }
-
-        Ok(declarations)
-    }
-
-    fn parse_declaration(&mut self) -> Result<Vec<Declaration>, ParseError> {
-        let name = self.parse_identifier()?;
-        self.consume_whitespace();
-        self.expect_char(':')?;
-        self.consume_whitespace();
-
-        if name == "border-radius" {
-            return self.parse_border_radius_shorthand();
-        }
-
-        if name == "box-shadow" {
-            let value = self.parse_box_shadow_value()?;
-            return Ok(vec![Declaration { name, value }]);
-        }
-
-        if name == "text-shadow" {
-            let value = self.parse_text_shadow_value()?;
-            return Ok(vec![Declaration { name, value }]);
-        }
-
-        if name == "transform" {
-            let value = self.parse_transform_value()?;
-            return Ok(vec![Declaration { name, value }]);
-        }
-
-        if name == "flex" {
-            return self.parse_flex_shorthand();
-        }
-
-        if name == "grid-template-columns" || name == "grid-template-rows" {
-            let value = self.parse_grid_track_list()?;
-            return Ok(vec![Declaration { name, value }]);
-        }
-
-        if name == "grid-column" || name == "grid-row" {
-            let value = self.parse_grid_placement()?;
-            return Ok(vec![Declaration { name, value }]);
-        }
-
-        if name == "grid-template-areas" {
-            let value = self.parse_grid_template_areas()?;
-            return Ok(vec![Declaration { name, value }]);
-        }
-
-        let value = self.parse_value()?;
-        Ok(vec![Declaration { name, value }])
-    }
-
-    fn parse_grid_template_areas(&mut self) -> Result<Value, ParseError> {
-        // `grid-template-areas: "a a b" "c c b" "c c b";`
-        // Each row is a quoted string of whitespace-separated tokens. `.` is
-        // a designated empty cell. Adjacent cells with the same name form
-        // one rectangular area; the layout pass scans the map and builds a
-        // bounding rectangle when an item asks for that area by name.
-        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
-        loop {
-            self.consume_whitespace();
-            match self.next_char() {
-                Some('"') => {}
-                _ => break,
-            }
-            self.consume_char(); // opening "
-            let body = self.consume_while(|ch| ch != '"');
-            if self.next_char() == Some('"') {
-                self.consume_char(); // closing "
-            } else {
-                return Err(ParseError::new(self.pos, "unterminated string in grid-template-areas"));
-            }
-            let cells = body
-                .split_whitespace()
-                .map(|tok| {
-                    if tok == "." {
-                        None
-                    } else {
-                        Some(tok.to_string())
-                    }
-                })
-                .collect::<Vec<_>>();
-            if !cells.is_empty() {
-                rows.push(cells);
-            }
-        }
-        if rows.is_empty() {
-            return Err(ParseError::new(
-                self.pos,
-                "grid-template-areas requires at least one row string",
-            ));
-        }
-        Ok(Value::TemplateAreas(rows))
-    }
-
-    fn parse_grid_placement(&mut self) -> Result<Value, ParseError> {
-        // `grid-column: <line> [/ <line>]?`. Each side is one of:
-        //   - `auto`
-        //   - `<integer>` (1-based grid line; negatives skipped for now)
-        //   - `span <integer>`
-        // Missing `/ <line>` defaults the end side to `auto`, which the
-        // layout pass interprets as span-1.
-        self.consume_whitespace();
-        let start = self.parse_grid_line()?;
-        self.consume_whitespace();
-        let end = if self.next_char() == Some('/') {
-            self.consume_char();
-            self.consume_whitespace();
-            self.parse_grid_line()?
-        } else {
-            GridLine::Auto
         };
-        Ok(Value::GridPlacement(GridPlacement { start, end }))
+
+        // Skip whitespace after `>` so `.a > .b` and `.a >.b` behave the same.
+        input.skip_whitespace();
+
+        // The next token has to actually start a simple selector. If it doesn't
+        // (e.g. it's `,` or `{`), back out and let the outer loop see it.
+        let probe = input.state();
+        let starts_simple = matches!(
+            input.next_including_whitespace_and_comments(),
+            Ok(Token::Delim('.'))
+                | Ok(Token::Delim('#'))
+                | Ok(Token::Ident(_))
+                | Ok(Token::IDHash(_))
+                | Ok(Token::Hash(_))
+        );
+        input.reset(&probe);
+
+        if !starts_simple {
+            input.reset(&saved);
+            break;
+        }
+
+        parts.push(parse_simple_selector(input)?);
+        combinators.push(combinator);
     }
 
-    fn parse_grid_line(&mut self) -> Result<GridLine, ParseError> {
-        // `auto` / `span <n>` come first because they're keyword-led.
-        if matches!(self.next_char(), Some(ch) if ch.is_ascii_alphabetic()) {
-            let keyword = self.parse_identifier()?;
-            return match keyword.as_str() {
-                "auto" => Ok(GridLine::Auto),
-                "span" => {
-                    self.consume_whitespace();
-                    let n = self.parse_grid_line_integer()?;
-                    if n == 0 {
-                        return Err(ParseError::new(self.pos, "span must be >= 1"));
-                    }
-                    Ok(GridLine::Span(n))
+    Ok(Selector { parts, combinators })
+}
+
+/// Parse one simple selector: tag/class/id base plus an optional pseudo-class.
+fn parse_simple_selector<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<SimpleSelector, ParseError> {
+    let pos = input.position().byte_index();
+    let token = input
+        .next_including_whitespace_and_comments()
+        .map_err(|err| convert_basic_error_at(pos, err))?
+        .clone();
+    let kind = match token {
+        Token::Delim('.') => {
+            let pos = input.position().byte_index();
+            let name = input
+                .expect_ident()
+                .map_err(|err| convert_basic_error_at(pos, err))?
+                .to_string();
+            SimpleSelectorKind::Class(name)
+        }
+        // `#name` arrives as either Hash or IDHash depending on whether the
+        // body looks like an ID identifier; both map to our `Id` kind.
+        Token::IDHash(name) | Token::Hash(name) => SimpleSelectorKind::Id(name.to_string()),
+        Token::Ident(name) => SimpleSelectorKind::Tag(name.to_string()),
+        Token::Delim('#') => {
+            // Defensive: the tokeniser usually delivers `#x` as Hash, but
+            // accept the explicit-delim form for symmetry with the old parser.
+            let pos = input.position().byte_index();
+            let name = input
+                .expect_ident()
+                .map_err(|err| convert_basic_error_at(pos, err))?
+                .to_string();
+            SimpleSelectorKind::Id(name)
+        }
+        other => {
+            return Err(token_error_at(pos, &other, "expected selector"));
+        }
+    };
+
+    // Optional pseudo-class suffix glued directly to the kind (e.g. `.btn:hover`).
+    let pseudo = {
+        let probe = input.state();
+        match input.next_including_whitespace_and_comments() {
+            Ok(Token::Colon) => {
+                let pos = input.position().byte_index();
+                let name = input
+                    .expect_ident()
+                    .map_err(|err| convert_basic_error_at(pos, err))?
+                    .to_string();
+                match name.as_str() {
+                    "hover" => Some(PseudoClass::Hover),
+                    "focus" => Some(PseudoClass::Focus),
+                    "active" => Some(PseudoClass::Active),
+                    "link" => Some(PseudoClass::Link),
+                    "visited" => Some(PseudoClass::Visited),
+                    // Unknown pseudo-classes parse silently to None so the surrounding rule
+                    // is still applied; the selector just never matches `:unknown` cases.
+                    _ => None,
                 }
-                other => Err(ParseError::new(
-                    self.pos,
-                    format!("unsupported grid-line keyword '{other}'"),
-                )),
-            };
-        }
-        let n = self.parse_grid_line_integer()?;
-        if n == 0 {
-            return Err(ParseError::new(self.pos, "grid line must be >= 1"));
-        }
-        Ok(GridLine::Index(n))
-    }
-
-    fn parse_grid_line_integer(&mut self) -> Result<u32, ParseError> {
-        let digits = self.consume_while(|ch| ch.is_ascii_digit());
-        digits.parse::<u32>().map_err(|_| {
-            ParseError::new(
-                self.pos,
-                format!("invalid grid line integer '{digits}'"),
-            )
-        })
-    }
-
-    fn parse_grid_track_list(&mut self) -> Result<Value, ParseError> {
-        // CSS `grid-template-columns: 100px 1fr 200px` — whitespace-separated
-        // track sizes. Each token is either a `<length>` (resolves later in
-        // layout) or a `<number>fr` (a flexible fraction). The `fr` unit only
-        // makes sense inside this list, so we parse it here instead of
-        // teaching the generic length parser about it.
-        let mut tracks = Vec::new();
-        loop {
-            self.consume_whitespace();
-            match self.next_char() {
-                Some(';') | Some('}') | None => break,
-                _ => {}
             }
-            let track = self.parse_grid_track_size()?;
-            tracks.push(track);
+            _ => {
+                input.reset(&probe);
+                None
+            }
         }
-        if tracks.is_empty() {
-            return Err(ParseError::new(
-                self.pos,
-                "grid track list requires at least one track size",
-            ));
+    };
+
+    Ok(SimpleSelector { kind, pseudo })
+}
+
+// =============================================================================
+// Declaration block parsing
+// =============================================================================
+
+/// Iterate the `{ ... }` body and collect declarations. Errors on individual
+/// declarations are tolerated: the offending entry is dropped and the next one
+/// continues. `RuleBodyParser` already scans past the next semicolon on error
+/// so the tolerant behaviour matches the original parser.
+fn parse_declaration_block<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<Vec<Declaration>, ParseError> {
+    let mut declarations = Vec::new();
+    let mut handler = DeclHandler;
+    let iter = cssparser::RuleBodyParser::new(input, &mut handler);
+    for decls in iter.flatten() {
+        declarations.extend(decls);
+    }
+    Ok(declarations)
+}
+
+struct DeclHandler;
+
+impl<'i> cssparser::DeclarationParser<'i> for DeclHandler {
+    type Declaration = Vec<Declaration>;
+    type Error = CssError;
+
+    fn parse_value<'t>(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut CssParser<'i, 't>,
+        _decl_start: &ParserState,
+    ) -> Result<Self::Declaration, CssParseError<'i, Self::Error>> {
+        // Dispatch by property name to mirror the old `parse_declaration`. The
+        // value-shape helpers each consume their delimited slice end-to-end so
+        // `parse_value` itself just routes by name.
+        let name = name.to_string();
+        let result = parse_declaration_value(&name, input);
+        match result {
+            Ok(decls) => Ok(decls),
+            Err(err) => Err(input.new_custom_error(err)),
         }
-        Ok(Value::TrackList(tracks))
+    }
+}
+
+impl<'i> cssparser::AtRuleParser<'i> for DeclHandler {
+    type Prelude = ();
+    type AtRule = Vec<Declaration>;
+    type Error = CssError;
+}
+
+impl<'i> cssparser::QualifiedRuleParser<'i> for DeclHandler {
+    type Prelude = ();
+    type QualifiedRule = Vec<Declaration>;
+    type Error = CssError;
+}
+
+impl<'i> cssparser::RuleBodyItemParser<'i, Vec<Declaration>, CssError> for DeclHandler {
+    fn parse_declarations(&self) -> bool {
+        true
     }
 
-    fn parse_grid_track_size(&mut self) -> Result<TrackSize, ParseError> {
-        // `auto` is the only non-numeric token allowed in commit G2; bigger
-        // keywords like `min-content`/`max-content` would extend this branch.
-        if matches!(self.next_char(), Some(ch) if ch.is_ascii_alphabetic()) {
-            let keyword = self.parse_identifier()?;
-            return match keyword.as_str() {
-                "auto" => Ok(TrackSize::Auto),
+    fn parse_qualified(&self) -> bool {
+        false
+    }
+}
+
+/// Per-property dispatch: returns the longhand declarations contributed by
+/// a single source declaration. Shorthands like `border-radius` and `flex`
+/// expand to several entries.
+fn parse_declaration_value<'i, 't>(
+    name: &str,
+    input: &mut CssParser<'i, 't>,
+) -> Result<Vec<Declaration>, ParseError> {
+    if name == "border-radius" {
+        return parse_border_radius_shorthand(name, input);
+    }
+    if name == "box-shadow" {
+        let value = parse_box_shadow_value(input)?;
+        return Ok(vec![Declaration {
+            name: name.to_string(),
+            value,
+        }]);
+    }
+    if name == "text-shadow" {
+        let value = parse_text_shadow_value(input)?;
+        return Ok(vec![Declaration {
+            name: name.to_string(),
+            value,
+        }]);
+    }
+    if name == "transform" {
+        let value = parse_transform_value(input)?;
+        return Ok(vec![Declaration {
+            name: name.to_string(),
+            value,
+        }]);
+    }
+    if name == "flex" {
+        return parse_flex_shorthand(input);
+    }
+    if name == "grid-template-columns" || name == "grid-template-rows" {
+        let value = parse_grid_track_list(input)?;
+        return Ok(vec![Declaration {
+            name: name.to_string(),
+            value,
+        }]);
+    }
+    if name == "grid-column" || name == "grid-row" {
+        let value = parse_grid_placement(input)?;
+        return Ok(vec![Declaration {
+            name: name.to_string(),
+            value,
+        }]);
+    }
+    if name == "grid-template-areas" {
+        let value = parse_grid_template_areas(input)?;
+        return Ok(vec![Declaration {
+            name: name.to_string(),
+            value,
+        }]);
+    }
+
+    let value = parse_value(input)?;
+    Ok(vec![Declaration {
+        name: name.to_string(),
+        value,
+    }])
+}
+
+// =============================================================================
+// Value parsing (the bulk of the per-property quirks)
+// =============================================================================
+
+/// Generic value parser used as the fallback dispatch for any property that
+/// doesn't have a custom shape. Recognises keywords, numbers/lengths, hex
+/// colors, named colors, and the legacy `rgb()` / `rgba()` / `linear-gradient()`
+/// / `radial-gradient()` / `url()` functions.
+fn parse_value<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, ParseError> {
+    input.skip_whitespace();
+    let position = input.position();
+    let token = input
+        .next()
+        .map_err(|err| convert_basic_error_at(position.byte_index(), err))?
+        .clone();
+
+    let value = match token {
+        Token::Hash(hex) | Token::IDHash(hex) => parse_hex_color_str(hex.as_ref(), input)?,
+        Token::Number { value, .. } => Value::Number(value),
+        Token::Percentage { unit_value, .. } => Value::Length(unit_value * 100.0, Unit::Percent),
+        Token::Dimension { value, unit, .. } => length_with_unit(value, unit.as_ref()),
+        Token::Ident(ident) => {
+            let raw = ident.to_string();
+            if let Some(color) = named_color(&raw) {
+                Value::Color(color)
+            } else {
+                Value::Keyword(raw)
+            }
+        }
+        Token::Function(name) => parse_function(name.as_ref(), input)?,
+        // Unquoted URL: cssparser turns the entire `url(  /a/b  )` into a single
+        // `UnquotedUrl` token (already trimmed of inner whitespace), so the
+        // outer `Function("url")` route only fires on the quoted form.
+        Token::UnquotedUrl(url) => Value::ImageUrl(url.to_string()),
+        Token::QuotedString(s) => Value::Keyword(s.to_string()),
+        other => {
+            return Err(token_error(input, &other, "unexpected token in value"));
+        }
+    };
+
+    Ok(value)
+}
+
+fn length_with_unit(value: f32, unit: &str) -> Value {
+    match unit {
+        "px" => Value::Length(value, Unit::Px),
+        "em" => Value::Length(value, Unit::Em),
+        "rem" => Value::Length(value, Unit::Rem),
+        // Unsupported dimensions (e.g. `12pt`) fall back to a keyword that mirrors the
+        // original tokens so callers can still distinguish them at the cascade layer.
+        other => Value::Keyword(format!("{value}{other}")),
+    }
+}
+
+fn parse_hex_color_str<'i, 't>(
+    hex: &str,
+    input: &CssParser<'i, 't>,
+) -> Result<Value, ParseError> {
+    let (r, g, b) = match hex.len() {
+        3 => {
+            let chars: Vec<char> = hex.chars().collect();
+            (
+                expand_hex(chars[0])?,
+                expand_hex(chars[1])?,
+                expand_hex(chars[2])?,
+            )
+        }
+        6 => (
+            parse_hex_pair(&hex[0..2])?,
+            parse_hex_pair(&hex[2..4])?,
+            parse_hex_pair(&hex[4..6])?,
+        ),
+        _ => {
+            return Err(ParseError::new(
+                input.position().byte_index(),
+                "hex colors must use either 3 or 6 digits",
+            ));
+        }
+    };
+    Ok(Value::Color(Color { r, g, b, a: 255 }))
+}
+
+fn parse_hex_pair(pair: &str) -> Result<u8, ParseError> {
+    u8::from_str_radix(pair, 16)
+        .map_err(|_| ParseError::new(0, format!("invalid hex color pair '{pair}'")))
+}
+
+fn expand_hex(ch: char) -> Result<u8, ParseError> {
+    let mut pair = String::with_capacity(2);
+    pair.push(ch);
+    pair.push(ch);
+    parse_hex_pair(&pair)
+}
+
+/// Drive a function-call value (`rgb()`, `linear-gradient()`, etc). The caller
+/// has already consumed the leading `Function(name)` token, so we open a nested
+/// block and route by name.
+fn parse_function<'i, 't>(
+    name: &str,
+    input: &mut CssParser<'i, 't>,
+) -> Result<Value, ParseError> {
+    let lower = name.to_ascii_lowercase();
+    input
+        .parse_nested_block(|inner| {
+            let result: Result<Value, ParseError> = match lower.as_str() {
+                "rgb" => parse_rgb_function(inner, false),
+                "rgba" => parse_rgb_function(inner, true),
+                "linear-gradient" => parse_linear_gradient(inner),
+                "radial-gradient" => parse_radial_gradient(inner),
+                "url" => parse_url_function(inner),
                 other => Err(ParseError::new(
-                    self.pos,
-                    format!("unsupported grid track keyword '{other}'"),
+                    inner.position().byte_index(),
+                    format!("unsupported function '{other}'"),
                 )),
             };
-        }
+            result.map_err(|err| inner.new_custom_error(err))
+        })
+        .map_err(|err| convert_error(err))
+}
 
-        // Read the leading number, then peek a unit — `fr` becomes a Fraction,
-        // anything else routes through the regular length unit set.
-        let number_str = self.consume_while(|ch| ch.is_ascii_digit() || ch == '.');
-        if number_str.is_empty() {
+fn parse_rgb_function<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+    has_alpha: bool,
+) -> Result<Value, ParseError> {
+    let r = parse_color_byte(input)?;
+    expect_token_comma(input)?;
+    let g = parse_color_byte(input)?;
+    expect_token_comma(input)?;
+    let b = parse_color_byte(input)?;
+    let a = if has_alpha {
+        expect_token_comma(input)?;
+        let alpha = parse_unsigned_number(input)?;
+        (alpha.clamp(0.0, 1.0) * 255.0).round() as u8
+    } else {
+        255
+    };
+    input.skip_whitespace();
+    Ok(Value::Color(Color { r, g, b, a }))
+}
+
+fn parse_color_byte<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<u8, ParseError> {
+    let value = parse_unsigned_number(input)?;
+    Ok(value.clamp(0.0, 255.0).round() as u8)
+}
+
+fn parse_unsigned_number<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<f32, ParseError> {
+    input.skip_whitespace();
+    let pos = input.position().byte_index();
+    let token = input
+        .next()
+        .map_err(|err| convert_basic_error_at(pos, err))?
+        .clone();
+    match token {
+        Token::Number { value, .. } => Ok(value),
+        other => Err(token_error(input, &other, "invalid numeric component")),
+    }
+}
+
+fn expect_token_comma<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<(), ParseError> {
+    input.skip_whitespace();
+    let pos = input.position().byte_index();
+    input
+        .expect_comma()
+        .map_err(|err| convert_basic_error_at(pos, err))
+}
+
+// -----------------------------------------------------------------------------
+// linear-gradient / radial-gradient
+// -----------------------------------------------------------------------------
+
+fn parse_linear_gradient<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, ParseError> {
+    input.skip_whitespace();
+
+    // Look for an optional `to <side>` direction prefix. We commit to the
+    // direction parse only if the first token looks like the `to` keyword;
+    // otherwise back out and treat the input as a stops-only gradient.
+    let direction = {
+        let saved = input.state();
+        let probe = input.next().ok().cloned();
+        match probe {
+            Some(Token::Ident(ref ident)) if ident.eq_ignore_ascii_case("to") => {
+                input.skip_whitespace();
+                let side_pos = input.position().byte_index();
+                let side_tok = input
+                    .next()
+                    .map_err(|err| convert_basic_error_at(side_pos, err))?
+                    .clone();
+                let dir = match side_tok {
+                    Token::Ident(side) => match side.as_ref() {
+                        "top" => GradientDirection::ToTop,
+                        "bottom" => GradientDirection::ToBottom,
+                        "left" => GradientDirection::ToLeft,
+                        "right" => GradientDirection::ToRight,
+                        other => {
+                            return Err(ParseError::new(
+                                side_pos,
+                                format!("unsupported gradient direction 'to {other}'"),
+                            ));
+                        }
+                    },
+                    other => {
+                        return Err(token_error(input, &other, "expected gradient direction side"));
+                    }
+                };
+                input.skip_whitespace();
+                let comma_pos = input.position().byte_index();
+                input
+                    .expect_comma()
+                    .map_err(|err| convert_basic_error_at(comma_pos, err))?;
+                dir
+            }
+            _ => {
+                input.reset(&saved);
+                GradientDirection::ToBottom
+            }
+        }
+    };
+
+    let stops = parse_gradient_stops(input, "linear-gradient")?;
+    Ok(Value::Gradient(Gradient {
+        kind: GradientKind::Linear(direction),
+        stops,
+    }))
+}
+
+fn parse_radial_gradient<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, ParseError> {
+    input.skip_whitespace();
+    let stops = parse_gradient_stops(input, "radial-gradient")?;
+    Ok(Value::Gradient(Gradient {
+        kind: GradientKind::Radial,
+        stops,
+    }))
+}
+
+fn parse_gradient_stops<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+    label: &str,
+) -> Result<Vec<ColorStop>, ParseError> {
+    let mut stops = Vec::new();
+    loop {
+        input.skip_whitespace();
+        stops.push(parse_color_stop(input)?);
+        input.skip_whitespace();
+        // We're inside `parse_nested_block`, so `next()` returns `Err` once we
+        // hit the closing `)`. A comma means another stop follows; anything
+        // else (including end-of-block) ends the list.
+        let probe = input.state();
+        match input.next() {
+            Ok(Token::Comma) => continue,
+            Ok(other) => {
+                let other = other.clone();
+                return Err(token_error(input, &other, &format!("expected ',' or ')' in {label}")));
+            }
+            Err(_) => {
+                input.reset(&probe);
+                break;
+            }
+        }
+    }
+    if stops.len() < 2 {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            format!("{label} requires at least two color stops"),
+        ));
+    }
+    Ok(stops)
+}
+
+fn parse_color_stop<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<ColorStop, ParseError> {
+    let color = match parse_value(input)? {
+        Value::Color(color) => color,
+        other => {
             return Err(ParseError::new(
-                self.pos,
-                "grid track size requires a numeric value",
+                input.position().byte_index(),
+                format!("expected a color in gradient stop, got {other:?}"),
             ));
         }
-        let value = number_str.parse::<f32>().map_err(|_| {
-            ParseError::new(
-                self.pos,
-                format!("invalid numeric value '{number_str}' in grid track"),
-            )
-        })?;
-
-        if self.next_char() == Some('%') {
-            self.consume_char();
-            return Ok(TrackSize::Length(value, Unit::Percent));
+    };
+    input.skip_whitespace();
+    let probe = input.state();
+    let position = match input.next().ok().cloned() {
+        Some(Token::Percentage { unit_value, .. }) => Some(unit_value.clamp(0.0, 1.0)),
+        _ => {
+            input.reset(&probe);
+            None
         }
+    };
+    Ok(ColorStop { color, position })
+}
 
-        if !matches!(self.next_char(), Some(ch) if ch.is_alphabetic()) {
+// -----------------------------------------------------------------------------
+// url(...)
+// -----------------------------------------------------------------------------
+
+fn parse_url_function<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, ParseError> {
+    // Inside the nested block opened by `Function("url")`. The token for the URL
+    // is either an `UnquotedUrl` (cssparser already trimmed surrounding
+    // whitespace) or a `QuotedString`. Anything else is a parse error.
+    input.skip_whitespace();
+    let pos = input.position().byte_index();
+    let token = input
+        .next()
+        .map_err(|err| convert_basic_error_at(pos, err))?
+        .clone();
+    let url = match token {
+        Token::UnquotedUrl(url) => url.to_string(),
+        Token::QuotedString(url) => url.to_string(),
+        other => {
+            return Err(token_error(input, &other, "expected URL token"));
+        }
+    };
+    input.skip_whitespace();
+    Ok(Value::ImageUrl(url))
+}
+
+// -----------------------------------------------------------------------------
+// length / number helpers (with sign + unit)
+// -----------------------------------------------------------------------------
+
+/// Parse a single number-or-length token where a leading sign is allowed. Used
+/// by transform / shadow / flex / border-radius — anywhere we want to accept
+/// `-10px` or `1.5` without the generic `parse_value` machinery.
+fn parse_length_or_number<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<Value, ParseError> {
+    input.skip_whitespace();
+    let pos = input.position().byte_index();
+    let token = input
+        .next()
+        .map_err(|err| convert_basic_error_at(pos, err))?
+        .clone();
+    match token {
+        Token::Number { value, .. } => Ok(Value::Number(value)),
+        Token::Percentage { unit_value, .. } => Ok(Value::Length(unit_value * 100.0, Unit::Percent)),
+        Token::Dimension { value, unit, .. } => Ok(length_with_unit(value, unit.as_ref())),
+        other => Err(token_error(input, &other, "expected a length or number")),
+    }
+}
+
+fn parse_length_token<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<f32, ParseError> {
+    match parse_length_or_number(input)? {
+        Value::Length(v, _) => Ok(v),
+        Value::Number(v) => Ok(v),
+        other => Err(ParseError::new(
+            input.position().byte_index(),
+            format!("expected a length token, got {other:?}"),
+        )),
+    }
+}
+
+/// `true` if the next token can begin a numeric value (number, dimension,
+/// percentage). Used by shadow / flex parsers that greedily consume a variable
+/// number of leading lengths.
+fn peek_starts_length<'i, 't>(input: &mut CssParser<'i, 't>) -> bool {
+    let saved = input.state();
+    let result = matches!(
+        input.next(),
+        Ok(Token::Number { .. }) | Ok(Token::Dimension { .. }) | Ok(Token::Percentage { .. })
+    );
+    input.reset(&saved);
+    result
+}
+
+// -----------------------------------------------------------------------------
+// border-radius shorthand
+// -----------------------------------------------------------------------------
+
+fn parse_border_radius_shorthand<'i, 't>(
+    name: &str,
+    input: &mut CssParser<'i, 't>,
+) -> Result<Vec<Declaration>, ParseError> {
+    let _ = name; // shorthand always expands to fixed longhand names
+    let mut lengths = Vec::new();
+    loop {
+        input.skip_whitespace();
+        if !peek_starts_length(input) {
+            break;
+        }
+        lengths.push(parse_length_or_number(input)?);
+        if lengths.len() == 4 {
+            break;
+        }
+    }
+
+    if lengths.is_empty() {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            "border-radius requires at least one length",
+        ));
+    }
+
+    let (tl, tr, br, bl) = match lengths.as_slice() {
+        [v] => (v.clone(), v.clone(), v.clone(), v.clone()),
+        [tl_br, tr_bl] => (tl_br.clone(), tr_bl.clone(), tl_br.clone(), tr_bl.clone()),
+        [tl, tr_bl, br] => (tl.clone(), tr_bl.clone(), br.clone(), tr_bl.clone()),
+        [tl, tr, br, bl] => (tl.clone(), tr.clone(), br.clone(), bl.clone()),
+        _ => unreachable!(),
+    };
+
+    Ok(vec![
+        Declaration {
+            name: "border-top-left-radius".into(),
+            value: tl,
+        },
+        Declaration {
+            name: "border-top-right-radius".into(),
+            value: tr,
+        },
+        Declaration {
+            name: "border-bottom-right-radius".into(),
+            value: br,
+        },
+        Declaration {
+            name: "border-bottom-left-radius".into(),
+            value: bl,
+        },
+    ])
+}
+
+// -----------------------------------------------------------------------------
+// flex shorthand
+// -----------------------------------------------------------------------------
+
+fn parse_flex_shorthand<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<Vec<Declaration>, ParseError> {
+    // Same grammar as the original parser — see the long comment in the prior
+    // implementation. We greedily consume up to three numeric tokens and stop
+    // when we see a length (which becomes the basis) or run out.
+    let mut grow: Option<f32> = None;
+    let mut shrink: Option<f32> = None;
+    let mut basis: Option<Value> = None;
+
+    for _slot in 0..3 {
+        input.skip_whitespace();
+        if !peek_starts_length(input) {
+            break;
+        }
+        match parse_length_or_number(input)? {
+            Value::Number(n) => {
+                if grow.is_none() {
+                    grow = Some(n);
+                } else if shrink.is_none() {
+                    shrink = Some(n);
+                } else {
+                    return Err(ParseError::new(
+                        input.position().byte_index(),
+                        "flex shorthand: third value must be a length",
+                    ));
+                }
+            }
+            length @ Value::Length(_, _) => {
+                basis = Some(length);
+                break;
+            }
+            _ => break,
+        }
+    }
+
+    if grow.is_none() && basis.is_none() {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            "flex shorthand requires at least one number or length",
+        ));
+    }
+
+    let grow_value = grow.unwrap_or(1.0);
+    let shrink_value = shrink.unwrap_or(1.0);
+    let mut decls = vec![
+        Declaration {
+            name: "flex-grow".into(),
+            value: Value::Number(grow_value),
+        },
+        Declaration {
+            name: "flex-shrink".into(),
+            value: Value::Number(shrink_value),
+        },
+    ];
+    if let Some(basis_value) = basis {
+        decls.push(Declaration {
+            name: "flex-basis".into(),
+            value: basis_value,
+        });
+    }
+    Ok(decls)
+}
+
+// -----------------------------------------------------------------------------
+// transform list
+// -----------------------------------------------------------------------------
+
+fn parse_transform_value<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<Value, ParseError> {
+    let mut ops = Vec::new();
+    loop {
+        input.skip_whitespace();
+        // Stop at end-of-input (we're in a delimited declaration slice, so
+        // `next()` returning Err means there's nothing more).
+        let probe = input.state();
+        let func = match input.next() {
+            Ok(Token::Function(name)) => name.to_string(),
+            Ok(_) => {
+                input.reset(&probe);
+                break;
+            }
+            Err(_) => {
+                input.reset(&probe);
+                break;
+            }
+        };
+        let op = input
+            .parse_nested_block(|inner| {
+                let result: Result<TransformOp, ParseError> = parse_transform_op(&func, inner);
+                result.map_err(|err| inner.new_custom_error(err))
+            })
+            .map_err(|err| convert_error(err))?;
+        ops.push(op);
+    }
+    if ops.is_empty() {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            "transform requires at least one function",
+        ));
+    }
+    Ok(Value::TransformList(ops))
+}
+
+fn parse_transform_op<'i, 't>(
+    name: &str,
+    input: &mut CssParser<'i, 't>,
+) -> Result<TransformOp, ParseError> {
+    match name {
+        "translate" => {
+            input.skip_whitespace();
+            let x = parse_length_token(input)?;
+            input.skip_whitespace();
+            let y = if input.try_parse(|i| i.expect_comma()).is_ok() {
+                input.skip_whitespace();
+                let value = parse_length_token(input)?;
+                input.skip_whitespace();
+                value
+            } else {
+                0.0
+            };
+            Ok(TransformOp::Translate { x, y })
+        }
+        "translateX" => {
+            input.skip_whitespace();
+            let x = parse_length_token(input)?;
+            input.skip_whitespace();
+            Ok(TransformOp::Translate { x, y: 0.0 })
+        }
+        "translateY" => {
+            input.skip_whitespace();
+            let y = parse_length_token(input)?;
+            input.skip_whitespace();
+            Ok(TransformOp::Translate { x: 0.0, y })
+        }
+        "scale" => {
+            input.skip_whitespace();
+            let x = parse_length_token(input)?;
+            input.skip_whitespace();
+            let y = if input.try_parse(|i| i.expect_comma()).is_ok() {
+                input.skip_whitespace();
+                let value = parse_length_token(input)?;
+                input.skip_whitespace();
+                value
+            } else {
+                x
+            };
+            Ok(TransformOp::Scale { x, y })
+        }
+        "scaleX" => {
+            input.skip_whitespace();
+            let x = parse_length_token(input)?;
+            input.skip_whitespace();
+            Ok(TransformOp::Scale { x, y: 1.0 })
+        }
+        "scaleY" => {
+            input.skip_whitespace();
+            let y = parse_length_token(input)?;
+            input.skip_whitespace();
+            Ok(TransformOp::Scale { x: 1.0, y })
+        }
+        "rotate" => {
+            input.skip_whitespace();
+            let theta = parse_angle_token(input)?;
+            input.skip_whitespace();
+            Ok(TransformOp::Rotate(theta))
+        }
+        other => Err(ParseError::new(
+            input.position().byte_index(),
+            format!("unsupported transform function '{other}'"),
+        )),
+    }
+}
+
+fn parse_angle_token<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<f32, ParseError> {
+    input.skip_whitespace();
+    let pos = input.position().byte_index();
+    let token = input
+        .next()
+        .map_err(|err| convert_basic_error_at(pos, err))?
+        .clone();
+    let (value, unit): (f32, String) = match token {
+        Token::Number { value, .. } => (value, String::new()),
+        Token::Dimension { value, unit, .. } => (value, unit.to_string()),
+        other => return Err(token_error(input, &other, "invalid angle")),
+    };
+    let radians = match unit.as_str() {
+        "deg" => value * std::f32::consts::PI / 180.0,
+        "rad" => value,
+        "turn" => value * std::f32::consts::TAU,
+        "grad" => value * std::f32::consts::PI / 200.0,
+        "" if value == 0.0 => 0.0,
+        other => {
             return Err(ParseError::new(
-                self.pos,
-                "grid track size requires a unit (px/em/rem/% or fr)",
+                pos,
+                format!("unsupported angle unit '{other}'"),
             ));
         }
+    };
+    Ok(radians)
+}
 
-        let unit = self.parse_identifier()?;
-        match unit.as_str() {
+// -----------------------------------------------------------------------------
+// box-shadow / text-shadow
+// -----------------------------------------------------------------------------
+
+fn parse_box_shadow_value<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<Value, ParseError> {
+    let offset_x = parse_length_token(input)?;
+    input.skip_whitespace();
+    let offset_y = parse_length_token(input)?;
+    input.skip_whitespace();
+
+    let mut blur_radius = 0.0;
+    let mut spread_radius = 0.0;
+    for slot in 0..2 {
+        if !peek_starts_length(input) {
+            break;
+        }
+        let value = parse_length_token(input)?;
+        if slot == 0 {
+            blur_radius = value.max(0.0);
+        } else {
+            spread_radius = value;
+        }
+        input.skip_whitespace();
+    }
+
+    let color = if input.is_exhausted() {
+        Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        }
+    } else {
+        match parse_value(input)? {
+            Value::Color(color) => color,
+            other => {
+                return Err(ParseError::new(
+                    input.position().byte_index(),
+                    format!("expected color in box-shadow, got {other:?}"),
+                ));
+            }
+        }
+    };
+
+    Ok(Value::BoxShadow(BoxShadow {
+        offset_x,
+        offset_y,
+        blur_radius,
+        spread_radius,
+        color,
+    }))
+}
+
+fn parse_text_shadow_value<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<Value, ParseError> {
+    let offset_x = parse_length_token(input)?;
+    input.skip_whitespace();
+    let offset_y = parse_length_token(input)?;
+    input.skip_whitespace();
+
+    let blur_radius = if peek_starts_length(input) {
+        let value = parse_length_token(input)?.max(0.0);
+        input.skip_whitespace();
+        value
+    } else {
+        0.0
+    };
+
+    let color = if input.is_exhausted() {
+        Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        }
+    } else {
+        match parse_value(input)? {
+            Value::Color(color) => color,
+            other => {
+                return Err(ParseError::new(
+                    input.position().byte_index(),
+                    format!("expected color in text-shadow, got {other:?}"),
+                ));
+            }
+        }
+    };
+
+    Ok(Value::TextShadow(TextShadow {
+        offset_x,
+        offset_y,
+        blur_radius,
+        color,
+    }))
+}
+
+// -----------------------------------------------------------------------------
+// grid-* values
+// -----------------------------------------------------------------------------
+
+fn parse_grid_template_areas<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<Value, ParseError> {
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    loop {
+        input.skip_whitespace();
+        let probe = input.state();
+        let body = match input.next() {
+            Ok(Token::QuotedString(s)) => s.to_string(),
+            _ => {
+                input.reset(&probe);
+                break;
+            }
+        };
+        let cells = body
+            .split_whitespace()
+            .map(|tok| {
+                if tok == "." {
+                    None
+                } else {
+                    Some(tok.to_string())
+                }
+            })
+            .collect::<Vec<_>>();
+        if !cells.is_empty() {
+            rows.push(cells);
+        }
+    }
+    if rows.is_empty() {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            "grid-template-areas requires at least one row string",
+        ));
+    }
+    Ok(Value::TemplateAreas(rows))
+}
+
+fn parse_grid_placement<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<Value, ParseError> {
+    input.skip_whitespace();
+    let start = parse_grid_line(input)?;
+    input.skip_whitespace();
+    let end = if input.try_parse(|i| i.expect_delim('/')).is_ok() {
+        input.skip_whitespace();
+        parse_grid_line(input)?
+    } else {
+        GridLine::Auto
+    };
+    Ok(Value::GridPlacement(GridPlacement { start, end }))
+}
+
+fn parse_grid_line<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<GridLine, ParseError> {
+    let pos = input.position().byte_index();
+    let token = input
+        .next()
+        .map_err(|err| convert_basic_error_at(pos, err))?
+        .clone();
+    match token {
+        Token::Ident(name) => match name.as_ref() {
+            "auto" => Ok(GridLine::Auto),
+            "span" => {
+                input.skip_whitespace();
+                let n = parse_grid_line_integer(input)?;
+                if n == 0 {
+                    return Err(ParseError::new(pos, "span must be >= 1"));
+                }
+                Ok(GridLine::Span(n))
+            }
+            other => Err(ParseError::new(
+                pos,
+                format!("unsupported grid-line keyword '{other}'"),
+            )),
+        },
+        Token::Number {
+            int_value: Some(int_value),
+            value,
+            ..
+        } => {
+            if int_value <= 0 {
+                return Err(ParseError::new(pos, "grid line must be >= 1"));
+            }
+            let _ = value;
+            Ok(GridLine::Index(int_value as u32))
+        }
+        Token::Number { value, .. } => {
+            if value <= 0.0 {
+                return Err(ParseError::new(pos, "grid line must be >= 1"));
+            }
+            Ok(GridLine::Index(value as u32))
+        }
+        other => Err(token_error(input, &other, "expected grid line value")),
+    }
+}
+
+fn parse_grid_line_integer<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<u32, ParseError> {
+    let pos = input.position().byte_index();
+    let token = input
+        .next()
+        .map_err(|err| convert_basic_error_at(pos, err))?
+        .clone();
+    match token {
+        Token::Number {
+            int_value: Some(n),
+            ..
+        } if n >= 0 => Ok(n as u32),
+        Token::Number { value, .. } if value >= 0.0 => Ok(value as u32),
+        other => Err(token_error(input, &other, "invalid grid line integer")),
+    }
+}
+
+fn parse_grid_track_list<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<Value, ParseError> {
+    let mut tracks = Vec::new();
+    loop {
+        input.skip_whitespace();
+        if input.is_exhausted() {
+            break;
+        }
+        let track = parse_grid_track_size(input)?;
+        tracks.push(track);
+    }
+    if tracks.is_empty() {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            "grid track list requires at least one track size",
+        ));
+    }
+    Ok(Value::TrackList(tracks))
+}
+
+fn parse_grid_track_size<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<TrackSize, ParseError> {
+    let pos = input.position().byte_index();
+    let token = input
+        .next()
+        .map_err(|err| convert_basic_error_at(pos, err))?
+        .clone();
+    match token {
+        Token::Ident(name) => match name.as_ref() {
+            "auto" => Ok(TrackSize::Auto),
+            other => Err(ParseError::new(
+                pos,
+                format!("unsupported grid track keyword '{other}'"),
+            )),
+        },
+        Token::Percentage { unit_value, .. } => {
+            Ok(TrackSize::Length(unit_value * 100.0, Unit::Percent))
+        }
+        Token::Dimension { value, unit, .. } => match unit.as_ref() {
             "fr" => Ok(TrackSize::Fraction(value)),
             "px" => Ok(TrackSize::Length(value, Unit::Px)),
             "em" => Ok(TrackSize::Length(value, Unit::Em)),
             "rem" => Ok(TrackSize::Length(value, Unit::Rem)),
             other => Err(ParseError::new(
-                self.pos,
+                pos,
                 format!("unsupported grid track unit '{other}'"),
             )),
-        }
+        },
+        Token::Number { .. } => Err(ParseError::new(
+            pos,
+            "grid track size requires a unit (px/em/rem/% or fr)",
+        )),
+        other => Err(token_error(input, &other, "invalid grid track size")),
     }
+}
 
-    fn parse_flex_shorthand(&mut self) -> Result<Vec<Declaration>, ParseError> {
-        // CSS `flex` shorthand sets flex-grow / flex-shrink / flex-basis.
-        // Toy support is the common forms only:
-        //   flex: <number>                       → grow:<n>, shrink:1
-        //   flex: <number> <number>              → grow, shrink
-        //   flex: <number> <number> <length>     → grow, shrink, basis
-        //   flex: <length>                       → grow:1, shrink:1, basis
-        //   flex: <number> <length>              → grow, shrink:1, basis
-        // Keywords (`auto`, `none`, `initial`) are not recognised — author
-        // must spell out longhands or use a numeric form. Implicit basis is
-        // left unset, which means flex children fall back to width-based
-        // (or shrink-to-fit) sizing in the layout pass.
-        let mut grow: Option<f32> = None;
-        let mut shrink: Option<f32> = None;
-        let mut basis: Option<Value> = None;
+// =============================================================================
+// Error conversion helpers
+// =============================================================================
 
-        for _slot in 0..3 {
-            self.consume_whitespace();
-            match self.next_char() {
-                Some(';') | Some('}') | None => break,
-                Some(ch) if !(ch.is_ascii_digit() || ch == '.' || ch == '-') => break,
-                _ => {}
+fn convert_error<'i>(err: CssParseError<'i, CssError>) -> ParseError {
+    let position = err.location.line as usize; // best-effort fallback
+    match err.kind {
+        cssparser::ParseErrorKind::Custom(custom) => custom,
+        cssparser::ParseErrorKind::Basic(basic) => match basic {
+            BasicParseErrorKind::EndOfInput => ParseError::new(position, "unexpected end of input"),
+            BasicParseErrorKind::UnexpectedToken(token) => {
+                ParseError::new(position, format!("unexpected token: {token:?}"))
             }
-            match self.parse_length_or_number()? {
-                Value::Number(n) => {
-                    if grow.is_none() {
-                        grow = Some(n);
-                    } else if shrink.is_none() {
-                        shrink = Some(n);
-                    } else {
-                        return Err(ParseError::new(
-                            self.pos,
-                            "flex shorthand: third value must be a length",
-                        ));
-                    }
-                }
-                length @ Value::Length(_, _) => {
-                    basis = Some(length);
-                    break;
-                }
-                _ => break,
+            BasicParseErrorKind::AtRuleInvalid(name) => {
+                ParseError::new(position, format!("invalid at-rule '@{name}'"))
             }
-        }
-
-        if grow.is_none() && basis.is_none() {
-            return Err(ParseError::new(
-                self.pos,
-                "flex shorthand requires at least one number or length",
-            ));
-        }
-
-        let grow_value = grow.unwrap_or(1.0);
-        let shrink_value = shrink.unwrap_or(1.0);
-        let mut decls = vec![
-            Declaration {
-                name: "flex-grow".into(),
-                value: Value::Number(grow_value),
-            },
-            Declaration {
-                name: "flex-shrink".into(),
-                value: Value::Number(shrink_value),
-            },
-        ];
-        if let Some(basis_value) = basis {
-            decls.push(Declaration {
-                name: "flex-basis".into(),
-                value: basis_value,
-            });
-        }
-        Ok(decls)
-    }
-
-    fn parse_transform_value(&mut self) -> Result<Value, ParseError> {
-        // CSS transform is a whitespace-separated function list; each entry is
-        // one of `translate(...)`, `translateX(...)`, `translateY(...)` for now.
-        // The list ends at ';' or '}'. An empty list parses as keyword `none`
-        // up the stack, so we require at least one function here.
-        let mut ops = Vec::new();
-        loop {
-            self.consume_whitespace();
-            match self.next_char() {
-                Some(';') | Some('}') | None => break,
-                _ => {}
+            BasicParseErrorKind::AtRuleBodyInvalid => {
+                ParseError::new(position, "invalid at-rule body")
             }
-            let name = self.parse_identifier()?;
-            self.expect_char('(')?;
-            let op = match name.as_str() {
-                "translate" => {
-                    self.consume_whitespace();
-                    let x = self.parse_length_token()?;
-                    self.consume_whitespace();
-                    let y = if self.next_char() == Some(',') {
-                        self.consume_char();
-                        self.consume_whitespace();
-                        let value = self.parse_length_token()?;
-                        self.consume_whitespace();
-                        value
-                    } else {
-                        // Single-arg form keeps the y component at 0.
-                        0.0
-                    };
-                    TransformOp::Translate { x, y }
-                }
-                "translateX" => {
-                    self.consume_whitespace();
-                    let x = self.parse_length_token()?;
-                    self.consume_whitespace();
-                    TransformOp::Translate { x, y: 0.0 }
-                }
-                "translateY" => {
-                    self.consume_whitespace();
-                    let y = self.parse_length_token()?;
-                    self.consume_whitespace();
-                    TransformOp::Translate { x: 0.0, y }
-                }
-                "scale" => {
-                    // `scale(x)` is shorthand for `scale(x, x)` (uniform scale);
-                    // the two-arg form sets both axes independently.
-                    self.consume_whitespace();
-                    let x = self.parse_length_token()?;
-                    self.consume_whitespace();
-                    let y = if self.next_char() == Some(',') {
-                        self.consume_char();
-                        self.consume_whitespace();
-                        let value = self.parse_length_token()?;
-                        self.consume_whitespace();
-                        value
-                    } else {
-                        x
-                    };
-                    TransformOp::Scale { x, y }
-                }
-                "scaleX" => {
-                    self.consume_whitespace();
-                    let x = self.parse_length_token()?;
-                    self.consume_whitespace();
-                    TransformOp::Scale { x, y: 1.0 }
-                }
-                "scaleY" => {
-                    self.consume_whitespace();
-                    let y = self.parse_length_token()?;
-                    self.consume_whitespace();
-                    TransformOp::Scale { x: 1.0, y }
-                }
-                "rotate" => {
-                    self.consume_whitespace();
-                    let theta = self.parse_angle_token()?;
-                    self.consume_whitespace();
-                    TransformOp::Rotate(theta)
-                }
-                other => {
-                    return Err(ParseError::new(
-                        self.pos,
-                        format!("unsupported transform function '{other}'"),
-                    ));
-                }
-            };
-            self.expect_char(')')?;
-            ops.push(op);
-        }
-        if ops.is_empty() {
-            return Err(ParseError::new(
-                self.pos,
-                "transform requires at least one function",
-            ));
-        }
-        Ok(Value::TransformList(ops))
-    }
-
-    fn parse_text_shadow_value(&mut self) -> Result<Value, ParseError> {
-        // Grammar: <offset-x> <offset-y> [<blur>] [<color>]. No spread (the
-        // notion doesn't apply to glyph shadows). Color defaults to opaque
-        // black; blur defaults to 0 and clamps to non-negative.
-        let offset_x = self.parse_length_token()?;
-        self.consume_whitespace();
-        let offset_y = self.parse_length_token()?;
-        self.consume_whitespace();
-
-        let blur_radius = if self.peek_starts_length() {
-            let value = self.parse_length_token()?.max(0.0);
-            self.consume_whitespace();
-            value
-        } else {
-            0.0
-        };
-
-        let color = if matches!(self.next_char(), Some(';') | Some('}') | None) {
-            Color {
-                r: 0,
-                g: 0,
-                b: 0,
-                a: 255,
+            BasicParseErrorKind::QualifiedRuleInvalid => {
+                ParseError::new(position, "invalid qualified rule")
             }
-        } else {
-            match self.parse_value()? {
-                Value::Color(color) => color,
-                other => {
-                    return Err(ParseError::new(
-                        self.pos,
-                        format!("expected color in text-shadow, got {other:?}"),
-                    ));
-                }
-            }
-        };
-
-        Ok(Value::TextShadow(TextShadow {
-            offset_x,
-            offset_y,
-            blur_radius,
-            color,
-        }))
+        },
     }
+}
 
-    fn parse_box_shadow_value(&mut self) -> Result<Value, ParseError> {
-        // Grammar (MVP): <offset-x> <offset-y> [<blur>] [<spread>] [<color>].
-        // We greedily consume up to four leading lengths (offset-x, offset-y,
-        // blur, spread) and then anything left over is the color. `inset` and
-        // multi-shadow comma lists are out of scope here.
-        let offset_x = self.parse_length_token()?;
-        self.consume_whitespace();
-        let offset_y = self.parse_length_token()?;
-        self.consume_whitespace();
+fn convert_basic_error_at<'i>(
+    position: usize,
+    err: cssparser::BasicParseError<'i>,
+) -> ParseError {
+    let message = match err.kind {
+        BasicParseErrorKind::EndOfInput => "unexpected end of input".to_string(),
+        BasicParseErrorKind::UnexpectedToken(token) => format!("unexpected token: {token:?}"),
+        BasicParseErrorKind::AtRuleInvalid(name) => format!("invalid at-rule '@{name}'"),
+        BasicParseErrorKind::AtRuleBodyInvalid => "invalid at-rule body".to_string(),
+        BasicParseErrorKind::QualifiedRuleInvalid => "invalid qualified rule".to_string(),
+    };
+    ParseError::new(position, message)
+}
 
-        let mut blur_radius = 0.0;
-        let mut spread_radius = 0.0;
-        for slot in 0..2 {
-            if !self.peek_starts_length() {
-                break;
-            }
-            let value = self.parse_length_token()?;
-            if slot == 0 {
-                blur_radius = value.max(0.0);
-            } else {
-                spread_radius = value;
-            }
-            self.consume_whitespace();
-        }
+fn token_error<'i, 't>(
+    input: &CssParser<'i, 't>,
+    token: &Token<'_>,
+    message: &str,
+) -> ParseError {
+    ParseError::new(
+        input.position().byte_index(),
+        format!("{message}: got {token:?}"),
+    )
+}
 
-        let color = if matches!(self.next_char(), Some(';') | Some('}') | None) {
-            // Default shadow color: opaque black, matching the common toy use.
-            Color {
-                r: 0,
-                g: 0,
-                b: 0,
-                a: 255,
-            }
-        } else {
-            match self.parse_value()? {
-                Value::Color(color) => color,
-                other => {
-                    return Err(ParseError::new(
-                        self.pos,
-                        format!("expected color in box-shadow, got {other:?}"),
-                    ));
-                }
-            }
-        };
-
-        Ok(Value::BoxShadow(BoxShadow {
-            offset_x,
-            offset_y,
-            blur_radius,
-            spread_radius,
-            color,
-        }))
-    }
-
-    fn parse_angle_token(&mut self) -> Result<f32, ParseError> {
-        // CSS rotate() takes an `<angle>`: a number plus a unit (deg, rad,
-        // turn, grad). The toy supports all four and converts to radians so
-        // the renderer can call `.sin_cos()` directly without re-checking
-        // units later.
-        self.consume_whitespace();
-        let negative = if self.next_char() == Some('-') {
-            self.consume_char();
-            true
-        } else {
-            false
-        };
-        let number = self.consume_while(|ch| ch.is_ascii_digit() || ch == '.');
-        let mut value = number
-            .parse::<f32>()
-            .map_err(|_| ParseError::new(self.pos, format!("invalid angle '{number}'")))?;
-        if negative {
-            value = -value;
-        }
-        let unit = match self.next_char() {
-            Some(ch) if ch.is_alphabetic() => self.parse_identifier()?,
-            // CSS spec only allows a unitless 0; anything else needs a unit,
-            // but `0` with no unit is common enough to accept defensively.
-            _ => String::new(),
-        };
-        let radians = match unit.as_str() {
-            "deg" => value * std::f32::consts::PI / 180.0,
-            "rad" => value,
-            "turn" => value * std::f32::consts::TAU,
-            "grad" => value * std::f32::consts::PI / 200.0,
-            "" if value == 0.0 => 0.0,
-            other => {
-                return Err(ParseError::new(
-                    self.pos,
-                    format!("unsupported angle unit '{other}'"),
-                ));
-            }
-        };
-        Ok(radians)
-    }
-
-    fn parse_length_token(&mut self) -> Result<f32, ParseError> {
-        // Reuse the generic value parser so a leading minus / unitless number
-        // path is handled exactly like elsewhere, then narrow the result to a
-        // numeric component.
-        let value = self.parse_value()?;
-        match value {
-            Value::Length(v, _) => Ok(v),
-            Value::Number(v) => Ok(v),
-            other => Err(ParseError::new(
-                self.pos,
-                format!("expected a length token, got {other:?}"),
-            )),
-        }
-    }
-
-    fn peek_starts_length(&self) -> bool {
-        // Token that can start a numeric value: digit, decimal point, or a
-        // minus sign followed by either of those.
-        match self.next_char() {
-            Some(ch) if ch.is_ascii_digit() || ch == '.' => true,
-            Some('-') => {
-                let mut chars = self.input[self.pos..].chars();
-                chars.next();
-                matches!(chars.next(), Some(ch) if ch.is_ascii_digit() || ch == '.')
-            }
-            _ => false,
-        }
-    }
-
-    fn parse_border_radius_shorthand(&mut self) -> Result<Vec<Declaration>, ParseError> {
-        // CSS allows 1-4 length tokens. Per spec: 1=all, 2=tl/br + tr/bl,
-        // 3=tl + tr/bl + br, 4=tl + tr + br + bl.
-        let mut lengths = Vec::new();
-        loop {
-            self.consume_whitespace();
-            match self.next_char() {
-                Some(ch) if ch.is_ascii_digit() || ch == '.' => {}
-                _ => break,
-            }
-            lengths.push(self.parse_length_or_number()?);
-            if lengths.len() == 4 {
-                break;
-            }
-        }
-
-        if lengths.is_empty() {
-            return Err(ParseError::new(
-                self.pos,
-                "border-radius requires at least one length",
-            ));
-        }
-
-        let (tl, tr, br, bl) = match lengths.as_slice() {
-            [v] => (v.clone(), v.clone(), v.clone(), v.clone()),
-            [tl_br, tr_bl] => (tl_br.clone(), tr_bl.clone(), tl_br.clone(), tr_bl.clone()),
-            [tl, tr_bl, br] => (tl.clone(), tr_bl.clone(), br.clone(), tr_bl.clone()),
-            [tl, tr, br, bl] => (tl.clone(), tr.clone(), br.clone(), bl.clone()),
-            _ => unreachable!(),
-        };
-
-        Ok(vec![
-            Declaration {
-                name: "border-top-left-radius".into(),
-                value: tl,
-            },
-            Declaration {
-                name: "border-top-right-radius".into(),
-                value: tr,
-            },
-            Declaration {
-                name: "border-bottom-right-radius".into(),
-                value: br,
-            },
-            Declaration {
-                name: "border-bottom-left-radius".into(),
-                value: bl,
-            },
-        ])
-    }
-
-    fn parse_value(&mut self) -> Result<Value, ParseError> {
-        match self.next_char() {
-            Some('#') => self.parse_hex_color(),
-            Some(ch) if ch.is_ascii_digit() => self.parse_length_or_number(),
-            // A leading minus only counts as a numeric sign when an actual digit
-            // (or decimal point) follows; otherwise it is the start of an
-            // identifier (e.g. CSS custom properties like `--color`).
-            Some('-') if self.peeks_negative_number() => {
-                self.consume_char();
-                Ok(negate_numeric(self.parse_length_or_number()?))
-            }
-            // Identifier-shaped values cover plain keywords (block, auto, ...), named
-            // colors, and functional color notations like rgb()/rgba(). The functional
-            // form is recognised when an opening paren follows the identifier name.
-            Some(_) => {
-                let ident = self.parse_identifier()?;
-                if self.next_char() == Some('(') {
-                    if ident.eq_ignore_ascii_case("rgb") || ident.eq_ignore_ascii_case("rgba") {
-                        return self.parse_rgb_function(ident.eq_ignore_ascii_case("rgba"));
-                    }
-                    if ident.eq_ignore_ascii_case("linear-gradient") {
-                        return self.parse_linear_gradient();
-                    }
-                    if ident.eq_ignore_ascii_case("radial-gradient") {
-                        return self.parse_radial_gradient();
-                    }
-                    if ident.eq_ignore_ascii_case("url") {
-                        return self.parse_url_function();
-                    }
-                }
-                Ok(named_color(&ident)
-                    .map(Value::Color)
-                    .unwrap_or(Value::Keyword(ident)))
-            }
-            None => Err(ParseError::new(
-                self.pos,
-                "unexpected end of input while parsing value",
-            )),
-        }
-    }
-
-    fn peeks_negative_number(&self) -> bool {
-        let mut chars = self.input[self.pos..].chars();
-        let first = chars.next();
-        let second = chars.next();
-        first == Some('-') && matches!(second, Some(ch) if ch.is_ascii_digit() || ch == '.')
-    }
-
-    fn parse_rgb_function(&mut self, has_alpha: bool) -> Result<Value, ParseError> {
-        // We only handle the legacy comma-separated form (`rgb(r, g, b)` and
-        // `rgba(r, g, b, a)`). Modern whitespace + slash syntax and percentage
-        // components are intentionally out of scope for now.
-        self.expect_char('(')?;
-        let r = self.parse_color_byte()?;
-        self.expect_comma()?;
-        let g = self.parse_color_byte()?;
-        self.expect_comma()?;
-        let b = self.parse_color_byte()?;
-        let a = if has_alpha {
-            self.expect_comma()?;
-            // Alpha is authored as a 0..1 float in CSS; we store as u8 by scaling.
-            let alpha = self.parse_unsigned_number()?;
-            (alpha.clamp(0.0, 1.0) * 255.0).round() as u8
-        } else {
-            255
-        };
-        self.consume_whitespace();
-        self.expect_char(')')?;
-
-        Ok(Value::Color(Color { r, g, b, a }))
-    }
-
-    fn parse_linear_gradient(&mut self) -> Result<Value, ParseError> {
-        // Supported forms (MVP):
-        //   linear-gradient(<color> [<%>]?, <color> [<%>]? [, ...])
-        //   linear-gradient(to top|bottom|left|right, <stops...>)
-        // Angle (`45deg`) and corner directions (`to top left`) are deferred.
-        self.expect_char('(')?;
-        self.consume_whitespace();
-
-        let direction = if self.starts_with("to ") || self.starts_with("to\t") {
-            // Eat "to" identifier, then read a side keyword. A direction prefix
-            // must be followed by a comma before the first color stop.
-            let _to = self.parse_identifier()?;
-            self.consume_whitespace();
-            let side = self.parse_identifier()?;
-            let dir = match side.as_str() {
-                "top" => GradientDirection::ToTop,
-                "bottom" => GradientDirection::ToBottom,
-                "left" => GradientDirection::ToLeft,
-                "right" => GradientDirection::ToRight,
-                other => {
-                    return Err(ParseError::new(
-                        self.pos,
-                        format!("unsupported gradient direction 'to {other}'"),
-                    ));
-                }
-            };
-            self.consume_whitespace();
-            self.expect_char(',')?;
-            dir
-        } else {
-            GradientDirection::ToBottom
-        };
-
-        let stops = self.parse_gradient_stops("linear-gradient")?;
-        Ok(Value::Gradient(Gradient {
-            kind: GradientKind::Linear(direction),
-            stops,
-        }))
-    }
-
-    fn parse_radial_gradient(&mut self) -> Result<Value, ParseError> {
-        // MVP form: `radial-gradient(<stops>)`. The renderer treats it as an
-        // ellipse sized to the farthest corner, centered in the box. Shape /
-        // size / position prefixes (`circle at 30% 70%`, etc.) are deferred.
-        self.expect_char('(')?;
-        self.consume_whitespace();
-        let stops = self.parse_gradient_stops("radial-gradient")?;
-        Ok(Value::Gradient(Gradient {
-            kind: GradientKind::Radial,
-            stops,
-        }))
-    }
-
-    fn parse_url_function(&mut self) -> Result<Value, ParseError> {
-        // `url("…")`, `url('…')`, or unquoted `url(…)`. The token can hold any
-        // character except a matching quote / closing paren; we capture the
-        // raw string and trim outer whitespace, leaving URL resolution
-        // (relative vs absolute, percent-decoding) to the resource loader.
-        self.expect_char('(')?;
-        self.consume_whitespace();
-        let url = match self.next_char() {
-            Some(ch) if ch == '"' || ch == '\'' => {
-                let quote = ch;
-                self.consume_char();
-                let mut buf = String::new();
-                loop {
-                    match self.consume_char() {
-                        Some(c) if c == quote => break,
-                        Some(c) => buf.push(c),
-                        None => {
-                            return Err(ParseError::new(
-                                self.pos,
-                                "unterminated quoted url() value",
-                            ));
-                        }
-                    }
-                }
-                buf
-            }
-            Some(_) => {
-                let mut buf = String::new();
-                while let Some(c) = self.next_char() {
-                    if c == ')' {
-                        break;
-                    }
-                    self.consume_char();
-                    buf.push(c);
-                }
-                buf.trim().to_string()
-            }
-            None => {
-                return Err(ParseError::new(self.pos, "unexpected end of url() value"));
-            }
-        };
-        self.consume_whitespace();
-        self.expect_char(')')?;
-        Ok(Value::ImageUrl(url))
-    }
-
-    fn parse_gradient_stops(&mut self, label: &str) -> Result<Vec<ColorStop>, ParseError> {
-        // Shared by linear and radial: comma-separated `<color> [<%>]?` pairs
-        // until the closing paren. Both gradients require at least two stops.
-        let mut stops = Vec::new();
-        loop {
-            self.consume_whitespace();
-            stops.push(self.parse_color_stop()?);
-            self.consume_whitespace();
-            match self.next_char() {
-                Some(',') => {
-                    self.consume_char();
-                }
-                Some(')') => break,
-                _ => {
-                    return Err(ParseError::new(
-                        self.pos,
-                        format!("expected ',' or ')' in {label}"),
-                    ));
-                }
-            }
-        }
-        self.expect_char(')')?;
-        if stops.len() < 2 {
-            return Err(ParseError::new(
-                self.pos,
-                format!("{label} requires at least two color stops"),
-            ));
-        }
-        Ok(stops)
-    }
-
-    fn parse_color_stop(&mut self) -> Result<ColorStop, ParseError> {
-        // A stop is a color value, optionally followed by a percentage
-        // position. We delegate to parse_value so anything that would parse
-        // as a color elsewhere (`#fff`, `rgb()`, named, etc.) works here too.
-        let color = match self.parse_value()? {
-            Value::Color(color) => color,
-            other => {
-                return Err(ParseError::new(
-                    self.pos,
-                    format!("expected a color in gradient stop, got {other:?}"),
-                ));
-            }
-        };
-        self.consume_whitespace();
-        let position = if matches!(self.next_char(), Some(ch) if ch.is_ascii_digit() || ch == '.') {
-            let value = self.parse_unsigned_number()?;
-            if self.next_char() == Some('%') {
-                self.consume_char();
-                Some((value / 100.0).clamp(0.0, 1.0))
-            } else {
-                return Err(ParseError::new(
-                    self.pos,
-                    "gradient stop position must be a percentage",
-                ));
-            }
-        } else {
-            None
-        };
-        Ok(ColorStop { color, position })
-    }
-
-    fn parse_color_byte(&mut self) -> Result<u8, ParseError> {
-        let value = self.parse_unsigned_number()?;
-        Ok(value.clamp(0.0, 255.0).round() as u8)
-    }
-
-    fn parse_unsigned_number(&mut self) -> Result<f32, ParseError> {
-        self.consume_whitespace();
-        let number = self.consume_while(|ch| ch.is_ascii_digit() || ch == '.');
-        number.parse::<f32>().map_err(|_| {
-            ParseError::new(
-                self.pos,
-                format!("invalid numeric component '{number}' in color"),
-            )
-        })
-    }
-
-    fn expect_comma(&mut self) -> Result<(), ParseError> {
-        self.consume_whitespace();
-        self.expect_char(',')
-    }
-
-    fn parse_hex_color(&mut self) -> Result<Value, ParseError> {
-        self.expect_char('#')?;
-        let hex = self.consume_while(|ch| ch.is_ascii_hexdigit());
-
-        let (r, g, b) = match hex.len() {
-            3 => {
-                let chars: Vec<char> = hex.chars().collect();
-                (
-                    Self::expand_hex(chars[0])?,
-                    Self::expand_hex(chars[1])?,
-                    Self::expand_hex(chars[2])?,
-                )
-            }
-            6 => (
-                Self::parse_hex_pair(&hex[0..2])?,
-                Self::parse_hex_pair(&hex[2..4])?,
-                Self::parse_hex_pair(&hex[4..6])?,
-            ),
-            _ => {
-                return Err(ParseError::new(
-                    self.pos,
-                    "hex colors must use either 3 or 6 digits",
-                ));
-            }
-        };
-
-        Ok(Value::Color(Color { r, g, b, a: 255 }))
-    }
-
-    fn parse_length_or_number(&mut self) -> Result<Value, ParseError> {
-        let number = self.consume_while(|ch| ch.is_ascii_digit() || ch == '.');
-        let value = number.parse::<f32>().map_err(|_| {
-            ParseError::new(
-                self.pos,
-                format!("invalid numeric value '{number}' in declaration"),
-            )
-        })?;
-
-        // Percent uses a non-identifier suffix, so check it before falling through to the
-        // alphabetic unit lookup.
-        if self.next_char() == Some('%') {
-            self.consume_char();
-            return Ok(Value::Length(value, Unit::Percent));
-        }
-
-        // No alphabetic unit follows → unitless number. This is what
-        // `z-index: 5`, `line-height: 1.5`, etc. produce.
-        if !matches!(self.next_char(), Some(ch) if ch.is_alphabetic()) {
-            return Ok(Value::Number(value));
-        }
-
-        let unit = self.parse_identifier()?;
-        match unit.as_str() {
-            "px" => Ok(Value::Length(value, Unit::Px)),
-            "em" => Ok(Value::Length(value, Unit::Em)),
-            "rem" => Ok(Value::Length(value, Unit::Rem)),
-            // Unsupported units fall back to plain keywords instead of hard-failing.
-            _ => Ok(Value::Keyword(format!("{value}{unit}"))),
-        }
-    }
-
-    fn parse_identifier(&mut self) -> Result<String, ParseError> {
-        let ident = self.consume_while(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_');
-        if ident.is_empty() {
-            Err(ParseError::new(self.pos, "expected identifier"))
-        } else {
-            Ok(ident)
-        }
-    }
-
-    fn consume_whitespace(&mut self) {
-        self.consume_while(char::is_whitespace);
-    }
-
-    fn consume_while<F>(&mut self, test: F) -> String
-    where
-        F: Fn(char) -> bool,
-    {
-        let mut result = String::new();
-
-        while let Some(ch) = self.next_char() {
-            if !test(ch) {
-                break;
-            }
-
-            result.push(self.consume_char().expect("character must exist"));
-        }
-
-        result
-    }
-
-    fn eof(&self) -> bool {
-        self.pos >= self.input.len()
-    }
-
-    fn next_char(&self) -> Option<char> {
-        self.input[self.pos..].chars().next()
-    }
-
-    fn consume_char(&mut self) -> Option<char> {
-        let current = self.next_char()?;
-        self.pos += current.len_utf8();
-        Some(current)
-    }
-
-    fn expect_char(&mut self, expected: char) -> Result<(), ParseError> {
-        match self.consume_char() {
-            Some(actual) if actual == expected => Ok(()),
-            Some(actual) => Err(ParseError::new(
-                self.pos,
-                format!("expected '{expected}', found '{actual}'"),
-            )),
-            None => Err(ParseError::new(
-                self.pos,
-                format!("expected '{expected}', found end of input"),
-            )),
-        }
-    }
-
-    fn parse_hex_pair(pair: &str) -> Result<u8, ParseError> {
-        u8::from_str_radix(pair, 16)
-            .map_err(|_| ParseError::new(0, format!("invalid hex color pair '{pair}'")))
-    }
-
-    fn expand_hex(value: char) -> Result<u8, ParseError> {
-        let mut pair = String::with_capacity(2);
-        pair.push(value);
-        pair.push(value);
-        Self::parse_hex_pair(&pair)
-    }
+fn token_error_at(position: usize, token: &Token<'_>, message: &str) -> ParseError {
+    ParseError::new(position, format!("{message}: got {token:?}"))
 }
 
 #[cfg(test)]
@@ -1704,12 +1776,6 @@ mod tests {
 
     #[test]
     fn parses_link_and_visited_pseudo_classes() {
-        // Anchor link/visited pseudos are common enough on real pages
-        // (HN's `a:link { color: black }` is a representative example)
-        // that the parser needs to recognise them as their own variants
-        // rather than collapsing to the bare `a` selector — otherwise
-        // the visited rule would source-order-win over the link rule
-        // and every anchor would render in the visited colour.
         let stylesheet = parse(
             r#"
                 a:link { color: red; }
@@ -1727,8 +1793,6 @@ mod tests {
 
     #[test]
     fn unknown_pseudo_class_falls_back_to_no_pseudo() {
-        // The parser stays permissive: an unknown pseudo just clears the slot rather
-        // than failing the whole rule. The selector then matches its non-pseudo form.
         let stylesheet = parse(".btn:totally-fake { color: red; }").unwrap();
         let part = &stylesheet.rules[0].selectors[0].parts[0];
 
@@ -1738,7 +1802,6 @@ mod tests {
 
     #[test]
     fn parses_child_combinator_with_optional_surrounding_whitespace() {
-        // Both `.a > .b` and `.a>.b` should parse the same way.
         let with_spaces = parse(".outer > .inner { color: red; }").unwrap();
         let no_spaces = parse(".outer>.inner { color: red; }").unwrap();
 
@@ -1845,7 +1908,6 @@ mod tests {
         let stylesheet = parse("div { border-radius: 8px 12px; }").unwrap();
         let decls = &stylesheet.rules[0].declarations;
 
-        // 2-value shorthand: first is tl/br, second is tr/bl.
         assert_eq!(decls[0].name, "border-top-left-radius");
         assert_eq!(decls[0].value, Value::Length(8.0, Unit::Px));
         assert_eq!(decls[1].name, "border-top-right-radius");
@@ -1872,7 +1934,6 @@ mod tests {
         let stylesheet = parse("div { border-radius: 1px 2px 3px; }").unwrap();
         let decls = &stylesheet.rules[0].declarations;
 
-        // 3-value shorthand: tl, tr/bl, br.
         assert_eq!(decls[0].value, Value::Length(1.0, Unit::Px));
         assert_eq!(decls[1].value, Value::Length(2.0, Unit::Px));
         assert_eq!(decls[2].value, Value::Length(3.0, Unit::Px));
@@ -1885,7 +1946,6 @@ mod tests {
             parse("div { border-radius: 8px; border-top-left-radius: 12px; }").unwrap();
         let decls = &stylesheet.rules[0].declarations;
 
-        // Shorthand still expands first; the explicit property follows and wins on cascade.
         assert_eq!(decls.len(), 5);
         assert_eq!(decls[4].name, "border-top-left-radius");
         assert_eq!(decls[4].value, Value::Length(12.0, Unit::Px));
@@ -1919,13 +1979,10 @@ mod tests {
                 a: 0,
             })
         );
-        // Unknown named color (SkyBlue not in our shipped subset) falls back to a keyword
-        // so the parser stays permissive.
         assert_eq!(
             stylesheet.rules[1].declarations[0].value,
             Value::Keyword("SkyBlue".into())
         );
-        // `cyan` is an alias for `aqua` — case-insensitive lookup picks it up.
         assert_eq!(
             stylesheet.rules[1].declarations[1].value,
             Value::Color(Color {
@@ -1954,7 +2011,6 @@ mod tests {
     #[test]
     fn parses_rgba_function_with_fractional_alpha() {
         let stylesheet = parse("p { background-color: rgba(255, 0, 0, 0.5); }").unwrap();
-        // 0.5 alpha rounds to 128/255 (0.5 * 255 = 127.5 -> 128).
         assert_eq!(
             stylesheet.rules[0].declarations[0].value,
             Value::Color(Color {
@@ -2006,7 +2062,6 @@ mod tests {
     fn skips_invalid_declarations() {
         let stylesheet = parse("div { color red; font-size: 16px; }").unwrap();
 
-        // The malformed "color red" declaration is skipped; valid ones are kept.
         assert_eq!(stylesheet.rules.len(), 1);
         assert_eq!(stylesheet.rules[0].declarations.len(), 1);
         assert_eq!(stylesheet.rules[0].declarations[0].name, "font-size");
@@ -2014,8 +2069,6 @@ mod tests {
 
     #[test]
     fn parses_unitless_integer_as_number() {
-        // `z-index: 5` has no unit — historically this errored; now it should
-        // produce a `Value::Number`.
         let stylesheet = parse(".a { z-index: 5; }").unwrap();
         let decls = &stylesheet.rules[0].declarations;
 
@@ -2033,8 +2086,6 @@ mod tests {
 
     #[test]
     fn parses_negative_length_with_unit() {
-        // The same minus-prefix path also has to handle properties like
-        // `margin-left: -10px` once we get to negative offsets/positions.
         let stylesheet = parse(".a { margin-left: -10px; }").unwrap();
         let decls = &stylesheet.rules[0].declarations;
 
@@ -2043,7 +2094,6 @@ mod tests {
 
     #[test]
     fn parses_unitless_decimal_as_number() {
-        // `line-height: 1.5` is the canonical unitless-decimal use case.
         let stylesheet = parse(".a { line-height: 1.5; }").unwrap();
         let decls = &stylesheet.rules[0].declarations;
 
@@ -2052,8 +2102,6 @@ mod tests {
 
     #[test]
     fn parses_linear_gradient_default_direction_and_auto_stops() {
-        // Without `to <side>`, the gradient runs top → bottom. Stops without
-        // explicit positions stay as `None` so the renderer can distribute.
         let stylesheet = parse(".a { background-image: linear-gradient(red, blue); }").unwrap();
         let decl = &stylesheet.rules[0].declarations[0];
 
@@ -2074,8 +2122,6 @@ mod tests {
 
     #[test]
     fn parses_linear_gradient_with_explicit_direction() {
-        // `to right` rotates the axis horizontally; the parser preserves the
-        // direction without changing stop ordering.
         let stylesheet =
             parse(".a { background-image: linear-gradient(to right, red, blue); }").unwrap();
         let gradient = match &stylesheet.rules[0].declarations[0].value {
@@ -2090,7 +2136,6 @@ mod tests {
 
     #[test]
     fn parses_box_shadow_full_form() {
-        // `5px 10px 15px 2px black` populates every component in order.
         let stylesheet = parse(".a { box-shadow: 5px 10px 15px 2px black; }").unwrap();
         let value = &stylesheet.rules[0].declarations[0].value;
         let shadow = match value {
@@ -2116,7 +2161,6 @@ mod tests {
 
     #[test]
     fn parses_box_shadow_minimal_form_uses_defaults() {
-        // Just two offsets — blur/spread default to 0, color defaults to opaque black.
         let stylesheet = parse(".a { box-shadow: 5px 10px; }").unwrap();
         let shadow = match &stylesheet.rules[0].declarations[0].value {
             Value::BoxShadow(shadow) => *shadow,
@@ -2152,7 +2196,6 @@ mod tests {
 
     #[test]
     fn parses_text_shadow_full_form() {
-        // `2px 3px 4px red` populates every component in order.
         let stylesheet = parse(".a { text-shadow: 2px 3px 4px red; }").unwrap();
         let shadow = match &stylesheet.rules[0].declarations[0].value {
             Value::TextShadow(shadow) => *shadow,
@@ -2176,7 +2219,6 @@ mod tests {
 
     #[test]
     fn parses_text_shadow_minimal_form_uses_defaults() {
-        // Just two offsets — blur defaults to 0, color defaults to black.
         let stylesheet = parse(".a { text-shadow: 2px 3px; }").unwrap();
         let shadow = match &stylesheet.rules[0].declarations[0].value {
             Value::TextShadow(shadow) => *shadow,
@@ -2198,8 +2240,6 @@ mod tests {
 
     #[test]
     fn parses_radial_gradient_as_radial_kind() {
-        // MVP `radial-gradient(<stops>)` — no shape/size/position prefix.
-        // Should land in `Value::Gradient` with `GradientKind::Radial`.
         let stylesheet = parse(".a { background-image: radial-gradient(red, blue); }").unwrap();
         let gradient = match &stylesheet.rules[0].declarations[0].value {
             Value::Gradient(gradient) => gradient,
@@ -2225,8 +2265,6 @@ mod tests {
 
     #[test]
     fn parses_unquoted_url_trims_outer_whitespace() {
-        // Unquoted form is permitted by spec; outer whitespace inside the
-        // parens is not part of the resource URL.
         let stylesheet = parse(".a { background-image: url(  /static/bg.png  ); }").unwrap();
         let value = &stylesheet.rules[0].declarations[0].value;
         assert_eq!(value, &Value::ImageUrl("/static/bg.png".to_string()));
@@ -2234,7 +2272,6 @@ mod tests {
 
     #[test]
     fn parses_transform_translate_two_args() {
-        // `translate(10px, 20px)` lands as a single-op list with both axes set.
         let stylesheet = parse(".a { transform: translate(10px, 20px); }").unwrap();
         let value = &stylesheet.rules[0].declarations[0].value;
         let ops = match value {
@@ -2262,7 +2299,6 @@ mod tests {
 
     #[test]
     fn parses_transform_translate_axis_helpers() {
-        // translateX/translateY are sugar for the corresponding 1-axis translate.
         let stylesheet = parse(".a { transform: translateX(5px) translateY(-7px); }").unwrap();
         let ops = match &stylesheet.rules[0].declarations[0].value {
             Value::TransformList(ops) => ops.clone(),
@@ -2279,7 +2315,6 @@ mod tests {
 
     #[test]
     fn parses_transform_scale_uniform_one_arg() {
-        // `scale(2)` is shorthand for `scale(2, 2)` — uniform scale on both axes.
         let stylesheet = parse(".a { transform: scale(2); }").unwrap();
         let ops = match &stylesheet.rules[0].declarations[0].value {
             Value::TransformList(ops) => ops.clone(),
@@ -2313,7 +2348,6 @@ mod tests {
             Value::TransformList(ops) => ops.clone(),
             other => panic!("expected TransformList, got {other:?}"),
         };
-        // 45deg → π/4 rad. The `rad` form is passed through verbatim.
         let expected = [std::f32::consts::FRAC_PI_4, 2.0];
         let actual: Vec<f32> = ops
             .iter()
@@ -2336,7 +2370,6 @@ mod tests {
         };
         match ops.as_slice() {
             [TransformOp::Rotate(theta)] => {
-                // -0.25 turn = -π/2.
                 assert!((theta + std::f32::consts::FRAC_PI_2).abs() < 1e-4);
             }
             other => panic!("expected single Rotate, got {other:?}"),
@@ -2345,8 +2378,6 @@ mod tests {
 
     #[test]
     fn parses_linear_gradient_with_explicit_stop_positions() {
-        // `red 0%, yellow 50%, blue 100%` should preserve every stop's
-        // percentage as a 0..1 float, no auto-distribution.
         let stylesheet =
             parse(".a { background-image: linear-gradient(red 0%, yellow 50%, blue 100%); }")
                 .unwrap();
@@ -2449,12 +2480,7 @@ mod tests {
 
     #[test]
     fn grid_template_columns_rejects_unitless_number() {
-        // A bare number with no unit is ambiguous (`5` could be 5px or 5fr)
-        // so the parser refuses rather than guessing.
         let stylesheet = parse(".g { grid-template-columns: 5; }");
-        // The parser is tolerant — it returns Ok with the rule dropped or kept
-        // empty. Just assert the bad declaration didn't sneak through as a
-        // TrackList by the size matching the dropped state.
         if let Ok(stylesheet) = stylesheet {
             for rule in stylesheet.rules {
                 for decl in rule.declarations {
