@@ -1,11 +1,11 @@
 // DisplayCommand -> pixel buffer. Software rasterizer for solid rects,
-// rounded rects, gradients, box-shadows, text (fontdue + bitmap fallback),
-// and images. Translate+scale matrices are baked into rect coordinates by
-// the display-list stage; rotation lands here as a `TransformGroup` and is
+// rounded rects, gradients, box-shadows, text (cosmic-text shaping +
+// swash glyph rasterisation, with a 7x7 bitmap font fallback), and images.
+// Translate+scale matrices are baked into rect coordinates by the
+// display-list stage; rotation lands here as a `TransformGroup` and is
 // scan-converted through the inverse matrix per-pixel.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, PhysicalGlyph, Shaping, SwashContent};
 
 use crate::css::{Color, GradientDirection, GradientKind};
 use crate::layout::Rect;
@@ -15,62 +15,13 @@ use super::{
     ShadowCommand, TextCommand,
 };
 
-// Glyph cache. Key = (codepoint, index of the font in the active font slice,
-// f32 bits of font size). Value = the (metrics, alpha bitmap) tuple that
-// `fontdue::Font::rasterize` would otherwise recompute every call. Repaint
-// of a static page hits this cache for every glyph, so the per-frame cost
-// stops scaling with text length.
-//
-// Capacity is a hard cap; on overflow we drop the entire map rather than
-// running an LRU. The visible glyphs repopulate within one or two frames,
-// and the simpler eviction avoids any per-lookup bookkeeping.
-//
-// thread_local! keeps the cache alive across `rasterize` calls without
-// changing the public API. Rendering today is single-threaded; a future
-// multi-threaded rasterizer would need a per-thread or shared-mutex scheme.
-//
-// The font_idx component of the key is only stable while the same font
-// slice is in use. When the binary swaps fonts after navigation it must
-// call `invalidate_glyph_cache` — without that, we would silently return
-// bitmaps from a font that no longer occupies that slot.
-const GLYPH_CACHE_CAPACITY: usize = 8192;
-
-// (codepoint, font index in the active slice, f32-bits of size).
-type GlyphKey = (u32, usize, u32);
-// fontdue's rasterized output: per-glyph metrics + alpha bitmap.
-type GlyphEntry = (fontdue::Metrics, Vec<u8>);
-
-thread_local! {
-    static GLYPH_CACHE: RefCell<HashMap<GlyphKey, GlyphEntry>> = RefCell::new(HashMap::new());
-}
-
-pub fn invalidate_glyph_cache() {
-    GLYPH_CACHE.with(|cache| cache.borrow_mut().clear());
-}
-
-fn with_cached_glyph<F, R>(
-    font: &fontdue::Font,
-    font_idx: usize,
-    ch: char,
-    font_size: f32,
-    f: F,
-) -> R
-where
-    F: FnOnce(&fontdue::Metrics, &[u8]) -> R,
-{
-    GLYPH_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let key = (ch as u32, font_idx, font_size.to_bits());
-        if !cache.contains_key(&key) {
-            if cache.len() >= GLYPH_CACHE_CAPACITY {
-                cache.clear();
-            }
-            cache.insert(key, font.rasterize(ch, font_size));
-        }
-        let entry = cache.get(&key).expect("inserted just above");
-        f(&entry.0, &entry.1)
-    })
-}
+// Glyph image caching is now owned by `cosmic_text::SwashCache`, which keys
+// rasterised images on a `CacheKey` that already encodes (font id, glyph id,
+// size, subpixel position). The cache lives as a `OnceLock<Mutex<SwashCache>>`
+// in `state` and is rebuilt whenever the FontSystem swaps after navigation,
+// so this stub stays around purely so `main.rs`'s explicit invalidation marker
+// does not have to be plumbed through a removed API.
+pub fn invalidate_glyph_cache() {}
 
 // Measures the rendered width of `text` at `font_size`. Callers use this to
 // position UI elements that need to align with the *end* of a rendered string
@@ -100,8 +51,6 @@ pub fn measure_text_width(text: &str, font_size: f32, fonts: &[fontdue::Font]) -
 }
 
 fn measure_with_cosmic(text: &str, font_size: f32) -> Option<f32> {
-    use cosmic_text::{Attrs, Buffer, Metrics, Shaping};
-
     let slot = crate::state::shared_font_system()?;
     let mut fs = slot.lock().ok()?;
 
@@ -470,81 +419,63 @@ fn draw_text_through(
     inverse: Affine,
     fonts: &[fontdue::Font],
 ) {
-    // Per-glyph: rasterize the glyph in its own local coordinates, then for
-    // every pixel in the screen-space bbox of the glyph quad, inverse-map
-    // back to glyph-local and sample the bitmap. The glyph itself never
-    // needs to know about rotation — only the placement does.
+    // Per-glyph: get the swash alpha image (laid out in its own local
+    // coordinates), then for every pixel in the screen-space bbox of the
+    // glyph quad, inverse-map back to glyph-local and sample the bitmap.
+    // The glyph itself never needs to know about rotation — only the
+    // placement does.
+    //
+    // The bitmap fallback path doesn't support arbitrary transforms, so the
+    // empty-fonts branch (tests / no fonts loaded) skips drawing rather than
+    // emitting glyphs at the wrong orientation.
     if fonts.is_empty() {
-        // The bitmap fallback path doesn't support arbitrary transforms;
-        // skip rather than draw at the wrong orientation. Pages that hit
-        // this branch typically have no fonts loaded at all.
         return;
     }
-    let font_size = text.font_size.max(8.0);
-    let ascent = fonts[0]
-        .horizontal_line_metrics(font_size)
-        .map(|m| m.ascent)
-        .unwrap_or(font_size * 0.8);
-    let mut cursor_x = text.x;
-
-    for ch in text.text.chars() {
-        let Some((font_idx, font)) = fonts
-            .iter()
-            .enumerate()
-            .find(|(_, f)| f.lookup_glyph_index(ch) != 0 || ch == ' ')
-        else {
-            cursor_x += font_size * 0.75;
-            continue;
+    let Some(physicals_and_images) = shape_and_images(text) else {
+        return;
+    };
+    for (physical, image) in &physicals_and_images {
+        let img_w = image.placement.width as usize;
+        let img_h = image.placement.height as usize;
+        let dx0 = (physical.x + image.placement.left) as f32;
+        let dy0 = (physical.y - image.placement.top) as f32;
+        let glyph_bounds = Rect {
+            x: dx0,
+            y: dy0,
+            width: img_w as f32,
+            height: img_h as f32,
         };
-        let advance = with_cached_glyph(font, font_idx, ch, font_size, |metrics, bitmap| {
-            if metrics.width == 0 || metrics.height == 0 {
-                return metrics.advance_width;
-            }
-            let glyph_origin_x = cursor_x + metrics.xmin as f32;
-            let glyph_origin_y = text.y + ascent - metrics.height as f32 - metrics.ymin as f32;
-            let glyph_bounds = Rect {
-                x: glyph_origin_x,
-                y: glyph_origin_y,
-                width: metrics.width as f32,
-                height: metrics.height as f32,
-            };
-            let color = text.color;
-            paint_through(
-                buffer,
-                width,
-                height,
-                glyph_bounds,
-                transform,
-                inverse,
-                |lx, ly| {
-                    let gx = (lx - glyph_origin_x).floor() as i32;
-                    let gy = (ly - glyph_origin_y).floor() as i32;
-                    if gx < 0
-                        || gy < 0
-                        || gx as usize >= metrics.width
-                        || gy as usize >= metrics.height
-                    {
-                        return None;
-                    }
-                    let alpha = bitmap[gy as usize * metrics.width + gx as usize];
-                    if alpha == 0 {
-                        return None;
-                    }
-                    let coverage = (alpha as u32 * color.a as u32) / 255;
-                    if coverage == 0 {
-                        return None;
-                    }
-                    Some(Color {
-                        r: color.r,
-                        g: color.g,
-                        b: color.b,
-                        a: coverage as u8,
-                    })
-                },
-            );
-            metrics.advance_width
-        });
-        cursor_x += advance;
+        let color = text.color;
+        let data = &image.data;
+        paint_through(
+            buffer,
+            width,
+            height,
+            glyph_bounds,
+            transform,
+            inverse,
+            |lx, ly| {
+                let gx = (lx - dx0).floor() as i32;
+                let gy = (ly - dy0).floor() as i32;
+                if gx < 0 || gy < 0 || gx as usize >= img_w || gy as usize >= img_h {
+                    return None;
+                }
+                let alpha = data[gy as usize * img_w + gx as usize];
+                if alpha == 0 {
+                    return None;
+                }
+                let coverage = (alpha as u32 * color.a as u32) / 255;
+                if coverage == 0 {
+                    return None;
+                }
+                Some(Color {
+                    r: color.r,
+                    g: color.g,
+                    b: color.b,
+                    a: coverage as u8,
+                })
+            },
+        );
     }
 }
 
@@ -834,85 +765,122 @@ fn draw_text(
     text: &TextCommand,
     fonts: &[fontdue::Font],
 ) {
+    // Empty fonts means tests are driving the renderer with no real font data
+    // installed; the 7x7 bitmap fallback gives them deterministic glyphs that
+    // do not depend on cosmic-text or any system font.
     if fonts.is_empty() {
         draw_text_bitmap(buffer, width, height, text);
         return;
     }
+    let Some(physicals_and_images) = shape_and_images(text) else {
+        draw_text_bitmap(buffer, width, height, text);
+        return;
+    };
+    for (physical, image) in &physicals_and_images {
+        blit_swash_mask(buffer, width, height, image, physical, text.color);
+    }
+}
 
-    let font_size = text.font_size.max(8.0);
-    let ascent = fonts[0]
-        .horizontal_line_metrics(font_size)
-        .map(|m| m.ascent)
-        .unwrap_or(font_size * 0.8);
-    let mut cursor_x = text.x;
+// Shape `text.text` through cosmic-text and resolve every glyph to its swash
+// alpha image, returning `(physical_glyph, image)` pairs ready to blit. Both
+// the FontSystem and SwashCache live in shared `Mutex` slots — we acquire
+// each lock for the smallest possible scope. Returning `None` signals the
+// caller to fall back to the bitmap path (e.g. the shared slots have not been
+// initialised yet, or the lock is poisoned).
+fn shape_and_images(text: &TextCommand) -> Option<Vec<(PhysicalGlyph, cosmic_text::SwashImage)>> {
+    let fs_slot = crate::state::shared_font_system()?;
+    let swash_slot = crate::state::shared_swash_cache()?;
+    let mut fs = fs_slot.lock().ok()?;
+    let mut swash = swash_slot.lock().ok()?;
 
-    for ch in text.text.chars() {
-        // Find a font that contains this glyph. `enumerate` so the cache key
-        // can include the slot's position — the same character at the same
-        // size in different fonts must not collide.
-        let font_match = fonts
-            .iter()
-            .enumerate()
-            .find(|(_, f)| f.lookup_glyph_index(ch) != 0 || ch == ' ');
-
-        let Some((font_idx, font)) = font_match else {
-            // No font has this glyph — use the bitmap fallback for this character.
-            draw_bitmap_char(
-                buffer,
-                width,
-                height,
-                ch,
-                cursor_x,
-                text.y,
-                text.color,
-                text.font_size,
-            );
-            cursor_x += text.font_size * 0.75;
-            continue;
-        };
-
-        let advance = with_cached_glyph(font, font_idx, ch, font_size, |metrics, bitmap| {
-            let glyph_y = text.y + ascent - metrics.height as f32 - metrics.ymin as f32;
-
-            for row in 0..metrics.height {
-                for col in 0..metrics.width {
-                    let alpha = bitmap[row * metrics.width + col];
-                    if alpha == 0 {
-                        continue;
-                    }
-
-                    let px = (cursor_x + metrics.xmin as f32 + col as f32).round() as i32;
-                    let py = (glyph_y + row as f32).round() as i32;
-
-                    if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
-                        continue;
-                    }
-
-                    let idx = py as usize * width + px as usize;
-                    // Compose glyph coverage with text color's alpha so opacity
-                    // (or any pre-multiplied alpha on the color) attenuates the
-                    // visible glyph, not just AA edges.
-                    let coverage = (alpha as u32 * text.color.a as u32) / 255;
-                    if coverage == 0 {
-                        continue;
-                    }
-                    if coverage >= 255 {
-                        buffer[idx] = rgb_u32(text.color);
-                    } else {
-                        let bg = buffer[idx];
-                        let inv = 255 - coverage;
-                        let r = (coverage * text.color.r as u32 + inv * ((bg >> 16) & 0xFF)) / 255;
-                        let g = (coverage * text.color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
-                        let b = (coverage * text.color.b as u32 + inv * (bg & 0xFF)) / 255;
-                        buffer[idx] = (r << 16) | (g << 8) | b;
-                    }
-                }
+    let physicals = shape_to_physicals(&mut fs, text);
+    let mut out = Vec::with_capacity(physicals.len());
+    for physical in physicals {
+        if let Some(image) = swash.get_image(&mut fs, physical.cache_key).clone() {
+            // Only mask images participate in the alpha-blend path; subpixel
+            // and color images would need their own blend (Phase 4.4 follow-up).
+            if image.placement.width == 0
+                || image.placement.height == 0
+                || !matches!(image.content, SwashContent::Mask)
+            {
+                continue;
             }
+            out.push((physical, image));
+        }
+    }
+    Some(out)
+}
 
-            metrics.advance_width
-        });
+fn shape_to_physicals(fs: &mut FontSystem, text: &TextCommand) -> Vec<PhysicalGlyph> {
+    let size = text.font_size.max(8.0);
+    let metrics = Metrics::new(size, size * 1.2);
+    let mut buffer = Buffer::new(fs, metrics);
+    let mut bw = buffer.borrow_with(fs);
+    bw.set_size(None, None);
+    let attrs = Attrs::new();
+    bw.set_text(&text.text, &attrs, Shaping::Advanced, None);
+    bw.shape_until_scroll(true);
 
-        cursor_x += advance;
+    let mut out = Vec::new();
+    for run in bw.layout_runs() {
+        // `run.line_y` is the baseline of this line in buffer-local
+        // coordinates. Offsetting by `(text.x, text.y + run.line_y)` maps
+        // the run to absolute screen coordinates with the baseline aligned
+        // where `draw_text_bitmap` would have placed it.
+        let baseline = text.y + run.line_y;
+        for glyph in run.glyphs.iter() {
+            out.push(glyph.physical((text.x, baseline), 1.0));
+        }
+    }
+    out
+}
+
+fn blit_swash_mask(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    image: &cosmic_text::SwashImage,
+    physical: &PhysicalGlyph,
+    color: Color,
+) {
+    let img_w = image.placement.width as usize;
+    let img_h = image.placement.height as usize;
+    // `placement.left` is the bearing from the glyph origin to the image's
+    // left edge; `placement.top` is bearing UP from the baseline to the
+    // image's top edge (so we subtract to get screen y).
+    let dx0 = physical.x + image.placement.left;
+    let dy0 = physical.y - image.placement.top;
+
+    for row in 0..img_h {
+        for col in 0..img_w {
+            let alpha = image.data[row * img_w + col];
+            if alpha == 0 {
+                continue;
+            }
+            let px = dx0 + col as i32;
+            let py = dy0 + row as i32;
+            if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
+                continue;
+            }
+            let idx = py as usize * width + px as usize;
+            // Compose glyph coverage with text color's alpha so opacity (or
+            // any pre-multiplied alpha on the color) attenuates the visible
+            // glyph, not just AA edges.
+            let coverage = (alpha as u32 * color.a as u32) / 255;
+            if coverage == 0 {
+                continue;
+            }
+            if coverage >= 255 {
+                buffer[idx] = rgb_u32(color);
+            } else {
+                let bg = buffer[idx];
+                let inv = 255 - coverage;
+                let r = (coverage * color.r as u32 + inv * ((bg >> 16) & 0xFF)) / 255;
+                let g = (coverage * color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
+                let b = (coverage * color.b as u32 + inv * (bg & 0xFF)) / 255;
+                buffer[idx] = (r << 16) | (g << 8) | b;
+            }
+        }
     }
 }
 

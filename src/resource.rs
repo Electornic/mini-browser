@@ -344,7 +344,7 @@ fn extract_font_urls(css: &str) -> Vec<String> {
 }
 
 fn extract_url_value(block: &str) -> Option<String> {
-    // Collect all url() values from the block, then pick the best format for fontdue.
+    // Collect all url() values from the block, then pick the best format the font system loads.
     let mut urls = Vec::new();
     let lower = block.to_ascii_lowercase();
     let mut search_pos = 0;
@@ -373,7 +373,7 @@ fn extract_url_value(block: &str) -> Option<String> {
         search_pos = skip + 1;
     }
 
-    // Only pick TTF/OTF since fontdue supports those natively.
+    // Only pick TTF/OTF — what cosmic-text's fontdb backend can ingest directly.
     urls.into_iter().find(|u| {
         let l = u.to_ascii_lowercase();
         l.ends_with(".ttf") || l.ends_with(".otf")

@@ -13,7 +13,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use cosmic_text::FontSystem;
+use cosmic_text::{FontSystem, SwashCache};
 
 use crate::{
     chrome::{
@@ -1607,14 +1607,20 @@ pub fn build_font_cache(font_data: &[Vec<u8>]) -> Vec<fontdue::Font> {
     fonts
 }
 
-// Shaped-text engine shared across the layout / chrome / display-list lanes.
-// Phase 4.4a: only `measure_text_width` consults it; raster still uses fontdue.
-// `OnceLock` initialises lazily on the first `build_font_cache` call; later
-// calls swap the inner FontSystem so font reloads on navigation propagate.
+// Shaped-text engine + glyph image cache shared across the layout / chrome /
+// display-list lanes. The `OnceLock` slots initialise lazily on the first
+// `build_font_cache` call; later calls swap the inner FontSystem so font
+// reloads on navigation propagate. The SwashCache lives as long as the
+// FontSystem because its keys reference font ids inside that database.
 static SHARED_FONT_SYSTEM: OnceLock<Mutex<FontSystem>> = OnceLock::new();
+static SHARED_SWASH_CACHE: OnceLock<Mutex<SwashCache>> = OnceLock::new();
 
 pub fn shared_font_system() -> Option<&'static Mutex<FontSystem>> {
     SHARED_FONT_SYSTEM.get()
+}
+
+pub fn shared_swash_cache() -> Option<&'static Mutex<SwashCache>> {
+    SHARED_SWASH_CACHE.get()
 }
 
 fn install_shared_font_system(font_data: &[Vec<u8>], macos_fallback: Option<&[u8]>) {
@@ -1633,6 +1639,20 @@ fn install_shared_font_system(font_data: &[Vec<u8>], macos_fallback: Option<&[u8
         }
         None => {
             let _ = SHARED_FONT_SYSTEM.set(Mutex::new(fs));
+        }
+    }
+    // Glyph image cache keys reference font ids inside the new FontSystem, so
+    // any reload that swaps the FontSystem must drop the cached images that
+    // pointed at the previous one. Re-create the cache rather than mutating in
+    // place — SwashCache exposes no `clear` API.
+    match SHARED_SWASH_CACHE.get() {
+        Some(slot) => {
+            if let Ok(mut guard) = slot.lock() {
+                *guard = SwashCache::new();
+            }
+        }
+        None => {
+            let _ = SHARED_SWASH_CACHE.set(Mutex::new(SwashCache::new()));
         }
     }
 }
