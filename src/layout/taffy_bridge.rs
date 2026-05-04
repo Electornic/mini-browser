@@ -1,19 +1,30 @@
-// CSS → taffy::Style converter and the `layout_via_taffy` dispatch entry
-// for Phase 4.3. Em/rem are already resolved to px at style time (see
-// `style.rs`), so we only see Px and Percent here. Calc()/min()/max() are
-// not in the AST yet and fall through to defaults. Anything we don't
-// understand keeps taffy's `Style::DEFAULT` value, which matches CSS
-// initial values for the relevant property.
+// CSS → taffy::Style converter and the `layout_via_taffy` dispatch entry.
+// Em/rem are already resolved to px at style time (see `style.rs`), so we
+// only see Px and Percent here. Calc()/min()/max() are not in the AST yet
+// and fall through to defaults. Anything we don't understand keeps taffy's
+// `Style::DEFAULT` value, which matches CSS initial values for the
+// relevant property.
 //
-// Phase 4.3 partial status: this bridge handles the pure-block subset
-// (single elements + nested empty blocks + non-percent inset). Inline-flow,
-// floats/clear, flex/grid/table containers, and percent vertical
-// padding/inset all bail to the legacy block algorithm via `is_supported`
-// returning None — `layout_tree_with_fonts` falls back transparently.
-// Future Phase 4.3.x work would route the remaining shapes through taffy
-// either natively (flex/grid via `Display::Flex`/`Display::Grid`) or via a
-// `compute_layout_with_measure` callback that runs legacy layout in a
-// boundary leaf.
+// Phase 4.3 final state (post 4.3.1–4.3.5): every element root routes
+// through taffy. The dispatch is two-tier:
+//   • NATIVE — block, flex (`Display::Flex`), and grid (`Display::Grid`)
+//     containers are mapped to taffy nodes via `to_taffy_style` and
+//     positioned by taffy directly. The walk-back reads `taffy::Layout`
+//     fields back into our `LayoutBox`.
+//   • BOUNDARY — inline-flow blocks, tables, floats / clear, out-of-flow
+//     subtrees, percent vertical inset/padding, and grid-template-areas
+//     containers become opaque taffy leaves (`new_leaf_with_context`
+//     carrying a `NodeBoundary`). The measure callback runs the legacy
+//     `block::layout_node` once per leaf at the width taffy provides;
+//     walk-back splices the cached LayoutBox in after shifting it from
+//     origin (0, 0) to the absolute position taffy assigned. The boundary
+//     leaf's taffy style retains the node's margin so block-flow margin
+//     collapse with native siblings still works.
+//
+// Legacy block / inline / flex / grid / table layout code remains live
+// because the boundary measure callback still drives it for the shapes
+// listed above — the legacy algorithms own the semantics taffy doesn't
+// support natively.
 
 use taffy::prelude::{
     Dimension, LengthPercentage, LengthPercentageAuto, TaffyGridLine, TaffyGridSpan, TaffyTree,
@@ -382,23 +393,12 @@ fn grid_line_to_taffy(line: GridLine) -> TaffyGridPlacement<String> {
     }
 }
 
-// ---------- Phase 4.3.1+: taffy dispatch with measure-callback boundaries ----------
+// ---------- Dispatch: native taffy with measure-callback boundaries ----------
 //
-// Strategy: walk the StyledNode tree once and build a parallel taffy tree
-// where every node is either NATIVE (mapped 1:1 to a taffy node via
-// `to_taffy_style`, recursion continues) or a BOUNDARY (taffy leaf with a
-// `NodeBoundary` context). Boundary leaves get sized by the measure callback
-// (`measure_boundary`), which runs the legacy `block::layout_node` at the
-// width taffy passes in. After `compute_layout_with_measure` runs, we walk
-// taffy + StyledNode together — native nodes are reconstituted from the
-// taffy `Layout`, boundary nodes splice in the legacy LayoutBox after
-// shifting it from origin (0, 0) to its final position.
-//
-// What stays a boundary in 4.3.1: inline flow (`uses_inline_flow`), floats /
-// clear, out-of-flow, percent vertical inset/padding, flex / grid / table
-// containers. Each becomes an opaque rectangle from taffy's POV — the
-// legacy code lays out its interior. Subsequent sub-phases (4.3.2+) move
-// flex / grid / table off the boundary path and into native taffy.
+// `layout_via_taffy` walks the StyledNode tree, builds a parallel taffy
+// tree, runs `compute_layout_with_measure`, then walks taffy + StyledNode
+// together to reconstitute our `LayoutBox`. See the file-header comment
+// for the native vs. boundary split.
 
 struct NodeBoundary {
     node: StyledNode,

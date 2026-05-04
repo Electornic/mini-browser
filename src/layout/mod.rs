@@ -145,9 +145,10 @@ pub fn layout_tree_with_fonts(
     let previous =
         LAYOUT_FONTS_PTR.with(|cell| cell.replace(fonts as *const [fontdue::Font]));
     let _guard = LayoutFontsGuard { previous };
-    // Phase 4.3c: prefer the taffy-based path when it can handle the subtree;
-    // fall back to the legacy block algorithm for shapes the bridge does not
-    // yet support (every sub-phase widens the supported set).
+    // Element roots route through taffy (the bridge's measure-callback
+    // boundary handles every shape taffy itself doesn't understand). Only
+    // a non-element root (e.g. a stand-alone text node — never produced by
+    // current callers) falls back to the legacy block path.
     let mut layout_box = match taffy_bridge::layout_via_taffy(root, viewport_width) {
         Some(layout) => layout,
         None => {
