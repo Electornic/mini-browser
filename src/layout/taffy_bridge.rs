@@ -37,7 +37,6 @@ use super::{
     outer_rect, shift_layout_subtree,
 };
 use super::block::layout_node as legacy_block_layout;
-use super::grid::is_grid_container;
 use super::inline::uses_inline_flow;
 use super::table::is_table_container;
 
@@ -521,19 +520,21 @@ fn is_native_block(node: &StyledNode) -> bool {
     if !matches!(node.node_type, NodeType::Element(_)) {
         return false;
     }
-    // 4.3.2: flex containers are now native — `to_taffy_style` translates
-    // `display: flex / inline-flex` → `Display::Flex`, and taffy's flex
-    // algorithm consumes the `flex-*` / `align-*` / `justify-*` /`gap`
-    // fields the bridge already populates. Boundary leaves (inline-flow
-    // children, etc.) still work as flex items because the leaf's measured
-    // border-box size is exactly the size taffy needs to lay them out.
-    if is_grid_container(node)
-        || is_table_container(node)
+    // 4.3.2 / 4.3.3: flex AND grid containers are now native — taffy maps
+    // `display: flex` / `display: grid` (plus inline variants) and consumes
+    // the flex-* / align-* / justify-* / gap fields and the grid-template /
+    // grid-row / grid-column placement fields that the bridge already
+    // populates. Children that aren't natively supportable (inline-flow,
+    // floats, etc.) fall through to the boundary measure-callback path and
+    // taffy treats their measured size as the item's contribution to the
+    // flex / grid track sizing.
+    if is_table_container(node)
         || uses_inline_flow(node)
         || is_out_of_flow(node)
         || has_float(node)
         || has_clear(node)
         || has_percent_inset_or_padding(node)
+        || uses_grid_template_areas(node)
     {
         return false;
     }
@@ -559,6 +560,16 @@ fn has_clear(node: &StyledNode) -> bool {
         node.value("clear"),
         Some(Value::Keyword(k)) if k == "left" || k == "right" || k == "both"
     )
+}
+
+fn uses_grid_template_areas(node: &StyledNode) -> bool {
+    // taffy 0.10's grid algorithm has no `grid-template-areas` support, so a
+    // container that uses named-area placement falls back to the legacy grid
+    // pass via the boundary path. Items reference areas via `grid-area: <name>`,
+    // which our css crate stores as a keyword on the item — but the container
+    // is the real source of the name table, so detecting it on the container
+    // alone is sufficient.
+    matches!(node.value("grid-template-areas"), Some(Value::TemplateAreas(_)))
 }
 
 fn has_percent_inset_or_padding(node: &StyledNode) -> bool {
