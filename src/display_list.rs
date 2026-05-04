@@ -71,7 +71,11 @@ pub fn build_document_view(
         interaction,
     );
     let layout = layout::layout_tree_with_fonts(&styled, viewport_width as f32, fonts);
-    let mut commands = render::build_display_list(&layout);
+    let paint_ctx = render::PaintContext {
+        base_url: current_url,
+        images,
+    };
+    let mut commands = render::build_display_list(&layout, &paint_ctx);
     commands.extend(collect_image_commands(&layout, current_url, images));
     let links = collect_link_targets(&layout, None, false, render::Affine::IDENTITY);
     Ok(DocumentView {

@@ -61,7 +61,7 @@ pub fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
     let stylesheets = resource::load_stylesheets(&document, &final_url)
         .map_err(|error| describe_resource_error(&error))?;
     let font_data = resource::load_fonts(&stylesheets, &final_url);
-    let images = resource::load_images(&document, &final_url)
+    let images = resource::load_images(&document, &stylesheets, &final_url)
         .map_err(|error| describe_resource_error(&error))?
         .into_iter()
         .map(|image| (image.url.to_string(), image))

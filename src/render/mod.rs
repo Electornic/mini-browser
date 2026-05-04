@@ -12,7 +12,7 @@ use crate::{css::{Color, GradientKind}, layout::Rect};
 mod display_list;
 mod raster;
 
-pub use display_list::{build_display_list, transform_for, translate};
+pub use display_list::{PaintContext, build_display_list, transform_for, translate};
 pub use raster::{invalidate_glyph_cache, measure_text_width, rasterize};
 
 /// 2-D affine transform stored as the six matrix entries of
@@ -253,7 +253,65 @@ mod tests {
         let stylesheet = css::parse(css_source).unwrap();
         let styled = style::style_tree(&document, root, &[stylesheet]);
         let layout = layout::layout_tree(&styled, 400.0);
-        render::build_display_list(&layout)
+        let images = std::collections::HashMap::new();
+        render::build_display_list(&layout, &render::PaintContext::empty(&images))
+    }
+
+    #[test]
+    fn paints_background_image_from_url() {
+        // `background-image: url(...)` resolves the raw CSS string against
+        // the document's base URL and looks up an entry in the images map
+        // keyed by the resolved URL. The emitted Image command is anchored
+        // to the padding box (matching the bg-color path) and stretches the
+        // source pixels to fill it. Layout pads aren't required to make the
+        // assertion meaningful here — a 50×30 box keeps the math obvious.
+        let document = html::parse(r#"<div id="card"></div>"#).unwrap();
+        let root = document.roots()[0];
+        let stylesheet = css::parse(
+            r#"
+                #card {
+                    width: 50px;
+                    height: 30px;
+                    background-image: url("/bg.png");
+                }
+            "#,
+        )
+        .unwrap();
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let layout = layout::layout_tree(&styled, 400.0);
+
+        let base = crate::net::Url::parse("http://example.com/page").unwrap();
+        let resolved = base.resolve("/bg.png").unwrap();
+        let mut images: std::collections::HashMap<String, crate::resource::LoadedImage> =
+            std::collections::HashMap::new();
+        images.insert(
+            resolved.to_string(),
+            crate::resource::LoadedImage {
+                url: resolved,
+                width: 2,
+                height: 2,
+                pixels: vec![0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF],
+            },
+        );
+        let ctx = render::PaintContext {
+            base_url: Some(&base),
+            images: &images,
+        };
+        let commands = render::build_display_list(&layout, &ctx);
+
+        let image = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DisplayCommand::Image(image) => Some(image),
+                _ => None,
+            })
+            .expect("background-image url(...) must emit an Image command");
+        assert_eq!(image.x, 0.0);
+        assert_eq!(image.y, 0.0);
+        assert_eq!(image.width, 50.0);
+        assert_eq!(image.height, 30.0);
+        assert_eq!(image.source_width, 2);
+        assert_eq!(image.source_height, 2);
     }
 
     #[test]

@@ -79,14 +79,46 @@ pub fn load_scripts(
 
 pub fn load_images(
     document: &Document,
+    stylesheets: &[String],
     base_url: &Url,
 ) -> Result<Vec<LoadedImage>, ResourceError> {
-    let image_urls = image_urls(document, base_url)?;
+    let mut urls = image_urls(document, base_url)?;
+    urls.extend(stylesheet_image_urls(stylesheets, base_url));
+    // De-dupe by stringified URL — the same asset is often referenced from
+    // both an `<img>` tag and a CSS rule, and fetching twice is a waste.
+    let mut seen = std::collections::HashSet::new();
+    urls.retain(|url| seen.insert(url.to_string()));
     // Same parallel pattern as stylesheets: failures drop, order is preserved.
-    Ok(parallel_fetch(&image_urls, |url| {
+    Ok(parallel_fetch(&urls, |url| {
         let bytes = net::load_image(url).ok()?;
         decode_image(url.clone(), &bytes).ok()
     }))
+}
+
+// Parses every stylesheet body looking for `background-image: url(...)`
+// declarations and resolves each value against `base_url`. Bad URLs and
+// unparseable stylesheets are silently skipped; the rest of the page still
+// loads, mirroring how broken stylesheet links are tolerated upstream.
+fn stylesheet_image_urls(stylesheets: &[String], base_url: &Url) -> Vec<Url> {
+    let mut urls = Vec::new();
+    for css in stylesheets {
+        let Ok(parsed) = crate::css::parse(css) else {
+            continue;
+        };
+        for rule in &parsed.rules {
+            for decl in &rule.declarations {
+                if decl.name != "background-image" {
+                    continue;
+                }
+                if let crate::css::Value::ImageUrl(raw) = &decl.value
+                    && let Ok(resolved) = base_url.resolve(raw)
+                {
+                    urls.push(resolved);
+                }
+            }
+        }
+    }
+    urls
 }
 
 // Runs `fetch` against every URL on its own scoped thread and collects the
@@ -510,7 +542,7 @@ mod tests {
         });
 
         let base_url = Url::parse(&format!("http://127.0.0.1:{port}/index.html")).unwrap();
-        let images = load_images(&document, &base_url).unwrap();
+        let images = load_images(&document, &[], &base_url).unwrap();
 
         server.join().unwrap();
         assert_eq!(images.len(), 1);

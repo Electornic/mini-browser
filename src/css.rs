@@ -146,6 +146,11 @@ pub enum Value {
     // Layout looks up an item's `grid-area` keyword in this map and uses
     // the bounding rectangle of matching cells as the item's placement.
     TemplateAreas(Vec<Vec<Option<String>>>),
+    // `url("…")` reference, used as a `background-image` value. The string
+    // is the raw CSS URL — the resolver in `resource::load_images` joins it
+    // against the document's base URL when fetching, and the painter does
+    // the same when looking the loaded pixels back up at paint time.
+    ImageUrl(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1233,6 +1238,9 @@ impl<'a> Parser<'a> {
                     if ident.eq_ignore_ascii_case("radial-gradient") {
                         return self.parse_radial_gradient();
                     }
+                    if ident.eq_ignore_ascii_case("url") {
+                        return self.parse_url_function();
+                    }
                 }
                 Ok(named_color(&ident)
                     .map(Value::Color)
@@ -1327,6 +1335,52 @@ impl<'a> Parser<'a> {
             kind: GradientKind::Radial,
             stops,
         }))
+    }
+
+    fn parse_url_function(&mut self) -> Result<Value, ParseError> {
+        // `url("…")`, `url('…')`, or unquoted `url(…)`. The token can hold any
+        // character except a matching quote / closing paren; we capture the
+        // raw string and trim outer whitespace, leaving URL resolution
+        // (relative vs absolute, percent-decoding) to the resource loader.
+        self.expect_char('(')?;
+        self.consume_whitespace();
+        let url = match self.next_char() {
+            Some(ch) if ch == '"' || ch == '\'' => {
+                let quote = ch;
+                self.consume_char();
+                let mut buf = String::new();
+                loop {
+                    match self.consume_char() {
+                        Some(c) if c == quote => break,
+                        Some(c) => buf.push(c),
+                        None => {
+                            return Err(ParseError::new(
+                                self.pos,
+                                "unterminated quoted url() value",
+                            ));
+                        }
+                    }
+                }
+                buf
+            }
+            Some(_) => {
+                let mut buf = String::new();
+                while let Some(c) = self.next_char() {
+                    if c == ')' {
+                        break;
+                    }
+                    self.consume_char();
+                    buf.push(c);
+                }
+                buf.trim().to_string()
+            }
+            None => {
+                return Err(ParseError::new(self.pos, "unexpected end of url() value"));
+            }
+        };
+        self.consume_whitespace();
+        self.expect_char(')')?;
+        Ok(Value::ImageUrl(url))
     }
 
     fn parse_gradient_stops(&mut self, label: &str) -> Result<Vec<ColorStop>, ParseError> {
@@ -2153,6 +2207,29 @@ mod tests {
         };
         assert_eq!(gradient.kind, GradientKind::Radial);
         assert_eq!(gradient.stops.len(), 2);
+    }
+
+    #[test]
+    fn parses_double_quoted_url_as_image_url() {
+        let stylesheet = parse(r#".a { background-image: url("img/logo.png"); }"#).unwrap();
+        let value = &stylesheet.rules[0].declarations[0].value;
+        assert_eq!(value, &Value::ImageUrl("img/logo.png".to_string()));
+    }
+
+    #[test]
+    fn parses_single_quoted_url_as_image_url() {
+        let stylesheet = parse(".a { background-image: url('logo.png'); }").unwrap();
+        let value = &stylesheet.rules[0].declarations[0].value;
+        assert_eq!(value, &Value::ImageUrl("logo.png".to_string()));
+    }
+
+    #[test]
+    fn parses_unquoted_url_trims_outer_whitespace() {
+        // Unquoted form is permitted by spec; outer whitespace inside the
+        // parens is not part of the resource URL.
+        let stylesheet = parse(".a { background-image: url(  /static/bg.png  ); }").unwrap();
+        let value = &stylesheet.rules[0].declarations[0].value;
+        assert_eq!(value, &Value::ImageUrl("/static/bg.png".to_string()));
     }
 
     #[test]

@@ -3,18 +3,42 @@
 // painter expects (non-positioned descendants first, then positioned
 // descendants ordered by z-index).
 
+use std::collections::HashMap;
+
 use crate::{
     css::{Color, ColorStop, TransformOp, Unit, Value},
     dom::NodeType,
     layout::{Dimensions, LayoutBox, Rect},
+    net::Url,
+    resource::LoadedImage,
 };
 
 use super::{
-    Affine, CornerRadii, DisplayCommand, GradientCommand, ResolvedStop,
+    Affine, CornerRadii, DisplayCommand, GradientCommand, ImageCommand, ResolvedStop,
     ShadowCommand, TextCommand,
 };
 
-pub fn build_display_list(layout_root: &LayoutBox) -> Vec<DisplayCommand> {
+/// Side data the paint walk needs to resolve `background-image: url(...)`
+/// references. The map is keyed by the *resolved* URL string (same scheme
+/// `<img>` rendering already uses), so the walker re-resolves the raw CSS
+/// string against `base_url` and looks up. `base_url == None` skips the
+/// lookup entirely — useful for tests that don't care about background
+/// images.
+pub struct PaintContext<'a> {
+    pub base_url: Option<&'a Url>,
+    pub images: &'a HashMap<String, LoadedImage>,
+}
+
+impl<'a> PaintContext<'a> {
+    pub fn empty(images: &'a HashMap<String, LoadedImage>) -> Self {
+        Self {
+            base_url: None,
+            images,
+        }
+    }
+}
+
+pub fn build_display_list(layout_root: &LayoutBox, ctx: &PaintContext) -> Vec<DisplayCommand> {
     let mut commands = Vec::new();
     // The root layout box is treated as the initial stacking context: every
     // positioned descendant ends up sorted into z-layers under it. The
@@ -22,7 +46,7 @@ pub fn build_display_list(layout_root: &LayoutBox) -> Vec<DisplayCommand> {
     // multiplies into the alpha passed to descendants. The inherited
     // transform starts as identity and accumulates per `transform`
     // declaration on the way down.
-    paint_stacking_context(layout_root, &mut commands, 1.0, Affine::IDENTITY);
+    paint_stacking_context(layout_root, &mut commands, 1.0, Affine::IDENTITY, ctx);
     commands
 }
 
@@ -71,12 +95,13 @@ fn paint_stacking_context(
     commands: &mut Vec<DisplayCommand>,
     inherited_alpha: f32,
     inherited_transform: Affine,
+    ctx: &PaintContext,
 ) {
     let effective_alpha = inherited_alpha * opacity_of(layout_box);
     let effective_transform = inherited_transform.compose(transform_for(layout_box));
 
     // 1. Paint this stacking-context-creator's own bg/border/text.
-    paint_self(layout_box, commands, effective_alpha, effective_transform);
+    paint_self(layout_box, commands, effective_alpha, effective_transform, ctx);
 
     // Walk descendants and pluck out the positioned subtrees — each becomes
     // its own atomic z-layer. Non-positioned content is painted between the
@@ -111,18 +136,18 @@ fn paint_stacking_context(
 
     // 2. Negative-z layers paint first → they sit BEHIND non-positioned content.
     for (child, alpha, transform) in &negative {
-        paint_stacking_context(child, commands, *alpha, *transform);
+        paint_stacking_context(child, commands, *alpha, *transform, ctx);
     }
 
     // 3. Non-positioned descendants in tree order. Positioned subtrees are
     //    skipped here because they already belong to a z-layer.
     for child in &layout_box.children {
-        paint_non_positioned(child, commands, effective_alpha, effective_transform);
+        paint_non_positioned(child, commands, effective_alpha, effective_transform, ctx);
     }
 
     // 4 & 5. Zero/auto layers in tree order, then positive-z (sorted asc).
     for (child, alpha, transform) in zero_or_auto.iter().chain(positive.iter()) {
-        paint_stacking_context(child, commands, *alpha, *transform);
+        paint_stacking_context(child, commands, *alpha, *transform, ctx);
     }
 }
 
@@ -131,6 +156,7 @@ fn paint_non_positioned(
     commands: &mut Vec<DisplayCommand>,
     inherited_alpha: f32,
     inherited_transform: Affine,
+    ctx: &PaintContext,
 ) {
     // Stop at any positioned box — its painting belongs to its enclosing
     // stacking context, where z-order is decided.
@@ -139,9 +165,9 @@ fn paint_non_positioned(
     }
     let effective_alpha = inherited_alpha * opacity_of(layout_box);
     let effective_transform = inherited_transform.compose(transform_for(layout_box));
-    paint_self(layout_box, commands, effective_alpha, effective_transform);
+    paint_self(layout_box, commands, effective_alpha, effective_transform, ctx);
     for child in &layout_box.children {
-        paint_non_positioned(child, commands, effective_alpha, effective_transform);
+        paint_non_positioned(child, commands, effective_alpha, effective_transform, ctx);
     }
 }
 
@@ -151,6 +177,7 @@ fn paint_self(
     commands: &mut Vec<DisplayCommand>,
     alpha: f32,
     transform: Affine,
+    ctx: &PaintContext,
 ) {
     // Per-box paint order is shadow -> background-color -> background-image
     // (gradient) -> border -> text, matching CSS spec stacking within a
@@ -164,6 +191,9 @@ fn paint_self(
         commands.push(command);
     }
     if let Some(command) = gradient_command(layout_box, alpha) {
+        commands.push(command);
+    }
+    if let Some(command) = background_image_command(layout_box, ctx) {
         commands.push(command);
     }
     commands.extend(border_commands(layout_box, alpha));
@@ -427,6 +457,40 @@ fn background_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayComma
     } else {
         Some(DisplayCommand::RoundedRect(color, rect, radii))
     }
+}
+
+fn background_image_command(
+    layout_box: &LayoutBox,
+    ctx: &PaintContext,
+) -> Option<DisplayCommand> {
+    // `background-image: url(...)` parallels `<img>` rendering but anchored
+    // to the padding box rather than the content box, matching CSS spec
+    // behaviour for backgrounds. Resolution mirrors the `<img>` path so a
+    // page can reference the same asset from either spot interchangeably.
+    let node = layout_box.styled_node()?;
+    let raw = match node.value("background-image") {
+        Some(Value::ImageUrl(url)) => url,
+        _ => return None,
+    };
+    let key = if raw.contains("://") {
+        raw.clone()
+    } else {
+        ctx.base_url?.resolve(raw).ok()?.to_string()
+    };
+    let image = ctx.images.get(&key)?;
+    let rect = layout_box.dimensions.padding_box();
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return None;
+    }
+    Some(DisplayCommand::Image(ImageCommand {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        source_width: image.width,
+        source_height: image.height,
+        pixels: image.pixels.clone(),
+    }))
 }
 
 fn gradient_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
