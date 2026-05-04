@@ -37,7 +37,6 @@ use super::{
     outer_rect, shift_layout_subtree,
 };
 use super::block::layout_node as legacy_block_layout;
-use super::flex::is_flex_container;
 use super::grid::is_grid_container;
 use super::inline::uses_inline_flow;
 use super::table::is_table_container;
@@ -412,6 +411,11 @@ pub(super) fn layout_via_taffy(node: &StyledNode, viewport_width: f32) -> Option
         return None;
     }
     let mut tree: TaffyTree<NodeBoundary> = TaffyTree::new();
+    // Taffy rounds final layouts to integer pixels by default; legacy code
+    // ran in f32 throughout, so disable rounding to keep parity with the
+    // existing test suite (and so flex-shrink distributions like 66.67,
+    // 66.67, 66.67 don't drift to 67, 66, 67).
+    tree.disable_rounding();
     let root_id = build_taffy_node(&mut tree, node)?;
     // Wrapper for root `margin: auto` resolution against the viewport (taffy
     // does not auto-center the topmost node it lays out).
@@ -517,8 +521,13 @@ fn is_native_block(node: &StyledNode) -> bool {
     if !matches!(node.node_type, NodeType::Element(_)) {
         return false;
     }
-    if is_flex_container(node)
-        || is_grid_container(node)
+    // 4.3.2: flex containers are now native — `to_taffy_style` translates
+    // `display: flex / inline-flex` → `Display::Flex`, and taffy's flex
+    // algorithm consumes the `flex-*` / `align-*` / `justify-*` /`gap`
+    // fields the bridge already populates. Boundary leaves (inline-flow
+    // children, etc.) still work as flex items because the leaf's measured
+    // border-box size is exactly the size taffy needs to lay them out.
+    if is_grid_container(node)
         || is_table_container(node)
         || uses_inline_flow(node)
         || is_out_of_flow(node)
