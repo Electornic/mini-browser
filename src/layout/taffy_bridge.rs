@@ -12,17 +12,29 @@
 // matches CSS initial values for the relevant property.
 
 use taffy::prelude::{
-    Dimension, LengthPercentage, LengthPercentageAuto, TaffyGridLine, TaffyGridSpan,
+    Dimension, LengthPercentage, LengthPercentageAuto, TaffyGridLine, TaffyGridSpan, TaffyTree,
 };
 use taffy::style::{
-    AlignContent, AlignItems, AlignSelf, BoxSizing, Display, FlexDirection, FlexWrap,
-    GridAutoFlow, GridPlacement as TaffyGridPlacement, GridTemplateComponent, JustifyContent,
-    MaxTrackSizingFunction, MinTrackSizingFunction, Overflow, Position, Style, TrackSizingFunction,
+    AlignContent, AlignItems, AlignSelf, AvailableSpace, BoxSizing, Display, FlexDirection,
+    FlexWrap, GridAutoFlow, GridPlacement as TaffyGridPlacement, GridTemplateComponent,
+    JustifyContent, MaxTrackSizingFunction, MinTrackSizingFunction, Overflow, Position, Style,
+    TrackSizingFunction,
 };
-use taffy::geometry::{Line, MinMax, Rect, Size};
+use taffy::geometry::{Line, MinMax, Rect as TaffyRect, Size};
+use taffy::NodeId;
 
 use crate::css::{GridLine, TrackSize, Unit, Value};
+use crate::dom::NodeType;
 use crate::style::StyledNode;
+
+use super::{
+    Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, is_display_none,
+    is_layout_whitespace_text, is_out_of_flow,
+};
+use super::flex::is_flex_container;
+use super::grid::is_grid_container;
+use super::inline::uses_inline_flow;
+use super::table::is_table_container;
 
 pub fn to_taffy_style(node: &StyledNode) -> Style {
     let mut style = Style::DEFAULT;
@@ -48,7 +60,7 @@ pub fn to_taffy_style(node: &StyledNode) -> Style {
     style.margin = edge_lpa(node, "margin");
     style.padding = edge_lp(node, "padding");
     style.border = border_widths(node);
-    style.inset = Rect {
+    style.inset = TaffyRect {
         left: lpa(node.value("left")),
         right: lpa(node.value("right")),
         top: lpa(node.value("top")),
@@ -222,8 +234,8 @@ fn lp(value: Option<&Value>) -> LengthPercentage {
     }
 }
 
-fn edge_lpa(node: &StyledNode, prefix: &str) -> Rect<LengthPercentageAuto> {
-    Rect {
+fn edge_lpa(node: &StyledNode, prefix: &str) -> TaffyRect<LengthPercentageAuto> {
+    TaffyRect {
         left: lpa(node.value(&format!("{prefix}-left"))),
         right: lpa(node.value(&format!("{prefix}-right"))),
         top: lpa(node.value(&format!("{prefix}-top"))),
@@ -231,8 +243,8 @@ fn edge_lpa(node: &StyledNode, prefix: &str) -> Rect<LengthPercentageAuto> {
     }
 }
 
-fn edge_lp(node: &StyledNode, prefix: &str) -> Rect<LengthPercentage> {
-    Rect {
+fn edge_lp(node: &StyledNode, prefix: &str) -> TaffyRect<LengthPercentage> {
+    TaffyRect {
         left: lp(node.value(&format!("{prefix}-left"))),
         right: lp(node.value(&format!("{prefix}-right"))),
         top: lp(node.value(&format!("{prefix}-top"))),
@@ -240,8 +252,8 @@ fn edge_lp(node: &StyledNode, prefix: &str) -> Rect<LengthPercentage> {
     }
 }
 
-fn border_widths(node: &StyledNode) -> Rect<LengthPercentage> {
-    Rect {
+fn border_widths(node: &StyledNode) -> TaffyRect<LengthPercentage> {
+    TaffyRect {
         left: lp(node.value("border-left-width")),
         right: lp(node.value("border-right-width")),
         top: lp(node.value("border-top-width")),
@@ -319,5 +331,193 @@ fn grid_line_to_taffy(line: GridLine) -> TaffyGridPlacement<String> {
         GridLine::Auto => TaffyGridPlacement::Auto,
         GridLine::Index(idx) => TaffyGridPlacement::from_line_index(idx as i16),
         GridLine::Span(n) => TaffyGridPlacement::from_span(n as u16),
+    }
+}
+
+// ---------- 4.3b: end-to-end taffy dispatch (off by default) ----------
+//
+// `layout_via_taffy` is the new layout entry under construction. It returns
+// `None` for any subtree shape we can't yet handle natively in taffy, so a
+// caller can transparently fall back to the legacy block path. Each sub-phase
+// (4.3c–e) widens the `is_supported` filter until the legacy path falls out.
+//
+// 4.3b only handles the simplest case — a single block element with no
+// element children — which is enough to verify the bridge produces the same
+// dimensions as the legacy code end-to-end.
+
+pub(super) fn layout_via_taffy(node: &StyledNode, viewport_width: f32) -> Option<LayoutBox> {
+    if !is_supported(node) {
+        return None;
+    }
+    let mut tree: TaffyTree<()> = TaffyTree::new();
+    let root_id = build_taffy_node(&mut tree, node)?;
+    tree.compute_layout(
+        root_id,
+        Size {
+            width: AvailableSpace::Definite(viewport_width),
+            height: AvailableSpace::MaxContent,
+        },
+    )
+    .ok()?;
+    let root_layout = tree.layout(root_id).ok()?;
+    // Root's outer (margin-box) top-left lives at (0, 0) in our coord system,
+    // which means the root's BORDER box sits at (margin.left, margin.top).
+    // Children's `location` is relative to the parent's border box, so this
+    // origin propagates naturally during walk-back.
+    let root_origin = (root_layout.margin.left, root_layout.margin.top);
+    Some(walk_back(&tree, root_id, node, root_origin))
+}
+
+fn is_supported(node: &StyledNode) -> bool {
+    if !matches!(node.node_type, NodeType::Element(_)) {
+        return false;
+    }
+    if is_flex_container(node)
+        || is_grid_container(node)
+        || is_table_container(node)
+        || uses_inline_flow(node)
+        || is_out_of_flow(node)
+    {
+        return false;
+    }
+    // 4.3b accepts only leaf blocks — every child must be display:none or
+    // pure-whitespace text (both are skipped during taffy build, so the
+    // resulting taffy node has zero children). 4.3c will lift this to allow
+    // nested block subtrees with text leaves.
+    node.children
+        .iter()
+        .all(|c| is_display_none(c) || is_layout_whitespace_text(c))
+}
+
+fn build_taffy_node(tree: &mut TaffyTree<()>, node: &StyledNode) -> Option<NodeId> {
+    let style = to_taffy_style(node);
+    let mut children = Vec::new();
+    for child in &node.children {
+        if is_display_none(child) || is_layout_whitespace_text(child) {
+            continue;
+        }
+        children.push(build_taffy_node(tree, child)?);
+    }
+    tree.new_with_children(style, &children).ok()
+}
+
+fn walk_back(
+    tree: &TaffyTree<()>,
+    id: NodeId,
+    node: &StyledNode,
+    parent_border_origin: (f32, f32),
+) -> LayoutBox {
+    let layout = tree.layout(id).expect("layout was just computed");
+    let abs_border_x = parent_border_origin.0 + layout.location.x;
+    let abs_border_y = parent_border_origin.1 + layout.location.y;
+    let content_x = abs_border_x + layout.border.left + layout.padding.left;
+    let content_y = abs_border_y + layout.border.top + layout.padding.top;
+    let content_width = (layout.size.width
+        - layout.border.left
+        - layout.border.right
+        - layout.padding.left
+        - layout.padding.right)
+        .max(0.0);
+    let content_height = (layout.size.height
+        - layout.border.top
+        - layout.border.bottom
+        - layout.padding.top
+        - layout.padding.bottom)
+        .max(0.0);
+
+    let dimensions = Dimensions {
+        content: Rect {
+            x: content_x,
+            y: content_y,
+            width: content_width,
+            height: content_height,
+        },
+        padding: edge_from_taffy(&layout.padding),
+        border: edge_from_taffy(&layout.border),
+        margin: edge_from_taffy(&layout.margin),
+    };
+
+    // Recurse into children. The taffy child order matches the order we built
+    // them in `build_taffy_node`, which mirrors `node.children` minus skipped
+    // (display:none / whitespace) ones — keep them aligned here.
+    let child_ids = tree.children(id).unwrap_or_default();
+    let mut child_layouts = Vec::with_capacity(child_ids.len());
+    let next_origin = (abs_border_x, abs_border_y);
+    let mut taffy_iter = child_ids.into_iter();
+    for child in &node.children {
+        if is_display_none(child) || is_layout_whitespace_text(child) {
+            continue;
+        }
+        let child_id = match taffy_iter.next() {
+            Some(id) => id,
+            None => break,
+        };
+        child_layouts.push(walk_back(tree, child_id, child, next_origin));
+    }
+
+    LayoutBox {
+        box_type: container_box_type(node),
+        dimensions,
+        children: child_layouts,
+    }
+}
+
+fn edge_from_taffy(rect: &TaffyRect<f32>) -> EdgeSizes {
+    EdgeSizes {
+        left: rect.left,
+        right: rect.right,
+        top: rect.top,
+        bottom: rect.bottom,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::layout_via_taffy;
+    use crate::{css, html, layout::layout_tree, style};
+
+    fn styled_root(html_source: &str, css_source: &str) -> style::StyledNode {
+        let document = html::parse(html_source).unwrap();
+        let root = document.roots()[0];
+        let stylesheet = css::parse(css_source).unwrap();
+        style::style_tree(&document, root, &[stylesheet])
+    }
+
+    #[test]
+    fn taffy_matches_legacy_for_leaf_block() {
+        // Single empty <div> with explicit width/height/margin/padding/border.
+        // The taffy bridge should produce the same content rect and edge
+        // sizes as the legacy block algorithm.
+        let styled = styled_root(
+            r#"<div id="card"></div>"#,
+            r#"
+                #card {
+                    width: 120px;
+                    height: 60px;
+                    margin: 8px;
+                    padding: 6px;
+                    border: 2px solid black;
+                }
+            "#,
+        );
+
+        let legacy = layout_tree(&styled, 800.0);
+        let bridged = layout_via_taffy(&styled, 800.0)
+            .expect("leaf block must be supported in 4.3b");
+
+        assert_eq!(legacy.dimensions.content, bridged.dimensions.content);
+        assert_eq!(legacy.dimensions.padding, bridged.dimensions.padding);
+        assert_eq!(legacy.dimensions.border, bridged.dimensions.border);
+        assert_eq!(legacy.dimensions.margin, bridged.dimensions.margin);
+    }
+
+    #[test]
+    fn taffy_rejects_unsupported_subtree_in_4_3b() {
+        // Block element with element children — not handled in 4.3b yet.
+        let styled = styled_root(
+            r#"<div id="root"><p>One</p></div>"#,
+            r#"#root { width: 300px; } p { font-size: 16px; }"#,
+        );
+        assert!(layout_via_taffy(&styled, 800.0).is_none());
     }
 }
