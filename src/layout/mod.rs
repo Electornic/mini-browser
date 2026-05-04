@@ -19,6 +19,7 @@ mod flex;
 mod grid;
 mod inline;
 mod table;
+mod taffy_bridge;
 
 // The fontdue font slice currently in use for the running layout pass.
 // `layout_tree_with_fonts` writes this for the duration of one call so
