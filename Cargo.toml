@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 boa_engine = "0.21.1"
+cosmic-text = "0.19"
 cssparser = "0.36"
 fontdue = "0.9"
 html5ever = "0.38"

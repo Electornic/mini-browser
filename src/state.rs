@@ -5,7 +5,15 @@
 // for chrome painting. Pure helpers (sample HTML/CSS, the env-arg loader, the
 // font cache builder) live at the bottom so `main` can stay a one-liner.
 
-use std::{cell::RefCell, collections::HashMap, env, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    env,
+    rc::Rc,
+    sync::{Mutex, OnceLock},
+};
+
+use cosmic_text::FontSystem;
 
 use crate::{
     chrome::{
@@ -1581,9 +1589,10 @@ pub fn build_font_cache(font_data: &[Vec<u8>]) -> Vec<fontdue::Font> {
         .collect();
 
     // Fall back to a macOS system font so pages without web fonts can still render Korean/CJK.
-    if let Ok(system_font_bytes) = std::fs::read("/System/Library/Fonts/AppleSDGothicNeo.ttc")
+    let macos_fallback = std::fs::read("/System/Library/Fonts/AppleSDGothicNeo.ttc").ok();
+    if let Some(bytes) = macos_fallback.as_ref()
         && let Ok(font) = fontdue::Font::from_bytes(
-            system_font_bytes.as_slice(),
+            bytes.as_slice(),
             fontdue::FontSettings {
                 collection_index: 0,
                 ..fontdue::FontSettings::default()
@@ -1593,7 +1602,39 @@ pub fn build_font_cache(font_data: &[Vec<u8>]) -> Vec<fontdue::Font> {
         fonts.push(font);
     }
 
+    install_shared_font_system(font_data, macos_fallback.as_deref());
+
     fonts
+}
+
+// Shaped-text engine shared across the layout / chrome / display-list lanes.
+// Phase 4.4a: only `measure_text_width` consults it; raster still uses fontdue.
+// `OnceLock` initialises lazily on the first `build_font_cache` call; later
+// calls swap the inner FontSystem so font reloads on navigation propagate.
+static SHARED_FONT_SYSTEM: OnceLock<Mutex<FontSystem>> = OnceLock::new();
+
+pub fn shared_font_system() -> Option<&'static Mutex<FontSystem>> {
+    SHARED_FONT_SYSTEM.get()
+}
+
+fn install_shared_font_system(font_data: &[Vec<u8>], macos_fallback: Option<&[u8]>) {
+    let mut fs = FontSystem::new();
+    for data in font_data {
+        fs.db_mut().load_font_data(data.clone());
+    }
+    if let Some(bytes) = macos_fallback {
+        fs.db_mut().load_font_data(bytes.to_vec());
+    }
+    match SHARED_FONT_SYSTEM.get() {
+        Some(slot) => {
+            if let Ok(mut guard) = slot.lock() {
+                *guard = fs;
+            }
+        }
+        None => {
+            let _ = SHARED_FONT_SYSTEM.set(Mutex::new(fs));
+        }
+    }
 }
 
 #[cfg(test)]

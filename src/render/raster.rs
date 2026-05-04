@@ -72,11 +72,17 @@ where
     })
 }
 
-// Measures the rendered width of `text` at `font_size` using the same advance
-// rules as `draw_text` / `draw_text_bitmap`. Callers use this to position UI
-// elements that need to align with the *end* of a rendered string (e.g. the
-// caret in the chrome address bar) without resorting to a fixed average glyph
-// width — which is always wrong for proportional fonts.
+// Measures the rendered width of `text` at `font_size`. Callers use this to
+// position UI elements that need to align with the *end* of a rendered string
+// (caret, link underlines, line packing) without a fixed average glyph width
+// — which is always wrong for proportional fonts.
+//
+// Phase 4.4a: when the shared cosmic-text `FontSystem` is initialised, we route
+// through a Buffer so the result reflects real shaping (kerning, ligatures,
+// font fallback). The legacy fontdue per-char advance path is kept as a
+// fallback for the brief window before `build_font_cache` has run, and the
+// empty-`fonts`-slice path keeps unit tests deterministic without loading any
+// real font.
 pub fn measure_text_width(text: &str, font_size: f32, fonts: &[fontdue::Font]) -> f32 {
     if fonts.is_empty() {
         let scale = (font_size / 8.0).max(1.0).round();
@@ -86,6 +92,43 @@ pub fn measure_text_width(text: &str, font_size: f32, fonts: &[fontdue::Font]) -
             .sum();
     }
 
+    if let Some(width) = measure_with_cosmic(text, font_size) {
+        return width;
+    }
+
+    measure_with_fontdue(text, font_size, fonts)
+}
+
+fn measure_with_cosmic(text: &str, font_size: f32) -> Option<f32> {
+    use cosmic_text::{Attrs, Buffer, Metrics, Shaping};
+
+    let slot = crate::state::shared_font_system()?;
+    let mut fs = slot.lock().ok()?;
+
+    let size = font_size.max(8.0);
+    // Line height does not affect line_w, but cosmic-text requires a nonzero value.
+    let metrics = Metrics::new(size, size * 1.2);
+    let mut buffer = Buffer::new(&mut fs, metrics);
+    // `borrow_with` ties the buffer to the font system so subsequent calls
+    // can be written without re-passing the font system on every line.
+    let mut buffer = buffer.borrow_with(&mut fs);
+    // Unconstrained width so the input is never wrapped — we want the full
+    // shaped advance of `text`, not the width of the longest line after wrap.
+    buffer.set_size(None, None);
+    let attrs = Attrs::new();
+    buffer.set_text(text, &attrs, Shaping::Advanced, None);
+    buffer.shape_until_scroll(true);
+
+    let mut width = 0.0_f32;
+    for run in buffer.layout_runs() {
+        if run.line_w > width {
+            width = run.line_w;
+        }
+    }
+    Some(width)
+}
+
+fn measure_with_fontdue(text: &str, font_size: f32, fonts: &[fontdue::Font]) -> f32 {
     let size = font_size.max(8.0);
     let mut width = 0.0_f32;
     for ch in text.chars() {
@@ -95,14 +138,9 @@ pub fn measure_text_width(text: &str, font_size: f32, fonts: &[fontdue::Font]) -
         match font_match {
             Some(font) => {
                 // `font.metrics(ch, size)` returns advance + bounding box
-                // *without* rasterising the glyph bitmap; `rasterize` does
-                // both and is dramatically more expensive (a 16px latin
-                // glyph allocates ~hundreds of bytes and runs the
-                // antialiased outline pipeline). Layout calls this once
-                // per character every frame, so using `rasterize` here was
-                // making the per-frame cost scale with page text length —
-                // HN-sized pages spent the bulk of each frame inside
-                // glyph rasterisation just to read the advance number.
+                // *without* rasterising the glyph bitmap; using `rasterize`
+                // here was making the per-frame cost scale with page text
+                // length on HN-sized pages.
                 let metrics = font.metrics(ch, size);
                 width += metrics.advance_width;
             }
