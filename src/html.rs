@@ -25,7 +25,7 @@ pub fn parse(source: &str) -> Result<Document, ParseError> {
     // check at the top level alongside the rest of the function's flow.
     let (roots, trailing_pos, trailing_eof) = {
         let mut parser = Parser::new(source, &mut document);
-        let roots = parser.parse_nodes()?;
+        let roots = parser.parse_nodes(None)?;
         parser.consume_whitespace();
         (roots, parser.pos, parser.eof())
     };
@@ -56,7 +56,7 @@ pub fn parse_fragment(
 ) -> Result<Vec<NodeId>, ParseError> {
     let (roots, trailing_pos, trailing_eof) = {
         let mut parser = Parser::new(source, document);
-        let roots = parser.parse_nodes()?;
+        let roots = parser.parse_nodes(None)?;
         parser.consume_whitespace();
         (roots, parser.pos, parser.eof())
     };
@@ -86,7 +86,7 @@ impl<'a, 'd> Parser<'a, 'd> {
         }
     }
 
-    fn parse_nodes(&mut self) -> Result<Vec<NodeId>, ParseError> {
+    fn parse_nodes(&mut self, open_tag: Option<&str>) -> Result<Vec<NodeId>, ParseError> {
         let mut nodes = Vec::new();
         let mut had_node = false;
 
@@ -95,6 +95,19 @@ impl<'a, 'd> Parser<'a, 'd> {
             self.consume_whitespace();
 
             if self.eof() || self.starts_with("</") {
+                break;
+            }
+
+            // HTML5 implicit-close: an opening tag that auto-closes the
+            // currently open element ends this child list early. The
+            // ancestor's `parse_nodes` picks the opener up as its own
+            // child, turning `<li>a<li>b</ul>` into two sibling list
+            // items rather than nested ones. The opener is left in
+            // `self.input` deliberately — we are *not* consuming it here.
+            if let Some(parent) = open_tag
+                && let Some(opener) = self.peek_opening_tag_name()
+                && auto_closes(parent, &opener)
+            {
                 break;
             }
 
@@ -196,13 +209,26 @@ impl<'a, 'd> Parser<'a, 'd> {
             return Ok(element);
         }
 
-        let children = self.parse_nodes()?;
+        let children = self.parse_nodes(Some(&tag_name))?;
 
-        // Keep balancing strict instead of trying to recover like a real browser would.
+        // HTML5 implicit-close: parse_nodes stops when it hits any closing
+        // tag *or* an opening tag that auto-closes us. If what's next is
+        // not our own `</tag>`, leave it in the input — the ancestor will
+        // see it and decide. This turns omitted `</li>` / `</p>` / `</tr>`
+        // / mismatched closers into well-formed siblings instead of hard
+        // errors, matching how every real browser is forced to cope.
+        if !self.is_closing_tag_for(&tag_name) {
+            let element = self.document.create_element(tag_name, attributes);
+            for child in children {
+                self.document.append_child(element, child);
+            }
+            return Ok(element);
+        }
+
         self.expect_char('<')?;
         self.expect_char('/')?;
         let closing_tag = self.parse_tag_name()?;
-        if closing_tag != tag_name {
+        if !closing_tag.eq_ignore_ascii_case(&tag_name) {
             return Err(ParseError::new(
                 self.pos,
                 format!("mismatched closing tag: expected </{tag_name}>"),
@@ -337,6 +363,54 @@ impl<'a, 'd> Parser<'a, 'd> {
 
     fn starts_with(&self, value: &str) -> bool {
         self.input[self.pos..].starts_with(value)
+    }
+
+    // Look ahead at `<tag…` (or `<tag/`, `<tag>`) without advancing `pos`.
+    // Returns the lowercased tag name when the cursor is at an opening tag,
+    // None for closing tags, declarations/comments, raw text, or end-of-input.
+    // Used by the implicit-close path so a `<li>…<li>` author actually gets
+    // siblings instead of nested elements (see `auto_closes`).
+    fn peek_opening_tag_name(&self) -> Option<String> {
+        if !self.starts_with("<") || self.starts_with("</") || self.starts_with("<!") {
+            return None;
+        }
+        let mut tag = String::new();
+        for ch in self.input[self.pos + 1..].chars() {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                tag.push(ch);
+            } else {
+                break;
+            }
+        }
+        if tag.is_empty() {
+            None
+        } else {
+            Some(tag.to_ascii_lowercase())
+        }
+    }
+
+    // True iff the cursor sits on `</name>` (or `</name…`) ignoring case and
+    // requiring a non-name boundary character after the name. Lets
+    // `parse_element` distinguish "this is *my* closing tag, consume it"
+    // from "this is an ancestor's closing tag, leave it for them".
+    fn is_closing_tag_for(&self, name: &str) -> bool {
+        if !self.starts_with("</") {
+            return false;
+        }
+        let after = &self.input[self.pos + 2..];
+        let prefix = match after.get(..name.len()) {
+            Some(slice) => slice,
+            None => return false,
+        };
+        if !prefix.eq_ignore_ascii_case(name) {
+            return false;
+        }
+        // Boundary: the next char must not extend the name (so `</p>` does
+        // not match `is_closing_tag_for("pa")`).
+        match after.as_bytes().get(name.len()).copied() {
+            None => true,
+            Some(b) => !(b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+        }
     }
 
     fn eof(&self) -> bool {
@@ -490,6 +564,73 @@ fn named_entity(name: &str) -> Option<&'static str> {
 /// `<img>`, `<input>`, …). Exposed for the JS `innerHTML` getter, which
 /// emits an opening tag only for void elements and skips both the children
 /// and the close — matching the HTML serialization spec.
+// HTML5 implicit-close table. Returns true when seeing `<opener>` while
+// `parent` is still open should close `parent` first instead of nesting.
+//
+// Real browsers express this via the open-elements stack and per-element
+// "in scope" rules; here we keep it as a flat per-pair lookup because the
+// parser is recursion-based and only needs to decide one level at a time.
+// Small, principled subset: the cases real-world pages most often rely on
+// (omitted `</li>` / `</p>` / `</tr>` / `</td>`, table section swaps,
+// option/optgroup siblings).
+pub fn auto_closes(parent: &str, opener: &str) -> bool {
+    // Tag names are matched case-insensitively to mirror HTML's normalisation
+    // (which our DOM doesn't apply at create time).
+    let parent = parent.to_ascii_lowercase();
+    let opener = opener.to_ascii_lowercase();
+    match parent.as_str() {
+        "li" => opener == "li",
+        "dt" | "dd" => opener == "dt" || opener == "dd",
+        "tr" => opener == "tr",
+        "td" | "th" => opener == "td" || opener == "th",
+        "tbody" | "thead" | "tfoot" => matches!(opener.as_str(), "tbody" | "thead" | "tfoot"),
+        "option" => opener == "option" || opener == "optgroup",
+        "optgroup" => opener == "optgroup",
+        // <p> doesn't allow block-level descendants — any block opener
+        // implicitly closes the open <p>. The list mirrors the spec's
+        // "in button scope" set restricted to elements that exist in the
+        // small layout we support.
+        "p" => is_p_closing_block_opener(&opener),
+        _ => false,
+    }
+}
+
+fn is_p_closing_block_opener(tag: &str) -> bool {
+    matches!(
+        tag,
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "details"
+            | "div"
+            | "dl"
+            | "fieldset"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "form"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "hgroup"
+            | "hr"
+            | "main"
+            | "menu"
+            | "nav"
+            | "ol"
+            | "p"
+            | "pre"
+            | "section"
+            | "table"
+            | "ul"
+    )
+}
+
 pub fn is_void_element(tag_name: &str) -> bool {
     matches!(
         tag_name,
@@ -600,10 +741,130 @@ mod tests {
     }
 
     #[test]
-    fn returns_error_for_mismatched_closing_tag() {
-        let error = parse("<div><p>Hello</div>").unwrap_err();
+    fn implicitly_closes_inner_element_on_outer_closer() {
+        // `<div><p>Hello</div>` was treated as a hard error before HTML5
+        // implicit-close support landed; now the unmatched `</div>` closes
+        // the open `<p>` first and is consumed as the `<div>`'s own closer.
+        // The resulting tree is what every real browser produces.
+        let document = parse("<div><p>Hello</div>").unwrap();
+        let div = document.roots()[0];
+        let div_node = document.get(div).unwrap();
+        let crate::dom::NodeType::Element(div_elem) = &div_node.node_type else {
+            panic!("root must be an element");
+        };
+        assert_eq!(div_elem.tag_name, "div");
+        assert_eq!(div_node.children.len(), 1);
 
-        assert!(error.message.contains("mismatched closing tag"));
+        let p = div_node.children[0];
+        let p_node = document.get(p).unwrap();
+        let crate::dom::NodeType::Element(p_elem) = &p_node.node_type else {
+            panic!("expected <p> as div's child");
+        };
+        assert_eq!(p_elem.tag_name, "p");
+
+        let text_id = p_node.children[0];
+        assert_eq!(document.text(text_id), Some("Hello"));
+    }
+
+    #[test]
+    fn implicitly_closes_li_when_sibling_li_opens() {
+        // Real-world lists usually omit `</li>`; the previous strict parser
+        // produced a single nested `<li>` containing the second one. Under
+        // HTML5 implicit-close they end up as siblings of the `<ul>`.
+        let document = parse("<ul><li>a<li>b</ul>").unwrap();
+        let ul = document.roots()[0];
+        let ul_node = document.get(ul).unwrap();
+        // Two <li> children — the implicit close means b is a sibling of a.
+        let lis: Vec<_> = ul_node
+            .children
+            .iter()
+            .filter_map(|id| {
+                let node = document.get(*id)?;
+                match &node.node_type {
+                    crate::dom::NodeType::Element(el) if el.tag_name == "li" => Some(*id),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert_eq!(lis.len(), 2);
+        let first = document.get(lis[0]).unwrap().children[0];
+        let second = document.get(lis[1]).unwrap().children[0];
+        assert_eq!(document.text(first), Some("a"));
+        assert_eq!(document.text(second), Some("b"));
+    }
+
+    #[test]
+    fn implicitly_closes_p_when_block_opener_starts() {
+        // `<p>` cannot legally contain a block-level element — opening one
+        // closes the paragraph first. After the change, `<p>foo<div>bar</div>`
+        // produces two siblings (`<p>foo</p>` then `<div>bar</div>`),
+        // which matches what every real browser does.
+        let document = parse("<p>foo<div>bar</div>").unwrap();
+        let roots = document.roots();
+        // <p> and <div> are siblings under the document root.
+        assert_eq!(roots.len(), 2);
+        let p_tag = match &document.get(roots[0]).unwrap().node_type {
+            crate::dom::NodeType::Element(e) => e.tag_name.clone(),
+            _ => panic!("first root must be element"),
+        };
+        let div_tag = match &document.get(roots[1]).unwrap().node_type {
+            crate::dom::NodeType::Element(e) => e.tag_name.clone(),
+            _ => panic!("second root must be element"),
+        };
+        assert_eq!(p_tag, "p");
+        assert_eq!(div_tag, "div");
+
+        let p_text = document.get(roots[0]).unwrap().children[0];
+        assert_eq!(document.text(p_text), Some("foo"));
+    }
+
+    #[test]
+    fn implicitly_closes_table_cells_and_rows_when_closer_missing() {
+        // `<table><tr><td>x</tr></table>` omits `</td>`; the implicit close
+        // collapses out at the right level so the tree stays well-shaped:
+        // table → tr → td → "x".
+        let document = parse("<table><tr><td>x</tr></table>").unwrap();
+        let table = document.roots()[0];
+        let table_node = document.get(table).unwrap();
+        // Find the <tr> under <table> (the parser may also emit
+        // whitespace text — pick the first element child).
+        let tr = *table_node
+            .children
+            .iter()
+            .find(|id| {
+                matches!(
+                    document.get(**id).map(|n| &n.node_type),
+                    Some(crate::dom::NodeType::Element(e)) if e.tag_name == "tr"
+                )
+            })
+            .expect("tr child must exist");
+        let tr_node = document.get(tr).unwrap();
+        let td = *tr_node
+            .children
+            .iter()
+            .find(|id| {
+                matches!(
+                    document.get(**id).map(|n| &n.node_type),
+                    Some(crate::dom::NodeType::Element(e)) if e.tag_name == "td"
+                )
+            })
+            .expect("td child must exist");
+        let text = document.get(td).unwrap().children[0];
+        assert_eq!(document.text(text), Some("x"));
+    }
+
+    #[test]
+    fn returns_error_for_stray_closing_tag_at_top_level() {
+        // Stray closers with no opener still error — implicit-close only
+        // unwinds *open* elements. `</foo>` outside any element drops out
+        // of every parse_nodes loop and gets surfaced by the trailing-input
+        // check in `parse()`.
+        let error = parse("</span>").unwrap_err();
+        assert!(
+            error.message.contains("trailing input"),
+            "expected trailing-input error, got: {}",
+            error.message,
+        );
     }
 
     #[test]

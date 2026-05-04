@@ -2102,13 +2102,14 @@ mod tests {
 
     #[test]
     fn inner_html_set_throws_syntax_error_on_malformed_fragment() {
-        // Mismatched closing tag is exactly the kind of input scripts
-        // shouldn't be feeding innerHTML; surface it as SyntaxError so
-        // `try { …innerHTML = unsafeString }` works.
+        // A stray closing tag with no matching opener can't be recovered
+        // by implicit-close (no open element on the stack to unwind to);
+        // the fragment parser surfaces it as a trailing-input error,
+        // which the host setter wraps as a SyntaxError.
         let mut runtime = runtime_with(r#"<div id="host"></div>"#);
         let err = runtime
             .execute(
-                "var bad = '<div><p></div>';\
+                "var bad = '</span>';\
                  document.getElementById('host').innerHTML = bad;",
             )
             .unwrap_err();
