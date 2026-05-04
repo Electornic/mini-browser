@@ -2100,24 +2100,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn inner_html_set_throws_syntax_error_on_malformed_fragment() {
-        // A stray closing tag with no matching opener can't be recovered
-        // by implicit-close (no open element on the stack to unwind to);
-        // the fragment parser surfaces it as a trailing-input error,
-        // which the host setter wraps as a SyntaxError.
-        let mut runtime = runtime_with(r#"<div id="host"></div>"#);
-        let err = runtime
-            .execute(
-                "var bad = '</span>';\
-                 document.getElementById('host').innerHTML = bad;",
-            )
-            .unwrap_err();
-        assert!(
-            err.to_lowercase().contains("innerhtml"),
-            "expected innerHTML SyntaxError, got: {err}"
-        );
-    }
+    // Note: a previous test asserted that the host setter threw a
+    // SyntaxError when the fragment parser saw a stray closing tag. With
+    // html5ever (Phase 4.1) the parser always recovers — matching real
+    // browsers, where the same assignment silently produces no children.
+    // The "throw on syntax error" contract no longer holds and the test
+    // was removed; the stale-receiver throw below is independent and
+    // still applies.
 
     #[test]
     fn inner_html_set_throws_on_a_stale_receiver() {
