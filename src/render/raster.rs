@@ -4,6 +4,9 @@
 // the display-list stage; rotation lands here as a `TransformGroup` and is
 // scan-converted through the inverse matrix per-pixel.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use crate::css::{Color, GradientDirection, GradientKind};
 use crate::layout::Rect;
 
@@ -11,6 +14,63 @@ use super::{
     Affine, CornerRadii, DisplayCommand, GradientCommand, ImageCommand, ResolvedStop,
     ShadowCommand, TextCommand,
 };
+
+// Glyph cache. Key = (codepoint, index of the font in the active font slice,
+// f32 bits of font size). Value = the (metrics, alpha bitmap) tuple that
+// `fontdue::Font::rasterize` would otherwise recompute every call. Repaint
+// of a static page hits this cache for every glyph, so the per-frame cost
+// stops scaling with text length.
+//
+// Capacity is a hard cap; on overflow we drop the entire map rather than
+// running an LRU. The visible glyphs repopulate within one or two frames,
+// and the simpler eviction avoids any per-lookup bookkeeping.
+//
+// thread_local! keeps the cache alive across `rasterize` calls without
+// changing the public API. Rendering today is single-threaded; a future
+// multi-threaded rasterizer would need a per-thread or shared-mutex scheme.
+//
+// The font_idx component of the key is only stable while the same font
+// slice is in use. When the binary swaps fonts after navigation it must
+// call `invalidate_glyph_cache` — without that, we would silently return
+// bitmaps from a font that no longer occupies that slot.
+const GLYPH_CACHE_CAPACITY: usize = 8192;
+
+// (codepoint, font index in the active slice, f32-bits of size).
+type GlyphKey = (u32, usize, u32);
+// fontdue's rasterized output: per-glyph metrics + alpha bitmap.
+type GlyphEntry = (fontdue::Metrics, Vec<u8>);
+
+thread_local! {
+    static GLYPH_CACHE: RefCell<HashMap<GlyphKey, GlyphEntry>> = RefCell::new(HashMap::new());
+}
+
+pub fn invalidate_glyph_cache() {
+    GLYPH_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
+fn with_cached_glyph<F, R>(
+    font: &fontdue::Font,
+    font_idx: usize,
+    ch: char,
+    font_size: f32,
+    f: F,
+) -> R
+where
+    F: FnOnce(&fontdue::Metrics, &[u8]) -> R,
+{
+    GLYPH_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let key = (ch as u32, font_idx, font_size.to_bits());
+        if !cache.contains_key(&key) {
+            if cache.len() >= GLYPH_CACHE_CAPACITY {
+                cache.clear();
+            }
+            cache.insert(key, font.rasterize(ch, font_size));
+        }
+        let entry = cache.get(&key).expect("inserted just above");
+        f(&entry.0, &entry.1)
+    })
+}
 
 // Measures the rendered width of `text` at `font_size` using the same advance
 // rules as `draw_text` / `draw_text_bitmap`. Callers use this to position UI
@@ -390,58 +450,63 @@ fn draw_text_through(
     let mut cursor_x = text.x;
 
     for ch in text.text.chars() {
-        let Some(font) = fonts
+        let Some((font_idx, font)) = fonts
             .iter()
-            .find(|f| f.lookup_glyph_index(ch) != 0 || ch == ' ')
+            .enumerate()
+            .find(|(_, f)| f.lookup_glyph_index(ch) != 0 || ch == ' ')
         else {
             cursor_x += font_size * 0.75;
             continue;
         };
-        let (metrics, bitmap) = font.rasterize(ch, font_size);
-        if metrics.width == 0 || metrics.height == 0 {
-            cursor_x += metrics.advance_width;
-            continue;
-        }
-        let glyph_origin_x = cursor_x + metrics.xmin as f32;
-        let glyph_origin_y = text.y + ascent - metrics.height as f32 - metrics.ymin as f32;
-        let glyph_bounds = Rect {
-            x: glyph_origin_x,
-            y: glyph_origin_y,
-            width: metrics.width as f32,
-            height: metrics.height as f32,
-        };
-        let color = text.color;
-        paint_through(
-            buffer,
-            width,
-            height,
-            glyph_bounds,
-            transform,
-            inverse,
-            |lx, ly| {
-                let gx = (lx - glyph_origin_x).floor() as i32;
-                let gy = (ly - glyph_origin_y).floor() as i32;
-                if gx < 0 || gy < 0 || gx as usize >= metrics.width || gy as usize >= metrics.height
-                {
-                    return None;
-                }
-                let alpha = bitmap[gy as usize * metrics.width + gx as usize];
-                if alpha == 0 {
-                    return None;
-                }
-                let coverage = (alpha as u32 * color.a as u32) / 255;
-                if coverage == 0 {
-                    return None;
-                }
-                Some(Color {
-                    r: color.r,
-                    g: color.g,
-                    b: color.b,
-                    a: coverage as u8,
-                })
-            },
-        );
-        cursor_x += metrics.advance_width;
+        let advance = with_cached_glyph(font, font_idx, ch, font_size, |metrics, bitmap| {
+            if metrics.width == 0 || metrics.height == 0 {
+                return metrics.advance_width;
+            }
+            let glyph_origin_x = cursor_x + metrics.xmin as f32;
+            let glyph_origin_y = text.y + ascent - metrics.height as f32 - metrics.ymin as f32;
+            let glyph_bounds = Rect {
+                x: glyph_origin_x,
+                y: glyph_origin_y,
+                width: metrics.width as f32,
+                height: metrics.height as f32,
+            };
+            let color = text.color;
+            paint_through(
+                buffer,
+                width,
+                height,
+                glyph_bounds,
+                transform,
+                inverse,
+                |lx, ly| {
+                    let gx = (lx - glyph_origin_x).floor() as i32;
+                    let gy = (ly - glyph_origin_y).floor() as i32;
+                    if gx < 0
+                        || gy < 0
+                        || gx as usize >= metrics.width
+                        || gy as usize >= metrics.height
+                    {
+                        return None;
+                    }
+                    let alpha = bitmap[gy as usize * metrics.width + gx as usize];
+                    if alpha == 0 {
+                        return None;
+                    }
+                    let coverage = (alpha as u32 * color.a as u32) / 255;
+                    if coverage == 0 {
+                        return None;
+                    }
+                    Some(Color {
+                        r: color.r,
+                        g: color.g,
+                        b: color.b,
+                        a: coverage as u8,
+                    })
+                },
+            );
+            metrics.advance_width
+        });
+        cursor_x += advance;
     }
 }
 
@@ -744,12 +809,15 @@ fn draw_text(
     let mut cursor_x = text.x;
 
     for ch in text.text.chars() {
-        // Find a font that contains this glyph.
+        // Find a font that contains this glyph. `enumerate` so the cache key
+        // can include the slot's position — the same character at the same
+        // size in different fonts must not collide.
         let font_match = fonts
             .iter()
-            .find(|f| f.lookup_glyph_index(ch) != 0 || ch == ' ');
+            .enumerate()
+            .find(|(_, f)| f.lookup_glyph_index(ch) != 0 || ch == ' ');
 
-        let Some(font) = font_match else {
+        let Some((font_idx, font)) = font_match else {
             // No font has this glyph — use the bitmap fallback for this character.
             draw_bitmap_char(
                 buffer,
@@ -765,45 +833,48 @@ fn draw_text(
             continue;
         };
 
-        let (metrics, bitmap) = font.rasterize(ch, font_size);
-        let glyph_y = text.y + ascent - metrics.height as f32 - metrics.ymin as f32;
+        let advance = with_cached_glyph(font, font_idx, ch, font_size, |metrics, bitmap| {
+            let glyph_y = text.y + ascent - metrics.height as f32 - metrics.ymin as f32;
 
-        for row in 0..metrics.height {
-            for col in 0..metrics.width {
-                let alpha = bitmap[row * metrics.width + col];
-                if alpha == 0 {
-                    continue;
-                }
+            for row in 0..metrics.height {
+                for col in 0..metrics.width {
+                    let alpha = bitmap[row * metrics.width + col];
+                    if alpha == 0 {
+                        continue;
+                    }
 
-                let px = (cursor_x + metrics.xmin as f32 + col as f32).round() as i32;
-                let py = (glyph_y + row as f32).round() as i32;
+                    let px = (cursor_x + metrics.xmin as f32 + col as f32).round() as i32;
+                    let py = (glyph_y + row as f32).round() as i32;
 
-                if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
-                    continue;
-                }
+                    if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
+                        continue;
+                    }
 
-                let idx = py as usize * width + px as usize;
-                // Compose glyph coverage with text color's alpha so opacity
-                // (or any pre-multiplied alpha on the color) attenuates the
-                // visible glyph, not just AA edges.
-                let coverage = (alpha as u32 * text.color.a as u32) / 255;
-                if coverage == 0 {
-                    continue;
-                }
-                if coverage >= 255 {
-                    buffer[idx] = rgb_u32(text.color);
-                } else {
-                    let bg = buffer[idx];
-                    let inv = 255 - coverage;
-                    let r = (coverage * text.color.r as u32 + inv * ((bg >> 16) & 0xFF)) / 255;
-                    let g = (coverage * text.color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
-                    let b = (coverage * text.color.b as u32 + inv * (bg & 0xFF)) / 255;
-                    buffer[idx] = (r << 16) | (g << 8) | b;
+                    let idx = py as usize * width + px as usize;
+                    // Compose glyph coverage with text color's alpha so opacity
+                    // (or any pre-multiplied alpha on the color) attenuates the
+                    // visible glyph, not just AA edges.
+                    let coverage = (alpha as u32 * text.color.a as u32) / 255;
+                    if coverage == 0 {
+                        continue;
+                    }
+                    if coverage >= 255 {
+                        buffer[idx] = rgb_u32(text.color);
+                    } else {
+                        let bg = buffer[idx];
+                        let inv = 255 - coverage;
+                        let r = (coverage * text.color.r as u32 + inv * ((bg >> 16) & 0xFF)) / 255;
+                        let g = (coverage * text.color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
+                        let b = (coverage * text.color.b as u32 + inv * (bg & 0xFF)) / 255;
+                        buffer[idx] = (r << 16) | (g << 8) | b;
+                    }
                 }
             }
-        }
 
-        cursor_x += metrics.advance_width;
+            metrics.advance_width
+        });
+
+        cursor_x += advance;
     }
 }
 

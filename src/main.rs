@@ -16,9 +16,13 @@ fn main() {
     if let Err(error) = window::run("mini-browser", 800, 600, |width, height, input| {
         // Rebuild font cache when navigation loads new fonts. Done before
         // display_list so chrome's caret-width measurement sees the fresh fonts.
+        // Glyph cache is keyed by font slot index, so it must be flushed in
+        // lockstep — otherwise a slot that now holds a different face would
+        // serve bitmaps from the previous one.
         if browser.font_data.len() != last_font_count {
             fonts = build_font_cache(&browser.font_data);
             last_font_count = browser.font_data.len();
+            render::invalidate_glyph_cache();
         }
 
         let commands = browser.display_list(width, height, input, &fonts);

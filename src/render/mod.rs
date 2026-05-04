@@ -13,7 +13,7 @@ mod display_list;
 mod raster;
 
 pub use display_list::{build_display_list, transform_for, translate};
-pub use raster::{measure_text_width, rasterize};
+pub use raster::{invalidate_glyph_cache, measure_text_width, rasterize};
 
 /// 2-D affine transform stored as the six matrix entries of
 /// ```text
