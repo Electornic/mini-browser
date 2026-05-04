@@ -63,10 +63,20 @@ pub struct NodeData {
 // document is free to expose multiple top-level siblings (some test inputs
 // have two), and consumers that only care about the first element walk
 // `roots()[0]`.
+//
+// `revision` is a monotonically increasing counter bumped by every mutation
+// that affects style/layout output (structural edits, text/attribute writes).
+// The per-frame `BrowserState::cached_view` snapshots this number alongside
+// the built `DocumentView`; a static page hits the cache because revision
+// stays constant frame-over-frame, while any DOM mutation forces a rebuild.
+// External callers that mutate via `element_data_mut` / `get_mut` (the
+// keystroke path and the JS bridge attribute setters) call `touch()` after
+// the write to keep the counter honest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Document {
     nodes: Vec<Option<NodeData>>,
     roots: Vec<NodeId>,
+    revision: u64,
 }
 
 impl Document {
@@ -76,6 +86,21 @@ impl Document {
 
     pub fn roots(&self) -> &[NodeId] {
         &self.roots
+    }
+
+    /// Monotonic mutation counter. The view cache compares this against the
+    /// revision the cached view was built at; a mismatch means the document
+    /// changed and the cache must be rebuilt.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Manually bump the revision. Internal mutating methods call this on
+    /// their own; external callers that go through `element_data_mut` or
+    /// `get_mut` to write attributes / children must call this themselves
+    /// after the write so the cache invariant survives.
+    pub fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn get(&self, id: NodeId) -> Option<&NodeData> {
@@ -116,6 +141,7 @@ impl Document {
     /// Make `child` a top-level node of the document.
     pub fn append_root(&mut self, child: NodeId) {
         self.roots.push(child);
+        self.touch();
     }
 
     /// Wire `child` into `parent`'s children list and set the back-pointer.
@@ -131,6 +157,7 @@ impl Document {
             .get_mut(parent)
             .expect("append_child: parent id missing from arena");
         parent_slot.children.push(child);
+        self.touch();
     }
 
     pub fn element_data(&self, id: NodeId) -> Option<&ElementData> {
@@ -168,9 +195,14 @@ impl Document {
                 if let Some(child) = self.get_mut(id) {
                     child.parent = None;
                 }
+                self.touch();
             }
             None => {
+                let len_before = self.roots.len();
                 self.roots.retain(|r| *r != id);
+                if self.roots.len() != len_before {
+                    self.touch();
+                }
             }
         }
     }
@@ -191,6 +223,7 @@ impl Document {
         if let Some(child_node) = self.get_mut(child) {
             child_node.parent = None;
         }
+        self.touch();
         true
     }
 
@@ -208,6 +241,7 @@ impl Document {
         }
         if let Some(slot) = self.nodes.get_mut(id.index()) {
             *slot = None;
+            self.touch();
         }
     }
 
@@ -236,6 +270,7 @@ impl Document {
         match self.get_mut(id).map(|n| &mut n.node_type) {
             Some(NodeType::Text(s)) => {
                 *s = text;
+                self.touch();
                 true
             }
             _ => false,
@@ -275,6 +310,7 @@ impl Document {
         if let Some(p) = self.get_mut(parent) {
             p.children.insert(pos, new_child);
         }
+        self.touch();
         true
     }
 
@@ -597,6 +633,85 @@ mod tests {
         let dup_txt_id = doc.get(dup_li).unwrap().children[0];
         assert_ne!(dup_txt_id, txt);
         assert_eq!(doc.text(dup_txt_id), Some("one"));
+    }
+
+    #[test]
+    fn revision_starts_at_zero_and_bumps_on_structural_mutation() {
+        // The view cache leans on this: a freshly-built Document has a
+        // deterministic revision so the first frame after `install_document`
+        // doesn't accidentally match a stale cache entry. Subsequent
+        // structural edits each strictly advance the counter.
+        let mut doc = Document::new();
+        assert_eq!(doc.revision(), 0);
+
+        let parent = doc.create_element("div", AttrMap::new());
+        // create_* doesn't bump — newly-created nodes are unreachable
+        // from `roots()` until they're attached, so they can't influence
+        // any rendered output.
+        assert_eq!(doc.revision(), 0);
+
+        doc.append_root(parent);
+        let after_root = doc.revision();
+        assert!(after_root > 0);
+
+        let child = doc.create_element("p", AttrMap::new());
+        doc.append_child(parent, child);
+        assert!(doc.revision() > after_root);
+    }
+
+    #[test]
+    fn revision_bumps_on_text_attribute_and_subtree_mutations() {
+        // Each of the mutation entry points the JS bridge / keystroke path
+        // routes through must visibly advance the revision so the per-frame
+        // cache invalidates. Failures here would surface as ghost paint:
+        // the page state changes in the arena but the user keeps seeing
+        // last frame's commands.
+        let mut doc = Document::new();
+        let outer = doc.create_element("section", AttrMap::new());
+        let inner_text = doc.create_text("hi");
+        doc.append_child(outer, inner_text);
+        doc.append_root(outer);
+        let baseline = doc.revision();
+
+        // set_text on a text node bumps; on an Element the call returns
+        // false and the revision must NOT move (no observable change).
+        assert!(doc.set_text(inner_text, "yo".into()));
+        let after_set_text = doc.revision();
+        assert!(after_set_text > baseline);
+        assert!(!doc.set_text(outer, "x".into()));
+        assert_eq!(doc.revision(), after_set_text);
+
+        // Tombstone advances the counter once per freed slot — the
+        // exact delta is an implementation detail, but it must strictly
+        // increase from before-tombstone.
+        doc.tombstone_subtree(outer);
+        assert!(doc.revision() > after_set_text);
+    }
+
+    #[test]
+    fn revision_holds_steady_when_attribute_write_does_not_call_touch() {
+        // Documents the external-mutation contract: writing through
+        // `element_data_mut` is invisible to the cache until the caller
+        // explicitly calls `touch()`. The JS bridge setters and the
+        // keystroke path both honour this; this test exists to lock in
+        // the invariant so a future caller that forgets `touch()` at
+        // least has something to fail.
+        let mut doc = Document::new();
+        let elem = doc.create_element("input", AttrMap::new());
+        doc.append_root(elem);
+        let baseline = doc.revision();
+
+        // Attribute write through the raw `&mut ElementData` does not
+        // bump the revision on its own.
+        if let Some(data) = doc.element_data_mut(elem) {
+            data.attributes.insert("value".into(), "abc".into());
+        }
+        assert_eq!(doc.revision(), baseline);
+
+        // The caller's own `touch()` then bridges the change to the
+        // revision counter.
+        doc.touch();
+        assert!(doc.revision() > baseline);
     }
 
     #[test]

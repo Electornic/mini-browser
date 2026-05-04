@@ -236,6 +236,7 @@ pub(super) fn make_element(
             match document.element_data_mut(node_id) {
                 Some(elem) => {
                     elem.attributes.insert("value".into(), new_value);
+                    document.touch();
                     Ok(JsValue::undefined())
                 }
                 None => Err(stale_node_error()),
@@ -374,6 +375,7 @@ pub(super) fn make_element(
             match document.element_data_mut(node_id) {
                 Some(elem) => {
                     elem.attributes.insert(name, value);
+                    document.touch();
                     Ok(JsValue::undefined())
                 }
                 None => Err(stale_node_error()),
@@ -823,6 +825,7 @@ fn make_class_list(
                 }
             }
             elem.attributes.insert("class".into(), tokens.join(" "));
+            document.touch();
             Ok(JsValue::undefined())
         })
     };
@@ -844,6 +847,7 @@ fn make_class_list(
                 parse_class_tokens(elem.attributes.get("class").map(String::as_str).unwrap_or(""));
             tokens.retain(|t| !drop_tokens.iter().any(|d| d == t));
             elem.attributes.insert("class".into(), tokens.join(" "));
+            document.touch();
             Ok(JsValue::undefined())
         })
     };
@@ -880,6 +884,7 @@ fn make_class_list(
                 tokens.retain(|t| t != &token);
             }
             elem.attributes.insert("class".into(), tokens.join(" "));
+            document.touch();
             Ok(JsValue::from(should_be_present))
         })
     };

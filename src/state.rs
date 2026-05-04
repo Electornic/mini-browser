@@ -86,6 +86,35 @@ pub struct BrowserState {
     // Carried alongside `parsed_document` so that history restore can re-execute
     // every script without re-fetching from the network.
     pub external_scripts: HashMap<String, String>,
+
+    // Last `build_document_view` result plus the inputs it was built against.
+    // Each frame compares the live inputs (document revision, viewport, hover/
+    // focus paths, active state) against `key`; a match returns a clone of the
+    // cached view and skips style/layout/paint entirely. A static page with a
+    // still mouse therefore amortises the per-frame cost down to "clone a
+    // command list", and any DOM mutation / hover transition / viewport
+    // change naturally invalidates by mismatching the key.
+    //
+    // Caret blink and scroll already ride separate overlay layers above the
+    // page commands (see `display_list()`), so they don't participate in the
+    // key — that keeps the cache hit rate high during normal idle.
+    cached_view: Option<CachedView>,
+}
+
+// Snapshot of the inputs `build_document_view` was last called with, paired
+// with its output. The struct lives next to `BrowserState` because it's an
+// implementation detail of `display_list()` — no other module needs to know
+// about it. Cloning a `DocumentView` to satisfy the per-frame consume-by-
+// value pattern in `render::translate` is still much cheaper than rerunning
+// style + layout + paint, so the indirection pays for itself.
+#[derive(Debug)]
+struct CachedView {
+    revision: u64,
+    viewport_width: usize,
+    hover_path: Option<Vec<usize>>,
+    focus_path: Option<Vec<usize>>,
+    active: bool,
+    view: DocumentView,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +183,7 @@ impl BrowserState {
             focused_input_dirty: false,
             js,
             external_scripts,
+            cached_view: None,
         };
         // The first page seen on construction also runs its scripts so the
         // initial document follows the same lifecycle as later navigations
@@ -206,6 +236,13 @@ impl BrowserState {
         // ride into the new page and trigger a spurious `change` on
         // the next focus move.
         self.focused_input_dirty = false;
+        // The previous document's view cache references its old DOM/CSS,
+        // images, and base URL. The freshly-installed Document also starts
+        // with `revision = 0`, which would collide with the previous cached
+        // view's revision and silently serve stale paint commands — so blow
+        // the cache away on every install rather than relying on revision
+        // alone.
+        self.cached_view = None;
         self.run_scripts();
     }
 
@@ -267,56 +304,12 @@ impl BrowserState {
         self.js.drain_pending_jobs();
         self.js.run_animation_frame_callbacks();
 
-        // Interaction state piped into the style pass. Hover and focus are tracked
-        // across frames (one-frame lag); active is purely transient — true only while
-        // the left mouse is currently held over the previously-hovered element.
-        let interaction = style::InteractionState {
-            hover: self.hovered_dom_path.as_deref(),
-            focus: self.focused_dom_path.as_deref(),
-            active: if input.left_mouse_held {
-                self.hovered_dom_path.as_deref()
-            } else {
-                None
-            },
-        };
-        // Borrow the shared Document just long enough to build the layout —
-        // dropping the Ref before unwrap_or_else lets the error path call
-        // back into &mut self (set_status). No JS executes during display_list
-        // so we don't have to worry about an interleaved borrow_mut here.
-        let layout_result = {
-            let document = self.parsed_document.borrow();
-            build_document_view(
-                &document,
-                &self.parsed_stylesheet,
-                viewport_width,
-                self.current_url.as_ref(),
-                &self.images,
-                interaction,
-                fonts,
-            )
-        };
-        let document_view = layout_result.unwrap_or_else(|build_error| {
-            eprintln!("{build_error}");
-            self.set_status(
-                "render failed",
-                css::Color {
-                    r: 180,
-                    g: 60,
-                    b: 60,
-                    a: 255,
-                },
-            );
-            DocumentView {
-                commands: Vec::new(),
-                links: Vec::new(),
-                // Empty fallback root so downstream hit-testing can run safely.
-                layout_root: layout::LayoutBox {
-                    box_type: layout::BoxType::AnonymousBlock,
-                    dimensions: layout::Dimensions::default(),
-                    children: Vec::new(),
-                },
-            }
-        });
+        // `:active` matches only while the left button is held over an
+        // already-hovered element — capturing it as a bool here means a
+        // mouse-still page hits the view cache every frame, while a
+        // press/release cycle naturally produces two cache misses.
+        let active = input.left_mouse_held && self.hovered_dom_path.is_some();
+        let document_view = self.build_or_reuse_view(viewport_width, active, fonts);
 
         // Compute the deepest layout-box hit once: `path` feeds the next
         // frame's :hover/:focus styling, `node_id` feeds the click dispatch
@@ -486,6 +479,114 @@ impl BrowserState {
             fonts,
         ));
         commands
+    }
+
+    // Cache-aware wrapper around `display_list::build_document_view`. The
+    // function returns a `DocumentView` either by cloning a previously
+    // computed one (if every input that style/layout/paint depends on is
+    // unchanged) or by rerunning the full pipeline and refreshing the
+    // cache. The caller treats the returned value the same way regardless;
+    // the savings come purely from skipping redundant work on idle frames.
+    //
+    // Cache key components:
+    //   - `Document::revision()` covers every DOM mutation that flows
+    //     through the arena's mutating methods or through the JS bridge's
+    //     attribute setters (which now call `document.touch()` themselves).
+    //   - `viewport_width` is the only viewport input that build_document_view
+    //     pays attention to; height affects scroll clamping but not the
+    //     painted commands.
+    //   - `hover_path` / `focus_path` / `active` snapshot the interaction
+    //     state that style_tree_with_state cascades into the styled tree;
+    //     a hover transition or a press flips one of them and forces a
+    //     rebuild on that frame only.
+    //   - `parsed_stylesheet`, `current_url`, `images`, and `font_data` all
+    //     change exclusively at install time, so `cached_view = None` in
+    //     `install_document` covers them implicitly without a per-field
+    //     comparison.
+    //
+    // Render failures don't get cached — we want the next frame to retry
+    // a fresh build (the failure may have been transient).
+    fn build_or_reuse_view(
+        &mut self,
+        viewport_width: usize,
+        active: bool,
+        fonts: &[fontdue::Font],
+    ) -> DocumentView {
+        let revision = self.parsed_document.borrow().revision();
+        if let Some(cached) = self.cached_view.as_ref()
+            && cached.revision == revision
+            && cached.viewport_width == viewport_width
+            && cached.active == active
+            && cached.hover_path == self.hovered_dom_path
+            && cached.focus_path == self.focused_dom_path
+        {
+            return cached.view.clone();
+        }
+        let interaction = style::InteractionState {
+            hover: self.hovered_dom_path.as_deref(),
+            focus: self.focused_dom_path.as_deref(),
+            // The :active path lights up only while the mouse is held over
+            // the same node :hover already named, so we can reuse the hover
+            // path here — saves a second Vec.
+            active: if active {
+                self.hovered_dom_path.as_deref()
+            } else {
+                None
+            },
+        };
+        // Borrow scope keeps the document Ref out of the way of the
+        // `set_status` mutation below in the error branch, and out of the
+        // way of `self.cached_view = ...` on the success branch.
+        let layout_result = {
+            let document = self.parsed_document.borrow();
+            build_document_view(
+                &document,
+                &self.parsed_stylesheet,
+                viewport_width,
+                self.current_url.as_ref(),
+                &self.images,
+                interaction,
+                fonts,
+            )
+        };
+        match layout_result {
+            Ok(view) => {
+                self.cached_view = Some(CachedView {
+                    revision,
+                    viewport_width,
+                    hover_path: self.hovered_dom_path.clone(),
+                    focus_path: self.focused_dom_path.clone(),
+                    active,
+                    view: view.clone(),
+                });
+                view
+            }
+            Err(build_error) => {
+                eprintln!("{build_error}");
+                self.set_status(
+                    "render failed",
+                    css::Color {
+                        r: 180,
+                        g: 60,
+                        b: 60,
+                        a: 255,
+                    },
+                );
+                // Tear down any stale cached view from before the failure
+                // so a subsequent recovery rebuilds against current inputs.
+                self.cached_view = None;
+                DocumentView {
+                    commands: Vec::new(),
+                    links: Vec::new(),
+                    // Empty fallback root so downstream hit-testing can run safely.
+                    layout_root: layout::LayoutBox {
+                        box_type: layout::BoxType::AnonymousBlock,
+                        dimensions: layout::Dimensions::default(),
+                        children: Vec::new(),
+                    },
+                }
+            }
+        }
     }
 
     pub fn apply_input(
@@ -1173,6 +1274,11 @@ fn push_char_to_input_value(
     let mut value = elem.attributes.get("value").cloned().unwrap_or_default();
     value.push(ch);
     elem.attributes.insert("value".into(), value);
+    // The keystroke went through `element_data_mut`, which doesn't bump the
+    // Document's revision on its own — touch explicitly so the next frame's
+    // view cache rebuilds and the user actually sees the new caret position
+    // and value text rather than a stale paint.
+    document.touch();
     true
 }
 
@@ -1194,6 +1300,7 @@ fn pop_char_from_input_value(document: &Rc<RefCell<dom::Document>>, node_id: Nod
     }
     value.pop();
     elem.attributes.insert("value".into(), value);
+    document.touch();
     true
 }
 
@@ -1671,6 +1778,99 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    fn make_state(html_source: &str) -> BrowserState {
+        // Minimal BrowserState fixture for the view-cache tests below. The
+        // empty fonts/images/url defaults match what `display_list` sees on
+        // the NTP — the cache's behaviour is independent of those, but we
+        // still need a parseable document so `build_document_view` produces
+        // a real `Ok` result rather than the error-fallback path.
+        BrowserState::new(
+            String::new(),
+            html_source.to_string(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            None,
+            "",
+        )
+    }
+
+    #[test]
+    fn cached_view_populates_after_first_display_list_frame() {
+        // The cache is empty until the first frame builds something —
+        // `BrowserState::new` deliberately leaves it `None` so a build
+        // failure on frame 1 doesn't get masked by a stale entry.
+        let mut state = make_state("<div>hi</div>");
+        assert!(state.cached_view.is_none());
+        let input = window::WindowInput::default();
+        let _ = state.display_list(800, 600, &input, &[]);
+        assert!(state.cached_view.is_some());
+    }
+
+    #[test]
+    fn cached_view_revision_unchanged_across_idle_frames() {
+        // No DOM mutation, no hover/focus/viewport change → the second
+        // frame must hit the cache, observable as the cached revision
+        // staying put. (A miss would rebuild and rewrite cached_view
+        // from scratch, but with the same inputs the revision would
+        // also be equal — so we additionally verify the cache slot
+        // wasn't dropped between frames by checking is_some both times.)
+        let mut state = make_state("<div>hi</div>");
+        let input = window::WindowInput::default();
+        let _ = state.display_list(800, 600, &input, &[]);
+        let rev_after_first = state
+            .cached_view
+            .as_ref()
+            .map(|c| c.revision)
+            .expect("first frame must populate the cache");
+        let _ = state.display_list(800, 600, &input, &[]);
+        let rev_after_second = state
+            .cached_view
+            .as_ref()
+            .map(|c| c.revision)
+            .expect("second frame must keep the cache populated");
+        assert_eq!(rev_after_first, rev_after_second);
+    }
+
+    #[test]
+    fn cached_view_picks_up_dom_mutations_via_revision_bump() {
+        // A `Document::touch()` between frames stands in for any of the
+        // real mutation paths (set_attribute, value setter, classList,
+        // appendChild, …). The cache key check on the next frame must
+        // notice the bumped revision and rebuild — otherwise a script
+        // that mutates the DOM would leave the user staring at a stale
+        // paint.
+        let mut state = make_state("<div>hi</div>");
+        let input = window::WindowInput::default();
+        let _ = state.display_list(800, 600, &input, &[]);
+        let rev_first = state.cached_view.as_ref().unwrap().revision;
+        state.parsed_document.borrow_mut().touch();
+        let _ = state.display_list(800, 600, &input, &[]);
+        let rev_second = state.cached_view.as_ref().unwrap().revision;
+        assert!(rev_second > rev_first);
+    }
+
+    #[test]
+    fn install_document_drops_cached_view() {
+        // Navigation replaces the parsed Document in place; the new
+        // arena starts at revision 0 and would silently match a
+        // previous cache entry that also happened to be at revision 0.
+        // `install_document` therefore clears the cache explicitly so
+        // the very next frame rebuilds against the new tree's images,
+        // base URL, and stylesheet rather than serving the prior page.
+        let mut state = make_state("<div>old</div>");
+        let input = window::WindowInput::default();
+        let _ = state.display_list(800, 600, &input, &[]);
+        assert!(state.cached_view.is_some());
+        state.install_document(
+            "<p>new</p>".to_string(),
+            String::new(),
+            HashMap::new(),
+        );
+        assert!(state.cached_view.is_none());
     }
 
     #[test]
