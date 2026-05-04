@@ -499,16 +499,53 @@ fn is_supported(node: &StyledNode) -> bool {
         || is_table_container(node)
         || uses_inline_flow(node)
         || is_out_of_flow(node)
+        || has_float(node)
+        || has_clear(node)
+        || has_relative_position(node)
+        || has_percent_inset_or_padding(node)
     {
         return false;
     }
-    // 4.3b accepts only leaf blocks — every child must be display:none or
-    // pure-whitespace text (both are skipped during taffy build, so the
-    // resulting taffy node has zero children). 4.3c will lift this to allow
-    // nested block subtrees with text leaves.
+    // 4.3d allows nested block subtrees: every child must be skipped
+    // (display:none / pure-whitespace) or itself a supported block. The
+    // remaining unsupported shapes (inline flow, floats, position, %-resolved
+    // padding/inset) all bail to the legacy path for the whole subtree —
+    // 4.3e wires inline/flex/grid/table.
     node.children
         .iter()
-        .all(|c| is_display_none(c) || is_layout_whitespace_text(c))
+        .all(|c| is_display_none(c) || is_layout_whitespace_text(c) || is_supported(c))
+}
+
+fn has_float(node: &StyledNode) -> bool {
+    matches!(node.value("float"), Some(Value::Keyword(k)) if k == "left" || k == "right")
+}
+
+fn has_clear(node: &StyledNode) -> bool {
+    matches!(
+        node.value("clear"),
+        Some(Value::Keyword(k)) if k == "left" || k == "right" || k == "both"
+    )
+}
+
+fn has_relative_position(node: &StyledNode) -> bool {
+    // Old layout resolves `position: relative` percent offsets against
+    // parent_width on BOTH axes; taffy follows the CSS spec (top/bottom %
+    // against parent_height). To avoid behaviour drift, defer to the legacy
+    // path for any positioned element until 4.3e revisits this.
+    matches!(node.value("position"), Some(Value::Keyword(k)) if k == "relative")
+}
+
+fn has_percent_inset_or_padding(node: &StyledNode) -> bool {
+    let percent = |key: &str| {
+        matches!(node.value(key), Some(Value::Length(_, Unit::Percent)))
+    };
+    // Old layout's quirk for vertical padding/inset percentages (using
+    // parent_width as the base) doesn't survive the trip through taffy on
+    // top/bottom — punt to legacy when these are in play.
+    percent("padding-top")
+        || percent("padding-bottom")
+        || percent("top")
+        || percent("bottom")
 }
 
 fn build_taffy_node(tree: &mut TaffyTree<()>, node: &StyledNode) -> Option<NodeId> {
@@ -634,12 +671,37 @@ mod tests {
     }
 
     #[test]
-    fn taffy_rejects_unsupported_subtree_in_4_3b() {
-        // Block element with element children — not handled in 4.3b yet.
+    fn taffy_rejects_inline_flow_subtree() {
+        // Block element with text children — inline flow is the legacy
+        // path's job until 4.3e wires a measure callback for it.
         let styled = styled_root(
             r#"<div id="root"><p>One</p></div>"#,
             r#"#root { width: 300px; } p { font-size: 16px; }"#,
         );
         assert!(layout_via_taffy(&styled, 800.0).is_none());
+    }
+
+    #[test]
+    fn taffy_handles_nested_block_subtree() {
+        // 4.3d: empty nested blocks (no text) route through taffy and
+        // produce identical geometry to the legacy block algorithm.
+        let styled = styled_root(
+            r#"<div id="outer"><div class="inner"></div><div class="inner"></div></div>"#,
+            r#"
+                #outer { width: 200px; padding: 10px; }
+                .inner { height: 30px; margin: 5px 0; border: 1px solid black; }
+            "#,
+        );
+        let legacy = layout_tree(&styled, 800.0);
+        let bridged = layout_via_taffy(&styled, 800.0)
+            .expect("nested block subtree must be supported in 4.3d");
+
+        assert_eq!(legacy.dimensions.content, bridged.dimensions.content);
+        assert_eq!(legacy.children.len(), bridged.children.len());
+        for (a, b) in legacy.children.iter().zip(bridged.children.iter()) {
+            assert_eq!(a.dimensions.content, b.dimensions.content);
+            assert_eq!(a.dimensions.margin, b.dimensions.margin);
+            assert_eq!(a.dimensions.border, b.dimensions.border);
+        }
     }
 }
