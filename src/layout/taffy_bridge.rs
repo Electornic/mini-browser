@@ -1,15 +1,19 @@
-// 4.3a: bridge is not yet wired into dispatch — sub-phases 4.3b/c/d/e will
-// pull `to_taffy_style` and the helpers below into block/flex/grid/table.
-#![allow(dead_code)]
-
-// CSS → taffy::Style converter. Phase 4.3a wires this read-only — sibling
-// algorithm modules will switch their dispatch to `taffy::compute_layout` in
-// 4.3b/c/d/e and start consuming this output. Em/rem are already resolved to
-// px at style time (see `style.rs`), so we only see `Px` and `Percent` here.
-// Calc()/min()/max() are not in the AST yet and fall through to defaults.
+// CSS → taffy::Style converter and the `layout_via_taffy` dispatch entry
+// for Phase 4.3. Em/rem are already resolved to px at style time (see
+// `style.rs`), so we only see Px and Percent here. Calc()/min()/max() are
+// not in the AST yet and fall through to defaults. Anything we don't
+// understand keeps taffy's `Style::DEFAULT` value, which matches CSS
+// initial values for the relevant property.
 //
-// Anything we don't understand yet keeps taffy's `Style::DEFAULT` value, which
-// matches CSS initial values for the relevant property.
+// Phase 4.3 partial status: this bridge handles the pure-block subset
+// (single elements + nested empty blocks + non-percent inset). Inline-flow,
+// floats/clear, flex/grid/table containers, and percent vertical
+// padding/inset all bail to the legacy block algorithm via `is_supported`
+// returning None — `layout_tree_with_fonts` falls back transparently.
+// Future Phase 4.3.x work would route the remaining shapes through taffy
+// either natively (flex/grid via `Display::Flex`/`Display::Grid`) or via a
+// `compute_layout_with_measure` callback that runs legacy layout in a
+// boundary leaf.
 
 use taffy::prelude::{
     Dimension, LengthPercentage, LengthPercentageAuto, TaffyGridLine, TaffyGridSpan, TaffyTree,
