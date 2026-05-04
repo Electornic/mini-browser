@@ -528,6 +528,13 @@ fn is_native_block(node: &StyledNode) -> bool {
     // floats, etc.) fall through to the boundary measure-callback path and
     // taffy treats their measured size as the item's contribution to the
     // flex / grid track sizing.
+    // 4.3.4: tables intentionally stay on the boundary path. taffy 0.10
+    // has no `display: table*` support and CSS table sizing (column-equal,
+    // colspan, rowgroups, anonymous box generation for orphan cells) is
+    // sufficiently different from CSS Grid that a faithful mapping would
+    // re-implement most of `layout/table.rs` inside the bridge. Keeping
+    // tables as boundary leaves lets the legacy `layout_table_children`
+    // own the semantics, which is correct rather than expedient.
     if is_table_container(node)
         || uses_inline_flow(node)
         || is_out_of_flow(node)
@@ -732,6 +739,29 @@ mod tests {
         assert_eq!(legacy.dimensions.content, bridged.dimensions.content);
         assert_eq!(legacy.children.len(), bridged.children.len());
         assert_eq!(legacy.children[0].dimensions.content, bridged.children[0].dimensions.content);
+    }
+
+    #[test]
+    fn taffy_routes_table_through_boundary() {
+        // 4.3.4: tables are deliberately a boundary case — verify the
+        // bridge produces output identical to the legacy table layout for a
+        // simple 2x2 table with explicit cell content widths.
+        let styled = styled_root(
+            r#"<table id="t">
+                <tr><td class="c"></td><td class="c"></td></tr>
+                <tr><td class="c"></td><td class="c"></td></tr>
+            </table>"#,
+            r#"
+                #t { display: table; width: 200px; }
+                tr { display: table-row; }
+                td.c { display: table-cell; width: 100px; height: 30px; }
+            "#,
+        );
+        let legacy = layout_tree(&styled, 800.0);
+        let bridged = layout_via_taffy(&styled, 800.0)
+            .expect("element root always routes through taffy");
+        assert_eq!(legacy.dimensions.content, bridged.dimensions.content);
+        assert_eq!(legacy.children.len(), bridged.children.len());
     }
 
     #[test]
