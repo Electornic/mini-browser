@@ -28,8 +28,8 @@ use crate::dom::NodeType;
 use crate::style::StyledNode;
 
 use super::{
-    Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, is_display_none,
-    is_layout_whitespace_text, is_out_of_flow,
+    Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, intrinsic_height,
+    intrinsic_width, is_display_none, is_layout_whitespace_text, is_out_of_flow,
 };
 use super::flex::is_flex_container;
 use super::grid::is_grid_container;
@@ -44,9 +44,12 @@ pub fn to_taffy_style(node: &StyledNode) -> Style {
     style.position = position_value(node);
     style.overflow = overflow_value(node);
 
+    // CSS width/height take precedence over intrinsic size; fall back to the
+    // intrinsic helpers (used by the legacy path) when no explicit CSS value is
+    // present so img/input/textarea still get their attribute-driven defaults.
     style.size = Size {
-        width: dimension(node.value("width")),
-        height: dimension(node.value("height")),
+        width: dimension_with_intrinsic(node.value("width"), intrinsic_width(node)),
+        height: dimension_with_intrinsic(node.value("height"), intrinsic_height_opt(node)),
     };
     style.min_size = Size {
         width: dimension(node.value("min-width")),
@@ -61,10 +64,10 @@ pub fn to_taffy_style(node: &StyledNode) -> Style {
     style.padding = edge_lp(node, "padding");
     style.border = border_widths(node);
     style.inset = TaffyRect {
-        left: lpa(node.value("left")),
-        right: lpa(node.value("right")),
-        top: lpa(node.value("top")),
-        bottom: lpa(node.value("bottom")),
+        left: lpa_or_auto(node.value("left")),
+        right: lpa_or_auto(node.value("right")),
+        top: lpa_or_auto(node.value("top")),
+        bottom: lpa_or_auto(node.value("bottom")),
     };
 
     style.flex_direction = flex_direction_value(node);
@@ -217,12 +220,47 @@ fn dimension(value: Option<&Value>) -> Dimension {
     }
 }
 
-fn lpa(value: Option<&Value>) -> LengthPercentageAuto {
+fn dimension_with_intrinsic(css: Option<&Value>, intrinsic: Option<f32>) -> Dimension {
+    // CSS values always win; the intrinsic fallback only kicks in when CSS
+    // would otherwise resolve to `auto`. Used so img/input/textarea pull
+    // their attribute-derived size into the taffy Style.
+    match css {
+        Some(Value::Length(v, Unit::Px)) => Dimension::length(*v),
+        Some(Value::Length(v, Unit::Percent)) => Dimension::percent(*v / 100.0),
+        _ => match intrinsic {
+            Some(v) => Dimension::length(v),
+            None => Dimension::auto(),
+        },
+    }
+}
+
+fn intrinsic_height_opt(node: &StyledNode) -> Option<f32> {
+    // The legacy `intrinsic_height` returns 0.0 for elements that have no
+    // intrinsic height — collapse that to `None` so the bridge keeps Dimension
+    // ::auto for plain blocks (otherwise every block would be height-clamped
+    // to zero).
+    let h = intrinsic_height(node);
+    if h > 0.0 { Some(h) } else { None }
+}
+
+fn lpa_or_auto(value: Option<&Value>) -> LengthPercentageAuto {
+    // For properties whose CSS initial value is `auto` (top/right/bottom/left).
     match value {
         Some(Value::Length(v, Unit::Px)) => LengthPercentageAuto::length(*v),
         Some(Value::Length(v, Unit::Percent)) => LengthPercentageAuto::percent(*v / 100.0),
         Some(Value::Keyword(kw)) if kw == "auto" => LengthPercentageAuto::auto(),
         _ => LengthPercentageAuto::auto(),
+    }
+}
+
+fn lpa_or_zero(value: Option<&Value>) -> LengthPercentageAuto {
+    // For properties whose CSS initial value is 0 (margin sides). The keyword
+    // `auto` still maps through when explicitly authored.
+    match value {
+        Some(Value::Length(v, Unit::Px)) => LengthPercentageAuto::length(*v),
+        Some(Value::Length(v, Unit::Percent)) => LengthPercentageAuto::percent(*v / 100.0),
+        Some(Value::Keyword(kw)) if kw == "auto" => LengthPercentageAuto::auto(),
+        _ => LengthPercentageAuto::length(0.0),
     }
 }
 
@@ -235,11 +273,12 @@ fn lp(value: Option<&Value>) -> LengthPercentage {
 }
 
 fn edge_lpa(node: &StyledNode, prefix: &str) -> TaffyRect<LengthPercentageAuto> {
+    // Sole caller is `margin`, whose initial value is 0 (auto only via author).
     TaffyRect {
-        left: lpa(node.value(&format!("{prefix}-left"))),
-        right: lpa(node.value(&format!("{prefix}-right"))),
-        top: lpa(node.value(&format!("{prefix}-top"))),
-        bottom: lpa(node.value(&format!("{prefix}-bottom"))),
+        left: lpa_or_zero(node.value(&format!("{prefix}-left"))),
+        right: lpa_or_zero(node.value(&format!("{prefix}-right"))),
+        top: lpa_or_zero(node.value(&format!("{prefix}-top"))),
+        bottom: lpa_or_zero(node.value(&format!("{prefix}-bottom"))),
     }
 }
 
@@ -253,11 +292,14 @@ fn edge_lp(node: &StyledNode, prefix: &str) -> TaffyRect<LengthPercentage> {
 }
 
 fn border_widths(node: &StyledNode) -> TaffyRect<LengthPercentage> {
+    // Our style pipeline stores the per-side border WIDTH under the shorthand
+    // key (`border-left`), not under the longhand (`border-left-width`). The
+    // legacy `edge_sizes(node, "border", base)` does the same, so match it.
     TaffyRect {
-        left: lp(node.value("border-left-width")),
-        right: lp(node.value("border-right-width")),
-        top: lp(node.value("border-top-width")),
-        bottom: lp(node.value("border-bottom-width")),
+        left: lp(node.value("border-left")),
+        right: lp(node.value("border-right")),
+        top: lp(node.value("border-top")),
+        bottom: lp(node.value("border-bottom")),
     }
 }
 
@@ -351,21 +393,101 @@ pub(super) fn layout_via_taffy(node: &StyledNode, viewport_width: f32) -> Option
     }
     let mut tree: TaffyTree<()> = TaffyTree::new();
     let root_id = build_taffy_node(&mut tree, node)?;
+    // Wrap the actual root in a synthetic block container so taffy resolves
+    // the root's `margin: auto` against the viewport (taffy's outermost node
+    // sits at (0, 0) without a parent block context, so auto margins on the
+    // root itself otherwise collapse to 0).
+    let wrapper_style = Style {
+        display: Display::Block,
+        size: Size {
+            width: Dimension::length(viewport_width),
+            height: Dimension::auto(),
+        },
+        ..Style::DEFAULT
+    };
+    let wrapper_id = tree.new_with_children(wrapper_style, &[root_id]).ok()?;
     tree.compute_layout(
-        root_id,
+        wrapper_id,
         Size {
             width: AvailableSpace::Definite(viewport_width),
             height: AvailableSpace::MaxContent,
         },
     )
     .ok()?;
+    // The wrapper sits at (0, 0); the real root lives one level inside, so
+    // its border-box origin in viewport coords is `wrapper.location +
+    // root.location`. The wrapper has no padding/border, so this just adds
+    // the root's offset within the wrapper.
     let root_layout = tree.layout(root_id).ok()?;
-    // Root's outer (margin-box) top-left lives at (0, 0) in our coord system,
-    // which means the root's BORDER box sits at (margin.left, margin.top).
-    // Children's `location` is relative to the parent's border box, so this
-    // origin propagates naturally during walk-back.
-    let root_origin = (root_layout.margin.left, root_layout.margin.top);
-    Some(walk_back(&tree, root_id, node, root_origin))
+    let wrapper_layout = tree.layout(wrapper_id).ok()?;
+    let root_origin = (
+        wrapper_layout.location.x + root_layout.location.x,
+        wrapper_layout.location.y + root_layout.location.y,
+    );
+    // Recompose the root LayoutBox using its own Layout (NOT the wrapper)
+    // and the absolute origin of its border box.
+    Some(walk_back_root(&tree, root_id, node, root_origin))
+}
+
+fn walk_back_root(
+    tree: &TaffyTree<()>,
+    id: NodeId,
+    node: &StyledNode,
+    abs_border_origin: (f32, f32),
+) -> LayoutBox {
+    // Same as `walk_back`, except the absolute border-box origin is supplied
+    // directly rather than computed from a parent's origin + this node's
+    // location (the wrapper hop already accounted for that).
+    let layout = tree.layout(id).expect("layout was just computed");
+    let abs_border_x = abs_border_origin.0;
+    let abs_border_y = abs_border_origin.1;
+    let content_x = abs_border_x + layout.border.left + layout.padding.left;
+    let content_y = abs_border_y + layout.border.top + layout.padding.top;
+    let content_width = (layout.size.width
+        - layout.border.left
+        - layout.border.right
+        - layout.padding.left
+        - layout.padding.right)
+        .max(0.0);
+    let content_height = (layout.size.height
+        - layout.border.top
+        - layout.border.bottom
+        - layout.padding.top
+        - layout.padding.bottom)
+        .max(0.0);
+
+    let dimensions = Dimensions {
+        content: Rect {
+            x: content_x,
+            y: content_y,
+            width: content_width,
+            height: content_height,
+        },
+        padding: edge_from_taffy(&layout.padding),
+        border: edge_from_taffy(&layout.border),
+        margin: edge_from_taffy(&layout.margin),
+    };
+
+    let child_ids = tree.children(id).unwrap_or_default();
+    let mut child_layouts = Vec::with_capacity(child_ids.len());
+    let next_origin = (abs_border_x, abs_border_y);
+    let mut taffy_iter = child_ids.into_iter();
+    for child in &node.children {
+        if is_display_none(child) || is_layout_whitespace_text(child) {
+            continue;
+        }
+        let child_id = match taffy_iter.next() {
+            Some(id) => id,
+            None => break,
+        };
+        child_layouts.push(walk_back(tree, child_id, child, next_origin));
+    }
+
+    LayoutBox {
+        box_type: container_box_type(node),
+        dimensions,
+        children: child_layouts,
+    }
 }
 
 fn is_supported(node: &StyledNode) -> bool {

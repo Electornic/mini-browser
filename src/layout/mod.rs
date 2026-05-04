@@ -145,8 +145,16 @@ pub fn layout_tree_with_fonts(
     let previous =
         LAYOUT_FONTS_PTR.with(|cell| cell.replace(fonts as *const [fontdue::Font]));
     let _guard = LayoutFontsGuard { previous };
-    let mut cursor_y = 0.0;
-    let mut layout_box = layout_node(root, 0.0, &mut cursor_y, viewport_width);
+    // Phase 4.3c: prefer the taffy-based path when it can handle the subtree;
+    // fall back to the legacy block algorithm for shapes the bridge does not
+    // yet support (every sub-phase widens the supported set).
+    let mut layout_box = match taffy_bridge::layout_via_taffy(root, viewport_width) {
+        Some(layout) => layout,
+        None => {
+            let mut cursor_y = 0.0;
+            layout_node(root, 0.0, &mut cursor_y, viewport_width)
+        }
+    };
     // Pass 2: walk the tree and move every `position: absolute` subtree to
     // its final spot relative to its containing block. The initial
     // containing block is the viewport; we only know its width, so we use
