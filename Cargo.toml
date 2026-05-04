@@ -4,8 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1"
 boa_engine = "0.21.1"
 fontdue = "0.9"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png"] }
 minifb = "0.27"
 native-tls = "0.2"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
