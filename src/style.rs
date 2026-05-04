@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 
+use selectors::context::{
+    MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, QuirksMode,
+    SelectorCaches,
+};
+
 use crate::{
-    css::{
-        Combinator, Declaration, PseudoClass, Selector, SimpleSelector, SimpleSelectorKind,
-        Stylesheet, TrackSize, Unit, Value,
-    },
+    css::{Declaration, Selector, Stylesheet, TrackSize, Unit, Value},
     dom::{Document, ElementData, NodeId, NodeType},
+    dom_select::{MatchingElement, MatchingState},
 };
 
 pub type PropertyMap = BTreeMap<String, Value>;
@@ -47,14 +50,6 @@ pub struct InteractionState<'a> {
     pub active: Option<&'a [usize]>,
 }
 
-/// Per-node pseudo-class state used during selector matching.
-#[derive(Default, Copy, Clone, Debug)]
-struct PseudoState {
-    hover: bool,
-    focus: bool,
-    active: bool,
-}
-
 pub fn style_tree(document: &Document, root: NodeId, stylesheets: &[Stylesheet]) -> StyledNode {
     // Most callers do not care about interaction state — they get a "nothing engaged" tree.
     style_tree_with_state(document, root, stylesheets, InteractionState::default())
@@ -89,9 +84,24 @@ pub fn style_tree_with_state(
     stylesheets: &[Stylesheet],
     state: InteractionState<'_>,
 ) -> StyledNode {
+    // Resolve the user-supplied paths into NodeIds once. The matching layer
+    // walks parent links from these NodeIds to compute :hover / :focus /
+    // :active per element, which is cheaper than re-comparing path slices
+    // for every selector evaluation.
+    //
+    // The original cascade interpreted the empty path `[]` as "the root
+    // currently being styled" and `[0]` as that root's first child. We
+    // mirror that here so `style_tree_with_hover(..., Some(&[0]))` keeps
+    // its old meaning rather than the document-roots interpretation
+    // `Document::resolve_path` exposes.
+    let matching_state = MatchingState {
+        hover: state.hover.and_then(|p| resolve_relative_path(document, root, p)),
+        focus: state.focus.and_then(|p| resolve_relative_path(document, root, p)),
+        active: state.active.and_then(|p| resolve_relative_path(document, root, p)),
+    };
     // The root font-size feeds rem resolution for every descendant. Compute it up front
     // by treating the root as if it lived inside the user-agent default font-size.
-    let raw_root = specified_values(document, root, stylesheets, &[], PseudoState::default());
+    let raw_root = specified_values(document, root, stylesheets, &matching_state);
     let root_font_size = resolve_font_size(
         raw_root.get("font-size"),
         DEFAULT_FONT_SIZE,
@@ -103,43 +113,33 @@ pub fn style_tree_with_state(
         stylesheets,
         None,
         root_font_size,
-        &[],
-        &[],
-        state,
+        &matching_state,
     )
 }
 
-fn pseudo_state_for(state: InteractionState<'_>, current_path: &[usize]) -> PseudoState {
-    let prefix_match = |target: Option<&[usize]>| -> bool {
-        // Hover/active propagate up: every ancestor on the way down to the deepest
-        // engaged node also enters the state. starts_with returns true when the engaged
-        // path begins with `current_path`, i.e. current is an ancestor (or self).
-        matches!(target, Some(p) if p.starts_with(current_path))
-    };
-    let exact_match = |target: Option<&[usize]>| -> bool {
-        // :focus only matches the focused element itself; ancestors do not pick it up.
-        target == Some(current_path)
-    };
-    PseudoState {
-        hover: prefix_match(state.hover),
-        focus: exact_match(state.focus),
-        active: prefix_match(state.active),
+/// Walk a `Vec<usize>` child-index path starting from `root` (rather than
+/// the document's first root, which is what `Document::resolve_path`
+/// does). Used to resolve the InteractionState paths the cascade is
+/// handed by callers — the empty path means `root` itself, `[0]` means
+/// `root`'s first child, etc.
+fn resolve_relative_path(document: &Document, root: NodeId, path: &[usize]) -> Option<NodeId> {
+    let mut current = root;
+    for idx in path {
+        let node = document.get(current)?;
+        current = *node.children.get(*idx)?;
     }
+    Some(current)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn style_tree_inner(
     document: &Document,
     node_id: NodeId,
     stylesheets: &[Stylesheet],
     parent_values: Option<&PropertyMap>,
     root_font_size: f32,
-    ancestors: &[(NodeId, PseudoState)],
-    current_path: &[usize],
-    state: InteractionState<'_>,
+    state: &MatchingState,
 ) -> StyledNode {
-    let pseudo = pseudo_state_for(state, current_path);
-    let mut specified_values = specified_values(document, node_id, stylesheets, ancestors, pseudo);
+    let mut specified_values = specified_values(document, node_id, stylesheets, state);
 
     // Real browsers inherit many properties. Here we only inherit a few text-related ones
     // because they make documents readable without making the style system much more complex.
@@ -206,30 +206,22 @@ fn style_tree_inner(
         }
     }
 
-    // Append self to the ancestor chain children see during their selector matching,
-    // carrying the resolved pseudo-state so descendant matches can check pseudo classes
-    // anchored on engaged ancestors (e.g. `.outer:hover .inner`).
-    let mut child_ancestors: Vec<(NodeId, PseudoState)> = ancestors.to_vec();
-    child_ancestors.push((node_id, pseudo));
-
+    // The selectors crate walks the live DOM via the `Element` trait
+    // implementation in `dom_select.rs`, so we no longer need to thread an
+    // explicit ancestor chain through the recursion.
     let node_data = document
         .get(node_id)
         .expect("style_tree_inner called with invalid NodeId");
     let children = node_data
         .children
         .iter()
-        .enumerate()
-        .map(|(idx, child_id)| {
-            let mut child_path: Vec<usize> = current_path.to_vec();
-            child_path.push(idx);
+        .map(|child_id| {
             style_tree_inner(
                 document,
                 *child_id,
                 stylesheets,
                 Some(&specified_values),
                 root_font_size,
-                &child_ancestors,
-                &child_path,
                 state,
             )
         })
@@ -258,20 +250,34 @@ fn specified_values(
     document: &Document,
     node_id: NodeId,
     stylesheets: &[Stylesheet],
-    ancestors: &[(NodeId, PseudoState)],
-    pseudo: PseudoState,
+    state: &MatchingState,
 ) -> PropertyMap {
     let mut matched = Vec::new();
+    let element = MatchingElement::new(node_id, document, state);
 
-    // First collect every rule that matches this node together with its specificity and order.
+    // The selectors crate's `MatchingContext` carries caches that get
+    // mutated during a match (the nth-index cache, the relative-selector
+    // cache, etc.). We rebuild it once per node — the caches grow over
+    // the course of one styling pass which is exactly the reuse window
+    // the design intends; recreating per-rule would erase that benefit.
+    let mut caches = SelectorCaches::default();
+    let mut ctx = MatchingContext::<MiniBrowserSelectorImplAlias>::new(
+        MatchingMode::Normal,
+        None,
+        &mut caches,
+        QuirksMode::NoQuirks,
+        NeedsSelectorFlags::No,
+        MatchingForInvalidation::No,
+    );
+
+    // First collect every rule that matches this node together with its
+    // specificity and source order.
     for (rule_order, rule) in stylesheets
         .iter()
         .flat_map(|sheet| sheet.rules.iter())
         .enumerate()
     {
-        if let Some(specificity) =
-            matching_specificity(document, node_id, pseudo, ancestors, &rule.selectors)
-        {
+        if let Some(specificity) = matching_specificity(&element, &mut ctx, &rule.selectors) {
             matched.push((specificity, rule_order, &rule.declarations));
         }
     }
@@ -285,8 +291,8 @@ fn specified_values(
     // weight than every selector match, so a `<table border="1">` value
     // surrenders to `table { border: none; }` in author CSS but still wins
     // over an unstyled UA fallback.
-    if let Some(NodeType::Element(element)) = document.get(node_id).map(|n| &n.node_type) {
-        for (name, value) in presentational_hints(element) {
+    if let Some(NodeType::Element(elem_data)) = document.get(node_id).map(|n| &n.node_type) {
+        for (name, value) in presentational_hints(elem_data) {
             values.insert(name, value);
         }
     }
@@ -301,7 +307,7 @@ fn specified_values(
     // the right. We only fill in auto-margins when the cascade hasn't
     // already supplied a horizontal margin — author CSS / presentational
     // hints stay authoritative if they declared one.
-    if parent_is_center(document, ancestors)
+    if parent_is_center(document, node_id)
         && !values.contains_key("margin-left")
         && !values.contains_key("margin-right")
     {
@@ -312,15 +318,20 @@ fn specified_values(
     values
 }
 
-fn parent_is_center(document: &Document, ancestors: &[(NodeId, PseudoState)]) -> bool {
-    let Some((parent_id, _)) = ancestors.last() else {
+fn parent_is_center(document: &Document, node_id: NodeId) -> bool {
+    let Some(parent_id) = document.get(node_id).and_then(|n| n.parent) else {
         return false;
     };
     matches!(
-        document.get(*parent_id).map(|n| &n.node_type),
+        document.get(parent_id).map(|n| &n.node_type),
         Some(NodeType::Element(element)) if element.tag_name.eq_ignore_ascii_case("center")
     )
 }
+
+// Re-export of the selector impl so the MatchingContext type parameter
+// stays readable in `specified_values`. Keeps all selectors-crate
+// generics on a single line per use-site.
+type MiniBrowserSelectorImplAlias = crate::css::MiniBrowserSelectorImpl;
 
 /// Translate the legacy presentational HTML attributes (`bgcolor`, `width`,
 /// `align`, …) into equivalent CSS declarations. Pages from the table-layout
@@ -754,134 +765,23 @@ fn apply_declarations(values: &mut PropertyMap, declarations: &[Declaration]) {
 }
 
 fn matching_specificity(
-    document: &Document,
-    node_id: NodeId,
-    pseudo: PseudoState,
-    ancestors: &[(NodeId, PseudoState)],
-    selectors: &[Selector],
+    element: &MatchingElement<'_>,
+    ctx: &mut MatchingContext<'_, MiniBrowserSelectorImplAlias>,
+    selectors: &Selector,
 ) -> Option<u32> {
-    // The highest matching selector wins within a rule group such as `h1, .title`.
-    selectors
-        .iter()
-        .filter(|selector| matches_selector(document, node_id, pseudo, ancestors, selector))
-        .map(selector_specificity)
-        .max()
-}
-
-fn selector_specificity(selector: &Selector) -> u32 {
-    // Sum specificity across the whole chain so descendant selectors will already give the
-    // right answer once the parser starts emitting them.
-    selector.parts.iter().map(simple_specificity).sum()
-}
-
-fn simple_specificity(simple: &SimpleSelector) -> u32 {
-    let kind_specificity = match &simple.kind {
-        SimpleSelectorKind::Tag(_) => 1,
-        SimpleSelectorKind::Class(_) => 10,
-        SimpleSelectorKind::Id(_) => 100,
-    };
-    // Each pseudo-class adds 10 (CSS spec aligns it with class specificity).
-    let pseudo_specificity = if simple.pseudo.is_some() { 10 } else { 0 };
-    kind_specificity + pseudo_specificity
-}
-
-fn matches_selector(
-    document: &Document,
-    node_id: NodeId,
-    pseudo: PseudoState,
-    ancestors: &[(NodeId, PseudoState)],
-    selector: &Selector,
-) -> bool {
-    // Right-to-left matching: the rightmost simple selector is the target and must match
-    // the element being styled. Each preceding part is checked against ancestors using the
-    // combinator that connects it to the part on its right:
-    //   - Descendant: walk up until any ancestor matches.
-    //   - Child: the very next ancestor must match; no skipping.
-    // Pseudo state for both the target and each ancestor is carried alongside the node so
-    // pseudo-classes anchored anywhere on the chain (e.g. `.outer:hover .inner`) work.
-    let Some((target, leading)) = selector.parts.split_last() else {
-        return false;
-    };
-    if !matches_simple(document, node_id, pseudo, target) {
-        return false;
-    }
-
-    let mut ancestor_iter = ancestors.iter().rev();
-    for (j, part) in leading.iter().enumerate().rev() {
-        let combinator = selector.combinators[j];
-        match combinator {
-            Combinator::Descendant => loop {
-                match ancestor_iter.next() {
-                    Some((ancestor_id, ancestor_pseudo))
-                        if matches_simple(document, *ancestor_id, *ancestor_pseudo, part) =>
-                    {
-                        break;
-                    }
-                    Some(_) => continue,
-                    None => return false,
-                }
-            },
-            Combinator::Child => match ancestor_iter.next() {
-                Some((ancestor_id, ancestor_pseudo))
-                    if matches_simple(document, *ancestor_id, *ancestor_pseudo, part) => {}
-                _ => return false,
-            },
+    // The selectors crate hands us the parsed `SelectorList` (one entry
+    // per `Rule`'s comma-separated selector list). `matches_selector_list`
+    // returns true if any branch matches; for the cascade we also want
+    // the *highest* specificity among the matching branches, so we walk
+    // the list ourselves with `matches_selector` instead.
+    let mut best: Option<u32> = None;
+    for selector in selectors.list().slice() {
+        if selectors::matching::matches_selector(selector, 0, None, element, ctx) {
+            let spec = selector.specificity();
+            best = Some(best.map_or(spec, |prev| prev.max(spec)));
         }
     }
-    true
-}
-
-fn matches_simple(
-    document: &Document,
-    node_id: NodeId,
-    pseudo: PseudoState,
-    simple: &SimpleSelector,
-) -> bool {
-    let element = match document.get(node_id).map(|n| &n.node_type) {
-        Some(NodeType::Element(element)) => element,
-        // Text nodes never match selectors directly; they only inherit style from parents.
-        _ => return false,
-    };
-
-    let kind_match = match &simple.kind {
-        SimpleSelectorKind::Tag(tag_name) => element.tag_name == *tag_name,
-        SimpleSelectorKind::Class(class_name) => has_class(element, class_name),
-        SimpleSelectorKind::Id(id) => element
-            .attributes
-            .get("id")
-            .is_some_and(|value| value == id),
-    };
-
-    if !kind_match {
-        return false;
-    }
-
-    match simple.pseudo {
-        None => true,
-        Some(PseudoClass::Hover) => pseudo.hover,
-        Some(PseudoClass::Focus) => pseudo.focus,
-        Some(PseudoClass::Active) => pseudo.active,
-        // CSS spec: `:link` matches anchors with an href that haven't been
-        // visited yet. Without browsing-history tracking we treat every
-        // such anchor as unvisited — which is what a fresh-eyes visitor
-        // sees and what HN's `a:link { color: black }` rules expect.
-        Some(PseudoClass::Link) => {
-            element.tag_name.eq_ignore_ascii_case("a")
-                && element.attributes.contains_key("href")
-        }
-        // `:visited` is the dual of `:link` and never matches because we
-        // have no visited set to consult. Author rules targeting
-        // `a:visited` therefore drop out of the cascade entirely instead
-        // of stomping on `a:link` declarations through source order.
-        Some(PseudoClass::Visited) => false,
-    }
-}
-
-fn has_class(element: &ElementData, class_name: &str) -> bool {
-    element
-        .attributes
-        .get("class")
-        .is_some_and(|value| value.split_whitespace().any(|class| class == class_name))
+    best
 }
 
 #[cfg(test)]

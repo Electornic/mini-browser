@@ -21,7 +21,12 @@ use crate::html;
 
 use super::ListenerMap;
 use super::NODE_ID_PROP;
-use super::document::{ancestors_outermost_first, matches_static_selector};
+use super::document::matches_static_selector;
+use crate::dom_select::MatchingState;
+use selectors::context::{
+    MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, QuirksMode,
+    SelectorCaches,
+};
 use super::util::{first_arg_as_string, nth_arg_as_string, read_node_id};
 
 // Builds an Element wrapper that resolves every observable property against
@@ -587,9 +592,24 @@ pub(super) fn make_element(
             if document.get(node_id).is_none() {
                 return Ok(JsValue::from(false));
             }
-            let ancestors = ancestors_outermost_first(&document, node_id);
+            // The selectors crate walks parent links via the Element trait,
+            // so we no longer pass an explicit ancestor list.
+            let state = MatchingState::default();
+            let mut caches = SelectorCaches::default();
+            let mut match_ctx = MatchingContext::<crate::css::MiniBrowserSelectorImpl>::new(
+                MatchingMode::Normal,
+                None,
+                &mut caches,
+                QuirksMode::NoQuirks,
+                NeedsSelectorFlags::No,
+                MatchingForInvalidation::No,
+            );
             Ok(JsValue::from(matches_static_selector(
-                &document, node_id, &ancestors, &selector,
+                &document,
+                node_id,
+                &selector,
+                &state,
+                &mut match_ctx,
             )))
         })
     };
@@ -617,24 +637,31 @@ pub(super) fn make_element(
                 if document.get(node_id).is_none() {
                     return Ok(JsValue::null());
                 }
-                let mut ancestors = ancestors_outermost_first(&document, node_id);
+                // The selectors crate walks the live ancestor chain via
+                // the Element trait, so we just iterate self → ancestors
+                // and re-run the matcher at each step. No manual ancestor
+                // stack to maintain.
+                let state = MatchingState::default();
+                let mut caches = SelectorCaches::default();
+                let mut match_ctx = MatchingContext::<crate::css::MiniBrowserSelectorImpl>::new(
+                    MatchingMode::Normal,
+                    None,
+                    &mut caches,
+                    QuirksMode::NoQuirks,
+                    NeedsSelectorFlags::No,
+                    MatchingForInvalidation::No,
+                );
                 let mut current = Some(node_id);
                 let mut hit: Option<NodeId> = None;
                 while let Some(id) = current {
-                    // Only Element nodes can match a CSS selector — a stray
-                    // text/document parent quietly fails the simple-selector
-                    // check inside `matches_static_selector`, so the loop
-                    // naturally skips non-elements without an explicit guard.
-                    if matches_static_selector(&document, id, &ancestors, &selector) {
+                    // Only Element nodes can match a CSS selector — text /
+                    // document parents quietly fail the matcher's local-name
+                    // / class / id checks, so the loop naturally skips them.
+                    if matches_static_selector(&document, id, &selector, &state, &mut match_ctx) {
                         hit = Some(id);
                         break;
                     }
-                    let parent = document.get(id).and_then(|n| n.parent);
-                    // Drop the candidate's own immediate parent off the
-                    // ancestor stack so the next iteration treats it as the
-                    // new candidate (its own ancestors are everything above).
-                    ancestors.pop();
-                    current = parent;
+                    current = document.get(id).and_then(|n| n.parent);
                 }
                 hit
             };

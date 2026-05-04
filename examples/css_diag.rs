@@ -24,8 +24,15 @@ fn main() {
     );
 
     for (i, rule) in sheet.rules.iter().enumerate() {
-        let sel: Vec<String> = rule.selectors.iter().map(|s| format!("{s:?}")).collect();
-        println!("\nrule[{}] selectors: {}", i, sel.join(" || "));
+        // The selector AST is now opaque (owned by the `selectors` crate),
+        // so the diagnostic just prints the parsed list count + max
+        // specificity instead of the per-component dump it used to emit.
+        println!(
+            "\nrule[{}] {} selector branch(es), specificity={}",
+            i,
+            rule.selectors.list().len(),
+            rule.selectors.specificity()
+        );
         for d in &rule.declarations {
             println!("  {} = {:?}", d.name, d.value);
         }

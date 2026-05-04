@@ -11,6 +11,7 @@ pub mod chrome;
 pub mod css;
 pub mod display_list;
 pub mod dom;
+pub mod dom_select;
 pub mod html;
 pub mod js;
 pub mod layout;

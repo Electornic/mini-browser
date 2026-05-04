@@ -14,8 +14,14 @@ use boa_engine::{
 };
 
 use crate::{
-    css::{self, Combinator, Selector, SimpleSelector, SimpleSelectorKind},
+    css::{self, Selector},
     dom::{AttrMap, Document, NodeId, NodeType},
+    dom_select::{MatchingElement, MatchingState},
+};
+
+use selectors::context::{
+    MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, QuirksMode,
+    SelectorCaches,
 };
 
 use super::ListenerMap;
@@ -328,9 +334,21 @@ fn walk_collect_by_class(
 }
 
 fn find_first_match(document: &Document, selector: &Selector) -> Option<NodeId> {
-    let mut ancestors: Vec<NodeId> = Vec::new();
+    // querySelector is a static lookup against the parsed Document — no
+    // live hover/focus/active state to thread through, so we hand the
+    // selectors crate a default MatchingState.
+    let state = MatchingState::default();
+    let mut caches = SelectorCaches::default();
+    let mut ctx = MatchingContext::<crate::css::MiniBrowserSelectorImpl>::new(
+        MatchingMode::Normal,
+        None,
+        &mut caches,
+        QuirksMode::NoQuirks,
+        NeedsSelectorFlags::No,
+        MatchingForInvalidation::No,
+    );
     for &root in document.roots() {
-        if let Some(found) = walk_for_match(document, root, selector, &mut ancestors) {
+        if let Some(found) = walk_for_match(document, root, selector, &state, &mut ctx) {
             return Some(found);
         }
     }
@@ -341,9 +359,10 @@ fn walk_for_match(
     document: &Document,
     node_id: NodeId,
     selector: &Selector,
-    ancestors: &mut Vec<NodeId>,
+    state: &MatchingState,
+    ctx: &mut MatchingContext<'_, crate::css::MiniBrowserSelectorImpl>,
 ) -> Option<NodeId> {
-    if matches_static_selector(document, node_id, ancestors, selector) {
+    if matches_static_selector(document, node_id, selector, state, ctx) {
         return Some(node_id);
     }
     // Snapshot children before recursing so a lookup against the
@@ -352,81 +371,39 @@ fn walk_for_match(
         Some(node) => node.children.clone(),
         None => return None,
     };
-    ancestors.push(node_id);
     for child in &children {
-        if let Some(found) = walk_for_match(document, *child, selector, ancestors) {
-            ancestors.pop();
+        if let Some(found) = walk_for_match(document, *child, selector, state, ctx) {
             return Some(found);
         }
     }
-    ancestors.pop();
     None
 }
 
-// Walk parent links from `node_id` up to a root and return the chain
-// outermost-first (the document root sits at index 0, the immediate parent
-// of `node_id` is the last element). The receiver itself is excluded — that
-// matches what `matches_static_selector` expects in its `ancestors` slice.
-// Used by Element.matches / Element.closest so a parsed selector that uses
-// descendant or child combinators can be resolved against the live tree.
-pub(super) fn ancestors_outermost_first(document: &Document, node_id: NodeId) -> Vec<NodeId> {
-    let mut chain: Vec<NodeId> = Vec::new();
-    let mut cur = document.get(node_id).and_then(|n| n.parent);
-    while let Some(id) = cur {
-        chain.push(id);
-        cur = document.get(id).and_then(|n| n.parent);
-    }
-    chain.reverse();
-    chain
-}
-
-// Mirrors style::matches_selector but skips pseudo-class state — querySelector
-// is a static lookup against the parsed Document, no hover/focus context to
-// thread through. Pseudo-classes parse-but-ignore here: `.btn:hover` matches
-// the same set as `.btn`.
+// Run a parsed selector against an element by id, using the selectors
+// crate's matcher. Reused by querySelector / Element.matches /
+// Element.closest. Pseudo-class evaluation pulls live state from the
+// MatchingState the caller provides — for the static (querySelector)
+// case that's the default "nothing is engaged" state.
 pub(super) fn matches_static_selector(
     document: &Document,
     node_id: NodeId,
-    ancestors: &[NodeId],
     selector: &Selector,
+    state: &MatchingState,
+    ctx: &mut MatchingContext<'_, crate::css::MiniBrowserSelectorImpl>,
 ) -> bool {
-    let Some((target, leading)) = selector.parts.split_last() else {
+    if !matches!(
+        document.get(node_id).map(|n| &n.node_type),
+        Some(NodeType::Element(_))
+    ) {
+        // Text / detached nodes never match a CSS selector — short-circuit
+        // before constructing the wrapper to keep the matcher's invariants
+        // happy (it expects element-shaped inputs).
         return false;
-    };
-    if !matches_simple_static(document, node_id, target) {
-        return false;
     }
-    let mut iter = ancestors.iter().rev();
-    for (j, part) in leading.iter().enumerate().rev() {
-        let combinator = selector.combinators[j];
-        match combinator {
-            Combinator::Descendant => loop {
-                match iter.next() {
-                    Some(ancestor) if matches_simple_static(document, *ancestor, part) => break,
-                    Some(_) => continue,
-                    None => return false,
-                }
-            },
-            Combinator::Child => match iter.next() {
-                Some(ancestor) if matches_simple_static(document, *ancestor, part) => {}
-                _ => return false,
-            },
-        }
-    }
-    true
-}
-
-fn matches_simple_static(document: &Document, node_id: NodeId, simple: &SimpleSelector) -> bool {
-    let element = match document.get(node_id).map(|n| &n.node_type) {
-        Some(NodeType::Element(e)) => e,
-        _ => return false,
-    };
-    match &simple.kind {
-        SimpleSelectorKind::Tag(tag) => element.tag_name == *tag,
-        SimpleSelectorKind::Class(class) => element
-            .attributes
-            .get("class")
-            .is_some_and(|v| v.split_whitespace().any(|c| c == class)),
-        SimpleSelectorKind::Id(id) => element.attributes.get("id").is_some_and(|v| v == id),
-    }
+    let element = MatchingElement::new(node_id, document, state);
+    selector
+        .list()
+        .slice()
+        .iter()
+        .any(|sel| selectors::matching::matches_selector(sel, 0, None, &element, ctx))
 }

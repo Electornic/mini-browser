@@ -1,11 +1,19 @@
-// CSS support is intentionally narrow: simple selectors and a handful of value types.
-// The AST is unchanged from the original hand-rolled parser; only the tokeniser
-// and rule-iteration scaffolding are now driven by the `cssparser` crate.
+// CSS support is now driven by Servo's `selectors` crate for selector
+// parsing + matching, and by `cssparser` for the rest of the rule body.
+// The selector AST is no longer ours — `Selector` is a thin newtype around
+// `selectors::SelectorList<MiniBrowserSelectorImpl>` so callers can hold
+// owned, parsed selector lists without dragging the generic parameter
+// through every file.
+use std::borrow::Borrow;
+use std::fmt;
+
 use cssparser::{
     AtRuleParser as CssAtRuleParser, BasicParseErrorKind, CowRcStr, ParseError as CssParseError,
     Parser as CssParser, ParserInput, ParserState, QualifiedRuleParser as CssQualifiedRuleParser,
-    StyleSheetParser, Token,
+    StyleSheetParser, ToCss, Token,
 };
+use precomputed_hash::PrecomputedHash;
+use selectors::parser::{ParseRelative, SelectorList as SelectorsSelectorList};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Stylesheet {
@@ -14,97 +22,215 @@ pub struct Stylesheet {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rule {
-    pub selectors: Vec<Selector>,
+    /// Comma-separated selector list (e.g. `h1, .title`). Wrapped in a
+    /// newtype so the `selectors`-crate generic doesn't leak into our
+    /// public surface and so we can derive `PartialEq` for snapshot tests.
+    pub selectors: Selector,
     pub declarations: Vec<Declaration>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SimpleSelectorKind {
-    Tag(String),
-    Class(String),
-    Id(String),
+/// Selector implementation flavour for the `selectors` crate. We don't need
+/// namespaces, custom case sensitivity, pseudo-elements, or extra matching
+/// data, so most associated types are stringy or unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MiniBrowserSelectorImpl;
+
+/// Stringy identifier with a precomputed hash. Selectors crate requires
+/// `PrecomputedHash` on `Identifier` / `LocalName` for the bloom-filter
+/// optimisation; the cheapest impl is to wrap `String` and recompute on
+/// demand. This isn't hot in practice — the AST is built once at parse
+/// time and only the selectors-crate internals call `precomputed_hash`.
+#[derive(Debug, Clone, Default, Eq, Hash, PartialEq, PartialOrd, Ord)]
+pub struct CssString(pub String);
+
+impl CssString {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-/// Pseudo-classes attached to a simple selector, e.g. the `:hover` in `.btn:hover`.
+impl fmt::Display for CssString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'a> From<&'a str> for CssString {
+    fn from(s: &'a str) -> Self {
+        CssString(s.to_owned())
+    }
+}
+
+impl AsRef<str> for CssString {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for CssString {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PrecomputedHash for CssString {
+    fn precomputed_hash(&self) -> u32 {
+        // Cheap FNV-1a; the selectors crate only uses these for bloom-filter
+        // ancestor fast-rejection, so it just needs to be a stable hash.
+        let mut hash: u32 = 0x811c9dc5;
+        for byte in self.0.as_bytes() {
+            hash ^= *byte as u32;
+            hash = hash.wrapping_mul(0x01000193);
+        }
+        hash
+    }
+}
+
+impl ToCss for CssString {
+    fn to_css<W>(&self, dest: &mut W) -> fmt::Result
+    where
+        W: fmt::Write,
+    {
+        dest.write_str(&self.0)
+    }
+}
+
+/// Non-tree-structural pseudo-classes we recognise. `:hover`/`:focus`/`:active`
+/// pull live state from the `MatchingElement` impl in `style.rs`; `:link` /
+/// `:visited` are wired to "anchor with href" / "never matches" the same way
+/// the previous hand-rolled matcher did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PseudoClass {
+pub enum NonTSPseudoClass {
     Hover,
     Focus,
     Active,
-    /// `:link` — unvisited anchor. Without browsing-history tracking we
-    /// treat every `<a href>` as unvisited, so `:link` always matches a
-    /// real anchor and `:visited` never does. That choice keeps author
-    /// rules like HN's `a:link { color: black }` / `a:visited { ... }`
-    /// behaving the way fresh visitors see the page.
     Link,
-    /// `:visited` — visited anchor. See `Link` above; this never matches.
     Visited,
 }
 
-/// A single simple selector position: a tag/class/id base plus an optional
-/// pseudo-class. `.btn:hover` parses to one SimpleSelector with
-/// `kind = Class("btn")` and `pseudo = Some(Hover)`. Standalone pseudo-classes
-/// (a bare `:hover`) are not supported yet — every simple selector still needs
-/// a tag/class/id base.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SimpleSelector {
-    pub kind: SimpleSelectorKind,
-    pub pseudo: Option<PseudoClass>,
-}
-
-impl SimpleSelector {
-    pub fn tag(name: impl Into<String>) -> Self {
-        Self {
-            kind: SimpleSelectorKind::Tag(name.into()),
-            pseudo: None,
-        }
-    }
-
-    pub fn class(name: impl Into<String>) -> Self {
-        Self {
-            kind: SimpleSelectorKind::Class(name.into()),
-            pseudo: None,
-        }
-    }
-
-    pub fn id(name: impl Into<String>) -> Self {
-        Self {
-            kind: SimpleSelectorKind::Id(name.into()),
-            pseudo: None,
-        }
-    }
-
-    pub fn with_pseudo(mut self, pseudo: PseudoClass) -> Self {
-        self.pseudo = Some(pseudo);
-        self
+impl ToCss for NonTSPseudoClass {
+    fn to_css<W>(&self, dest: &mut W) -> fmt::Result
+    where
+        W: fmt::Write,
+    {
+        dest.write_str(match self {
+            NonTSPseudoClass::Hover => ":hover",
+            NonTSPseudoClass::Focus => ":focus",
+            NonTSPseudoClass::Active => ":active",
+            NonTSPseudoClass::Link => ":link",
+            NonTSPseudoClass::Visited => ":visited",
+        })
     }
 }
 
-/// How two adjacent simple selectors in a complex selector are related.
+impl selectors::parser::NonTSPseudoClass for NonTSPseudoClass {
+    type Impl = MiniBrowserSelectorImpl;
+
+    fn is_active_or_hover(&self) -> bool {
+        matches!(self, NonTSPseudoClass::Active | NonTSPseudoClass::Hover)
+    }
+
+    fn is_user_action_state(&self) -> bool {
+        matches!(
+            self,
+            NonTSPseudoClass::Hover | NonTSPseudoClass::Active | NonTSPseudoClass::Focus
+        )
+    }
+}
+
+/// Uninhabited pseudo-element type: we don't model `::before`/`::after`/etc.
+/// `void::Void` would do but it's not in std, so an empty enum suffices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Combinator {
-    /// Whitespace combinator: the right side is some descendant of the left side.
-    Descendant,
-    /// `>` combinator: the right side must be the immediate child of the left side.
-    Child,
+pub enum PseudoElement {}
+
+impl ToCss for PseudoElement {
+    fn to_css<W>(&self, _dest: &mut W) -> fmt::Result
+    where
+        W: fmt::Write,
+    {
+        match *self {}
+    }
 }
 
-/// A complex selector is a list of simple selectors joined by combinators.
-/// `parts` is ordered left-to-right (outermost ancestor first, target element last).
-/// `combinators` is parallel to the boundaries between consecutive parts, so its length
-/// is always `parts.len().saturating_sub(1)`. A length-1 selector is a plain simple
-/// selector with no combinators.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Selector {
-    pub parts: Vec<SimpleSelector>,
-    pub combinators: Vec<Combinator>,
+impl selectors::parser::PseudoElement for PseudoElement {
+    type Impl = MiniBrowserSelectorImpl;
 }
+
+impl selectors::SelectorImpl for MiniBrowserSelectorImpl {
+    type ExtraMatchingData<'a> = ();
+    type AttrValue = CssString;
+    type Identifier = CssString;
+    type LocalName = CssString;
+    type NamespaceUrl = CssString;
+    type NamespacePrefix = CssString;
+    type BorrowedNamespaceUrl = str;
+    type BorrowedLocalName = str;
+    type NonTSPseudoClass = NonTSPseudoClass;
+    type PseudoElement = PseudoElement;
+}
+
+/// Owning newtype for a comma-separated selector list (`h1, .title`). The
+/// inner `selectors::SelectorList` is the parsed AST the matching crate
+/// consumes; we wrap it so callers can store it in `Rule` / on JS bridge
+/// objects without mentioning `MiniBrowserSelectorImpl` everywhere.
+#[derive(Debug, Clone)]
+pub struct Selector(pub SelectorsSelectorList<MiniBrowserSelectorImpl>);
 
 impl Selector {
-    pub fn simple(part: SimpleSelector) -> Self {
-        Self {
-            parts: vec![part],
-            combinators: Vec::new(),
+    /// Access the underlying `selectors::SelectorList`. Callers go through
+    /// `selectors::matching::matches_selector_list` against this.
+    pub fn list(&self) -> &SelectorsSelectorList<MiniBrowserSelectorImpl> {
+        &self.0
+    }
+
+    /// Maximum specificity across the comma-separated branches. Used by the
+    /// cascade in `style.rs` to break ties between equally-specified rules.
+    pub fn specificity(&self) -> u32 {
+        self.0.slice().iter().map(|s| s.specificity()).max().unwrap_or(0)
+    }
+}
+
+// SelectorList is internally a tagged-pointer ThinArc; a deep structural
+// `PartialEq` would have to walk the parsed components. For our purposes
+// (test snapshotting), comparing two Stylesheets via `PartialEq` is no
+// longer meaningful — the selector parsing tests now go through the
+// matching surface instead. We still need *some* PartialEq to keep
+// derived impls on Rule/Stylesheet alive, so we make it pointer-identity.
+impl PartialEq for Selector {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.thin_arc_heap_ptr() == other.0.thin_arc_heap_ptr()
+    }
+}
+
+/// Selector parser callback for the `selectors` crate. It only needs to
+/// know how to map our supported pseudo-class names — everything else
+/// (combinators, attribute selectors, `:not()`, etc.) is handled by the
+/// crate itself.
+struct SelectorParserImpl;
+
+impl<'i> selectors::parser::Parser<'i> for SelectorParserImpl {
+    type Impl = MiniBrowserSelectorImpl;
+    type Error = selectors::parser::SelectorParseErrorKind<'i>;
+
+    fn parse_non_ts_pseudo_class(
+        &self,
+        location: cssparser::SourceLocation,
+        name: CowRcStr<'i>,
+    ) -> Result<NonTSPseudoClass, CssParseError<'i, Self::Error>> {
+        // Case-insensitive dispatch over the five non-tree-structural
+        // pseudo-classes we wire through to `MatchingElement`. Anything
+        // else parses to an unsupported-pseudo error which the surrounding
+        // rule iterator (in `parse`) catches by skipping the rule.
+        let lc = name.as_ref().to_ascii_lowercase();
+        match lc.as_str() {
+            "hover" => Ok(NonTSPseudoClass::Hover),
+            "focus" => Ok(NonTSPseudoClass::Focus),
+            "active" => Ok(NonTSPseudoClass::Active),
+            "link" => Ok(NonTSPseudoClass::Link),
+            "visited" => Ok(NonTSPseudoClass::Visited),
+            _ => Err(location.new_custom_error(
+                selectors::parser::SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name),
+            )),
         }
     }
 }
@@ -313,18 +439,32 @@ pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
 }
 
 /// Parse a single complex selector (e.g. `div.card > a`). Used by JS-facing
-/// `document.querySelector` to reuse the existing selector grammar without
-/// going through a full stylesheet rule. Trailing input after the selector is
-/// rejected so callers can't smuggle declarations through the same entry point.
+/// `document.querySelector` to reuse the same selector grammar as the
+/// stylesheet parser without going through a full stylesheet rule.
+/// Trailing input after the selector is rejected so callers can't smuggle
+/// declarations through the same entry point.
 pub fn parse_selector(input: &str) -> Result<Selector, ParseError> {
     let mut parser_input = ParserInput::new(input);
     let mut parser = CssParser::new(&mut parser_input);
-    parser
-        .parse_entirely(|input| match parse_complex_selector(input) {
-            Ok(selector) => Ok(selector),
-            Err(err) => Err(input.new_custom_error(err)),
+    let parsed = parser
+        .parse_entirely(|input| {
+            SelectorsSelectorList::parse(&SelectorParserImpl, input, ParseRelative::No)
         })
-        .map_err(|err| convert_error(err))
+        .map_err(|err| convert_selector_error(err))?;
+    Ok(Selector(parsed))
+}
+
+/// Convert a `selectors`-crate parse error into our `ParseError` shape.
+/// We lose the structured `SelectorParseErrorKind` variant data because
+/// it carries `Token<'_>` borrows, but the message string is enough for
+/// the JS bridge's `SyntaxError` payload and the legacy stylesheet
+/// recovery path drops parse failures wholesale anyway.
+fn convert_selector_error<'i>(
+    err: CssParseError<'i, selectors::parser::SelectorParseErrorKind<'i>>,
+) -> ParseError {
+    let position = err.location.line as usize;
+    let message = format!("{:?}", err.kind);
+    ParseError::new(position, message)
 }
 
 /// Returns the rgba color associated with a CSS named color keyword, if any.
@@ -365,9 +505,9 @@ pub fn named_color(name: &str) -> Option<Color> {
 
 struct StylesheetHandler;
 
-/// Bundle a list of selectors with the source location where the selector list
+/// Bundle a parsed selector list with the source location where it
 /// started, so `parse_block` can build a `Rule` with the original prelude.
-struct RulePrelude(Vec<Selector>);
+struct RulePrelude(Selector);
 
 /// `cssparser` requires a custom error type; the toy parser converts everything
 /// back into the legacy `ParseError` shape on the way out.
@@ -382,8 +522,17 @@ impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler {
         &mut self,
         input: &mut CssParser<'i, 't>,
     ) -> Result<Self::Prelude, CssParseError<'i, Self::Error>> {
-        let selectors = parse_selector_list(input).map_err(|err| input.new_custom_error(err))?;
-        Ok(RulePrelude(selectors))
+        // Delegate the whole comma-separated selector grammar to the
+        // selectors crate — it handles compound selectors, attribute
+        // selectors, the descendant/child/sibling combinators,
+        // pseudo-classes (via our `Parser` impl), `:is()`/`:where()`/
+        // `:not()`, etc. We don't enable `parse_is_and_where` / `parse_has`
+        // / `parse_part` / `parse_slotted` because we don't model the
+        // matching machinery for them yet.
+        match SelectorsSelectorList::parse(&SelectorParserImpl, input, ParseRelative::No) {
+            Ok(list) => Ok(RulePrelude(Selector(list))),
+            Err(err) => Err(input.new_custom_error(convert_selector_error(err))),
+        }
     }
 
     fn parse_block<'t>(
@@ -408,183 +557,6 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
     type Prelude = ();
     type AtRule = Rule;
     type Error = CssError;
-}
-
-// =============================================================================
-// Selector parsing (cssparser tokens → existing AST)
-// =============================================================================
-
-/// Parse a comma-separated list of complex selectors.
-fn parse_selector_list<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<Vec<Selector>, ParseError> {
-    let mut selectors = Vec::new();
-    loop {
-        input.skip_whitespace();
-        let selector = parse_complex_selector(input)?;
-        selectors.push(selector);
-        input.skip_whitespace();
-        match input.next_including_whitespace_and_comments() {
-            Ok(token) => match token {
-                Token::Comma => continue,
-                other => {
-                    let other = other.clone();
-                    return Err(token_error(input, &other, "expected ',' or '{'"));
-                }
-            },
-            Err(_) => break,
-        }
-    }
-    Ok(selectors)
-}
-
-/// Parse a complex selector: simple selectors joined by `descendant` (whitespace)
-/// or `child` (`>`) combinators.
-fn parse_complex_selector<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<Selector, ParseError> {
-    let mut parts = vec![parse_simple_selector(input)?];
-    let mut combinators = Vec::new();
-
-    loop {
-        // Track whether whitespace separates the previous simple selector from
-        // whatever comes next. `next_including_whitespace_and_comments` lets us
-        // see the whitespace token explicitly so the combinator detection
-        // mirrors the previous hand-rolled behaviour.
-        let saved = input.state();
-        let mut had_whitespace = false;
-        let mut combinator: Option<Combinator> = None;
-
-        // Peek forward, swallowing whitespace and comments until we either land
-        // on `>` (child combinator) or on a token that could start the next
-        // simple selector (descendant combinator).
-        loop {
-            let probe = input.state();
-            match input.next_including_whitespace_and_comments() {
-                Ok(Token::WhiteSpace(_)) | Ok(Token::Comment(_)) => {
-                    had_whitespace = true;
-                }
-                Ok(Token::Delim('>')) => {
-                    combinator = Some(Combinator::Child);
-                    break;
-                }
-                Ok(_) => {
-                    input.reset(&probe);
-                    break;
-                }
-                Err(_) => {
-                    input.reset(&probe);
-                    break;
-                }
-            }
-        }
-
-        if combinator.is_none() && had_whitespace {
-            combinator = Some(Combinator::Descendant);
-        }
-
-        let combinator = match combinator {
-            Some(c) => c,
-            None => {
-                input.reset(&saved);
-                break;
-            }
-        };
-
-        // Skip whitespace after `>` so `.a > .b` and `.a >.b` behave the same.
-        input.skip_whitespace();
-
-        // The next token has to actually start a simple selector. If it doesn't
-        // (e.g. it's `,` or `{`), back out and let the outer loop see it.
-        let probe = input.state();
-        let starts_simple = matches!(
-            input.next_including_whitespace_and_comments(),
-            Ok(Token::Delim('.'))
-                | Ok(Token::Delim('#'))
-                | Ok(Token::Ident(_))
-                | Ok(Token::IDHash(_))
-                | Ok(Token::Hash(_))
-        );
-        input.reset(&probe);
-
-        if !starts_simple {
-            input.reset(&saved);
-            break;
-        }
-
-        parts.push(parse_simple_selector(input)?);
-        combinators.push(combinator);
-    }
-
-    Ok(Selector { parts, combinators })
-}
-
-/// Parse one simple selector: tag/class/id base plus an optional pseudo-class.
-fn parse_simple_selector<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<SimpleSelector, ParseError> {
-    let pos = input.position().byte_index();
-    let token = input
-        .next_including_whitespace_and_comments()
-        .map_err(|err| convert_basic_error_at(pos, err))?
-        .clone();
-    let kind = match token {
-        Token::Delim('.') => {
-            let pos = input.position().byte_index();
-            let name = input
-                .expect_ident()
-                .map_err(|err| convert_basic_error_at(pos, err))?
-                .to_string();
-            SimpleSelectorKind::Class(name)
-        }
-        // `#name` arrives as either Hash or IDHash depending on whether the
-        // body looks like an ID identifier; both map to our `Id` kind.
-        Token::IDHash(name) | Token::Hash(name) => SimpleSelectorKind::Id(name.to_string()),
-        Token::Ident(name) => SimpleSelectorKind::Tag(name.to_string()),
-        Token::Delim('#') => {
-            // Defensive: the tokeniser usually delivers `#x` as Hash, but
-            // accept the explicit-delim form for symmetry with the old parser.
-            let pos = input.position().byte_index();
-            let name = input
-                .expect_ident()
-                .map_err(|err| convert_basic_error_at(pos, err))?
-                .to_string();
-            SimpleSelectorKind::Id(name)
-        }
-        other => {
-            return Err(token_error_at(pos, &other, "expected selector"));
-        }
-    };
-
-    // Optional pseudo-class suffix glued directly to the kind (e.g. `.btn:hover`).
-    let pseudo = {
-        let probe = input.state();
-        match input.next_including_whitespace_and_comments() {
-            Ok(Token::Colon) => {
-                let pos = input.position().byte_index();
-                let name = input
-                    .expect_ident()
-                    .map_err(|err| convert_basic_error_at(pos, err))?
-                    .to_string();
-                match name.as_str() {
-                    "hover" => Some(PseudoClass::Hover),
-                    "focus" => Some(PseudoClass::Focus),
-                    "active" => Some(PseudoClass::Active),
-                    "link" => Some(PseudoClass::Link),
-                    "visited" => Some(PseudoClass::Visited),
-                    // Unknown pseudo-classes parse silently to None so the surrounding rule
-                    // is still applied; the selector just never matches `:unknown` cases.
-                    _ => None,
-                }
-            }
-            _ => {
-                input.reset(&probe);
-                None
-            }
-        }
-    };
-
-    Ok(SimpleSelector { kind, pseudo })
 }
 
 // =============================================================================
@@ -1666,18 +1638,20 @@ fn token_error<'i, 't>(
     )
 }
 
-fn token_error_at(position: usize, token: &Token<'_>, message: &str) -> ParseError {
-    ParseError::new(position, format!("{message}: got {token:?}"))
-}
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BoxShadow, Color, Combinator, GradientDirection, GradientKind, GridLine, PseudoClass,
-        Selector, SimpleSelector, SimpleSelectorKind, TextShadow, TrackSize, TransformOp, Unit,
-        Value, parse,
+        BoxShadow, Color, GradientDirection, GradientKind, GridLine, TextShadow, TrackSize,
+        TransformOp, Unit, Value, parse,
     };
 
+    // The selector AST is now opaque (owned by the `selectors` crate),
+    // so parser tests assert the public surface (rule count + declarations
+    // + selector list length) rather than diving into specific selector
+    // components. Behavioural coverage of combinators / pseudo-classes /
+    // compound selectors lives in `style::tests`, where it can observe the
+    // cascade output the parsing actually drives.
     #[test]
     fn parses_multiple_rules_and_selectors() {
         let stylesheet = parse(
@@ -1695,13 +1669,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(stylesheet.rules.len(), 2);
-        assert_eq!(
-            stylesheet.rules[0].selectors,
-            vec![
-                Selector::simple(SimpleSelector::tag("h1")),
-                Selector::simple(SimpleSelector::class("title")),
-            ]
-        );
+        // First rule: a comma-separated list (`h1, .title`) parses into
+        // two branches inside the `SelectorList`.
+        assert_eq!(stylesheet.rules[0].selectors.list().len(), 2);
         assert_eq!(
             stylesheet.rules[0].declarations[0].value,
             Value::Color(Color {
@@ -1715,46 +1685,29 @@ mod tests {
             stylesheet.rules[0].declarations[1].value,
             Value::Length(24.0, Unit::Px)
         );
-        assert_eq!(
-            stylesheet.rules[1].selectors,
-            vec![Selector::simple(SimpleSelector::id("app"))]
-        );
+        // Second rule: a lone `#app` is a single-branch list.
+        assert_eq!(stylesheet.rules[1].selectors.list().len(), 1);
     }
 
     #[test]
     fn parses_descendant_selector_chain() {
+        // Successful parse + a single comma-branch is the only contract
+        // we still verify at this level — descendant matching itself is
+        // covered in `style::tests::descendant_selector_matches_nested_target`.
         let stylesheet = parse(".outer .inner { color: red; }").unwrap();
-        let selector = &stylesheet.rules[0].selectors[0];
-
-        // Whitespace-separated simple selectors collapse into a single descendant chain
-        // ordered left-to-right (outer ancestor first, target last).
-        assert_eq!(
-            selector.parts,
-            vec![
-                SimpleSelector::class("outer"),
-                SimpleSelector::class("inner"),
-            ]
-        );
+        assert_eq!(stylesheet.rules[0].selectors.list().len(), 1);
     }
 
     #[test]
     fn parses_hover_pseudo_class_attached_to_simple_selector() {
+        // The selectors crate encodes specificity in three bit-packed fields
+        // (ids in the high byte, classes/pseudos in the middle, elements in
+        // the low). `.btn:hover` is one class + one pseudo-class — both
+        // count as "class-like" — so its specificity is two class units.
         let stylesheet = parse(".btn:hover { color: red; }").unwrap();
-        let part = &stylesheet.rules[0].selectors[0].parts[0];
-
-        assert_eq!(part.kind, SimpleSelectorKind::Class("btn".into()));
-        assert_eq!(part.pseudo, Some(PseudoClass::Hover));
-    }
-
-    #[test]
-    fn pseudo_class_carries_through_descendant_chain() {
-        let stylesheet = parse(".outer .item:hover { color: red; }").unwrap();
-        let parts = &stylesheet.rules[0].selectors[0].parts;
-
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].pseudo, None);
-        assert_eq!(parts[1].kind, SimpleSelectorKind::Class("item".into()));
-        assert_eq!(parts[1].pseudo, Some(PseudoClass::Hover));
+        assert_eq!(stylesheet.rules.len(), 1);
+        let class_unit = parse(".x { }").unwrap().rules[0].selectors.specificity();
+        assert_eq!(stylesheet.rules[0].selectors.specificity(), 2 * class_unit);
     }
 
     #[test]
@@ -1767,11 +1720,19 @@ mod tests {
         )
         .unwrap();
 
-        let focus_part = &stylesheet.rules[0].selectors[0].parts[0];
-        let active_part = &stylesheet.rules[1].selectors[0].parts[0];
-
-        assert_eq!(focus_part.pseudo, Some(PseudoClass::Focus));
-        assert_eq!(active_part.pseudo, Some(PseudoClass::Active));
+        assert_eq!(stylesheet.rules.len(), 2);
+        let element_unit = parse("a { }").unwrap().rules[0].selectors.specificity();
+        let class_unit = parse(".x { }").unwrap().rules[0].selectors.specificity();
+        // a:focus = 1 element + 1 pseudo-class.
+        assert_eq!(
+            stylesheet.rules[0].selectors.specificity(),
+            element_unit + class_unit
+        );
+        // .btn:active = 1 class + 1 pseudo-class.
+        assert_eq!(
+            stylesheet.rules[1].selectors.specificity(),
+            2 * class_unit
+        );
     }
 
     #[test]
@@ -1784,75 +1745,49 @@ mod tests {
         )
         .unwrap();
 
-        let link_part = &stylesheet.rules[0].selectors[0].parts[0];
-        let visited_part = &stylesheet.rules[1].selectors[0].parts[0];
-
-        assert_eq!(link_part.pseudo, Some(PseudoClass::Link));
-        assert_eq!(visited_part.pseudo, Some(PseudoClass::Visited));
+        assert_eq!(stylesheet.rules.len(), 2);
+        // Same specificity (tag + pseudo); cascade tie-break is by source order
+        // — that's what the style-layer `link_pseudo_*` tests exercise.
+        let combined = stylesheet.rules[0].selectors.specificity();
+        assert_eq!(stylesheet.rules[1].selectors.specificity(), combined);
+        // Sanity: both selectors carry > 0 specificity.
+        assert!(combined > 0);
     }
 
     #[test]
-    fn unknown_pseudo_class_falls_back_to_no_pseudo() {
+    fn unknown_pseudo_class_drops_the_whole_rule() {
+        // Previously our hand-rolled parser silently turned `:totally-fake`
+        // into "no pseudo" so the rule still applied to bare `.btn`. The
+        // selectors crate is stricter — an unsupported pseudo-class is a
+        // parse error, which our top-level rule iteration tolerates by
+        // dropping the rule. Net result: `.btn:totally-fake` produces zero
+        // matched rules, which is the spec-correct behaviour.
         let stylesheet = parse(".btn:totally-fake { color: red; }").unwrap();
-        let part = &stylesheet.rules[0].selectors[0].parts[0];
-
-        assert_eq!(part.kind, SimpleSelectorKind::Class("btn".into()));
-        assert_eq!(part.pseudo, None);
+        assert_eq!(stylesheet.rules.len(), 0);
     }
 
     #[test]
     fn parses_child_combinator_with_optional_surrounding_whitespace() {
-        let with_spaces = parse(".outer > .inner { color: red; }").unwrap();
-        let no_spaces = parse(".outer>.inner { color: red; }").unwrap();
-
-        let expected_parts = vec![
-            SimpleSelector::class("outer"),
-            SimpleSelector::class("inner"),
-        ];
-        let expected_combinators = vec![Combinator::Child];
-
-        assert_eq!(with_spaces.rules[0].selectors[0].parts, expected_parts);
-        assert_eq!(
-            with_spaces.rules[0].selectors[0].combinators,
-            expected_combinators
-        );
-        assert_eq!(no_spaces.rules[0].selectors[0].parts, expected_parts);
-        assert_eq!(
-            no_spaces.rules[0].selectors[0].combinators,
-            expected_combinators
-        );
+        // Both forms must parse; matching semantics are covered in
+        // `style::tests::child_selector_*`.
+        assert!(parse(".outer > .inner { color: red; }").is_ok());
+        assert!(parse(".outer>.inner { color: red; }").is_ok());
     }
 
     #[test]
     fn parses_mixed_descendant_and_child_combinators() {
         let stylesheet = parse("nav ul > li { display: block; }").unwrap();
-        let selector = &stylesheet.rules[0].selectors[0];
-
-        assert_eq!(
-            selector.parts,
-            vec![
-                SimpleSelector::tag("nav"),
-                SimpleSelector::tag("ul"),
-                SimpleSelector::tag("li"),
-            ]
-        );
-        assert_eq!(
-            selector.combinators,
-            vec![Combinator::Descendant, Combinator::Child]
-        );
+        assert_eq!(stylesheet.rules.len(), 1);
+        assert_eq!(stylesheet.rules[0].selectors.list().len(), 1);
     }
 
     #[test]
     fn descendant_chain_supports_three_levels() {
         let stylesheet = parse("nav ul li { display: block; }").unwrap();
-        assert_eq!(
-            stylesheet.rules[0].selectors[0].parts,
-            vec![
-                SimpleSelector::tag("nav"),
-                SimpleSelector::tag("ul"),
-                SimpleSelector::tag("li"),
-            ]
-        );
+        assert_eq!(stylesheet.rules.len(), 1);
+        // Three tag selectors → 3 element units of specificity.
+        let element_unit = parse("a { }").unwrap().rules[0].selectors.specificity();
+        assert_eq!(stylesheet.rules[0].selectors.specificity(), 3 * element_unit);
     }
 
     #[test]
