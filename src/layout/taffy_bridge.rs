@@ -501,11 +501,15 @@ fn is_supported(node: &StyledNode) -> bool {
         || is_out_of_flow(node)
         || has_float(node)
         || has_clear(node)
-        || has_relative_position(node)
         || has_percent_inset_or_padding(node)
     {
         return false;
     }
+    // 4.3e: `position: relative` with non-percent inset is now safe to route
+    // through taffy (it positions the box statically, then shifts by the
+    // inset — same observable result as the legacy post-pass). Percent inset
+    // still falls back via `has_percent_inset_or_padding` because legacy
+    // resolves both axes against parent width while taffy follows the spec.
     // 4.3d allows nested block subtrees: every child must be skipped
     // (display:none / pure-whitespace) or itself a supported block. The
     // remaining unsupported shapes (inline flow, floats, position, %-resolved
@@ -525,14 +529,6 @@ fn has_clear(node: &StyledNode) -> bool {
         node.value("clear"),
         Some(Value::Keyword(k)) if k == "left" || k == "right" || k == "both"
     )
-}
-
-fn has_relative_position(node: &StyledNode) -> bool {
-    // Old layout resolves `position: relative` percent offsets against
-    // parent_width on BOTH axes; taffy follows the CSS spec (top/bottom %
-    // against parent_height). To avoid behaviour drift, defer to the legacy
-    // path for any positioned element until 4.3e revisits this.
-    matches!(node.value("position"), Some(Value::Keyword(k)) if k == "relative")
 }
 
 fn has_percent_inset_or_padding(node: &StyledNode) -> bool {
@@ -679,6 +675,24 @@ mod tests {
             r#"#root { width: 300px; } p { font-size: 16px; }"#,
         );
         assert!(layout_via_taffy(&styled, 800.0).is_none());
+    }
+
+    #[test]
+    fn taffy_handles_relative_position_with_px_offsets() {
+        // 4.3e: position:relative with non-percent inset now routes through
+        // taffy. taffy positions the box statically and shifts by inset —
+        // same end result as the legacy post-pass.
+        let styled = styled_root(
+            r#"<div id="root"><div class="box"></div></div>"#,
+            r#"
+                #root { width: 200px; }
+                .box { position: relative; left: 30px; top: 12px; height: 10px; }
+            "#,
+        );
+        let legacy = layout_tree(&styled, 800.0);
+        let bridged = layout_via_taffy(&styled, 800.0)
+            .expect("relative + px inset must be supported in 4.3e");
+        assert_eq!(legacy.children[0].dimensions.content, bridged.children[0].dimensions.content);
     }
 
     #[test]
