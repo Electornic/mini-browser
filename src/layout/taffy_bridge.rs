@@ -34,11 +34,15 @@ use crate::style::StyledNode;
 use super::{
     Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, intrinsic_height,
     intrinsic_width, is_display_none, is_layout_whitespace_text, is_out_of_flow,
+    outer_rect, shift_layout_subtree,
 };
+use super::block::layout_node as legacy_block_layout;
 use super::flex::is_flex_container;
 use super::grid::is_grid_container;
 use super::inline::uses_inline_flow;
 use super::table::is_table_container;
+
+use std::cell::RefCell;
 
 pub fn to_taffy_style(node: &StyledNode) -> Style {
     let mut style = Style::DEFAULT;
@@ -380,27 +384,37 @@ fn grid_line_to_taffy(line: GridLine) -> TaffyGridPlacement<String> {
     }
 }
 
-// ---------- 4.3b: end-to-end taffy dispatch (off by default) ----------
+// ---------- Phase 4.3.1+: taffy dispatch with measure-callback boundaries ----------
 //
-// `layout_via_taffy` is the new layout entry under construction. It returns
-// `None` for any subtree shape we can't yet handle natively in taffy, so a
-// caller can transparently fall back to the legacy block path. Each sub-phase
-// (4.3c–e) widens the `is_supported` filter until the legacy path falls out.
+// Strategy: walk the StyledNode tree once and build a parallel taffy tree
+// where every node is either NATIVE (mapped 1:1 to a taffy node via
+// `to_taffy_style`, recursion continues) or a BOUNDARY (taffy leaf with a
+// `NodeBoundary` context). Boundary leaves get sized by the measure callback
+// (`measure_boundary`), which runs the legacy `block::layout_node` at the
+// width taffy passes in. After `compute_layout_with_measure` runs, we walk
+// taffy + StyledNode together — native nodes are reconstituted from the
+// taffy `Layout`, boundary nodes splice in the legacy LayoutBox after
+// shifting it from origin (0, 0) to its final position.
 //
-// 4.3b only handles the simplest case — a single block element with no
-// element children — which is enough to verify the bridge produces the same
-// dimensions as the legacy code end-to-end.
+// What stays a boundary in 4.3.1: inline flow (`uses_inline_flow`), floats /
+// clear, out-of-flow, percent vertical inset/padding, flex / grid / table
+// containers. Each becomes an opaque rectangle from taffy's POV — the
+// legacy code lays out its interior. Subsequent sub-phases (4.3.2+) move
+// flex / grid / table off the boundary path and into native taffy.
+
+struct NodeBoundary {
+    node: StyledNode,
+    cached: RefCell<Option<LayoutBox>>,
+}
 
 pub(super) fn layout_via_taffy(node: &StyledNode, viewport_width: f32) -> Option<LayoutBox> {
-    if !is_supported(node) {
+    if !matches!(node.node_type, NodeType::Element(_)) {
         return None;
     }
-    let mut tree: TaffyTree<()> = TaffyTree::new();
+    let mut tree: TaffyTree<NodeBoundary> = TaffyTree::new();
     let root_id = build_taffy_node(&mut tree, node)?;
-    // Wrap the actual root in a synthetic block container so taffy resolves
-    // the root's `margin: auto` against the viewport (taffy's outermost node
-    // sits at (0, 0) without a parent block context, so auto margins on the
-    // root itself otherwise collapse to 0).
+    // Wrapper for root `margin: auto` resolution against the viewport (taffy
+    // does not auto-center the topmost node it lays out).
     let wrapper_style = Style {
         display: Display::Block,
         size: Size {
@@ -410,91 +424,96 @@ pub(super) fn layout_via_taffy(node: &StyledNode, viewport_width: f32) -> Option
         ..Style::DEFAULT
     };
     let wrapper_id = tree.new_with_children(wrapper_style, &[root_id]).ok()?;
-    tree.compute_layout(
+    tree.compute_layout_with_measure(
         wrapper_id,
         Size {
             width: AvailableSpace::Definite(viewport_width),
             height: AvailableSpace::MaxContent,
         },
+        |_known, avail, _id, ctx, _style| measure_boundary(avail, ctx),
     )
     .ok()?;
-    // The wrapper sits at (0, 0); the real root lives one level inside, so
-    // its border-box origin in viewport coords is `wrapper.location +
-    // root.location`. The wrapper has no padding/border, so this just adds
-    // the root's offset within the wrapper.
-    let root_layout = tree.layout(root_id).ok()?;
-    let wrapper_layout = tree.layout(wrapper_id).ok()?;
-    let root_origin = (
-        wrapper_layout.location.x + root_layout.location.x,
-        wrapper_layout.location.y + root_layout.location.y,
-    );
-    // Recompose the root LayoutBox using its own Layout (NOT the wrapper)
-    // and the absolute origin of its border box.
-    Some(walk_back_root(&tree, root_id, node, root_origin))
+    // wrapper sits at (0, 0) and has zero padding/border, so the root's
+    // border-box origin in viewport coords is just root.location.
+    Some(walk(&tree, root_id, node, (0.0, 0.0)))
 }
 
-fn walk_back_root(
-    tree: &TaffyTree<()>,
-    id: NodeId,
-    node: &StyledNode,
-    abs_border_origin: (f32, f32),
-) -> LayoutBox {
-    // Same as `walk_back`, except the absolute border-box origin is supplied
-    // directly rather than computed from a parent's origin + this node's
-    // location (the wrapper hop already accounted for that).
-    let layout = tree.layout(id).expect("layout was just computed");
-    let abs_border_x = abs_border_origin.0;
-    let abs_border_y = abs_border_origin.1;
-    let content_x = abs_border_x + layout.border.left + layout.padding.left;
-    let content_y = abs_border_y + layout.border.top + layout.padding.top;
-    let content_width = (layout.size.width
-        - layout.border.left
-        - layout.border.right
-        - layout.padding.left
-        - layout.padding.right)
-        .max(0.0);
-    let content_height = (layout.size.height
-        - layout.border.top
-        - layout.border.bottom
-        - layout.padding.top
-        - layout.padding.bottom)
-        .max(0.0);
-
-    let dimensions = Dimensions {
-        content: Rect {
-            x: content_x,
-            y: content_y,
-            width: content_width,
-            height: content_height,
-        },
-        padding: edge_from_taffy(&layout.padding),
-        border: edge_from_taffy(&layout.border),
-        margin: edge_from_taffy(&layout.margin),
+fn measure_boundary(
+    avail: Size<AvailableSpace>,
+    ctx: Option<&mut NodeBoundary>,
+) -> Size<f32> {
+    let Some(boundary) = ctx else {
+        return Size::ZERO;
     };
-
-    let child_ids = tree.children(id).unwrap_or_default();
-    let mut child_layouts = Vec::with_capacity(child_ids.len());
-    let next_origin = (abs_border_x, abs_border_y);
-    let mut taffy_iter = child_ids.into_iter();
-    for child in &node.children {
-        if is_display_none(child) || is_layout_whitespace_text(child) {
-            continue;
-        }
-        let child_id = match taffy_iter.next() {
-            Some(id) => id,
-            None => break,
-        };
-        child_layouts.push(walk_back(tree, child_id, child, next_origin));
-    }
-
-    LayoutBox {
-        box_type: container_box_type(node),
-        dimensions,
-        children: child_layouts,
+    let parent_width = match avail.width {
+        AvailableSpace::Definite(w) => w,
+        // Boundary leaves only see MaxContent / MinContent inside flex / grid
+        // intrinsic-size probes, which the boundary path does not yet drive
+        // (containers themselves still become boundaries in 4.3.1). Pick a
+        // big-but-finite proxy for max-content and 0 for min-content so the
+        // legacy block algorithm produces sensible widths in both extremes.
+        AvailableSpace::MaxContent => 1.0e6,
+        AvailableSpace::MinContent => 0.0,
+    };
+    let mut cursor_y = 0.0;
+    let lb = legacy_block_layout(&boundary.node, 0.0, &mut cursor_y, parent_width);
+    let outer = outer_rect(&lb);
+    let margin_w = lb.dimensions.margin.left + lb.dimensions.margin.right;
+    let margin_h = lb.dimensions.margin.top + lb.dimensions.margin.bottom;
+    *boundary.cached.borrow_mut() = Some(lb);
+    // Return the BORDER-box size; taffy applies the leaf's own margin (set in
+    // `boundary_taffy_style`) on top so block-flow margin collapse with native
+    // siblings still works.
+    Size {
+        width: (outer.width - margin_w).max(0.0),
+        height: (outer.height - margin_h).max(0.0),
     }
 }
 
-fn is_supported(node: &StyledNode) -> bool {
+fn build_taffy_node(
+    tree: &mut TaffyTree<NodeBoundary>,
+    node: &StyledNode,
+) -> Option<NodeId> {
+    if is_native_block(node) {
+        let style = to_taffy_style(node);
+        let mut children = Vec::new();
+        for child in &node.children {
+            if is_display_none(child) || is_layout_whitespace_text(child) {
+                continue;
+            }
+            children.push(build_taffy_node(tree, child)?);
+        }
+        tree.new_with_children(style, &children).ok()
+    } else {
+        let style = boundary_taffy_style(node);
+        tree.new_leaf_with_context(
+            style,
+            NodeBoundary {
+                node: node.clone(),
+                cached: RefCell::new(None),
+            },
+        )
+        .ok()
+    }
+}
+
+fn boundary_taffy_style(node: &StyledNode) -> Style {
+    // Boundary leaves participate in the parent's block flow but expose no
+    // internal structure to taffy — `size: auto` lets the measure callback
+    // determine the BORDER-box dimensions. The node's margin is preserved so
+    // taffy's block algorithm can still collapse it against native sibling
+    // margins; padding/border live inside the cached LayoutBox and must NOT
+    // be forwarded to taffy or they would be double-counted.
+    let mut style = Style::DEFAULT;
+    style.display = Display::Block;
+    style.margin = edge_lpa(node, "margin");
+    style
+}
+
+fn is_native_block(node: &StyledNode) -> bool {
+    // Self-checks: features that disqualify THIS node from being a native
+    // taffy block container (we'd lay it out via legacy as a single boundary
+    // leaf instead).
     if !matches!(node.node_type, NodeType::Element(_)) {
         return false;
     }
@@ -509,19 +528,17 @@ fn is_supported(node: &StyledNode) -> bool {
     {
         return false;
     }
-    // 4.3e: `position: relative` with non-percent inset is now safe to route
-    // through taffy (it positions the box statically, then shifts by the
-    // inset — same observable result as the legacy post-pass). Percent inset
-    // still falls back via `has_percent_inset_or_padding` because legacy
-    // resolves both axes against parent width while taffy follows the spec.
-    // 4.3d allows nested block subtrees: every child must be skipped
-    // (display:none / pure-whitespace) or itself a supported block. The
-    // remaining unsupported shapes (inline flow, floats, position, %-resolved
-    // padding/inset) all bail to the legacy path for the whole subtree —
-    // 4.3e wires inline/flex/grid/table.
-    node.children
+    // Child-level check: taffy's block algorithm doesn't honor CSS floats /
+    // clear or treat absolute/fixed children as out of flow. If any of our
+    // children carry those, we must drop down to a boundary leaf so the
+    // legacy code can apply the right semantics for the entire subtree.
+    // Inline-flow / flex / grid / table CHILDREN are fine — they each become
+    // their own boundary leaf, and taffy stacks those opaque rectangles in
+    // a perfectly ordinary block flow on our behalf.
+    !node
+        .children
         .iter()
-        .all(|c| is_display_none(c) || is_layout_whitespace_text(c) || is_supported(c))
+        .any(|c| has_float(c) || has_clear(c) || is_out_of_flow(c))
 }
 
 fn has_float(node: &StyledNode) -> bool {
@@ -539,29 +556,17 @@ fn has_percent_inset_or_padding(node: &StyledNode) -> bool {
     let percent = |key: &str| {
         matches!(node.value(key), Some(Value::Length(_, Unit::Percent)))
     };
-    // Old layout's quirk for vertical padding/inset percentages (using
-    // parent_width as the base) doesn't survive the trip through taffy on
-    // top/bottom — punt to legacy when these are in play.
+    // Legacy resolves percent vertical padding/inset against parent_width;
+    // taffy follows the spec. Stay on legacy by treating any such node as a
+    // boundary leaf so the quirk is preserved.
     percent("padding-top")
         || percent("padding-bottom")
         || percent("top")
         || percent("bottom")
 }
 
-fn build_taffy_node(tree: &mut TaffyTree<()>, node: &StyledNode) -> Option<NodeId> {
-    let style = to_taffy_style(node);
-    let mut children = Vec::new();
-    for child in &node.children {
-        if is_display_none(child) || is_layout_whitespace_text(child) {
-            continue;
-        }
-        children.push(build_taffy_node(tree, child)?);
-    }
-    tree.new_with_children(style, &children).ok()
-}
-
-fn walk_back(
-    tree: &TaffyTree<()>,
+fn walk(
+    tree: &TaffyTree<NodeBoundary>,
     id: NodeId,
     node: &StyledNode,
     parent_border_origin: (f32, f32),
@@ -569,55 +574,77 @@ fn walk_back(
     let layout = tree.layout(id).expect("layout was just computed");
     let abs_border_x = parent_border_origin.0 + layout.location.x;
     let abs_border_y = parent_border_origin.1 + layout.location.y;
-    let content_x = abs_border_x + layout.border.left + layout.padding.left;
-    let content_y = abs_border_y + layout.border.top + layout.padding.top;
-    let content_width = (layout.size.width
-        - layout.border.left
-        - layout.border.right
-        - layout.padding.left
-        - layout.padding.right)
-        .max(0.0);
-    let content_height = (layout.size.height
-        - layout.border.top
-        - layout.border.bottom
-        - layout.padding.top
-        - layout.padding.bottom)
-        .max(0.0);
 
-    let dimensions = Dimensions {
-        content: Rect {
-            x: content_x,
-            y: content_y,
-            width: content_width,
-            height: content_height,
-        },
-        padding: edge_from_taffy(&layout.padding),
-        border: edge_from_taffy(&layout.border),
-        margin: edge_from_taffy(&layout.margin),
-    };
+    if is_native_block(node) {
+        let content_x = abs_border_x + layout.border.left + layout.padding.left;
+        let content_y = abs_border_y + layout.border.top + layout.padding.top;
+        let content_width = (layout.size.width
+            - layout.border.left
+            - layout.border.right
+            - layout.padding.left
+            - layout.padding.right)
+            .max(0.0);
+        let content_height = (layout.size.height
+            - layout.border.top
+            - layout.border.bottom
+            - layout.padding.top
+            - layout.padding.bottom)
+            .max(0.0);
 
-    // Recurse into children. The taffy child order matches the order we built
-    // them in `build_taffy_node`, which mirrors `node.children` minus skipped
-    // (display:none / whitespace) ones — keep them aligned here.
-    let child_ids = tree.children(id).unwrap_or_default();
-    let mut child_layouts = Vec::with_capacity(child_ids.len());
-    let next_origin = (abs_border_x, abs_border_y);
-    let mut taffy_iter = child_ids.into_iter();
-    for child in &node.children {
-        if is_display_none(child) || is_layout_whitespace_text(child) {
-            continue;
-        }
-        let child_id = match taffy_iter.next() {
-            Some(id) => id,
-            None => break,
+        let dimensions = Dimensions {
+            content: Rect {
+                x: content_x,
+                y: content_y,
+                width: content_width,
+                height: content_height,
+            },
+            padding: edge_from_taffy(&layout.padding),
+            border: edge_from_taffy(&layout.border),
+            margin: edge_from_taffy(&layout.margin),
         };
-        child_layouts.push(walk_back(tree, child_id, child, next_origin));
-    }
 
-    LayoutBox {
-        box_type: container_box_type(node),
-        dimensions,
-        children: child_layouts,
+        let child_ids = tree.children(id).unwrap_or_default();
+        let mut child_layouts = Vec::with_capacity(child_ids.len());
+        let next_origin = (abs_border_x, abs_border_y);
+        let mut taffy_iter = child_ids.into_iter();
+        for child in &node.children {
+            if is_display_none(child) || is_layout_whitespace_text(child) {
+                continue;
+            }
+            let child_id = match taffy_iter.next() {
+                Some(id) => id,
+                None => break,
+            };
+            child_layouts.push(walk(tree, child_id, child, next_origin));
+        }
+
+        LayoutBox {
+            box_type: container_box_type(node),
+            dimensions,
+            children: child_layouts,
+        }
+    } else {
+        // Boundary leaf: the cached LayoutBox sits at outer (0, 0). Shift its
+        // outer-left to (abs_border_x - margin.left), outer-top similarly,
+        // so the border-box lands exactly where taffy positioned the leaf.
+        let abs_outer_x = abs_border_x - layout.margin.left;
+        let abs_outer_y = abs_border_y - layout.margin.top;
+        let ctx = tree
+            .get_node_context(id)
+            .expect("boundary leaves carry a NodeBoundary context");
+        let mut cached = ctx
+            .cached
+            .borrow_mut()
+            .take()
+            .unwrap_or_else(|| {
+                // Defensive: if the measure callback never fired (taffy may
+                // skip when known dimensions are already definite), run
+                // legacy here using taffy's resolved leaf size as the width.
+                let mut cursor_y = 0.0;
+                legacy_block_layout(&ctx.node, 0.0, &mut cursor_y, layout.size.width)
+            });
+        shift_layout_subtree(&mut cached, abs_outer_x, abs_outer_y);
+        cached
     }
 }
 
@@ -671,14 +698,20 @@ mod tests {
     }
 
     #[test]
-    fn taffy_rejects_inline_flow_subtree() {
-        // Block element with text children — inline flow is the legacy
-        // path's job until 4.3e wires a measure callback for it.
+    fn taffy_routes_inline_flow_subtree_through_boundary() {
+        // 4.3.1: a block parent with an inline-flow `<p>` child stays native
+        // at the parent level; the `<p>` becomes a boundary leaf measured by
+        // the legacy block algorithm. The bridged output must match legacy.
         let styled = styled_root(
             r#"<div id="root"><p>One</p></div>"#,
             r#"#root { width: 300px; } p { font-size: 16px; }"#,
         );
-        assert!(layout_via_taffy(&styled, 800.0).is_none());
+        let legacy = layout_tree(&styled, 800.0);
+        let bridged = layout_via_taffy(&styled, 800.0)
+            .expect("element root always routes through taffy after 4.3.1");
+        assert_eq!(legacy.dimensions.content, bridged.dimensions.content);
+        assert_eq!(legacy.children.len(), bridged.children.len());
+        assert_eq!(legacy.children[0].dimensions.content, bridged.children[0].dimensions.content);
     }
 
     #[test]
