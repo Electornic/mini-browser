@@ -61,10 +61,7 @@ pub enum ChromeAction {
     Menu,
 }
 
-pub fn chrome_commands(
-    chrome: ChromeState<'_>,
-    fonts: &[fontdue::Font],
-) -> Vec<render::DisplayCommand> {
+pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
     // Chrome rendering is intentionally separate from page rendering so scrolling never moves it.
     let width = chrome.viewport_width as f32;
     let input_empty = chrome.address_input.is_empty();
@@ -229,7 +226,7 @@ pub fn chrome_commands(
     ));
 
     if chrome.address_bar_selected {
-        let measured = render::measure_text_width(&address_display, ADDRESS_FONT_SIZE, fonts);
+        let measured = render::measure_text_width(&address_display, ADDRESS_FONT_SIZE);
         commands.push(render::DisplayCommand::SolidRect(
             css::Color {
                 r: 214,
@@ -254,13 +251,13 @@ pub fn chrome_commands(
         }));
     } else if chrome.show_caret {
         // Caret position is measured from the *actual input* (empty when only the
-        // placeholder is showing), and uses fontdue's advance widths so it lines
-        // up with where draw_text actually ends — a fixed average glyph width
-        // would always drift on proportional fonts.
+        // placeholder is showing), and uses cosmic-text's shaped advance so it
+        // lines up with where `draw_text` actually ends — a fixed average glyph
+        // width would always drift on proportional fonts.
         let caret_offset = if input_empty {
             0.0
         } else {
-            render::measure_text_width(&address_display, ADDRESS_FONT_SIZE, fonts)
+            render::measure_text_width(&address_display, ADDRESS_FONT_SIZE)
         };
         commands.push(render::DisplayCommand::SolidRect(
             css::Color::BLACK,

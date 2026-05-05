@@ -480,11 +480,10 @@ fn inline_content_height(node: &StyledNode, parent_width: f32) -> f32 {
 }
 
 fn inline_text_line_count(node: &StyledNode, text: &str, wrap_width: f32) -> u32 {
-    let fonts = super::current_fonts();
-    if fonts.is_empty() {
+    if crate::state::shared_font_system().is_none() {
         return 1;
     }
-    crate::render::measure_text_wrap(text, inline_font_size(node), Some(wrap_width), fonts).1
+    crate::render::measure_text_wrap(text, inline_font_size(node), Some(wrap_width)).1
 }
 
 fn inline_font_size(node: &StyledNode) -> f32 {
@@ -512,16 +511,16 @@ fn inline_char_width(node: &StyledNode) -> f32 {
     inline_font_size(node) * 0.75
 }
 
-// Measure the rendered width of `text` at `node`'s font size, preferring
-// real fontdue advance widths when the layout pass has fonts installed
-// and falling back to the legacy character-count × `font_size * 0.75`
-// estimate otherwise. The fallback path keeps every layout test that
-// calls bare `layout_tree` (no fonts) producing the same widths it did
-// before fontdue plumbing landed.
+// Measure the rendered width of `text` at `node`'s font size. When the
+// shared cosmic-text FontSystem is installed (the binary at runtime) we
+// route through `render::measure_text_width` for shaped advances; the
+// uninstalled branch (every unit test that does not call
+// `state::install_fonts`) falls back to the legacy character-count ×
+// `font_size * 0.75` estimate so layout assertions stay deterministic
+// without touching the host's font set.
 fn measure_inline_text(node: &StyledNode, text: &str) -> f32 {
-    let fonts = super::current_fonts();
-    if fonts.is_empty() {
+    if crate::state::shared_font_system().is_none() {
         return text.chars().count() as f32 * inline_char_width(node);
     }
-    crate::render::measure_text_width(text, inline_font_size(node), fonts)
+    crate::render::measure_text_width(text, inline_font_size(node))
 }

@@ -296,7 +296,6 @@ impl BrowserState {
         viewport_width: usize,
         viewport_height: usize,
         input: &window::WindowInput,
-        fonts: &[fontdue::Font],
     ) -> Vec<render::DisplayCommand> {
         // The browser re-builds its visible scene every frame from current state + fresh input.
         self.frame_index = self.frame_index.wrapping_add(1);
@@ -317,7 +316,7 @@ impl BrowserState {
         // mouse-still page hits the view cache every frame, while a
         // press/release cycle naturally produces two cache misses.
         let active = input.left_mouse_held && self.hovered_dom_path.is_some();
-        let document_view = self.build_or_reuse_view(viewport_width, active, fonts);
+        let document_view = self.build_or_reuse_view(viewport_width, active);
 
         // Compute the deepest layout-box hit once: `path` feeds the next
         // frame's :hover/:focus styling, `node_id` feeds the click dispatch
@@ -465,27 +464,23 @@ impl BrowserState {
                 &document_view.layout_root,
                 focused_node_id,
                 self.frame_index,
-                fonts,
             ),
             0.0,
             CHROME_HEIGHT - self.scroll_offset,
         ));
-        commands.extend(chrome_commands(
-            ChromeState {
-                viewport_width,
-                address_input: &self.address_input,
-                status_text: &self.status_text,
-                status_color: self.status_color,
-                address_bar_focused: self.address_bar_focused,
-                address_bar_selected: self.address_bar_selected,
-                show_caret: self.show_caret(),
-                can_go_back: self.can_go_back(),
-                can_go_forward: self.can_go_forward(),
-                hovered_action,
-                tab_title,
-            },
-            fonts,
-        ));
+        commands.extend(chrome_commands(ChromeState {
+            viewport_width,
+            address_input: &self.address_input,
+            status_text: &self.status_text,
+            status_color: self.status_color,
+            address_bar_focused: self.address_bar_focused,
+            address_bar_selected: self.address_bar_selected,
+            show_caret: self.show_caret(),
+            can_go_back: self.can_go_back(),
+            can_go_forward: self.can_go_forward(),
+            hovered_action,
+            tab_title,
+        }));
         commands
     }
 
@@ -514,12 +509,7 @@ impl BrowserState {
     //
     // Render failures don't get cached — we want the next frame to retry
     // a fresh build (the failure may have been transient).
-    fn build_or_reuse_view(
-        &mut self,
-        viewport_width: usize,
-        active: bool,
-        fonts: &[fontdue::Font],
-    ) -> DocumentView {
+    fn build_or_reuse_view(&mut self, viewport_width: usize, active: bool) -> DocumentView {
         let revision = self.parsed_document.borrow().revision();
         if let Some(cached) = self.cached_view.as_ref()
             && cached.revision == revision
@@ -554,7 +544,6 @@ impl BrowserState {
                 self.current_url.as_ref(),
                 &self.images,
                 interaction,
-                fonts,
             )
         };
         match layout_result {
@@ -1580,31 +1569,14 @@ pub fn load_initial_state() -> BrowserState {
     }
 }
 
-pub fn build_font_cache(font_data: &[Vec<u8>]) -> Vec<fontdue::Font> {
-    let mut fonts: Vec<fontdue::Font> = font_data
-        .iter()
-        .filter_map(|data| {
-            fontdue::Font::from_bytes(data.as_slice(), fontdue::FontSettings::default()).ok()
-        })
-        .collect();
-
-    // Fall back to a macOS system font so pages without web fonts can still render Korean/CJK.
+// Loads `font_data` (web fonts the page declared) plus a macOS system font
+// fallback into the shared cosmic-text `FontSystem` and rebuilds its swash
+// glyph cache. `main` calls this at startup and again whenever navigation
+// brings in new fonts; downstream measure / paint paths read the shared
+// slots directly so no font handle has to be threaded through.
+pub fn install_fonts(font_data: &[Vec<u8>]) {
     let macos_fallback = std::fs::read("/System/Library/Fonts/AppleSDGothicNeo.ttc").ok();
-    if let Some(bytes) = macos_fallback.as_ref()
-        && let Ok(font) = fontdue::Font::from_bytes(
-            bytes.as_slice(),
-            fontdue::FontSettings {
-                collection_index: 0,
-                ..fontdue::FontSettings::default()
-            },
-        )
-    {
-        fonts.push(font);
-    }
-
     install_shared_font_system(font_data, macos_fallback.as_deref());
-
-    fonts
 }
 
 // Shaped-text engine + glyph image cache shared across the layout / chrome /
@@ -1867,7 +1839,7 @@ mod tests {
         let mut state = make_state("<div>hi</div>");
         assert!(state.cached_view.is_none());
         let input = window::WindowInput::default();
-        let _ = state.display_list(800, 600, &input, &[]);
+        let _ = state.display_list(800, 600, &input);
         assert!(state.cached_view.is_some());
     }
 
@@ -1881,13 +1853,13 @@ mod tests {
         // wasn't dropped between frames by checking is_some both times.)
         let mut state = make_state("<div>hi</div>");
         let input = window::WindowInput::default();
-        let _ = state.display_list(800, 600, &input, &[]);
+        let _ = state.display_list(800, 600, &input);
         let rev_after_first = state
             .cached_view
             .as_ref()
             .map(|c| c.revision)
             .expect("first frame must populate the cache");
-        let _ = state.display_list(800, 600, &input, &[]);
+        let _ = state.display_list(800, 600, &input);
         let rev_after_second = state
             .cached_view
             .as_ref()
@@ -1906,10 +1878,10 @@ mod tests {
         // paint.
         let mut state = make_state("<div>hi</div>");
         let input = window::WindowInput::default();
-        let _ = state.display_list(800, 600, &input, &[]);
+        let _ = state.display_list(800, 600, &input);
         let rev_first = state.cached_view.as_ref().unwrap().revision;
         state.parsed_document.borrow_mut().touch();
-        let _ = state.display_list(800, 600, &input, &[]);
+        let _ = state.display_list(800, 600, &input);
         let rev_second = state.cached_view.as_ref().unwrap().revision;
         assert!(rev_second > rev_first);
     }
@@ -1924,7 +1896,7 @@ mod tests {
         // base URL, and stylesheet rather than serving the prior page.
         let mut state = make_state("<div>old</div>");
         let input = window::WindowInput::default();
-        let _ = state.display_list(800, 600, &input, &[]);
+        let _ = state.display_list(800, 600, &input);
         assert!(state.cached_view.is_some());
         state.install_document(
             "<p>new</p>".to_string(),

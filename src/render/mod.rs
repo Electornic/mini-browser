@@ -13,7 +13,7 @@ mod display_list;
 mod raster;
 
 pub use display_list::{PaintContext, build_display_list, transform_for, translate};
-pub use raster::{invalidate_glyph_cache, measure_text_width, measure_text_wrap, rasterize};
+pub use raster::{measure_text_width, measure_text_wrap, rasterize};
 
 /// 2-D affine transform stored as the six matrix entries of
 /// ```text
@@ -534,7 +534,6 @@ mod tests {
             )],
             4,
             4,
-            &[],
         );
 
         assert_eq!(pixels[5], 0xFF0000);
@@ -628,7 +627,6 @@ mod tests {
             })],
             2,
             2,
-            &[],
         );
 
         assert_eq!(pixels, vec![0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF]);
@@ -781,7 +779,7 @@ mod tests {
             a: 255,
         };
 
-        let solid = rasterize(&[DisplayCommand::SolidRect(color, rect)], 4, 4, &[]);
+        let solid = rasterize(&[DisplayCommand::SolidRect(color, rect)], 4, 4);
         let rounded = rasterize(
             &[DisplayCommand::RoundedRect(
                 color,
@@ -790,7 +788,6 @@ mod tests {
             )],
             4,
             4,
-            &[],
         );
 
         assert_eq!(solid, rounded);
@@ -816,7 +813,6 @@ mod tests {
             )],
             4,
             4,
-            &[],
         );
 
         // All four corner pixels lie outside the inscribed circle and stay white.
@@ -855,7 +851,6 @@ mod tests {
             )],
             4,
             4,
-            &[],
         );
 
         // Only the top-left corner is rounded; the other three corners stay sharp.
@@ -1268,7 +1263,7 @@ mod tests {
                 }
             "#,
         );
-        let pixels = render::rasterize(&commands, 1, 4, &[]);
+        let pixels = render::rasterize(&commands, 1, 4);
 
         let top_r = (pixels[0] >> 16) & 0xFF;
         let top_b = pixels[0] & 0xFF;
@@ -1300,7 +1295,7 @@ mod tests {
                 }
             "#,
         );
-        let pixels = render::rasterize(&commands, 4, 1, &[]);
+        let pixels = render::rasterize(&commands, 4, 1);
 
         let left_r = (pixels[0] >> 16) & 0xFF;
         let left_b = pixels[0] & 0xFF;
@@ -1330,7 +1325,7 @@ mod tests {
                 }
             "#,
         );
-        let pixels = render::rasterize(&commands, 4, 1, &[]);
+        let pixels = render::rasterize(&commands, 4, 1);
 
         // Pixel index 1 sits at progress = 1.5/4 = 0.375 ≥ 0.25 → fully blue.
         assert_eq!(pixels[1], 0x000000FF);
@@ -1418,7 +1413,7 @@ mod tests {
                 }
             "#,
         );
-        let pixels = render::rasterize(&commands, 4, 4, &[]);
+        let pixels = render::rasterize(&commands, 4, 4);
 
         // (3, 3): inside the shadow, fully red.
         assert_eq!(pixels[3 * 4 + 3], 0x00FF0000);
@@ -1444,7 +1439,7 @@ mod tests {
             "#,
         );
         // 12×12 buffer leaves at least a 4px margin on every side of the box.
-        let pixels = render::rasterize(&commands, 12, 12, &[]);
+        let pixels = render::rasterize(&commands, 12, 12);
 
         // (5, 2): 1.5px past the right edge → coverage 1 - 1.5/4 = 0.625,
         // pixel reads roughly mid-gray.
@@ -1480,7 +1475,7 @@ mod tests {
                 }
             "#,
         );
-        let pixels = render::rasterize(&commands, 5, 5, &[]);
+        let pixels = render::rasterize(&commands, 5, 5);
 
         let center = pixels[2 * 5 + 2];
         let center_r = (center >> 16) & 0xFF;
@@ -1529,7 +1524,6 @@ mod tests {
             )],
             1,
             1,
-            &[],
         );
 
         // Expected: r ≈ 255, g and b ≈ 127. Single u32 = 0xFF7F7F.
@@ -1718,7 +1712,7 @@ mod tests {
         );
         // Larger canvas so the rotated quad (which now extends to ~10px
         // tall and ~4px wide centred on (5, 2)) lands cleanly in-frame.
-        let pixels = render::rasterize(&commands, 16, 16, &[]);
+        let pixels = render::rasterize(&commands, 16, 16);
         // Logical centre is (5, 2); rotation around that point keeps the
         // centre pixel painted. We pick (5, 2) on the screen and assert
         // it's red.

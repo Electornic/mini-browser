@@ -6,8 +6,6 @@
 // types, `layout_tree` (the public entry) and the cross-cutting helpers every
 // algorithm needs (containing-block math, edge sizes, intrinsic sizes, …).
 
-use std::cell::Cell;
-
 use crate::{
     css::{Unit, Value},
     dom::{ElementData, NodeType},
@@ -20,55 +18,6 @@ mod grid;
 mod inline;
 mod table;
 mod taffy_bridge;
-
-// The fontdue font slice currently in use for the running layout pass.
-// `layout_tree_with_fonts` writes this for the duration of one call so
-// inline-measurement helpers (deep inside the layout call tree) can
-// reach the real font metrics without every layout function growing a
-// `&[fontdue::Font]` parameter. The slot is null between layout passes
-// (the bare `layout_tree` wrapper restores it before returning), so any
-// caller — including tests — that bypasses `_with_fonts` observes an
-// empty slice and falls back to the legacy `font_size * 0.75` estimate.
-thread_local! {
-    static LAYOUT_FONTS_PTR: Cell<*const [fontdue::Font]> = const {
-        Cell::new(std::ptr::null::<[fontdue::Font; 0]>() as *const [fontdue::Font])
-    };
-}
-
-// Scope guard that restores the previous fonts pointer when dropped, so
-// a panic inside a layout call doesn't leak a dangling pointer to the
-// next layout pass (or the next test in the same thread).
-struct LayoutFontsGuard {
-    previous: *const [fontdue::Font],
-}
-
-impl Drop for LayoutFontsGuard {
-    fn drop(&mut self) {
-        LAYOUT_FONTS_PTR.with(|cell| cell.set(self.previous));
-    }
-}
-
-/// Read the layout pass's currently-installed fontdue font slice. Returns
-/// an empty slice when no `_with_fonts` call is active. Sibling layout
-/// modules (`inline`, etc.) call this to get real font metrics for text
-/// width measurement.
-pub(super) fn current_fonts() -> &'static [fontdue::Font] {
-    LAYOUT_FONTS_PTR.with(|cell| {
-        let ptr = cell.get();
-        if ptr.is_null() {
-            &[]
-        } else {
-            // SAFETY: the pointer is only ever set by
-            // `layout_tree_with_fonts` to a borrow that outlives the
-            // entire layout pass, and the guard clears it on return /
-            // panic. Layout helpers only iterate the slice for the
-            // duration of a single call — never store the reference —
-            // so the lifetime extension to 'static is sound in
-            // practice even though it is a compile-time fiction.
-            unsafe { &*ptr }
-        }
-    })
-}
 
 use block::layout_node;
 use flex::is_flex_container;
@@ -134,17 +83,6 @@ pub enum BoxType {
 }
 
 pub fn layout_tree(root: &StyledNode, viewport_width: f32) -> LayoutBox {
-    layout_tree_with_fonts(root, viewport_width, &[])
-}
-
-pub fn layout_tree_with_fonts(
-    root: &StyledNode,
-    viewport_width: f32,
-    fonts: &[fontdue::Font],
-) -> LayoutBox {
-    let previous =
-        LAYOUT_FONTS_PTR.with(|cell| cell.replace(fonts as *const [fontdue::Font]));
-    let _guard = LayoutFontsGuard { previous };
     // Element roots route through taffy (the bridge's measure-callback
     // boundary handles every shape taffy itself doesn't understand). Only
     // a non-element root (e.g. a stand-alone text node — never produced by

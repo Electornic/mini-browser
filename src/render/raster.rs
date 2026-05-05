@@ -15,27 +15,17 @@ use super::{
     ShadowCommand, TextCommand,
 };
 
-// Glyph image caching is now owned by `cosmic_text::SwashCache`, which keys
-// rasterised images on a `CacheKey` that already encodes (font id, glyph id,
-// size, subpixel position). The cache lives as a `OnceLock<Mutex<SwashCache>>`
-// in `state` and is rebuilt whenever the FontSystem swaps after navigation,
-// so this stub stays around purely so `main.rs`'s explicit invalidation marker
-// does not have to be plumbed through a removed API.
-pub fn invalidate_glyph_cache() {}
-
 // Measures the rendered width of `text` at `font_size`. Callers use this to
 // position UI elements that need to align with the *end* of a rendered string
 // (caret, link underlines, line packing) without a fixed average glyph width
 // — which is always wrong for proportional fonts.
 //
-// Phase 4.4a: when the shared cosmic-text `FontSystem` is initialised, we route
-// through a Buffer so the result reflects real shaping (kerning, ligatures,
-// font fallback). The legacy fontdue per-char advance path is kept as a
-// fallback for the brief window before `build_font_cache` has run, and the
-// empty-`fonts`-slice path keeps unit tests deterministic without loading any
-// real font.
-pub fn measure_text_width(text: &str, font_size: f32, fonts: &[fontdue::Font]) -> f32 {
-    measure_text_wrap(text, font_size, None, fonts).0
+// When the shared cosmic-text `FontSystem` is installed, the result reflects
+// real shaping (kerning, ligatures, font fallback). Tests that never call
+// `state::install_fonts` see the deterministic toy estimate so layout
+// assertions don't depend on the host's font set.
+pub fn measure_text_width(text: &str, font_size: f32) -> f32 {
+    measure_text_wrap(text, font_size, None).0
 }
 
 // Measures `text` shaped by cosmic-text, breaking the run at `wrap_width`
@@ -44,31 +34,19 @@ pub fn measure_text_width(text: &str, font_size: f32, fonts: &[fontdue::Font]) -
 // inline layout uses both: max_line_width for line packing, line_count for
 // the vertical space the wrapped paragraph reserves.
 //
-// The empty-`fonts`-slice path keeps unit tests deterministic: no cosmic-text
-// is consulted, the toy `font_size * 0.75` per-char estimate runs, and the
-// caller always sees a single line. Real pages always pass a non-empty fonts
-// slice (the binary primes both fontdue and the shared cosmic-text
-// FontSystem in `build_font_cache`).
-pub fn measure_text_wrap(
-    text: &str,
-    font_size: f32,
-    wrap_width: Option<f32>,
-    fonts: &[fontdue::Font],
-) -> (f32, u32) {
-    if fonts.is_empty() {
-        let scale = (font_size / 8.0).max(1.0).round();
-        let width: f32 = text
-            .chars()
-            .map(|ch| if ch == ' ' { 4.0 * scale } else { 6.0 * scale })
-            .sum();
-        return (width, 1);
-    }
-
+// When no `FontSystem` is installed (every unit test that does not call
+// `state::install_fonts`), the toy `font_size * 0.75` per-char estimate
+// runs and the caller always sees a single line.
+pub fn measure_text_wrap(text: &str, font_size: f32, wrap_width: Option<f32>) -> (f32, u32) {
     if let Some(metrics) = measure_with_cosmic(text, font_size, wrap_width) {
         return metrics;
     }
-
-    (measure_with_fontdue(text, font_size, fonts), 1)
+    let scale = (font_size / 8.0).max(1.0).round();
+    let width: f32 = text
+        .chars()
+        .map(|ch| if ch == ' ' { 4.0 * scale } else { 6.0 * scale })
+        .sum();
+    (width, 1)
 }
 
 fn measure_with_cosmic(
@@ -105,38 +83,11 @@ fn measure_with_cosmic(
     Some((width, lines.max(1)))
 }
 
-fn measure_with_fontdue(text: &str, font_size: f32, fonts: &[fontdue::Font]) -> f32 {
-    let size = font_size.max(8.0);
-    let mut width = 0.0_f32;
-    for ch in text.chars() {
-        let font_match = fonts
-            .iter()
-            .find(|f| f.lookup_glyph_index(ch) != 0 || ch == ' ');
-        match font_match {
-            Some(font) => {
-                // `font.metrics(ch, size)` returns advance + bounding box
-                // *without* rasterising the glyph bitmap; using `rasterize`
-                // here was making the per-frame cost scale with page text
-                // length on HN-sized pages.
-                let metrics = font.metrics(ch, size);
-                width += metrics.advance_width;
-            }
-            None => width += font_size * 0.75,
-        }
-    }
-    width
-}
-
-pub fn rasterize(
-    commands: &[DisplayCommand],
-    width: usize,
-    height: usize,
-    fonts: &[fontdue::Font],
-) -> Vec<u32> {
+pub fn rasterize(commands: &[DisplayCommand], width: usize, height: usize) -> Vec<u32> {
     let mut buffer = vec![rgb_u32(Color::WHITE); width * height];
 
     for command in commands {
-        rasterize_command(&mut buffer, width, height, command, fonts);
+        rasterize_command(&mut buffer, width, height, command);
     }
 
     buffer
@@ -147,19 +98,18 @@ fn rasterize_command(
     width: usize,
     height: usize,
     command: &DisplayCommand,
-    fonts: &[fontdue::Font],
 ) {
     match command {
         DisplayCommand::SolidRect(color, rect) => fill_rect(buffer, width, height, *color, *rect),
         DisplayCommand::RoundedRect(color, rect, radii) => {
             fill_rounded_rect(buffer, width, height, *color, *rect, *radii)
         }
-        DisplayCommand::Text(text) => draw_text(buffer, width, height, text, fonts),
+        DisplayCommand::Text(text) => draw_text(buffer, width, height, text),
         DisplayCommand::Image(image) => draw_image(buffer, width, height, image),
         DisplayCommand::Gradient(gradient) => fill_gradient(buffer, width, height, gradient),
         DisplayCommand::BoxShadow(shadow) => fill_box_shadow(buffer, width, height, shadow),
         DisplayCommand::TransformGroup(transform, inner) => {
-            rasterize_through_transform(buffer, width, height, *transform, inner, fonts);
+            rasterize_through_transform(buffer, width, height, *transform, inner);
         }
     }
 }
@@ -170,7 +120,6 @@ fn rasterize_through_transform(
     height: usize,
     transform: Affine,
     commands: &[DisplayCommand],
-    fonts: &[fontdue::Font],
 ) {
     // Slow path: each inner primitive's logical bounds are mapped to a
     // screen-space bounding box through `transform`; every pixel in that
@@ -281,7 +230,7 @@ fn rasterize_through_transform(
                 );
             }
             DisplayCommand::Text(text) => {
-                draw_text_through(buffer, width, height, text, transform, inverse, fonts);
+                draw_text_through(buffer, width, height, text, transform, inverse);
             }
             DisplayCommand::TransformGroup(_, _) => {
                 // Nested groups never get emitted by the paint pass — each
@@ -445,7 +394,6 @@ fn draw_text_through(
     text: &TextCommand,
     transform: Affine,
     inverse: Affine,
-    fonts: &[fontdue::Font],
 ) {
     // Per-glyph: get the swash alpha image (laid out in its own local
     // coordinates), then for every pixel in the screen-space bbox of the
@@ -453,12 +401,9 @@ fn draw_text_through(
     // The glyph itself never needs to know about rotation — only the
     // placement does.
     //
-    // The bitmap fallback path doesn't support arbitrary transforms, so the
-    // empty-fonts branch (tests / no fonts loaded) skips drawing rather than
-    // emitting glyphs at the wrong orientation.
-    if fonts.is_empty() {
-        return;
-    }
+    // No bitmap fallback under transform: the 7x7 toy font has no notion of
+    // rotation, so when no shared FontSystem is installed (test paths) we
+    // simply skip the run rather than paint glyphs at the wrong orientation.
     let Some(physicals_and_images) = shape_and_images(text) else {
         return;
     };
@@ -786,20 +731,11 @@ fn fill_rounded_rect(
     }
 }
 
-fn draw_text(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
-    text: &TextCommand,
-    fonts: &[fontdue::Font],
-) {
-    // Empty fonts means tests are driving the renderer with no real font data
-    // installed; the 7x7 bitmap fallback gives them deterministic glyphs that
-    // do not depend on cosmic-text or any system font.
-    if fonts.is_empty() {
-        draw_text_bitmap(buffer, width, height, text);
-        return;
-    }
+fn draw_text(buffer: &mut [u32], width: usize, height: usize, text: &TextCommand) {
+    // When no shared FontSystem is installed (tests, or before
+    // `state::install_fonts` has run), `shape_and_images` returns `None` and
+    // we hand off to the 7x7 bitmap fallback so the test surface stays
+    // deterministic without loading any host font.
     let Some(physicals_and_images) = shape_and_images(text) else {
         draw_text_bitmap(buffer, width, height, text);
         return;

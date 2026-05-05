@@ -48,7 +48,6 @@ pub fn build_document_view(
     current_url: Option<&net::Url>,
     images: &HashMap<String, resource::LoadedImage>,
     interaction: style::InteractionState<'_>,
-    fonts: &[fontdue::Font],
 ) -> Result<DocumentView, String> {
     // The HTML/CSS parse steps used to live here and run every frame; they now
     // happen once at navigate time (see `BrowserState::install_document`) and
@@ -70,7 +69,7 @@ pub fn build_document_view(
         std::slice::from_ref(parsed_stylesheet),
         interaction,
     );
-    let layout = layout::layout_tree_with_fonts(&styled, viewport_width as f32, fonts);
+    let layout = layout::layout_tree(&styled, viewport_width as f32);
     let paint_ctx = render::PaintContext {
         base_url: current_url,
         images,
@@ -415,7 +414,6 @@ pub fn caret_commands_for_focused_input(
     layout_root: &layout::LayoutBox,
     focused_node_id: Option<NodeId>,
     frame_index: usize,
-    fonts: &[fontdue::Font],
 ) -> Vec<render::DisplayCommand> {
     let Some(focused_id) = focused_node_id else {
         return Vec::new();
@@ -464,10 +462,10 @@ pub fn caret_commands_for_focused_input(
             row_count += 1;
         }
         let row = row_count.saturating_sub(1);
-        let x_off = render::measure_text_width(last_line, font_size, fonts);
+        let x_off = render::measure_text_width(last_line, font_size);
         (x_off, font_size * row as f32)
     } else {
-        (render::measure_text_width(&value, font_size, fonts), 0.0)
+        (render::measure_text_width(&value, font_size), 0.0)
     };
 
     let content = input_box.dimensions.content;
@@ -598,7 +596,7 @@ mod tests {
         // the 1px black caret. Empty fonts make measure_text_width fall
         // back to its fixed-width estimate, so the assertion is determinist.
         let (layout_root, input_id) = setup(r#"<input type="text" value=""/>"#);
-        let commands = caret_commands_for_focused_input(&layout_root, Some(input_id), 0, &[]);
+        let commands = caret_commands_for_focused_input(&layout_root, Some(input_id), 0);
 
         assert_eq!(commands.len(), 1);
         match &commands[0] {
@@ -618,14 +616,14 @@ mod tests {
         // the empty-fonts fallback (each char 12px @ 16pt), "ab" is 24px
         // wide, so the caret lands 24px to the right of content.x.
         let (layout_root, input_id) = setup(r#"<input type="text" value="ab"/>"#);
-        let commands = caret_commands_for_focused_input(&layout_root, Some(input_id), 0, &[]);
+        let commands = caret_commands_for_focused_input(&layout_root, Some(input_id), 0);
         let rect = match &commands[0] {
             DisplayCommand::SolidRect(_, rect) => *rect,
             other => panic!("expected caret SolidRect, got {other:?}"),
         };
 
         // content.x for the input root = padding-left + border-left = 4 + 1 = 5.
-        let expected_offset = render::measure_text_width("ab", 16.0, &[]);
+        let expected_offset = render::measure_text_width("ab", 16.0);
         assert_eq!(rect.x, 5.0 + expected_offset);
     }
 
@@ -633,18 +631,18 @@ mod tests {
     fn caret_disappears_during_blink_off_phase() {
         // Frames 30..60 are the off half — no SolidRect emitted at all.
         let (layout_root, input_id) = setup(r#"<input type="text"/>"#);
-        let commands = caret_commands_for_focused_input(&layout_root, Some(input_id), 30, &[]);
+        let commands = caret_commands_for_focused_input(&layout_root, Some(input_id), 30);
         assert!(commands.is_empty());
 
         // And the cycle resumes at 60 → on again.
-        let on_again = caret_commands_for_focused_input(&layout_root, Some(input_id), 60, &[]);
+        let on_again = caret_commands_for_focused_input(&layout_root, Some(input_id), 60);
         assert_eq!(on_again.len(), 1);
     }
 
     #[test]
     fn caret_skips_when_no_focus() {
         let (layout_root, _input_id) = setup(r#"<input type="text"/>"#);
-        let commands = caret_commands_for_focused_input(&layout_root, None, 0, &[]);
+        let commands = caret_commands_for_focused_input(&layout_root, None, 0);
         assert!(commands.is_empty());
     }
 
@@ -654,7 +652,7 @@ mod tests {
         // NodeId guaranteed to not match the input slot.
         let (layout_root, input_id) = setup(r#"<input type="text"/>"#);
         let bogus_id = NodeId::from_raw(input_id.raw().wrapping_add(99));
-        let commands = caret_commands_for_focused_input(&layout_root, Some(bogus_id), 0, &[]);
+        let commands = caret_commands_for_focused_input(&layout_root, Some(bogus_id), 0);
         assert!(commands.is_empty());
     }
 
@@ -695,14 +693,14 @@ mod tests {
         // appear on the new line rather than the previous one.
         let (layout_root, textarea_id) =
             setup_textarea("<textarea value=\"ab\ncd\"></textarea>");
-        let commands = caret_commands_for_focused_input(&layout_root, Some(textarea_id), 0, &[]);
+        let commands = caret_commands_for_focused_input(&layout_root, Some(textarea_id), 0);
 
         assert_eq!(commands.len(), 1);
         let render::DisplayCommand::SolidRect(_, rect) = &commands[0] else {
             panic!("expected caret SolidRect, got {:?}", commands[0]);
         };
         // x = content.x + measure_text_width("cd")
-        let cd_width = render::measure_text_width("cd", 16.0, &[]);
+        let cd_width = render::measure_text_width("cd", 16.0);
         // content.x = padding-left + border-left = 4 + 1 = 5.
         assert_eq!(rect.x, 5.0 + cd_width);
         // Two lines → row index 1 → y offset = font-size * 1 = 16. The
@@ -725,8 +723,8 @@ mod tests {
         let (two_line_root, two_line_id) =
             setup_textarea("<textarea value=\"hi\n\"></textarea>");
 
-        let one_caret = caret_commands_for_focused_input(&one_line_root, Some(one_line_id), 0, &[]);
-        let two_caret = caret_commands_for_focused_input(&two_line_root, Some(two_line_id), 0, &[]);
+        let one_caret = caret_commands_for_focused_input(&one_line_root, Some(one_line_id), 0);
+        let two_caret = caret_commands_for_focused_input(&two_line_root, Some(two_line_id), 0);
 
         let render::DisplayCommand::SolidRect(_, one_rect) = &one_caret[0] else {
             panic!()

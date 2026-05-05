@@ -872,7 +872,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
         assert_eq!(browser.js.execute("clicks").unwrap(), "1");
     }
@@ -894,7 +893,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
         assert_eq!(browser.js.execute("clicks").unwrap(), "0");
     }
@@ -917,7 +915,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
         assert_eq!(
             browser.js.execute("trace").unwrap(),
@@ -942,7 +939,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
         let document = browser.parsed_document.borrow();
         // Two roots: the leading <script> and the trailing <div id=host>.
@@ -978,7 +974,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
         assert_eq!(browser.document_html, original_html);
     }
@@ -1011,7 +1006,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
         assert_eq!(browser.js.execute("trace").unwrap(), "\"a-focus;\"");
         // Second press over the `b` box: blur on `a` then focus on `b`.
@@ -1023,7 +1017,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
         assert_eq!(
             browser.js.execute("trace").unwrap(),
@@ -1056,7 +1049,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
         assert_eq!(browser.js.execute("trace").unwrap(), "\"focus;\"");
         // Step 2: click in the chrome band — focus clears, only blur fires.
@@ -1068,7 +1060,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
         assert_eq!(browser.js.execute("trace").unwrap(), "\"focus;blur;\"");
     }
@@ -1089,7 +1080,7 @@ mod tests {
         // the timer (deadline == now), so the page already saw the tick.
         // Confirm here, then verify the next frame doesn't double-fire.
         assert_eq!(browser.js.execute("hits").unwrap(), "1");
-        let _ = browser.display_list(800, 600, &window::WindowInput::default(), &[]);
+        let _ = browser.display_list(800, 600, &window::WindowInput::default());
         assert_eq!(browser.js.execute("hits").unwrap(), "1");
     }
 
@@ -1103,12 +1094,12 @@ mod tests {
             "",
         );
         assert_eq!(browser.js.execute("hits").unwrap(), "0");
-        let _ = browser.display_list(800, 600, &window::WindowInput::default(), &[]);
+        let _ = browser.display_list(800, 600, &window::WindowInput::default());
         assert_eq!(browser.js.execute("hits").unwrap(), "1");
         // Snapshot-then-fire: re-rAF inside the handler would queue for
         // next frame, but this handler doesn't, so a second frame is a
         // no-op.
-        let _ = browser.display_list(800, 600, &window::WindowInput::default(), &[]);
+        let _ = browser.display_list(800, 600, &window::WindowInput::default());
         assert_eq!(browser.js.execute("hits").unwrap(), "1");
     }
 
@@ -1752,7 +1743,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
 
         assert_eq!(browser.js.execute("trace").unwrap(), "\"change;blur;\"");
@@ -1785,7 +1775,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
 
         assert_eq!(browser.js.execute("trace").unwrap(), "\"blur;\"");
@@ -1823,7 +1812,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
 
         assert_eq!(browser.js.execute("trace").unwrap(), "\"blur;\"");
@@ -1995,7 +1983,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
 
         assert_eq!(browser.js.execute("hits").unwrap(), "1");
@@ -2026,7 +2013,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
 
         assert_eq!(browser.js.execute("hits").unwrap(), "0");
@@ -2058,7 +2044,6 @@ mod tests {
                 left_mouse_pressed: true,
                 ..window::WindowInput::default()
             },
-            &[],
         );
 
         // Click fired (proves the button was hit), submit didn't.
@@ -2209,7 +2194,7 @@ mod tests {
             r#"<div id="host"></div><script>requestAnimationFrame(function () { var p = document.createElement('p'); p.textContent = 'rafted'; document.getElementById('host').appendChild(p); });</script>"#,
             "",
         );
-        let _ = browser.display_list(800, 600, &window::WindowInput::default(), &[]);
+        let _ = browser.display_list(800, 600, &window::WindowInput::default());
         let document = browser.parsed_document.borrow();
         let host = document.roots()[0];
         let host_kids = &document.get(host).unwrap().children;
