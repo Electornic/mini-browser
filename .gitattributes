@@ -1,0 +1,4 @@
+*.rs text diff=rust
+*.toml text
+*.md text
+*.lock text
