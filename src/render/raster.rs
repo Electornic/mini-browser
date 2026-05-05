@@ -179,7 +179,7 @@ fn fill_solid_rect(pixmap: &mut Pixmap, color: Color, rect: Rect, transform: Aff
 // radius. Skia / SVG / Inkscape all use 4*(sqrt(2)-1)/3 — the curve
 // deviates from a true circle by under 0.03% so pixel-pinned tests at our
 // 4×4 / 5×5 surface scales never see the difference.
-const QUARTER_ARC_K: f32 = 0.5522847498;
+const QUARTER_ARC_K: f32 = 0.5522848;
 
 fn fill_rounded_rect(
     pixmap: &mut Pixmap,
@@ -326,9 +326,11 @@ fn fill_gradient(pixmap: &mut Pixmap, gradient: &GradientCommand, transform: Aff
         return;
     };
 
-    let mut paint = Paint::default();
-    paint.anti_alias = false;
-    paint.shader = shader;
+    let paint = Paint {
+        anti_alias: false,
+        shader,
+        ..Default::default()
+    };
     pixmap.fill_rect(dest, &paint, affine_to_ts(transform), None);
 }
 
@@ -463,15 +465,17 @@ fn draw_image(pixmap: &mut Pixmap, image: &ImageCommand, transform: Affine) {
     let pattern_transform =
         TsTransform::from_scale(scale_x, scale_y).post_translate(image.x, image.y);
 
-    let mut paint = Paint::default();
-    paint.anti_alias = false;
-    paint.shader = Pattern::new(
-        tile.as_ref(),
-        SpreadMode::Pad,
-        FilterQuality::Nearest,
-        1.0,
-        pattern_transform,
-    );
+    let paint = Paint {
+        anti_alias: false,
+        shader: Pattern::new(
+            tile.as_ref(),
+            SpreadMode::Pad,
+            FilterQuality::Nearest,
+            1.0,
+            pattern_transform,
+        ),
+        ..Default::default()
+    };
 
     let Some(dest) = TsRect::from_xywh(image.x, image.y, image.width, image.height) else {
         return;
