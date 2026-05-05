@@ -1,11 +1,21 @@
-// DisplayCommand -> pixel buffer. Software rasterizer for solid rects,
-// rounded rects, gradients, box-shadows, text (cosmic-text shaping +
-// swash glyph rasterisation, with a 7x7 bitmap font fallback), and images.
-// Translate+scale matrices are baked into rect coordinates by the
-// display-list stage; rotation lands here as a `TransformGroup` and is
-// scan-converted through the inverse matrix per-pixel.
+// DisplayCommand -> pixel buffer. Software paint pipeline backed by
+// `tiny-skia`: a `Pixmap` of premultiplied RGBA bytes is the buffer; the
+// rasterizer walks the command list and either calls into tiny-skia
+// (axis-aligned and rotated SolidRect) or drives a custom byte loop
+// (rounded-rect / gradient / image / box-shadow / text glyph blit).
+//
+// The custom helpers stay because their semantics are pinned by tests
+// — point-in-rect distance for rounded corners, linear-ramp shadow
+// falloff, swash mask blits with cosmic-text shaping. tiny-skia's
+// path filler can replace those incrementally in later sub-phases.
+//
+// Anti-aliasing stays off everywhere: the test surface compares exact
+// pixel u32s against geometric shapes whose boundary rule is "pixel
+// centre ≤ radius / inside the rect".  AA on tiny-skia paints would
+// shift those boundary pixels.
 
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, PhysicalGlyph, Shaping, SwashContent};
+use tiny_skia::{Color as TsColor, Paint, Pixmap, Rect as TsRect, Transform as TsTransform};
 
 use crate::css::{Color, GradientDirection, GradientKind};
 use crate::layout::Rect;
@@ -84,167 +94,364 @@ fn measure_with_cosmic(
 }
 
 pub fn rasterize(commands: &[DisplayCommand], width: usize, height: usize) -> Vec<u32> {
-    let mut buffer = vec![rgb_u32(Color::WHITE); width * height];
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    let mut pixmap = Pixmap::new(width as u32, height as u32)
+        .expect("non-zero width/height should fit a Pixmap allocation");
+    pixmap.fill(TsColor::WHITE);
 
     for command in commands {
-        rasterize_command(&mut buffer, width, height, command);
+        rasterize_command(&mut pixmap, command, Affine::IDENTITY);
     }
 
-    buffer
+    pixmap_to_u32(&pixmap)
 }
 
-fn rasterize_command(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
-    command: &DisplayCommand,
-) {
+// The pixmap's alpha is always 255 (we start with opaque white and every
+// blend equation is source-over, which preserves dst.a == 255), so
+// premultiplied RGB bytes equal straight RGB bytes — drop the alpha and
+// pack as 0x00RRGGBB to match what the legacy `Vec<u32>` buffer held.
+fn pixmap_to_u32(pixmap: &Pixmap) -> Vec<u32> {
+    let data = pixmap.data();
+    let mut out = Vec::with_capacity(data.len() / 4);
+    for chunk in data.chunks_exact(4) {
+        out.push((u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]));
+    }
+    out
+}
+
+fn rasterize_command(pixmap: &mut Pixmap, command: &DisplayCommand, transform: Affine) {
     match command {
-        DisplayCommand::SolidRect(color, rect) => fill_rect(buffer, width, height, *color, *rect),
-        DisplayCommand::RoundedRect(color, rect, radii) => {
-            fill_rounded_rect(buffer, width, height, *color, *rect, *radii)
+        DisplayCommand::SolidRect(color, rect) => {
+            fill_solid_rect(pixmap, *color, *rect, transform)
         }
-        DisplayCommand::Text(text) => draw_text(buffer, width, height, text),
-        DisplayCommand::Image(image) => draw_image(buffer, width, height, image),
-        DisplayCommand::Gradient(gradient) => fill_gradient(buffer, width, height, gradient),
-        DisplayCommand::BoxShadow(shadow) => fill_box_shadow(buffer, width, height, shadow),
-        DisplayCommand::TransformGroup(transform, inner) => {
-            rasterize_through_transform(buffer, width, height, *transform, inner);
+        DisplayCommand::RoundedRect(color, rect, radii) => {
+            fill_rounded_rect(pixmap, *color, *rect, *radii, transform)
+        }
+        DisplayCommand::Text(text) => draw_text(pixmap, text, transform),
+        DisplayCommand::Image(image) => draw_image(pixmap, image, transform),
+        DisplayCommand::Gradient(gradient) => fill_gradient(pixmap, gradient, transform),
+        DisplayCommand::BoxShadow(shadow) => fill_box_shadow(pixmap, shadow, transform),
+        DisplayCommand::TransformGroup(group_xform, inner) => {
+            // Compose this group's matrix on top of any inherited transform.
+            // The display-list builder only emits rotation/shear here (axis-
+            // aligned matrices are baked into rect coords up there), so we
+            // expect `transform` to be identity in practice — but composing
+            // is the right semantics if it ever isn't.
+            let composed = transform.compose(*group_xform);
+            for cmd in inner {
+                rasterize_command(pixmap, cmd, composed);
+            }
         }
     }
 }
 
-fn rasterize_through_transform(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
+fn fill_solid_rect(pixmap: &mut Pixmap, color: Color, rect: Rect, transform: Affine) {
+    if color.a == 0 {
+        return;
+    }
+    let Some(ts_rect) = to_ts_rect(rect) else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+    // anti_alias defaults to false for `Paint::default()`, which is what
+    // the pixel-pinned tests want — a rotated rect picks up jagged edges
+    // exactly the way the old hand-rolled inverse-pixel-sample did.
+    pixmap.fill_rect(ts_rect, &paint, affine_to_ts(transform), None);
+}
+
+fn fill_rounded_rect(
+    pixmap: &mut Pixmap,
+    color: Color,
+    rect: Rect,
+    radii: CornerRadii,
     transform: Affine,
-    commands: &[DisplayCommand],
 ) {
-    // Slow path: each inner primitive's logical bounds are mapped to a
-    // screen-space bounding box through `transform`; every pixel in that
-    // bbox is inverse-mapped back to logical space and sampled against
-    // the primitive there. The matrix never has to be axis-aligned, so
-    // rotation and shear come out correct.
-    let inverse = transform.inverse();
-    for command in commands {
-        match command {
-            DisplayCommand::SolidRect(color, rect) => {
-                let color = *color;
-                let rect = *rect;
-                paint_through(buffer, width, height, rect, transform, inverse, |lx, ly| {
-                    if point_in_logical_rect(lx, ly, rect) {
-                        Some(color)
-                    } else {
-                        None
-                    }
-                });
+    if color.a == 0 {
+        return;
+    }
+    if radii.tl == 0.0 && radii.tr == 0.0 && radii.br == 0.0 && radii.bl == 0.0 {
+        // Cheaper rectangle filler — and it lets tiny-skia handle the
+        // axis-aligned / rotated dispatch in one place.
+        fill_solid_rect(pixmap, color, rect, transform);
+        return;
+    }
+
+    if transform.is_identity() {
+        fill_rounded_rect_aligned(pixmap, color, rect, radii);
+    } else {
+        let inverse = transform.inverse();
+        paint_through(pixmap, rect, transform, inverse, |lx, ly| {
+            if point_in_logical_rounded_rect(lx, ly, rect, radii) {
+                Some(color)
+            } else {
+                None
             }
-            DisplayCommand::RoundedRect(color, rect, radii) => {
-                let color = *color;
-                let rect = *rect;
-                let radii = *radii;
-                paint_through(buffer, width, height, rect, transform, inverse, |lx, ly| {
-                    if point_in_logical_rounded_rect(lx, ly, rect, radii) {
-                        Some(color)
-                    } else {
-                        None
-                    }
-                });
+        });
+    }
+}
+
+fn fill_rounded_rect_aligned(pixmap: &mut Pixmap, color: Color, rect: Rect, radii: CornerRadii) {
+    let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
+    let x_start = rect.x.max(0.0).floor() as usize;
+    let y_start = rect.y.max(0.0).floor() as usize;
+    let x_end = ((rect.x + rect.width).ceil().max(0.0) as usize).min(width);
+    let y_end = ((rect.y + rect.height).ceil().max(0.0) as usize).min(height);
+
+    // Cap each radius to half the rect so corners never overlap.
+    let max_radius = (rect.width.min(rect.height) / 2.0).max(0.0);
+    let tl = radii.tl.clamp(0.0, max_radius);
+    let tr = radii.tr.clamp(0.0, max_radius);
+    let br = radii.br.clamp(0.0, max_radius);
+    let bl = radii.bl.clamp(0.0, max_radius);
+
+    let left = rect.x;
+    let top = rect.y;
+    let right = rect.x + rect.width;
+    let bottom = rect.y + rect.height;
+
+    let data = pixmap.data_mut();
+    for y in y_start..y_end {
+        let py = y as f32 + 0.5;
+        let row = y * width;
+        for x in x_start..x_end {
+            let px = x as f32 + 0.5;
+            // Pixels in the straight band always paint; only corner regions need a distance check.
+            let inside = if tl > 0.0 && px < left + tl && py < top + tl {
+                let dx = px - (left + tl);
+                let dy = py - (top + tl);
+                dx * dx + dy * dy <= tl * tl
+            } else if tr > 0.0 && px > right - tr && py < top + tr {
+                let dx = px - (right - tr);
+                let dy = py - (top + tr);
+                dx * dx + dy * dy <= tr * tr
+            } else if br > 0.0 && px > right - br && py > bottom - br {
+                let dx = px - (right - br);
+                let dy = py - (bottom - br);
+                dx * dx + dy * dy <= br * br
+            } else if bl > 0.0 && px < left + bl && py > bottom - bl {
+                let dx = px - (left + bl);
+                let dy = py - (bottom - bl);
+                dx * dx + dy * dy <= bl * bl
+            } else {
+                true
+            };
+
+            if !inside {
+                continue;
             }
-            DisplayCommand::Gradient(gradient) => {
-                let rect = gradient.rect;
-                paint_through(buffer, width, height, rect, transform, inverse, |lx, ly| {
-                    let progress = gradient_progress(lx, ly, rect, gradient.kind);
-                    let color = sample_gradient(&gradient.stops, progress.clamp(0.0, 1.0));
-                    if color.a == 0 { None } else { Some(color) }
-                });
+            blend_pixel_bytes(data, (row + x) * 4, color);
+        }
+    }
+}
+
+fn fill_gradient(pixmap: &mut Pixmap, gradient: &GradientCommand, transform: Affine) {
+    if gradient.stops.is_empty() {
+        return;
+    }
+    let rect = gradient.rect;
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return;
+    }
+
+    if transform.is_identity() {
+        fill_gradient_aligned(pixmap, gradient);
+    } else {
+        let inverse = transform.inverse();
+        paint_through(pixmap, rect, transform, inverse, |lx, ly| {
+            let progress = gradient_progress(lx, ly, rect, gradient.kind);
+            let color = sample_gradient(&gradient.stops, progress.clamp(0.0, 1.0));
+            if color.a == 0 { None } else { Some(color) }
+        });
+    }
+}
+
+fn fill_gradient_aligned(pixmap: &mut Pixmap, gradient: &GradientCommand) {
+    let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
+    let rect = gradient.rect;
+    let x_start = rect.x.max(0.0).floor() as usize;
+    let y_start = rect.y.max(0.0).floor() as usize;
+    let x_end = ((rect.x + rect.width).ceil().max(0.0) as usize).min(width);
+    let y_end = ((rect.y + rect.height).ceil().max(0.0) as usize).min(height);
+
+    let data = pixmap.data_mut();
+    for y in y_start..y_end {
+        let py = y as f32 + 0.5;
+        let row = y * width;
+        for x in x_start..x_end {
+            let px = x as f32 + 0.5;
+            let progress = gradient_progress(px, py, rect, gradient.kind).clamp(0.0, 1.0);
+            let color = sample_gradient(&gradient.stops, progress);
+            if color.a == 0 {
+                continue;
             }
-            DisplayCommand::BoxShadow(shadow) => {
-                // Logical bounds expand by blur on every side because the
-                // soft falloff lives outside the rect itself.
-                let blur = shadow.blur_radius.max(0.0);
-                let bounds = Rect {
-                    x: shadow.rect.x - blur,
-                    y: shadow.rect.y - blur,
-                    width: shadow.rect.width + 2.0 * blur,
-                    height: shadow.rect.height + 2.0 * blur,
-                };
-                paint_through(
-                    buffer,
-                    width,
-                    height,
-                    bounds,
-                    transform,
-                    inverse,
-                    |lx, ly| {
-                        let coverage = shadow_coverage(lx, ly, shadow.rect, blur);
-                        if coverage <= 0.0 {
-                            return None;
-                        }
-                        let alpha = ((shadow.color.a as f32) * coverage).clamp(0.0, 255.0) as u8;
-                        Some(Color {
-                            r: shadow.color.r,
-                            g: shadow.color.g,
-                            b: shadow.color.b,
-                            a: alpha,
-                        })
-                    },
-                );
+            blend_pixel_bytes(data, (row + x) * 4, color);
+        }
+    }
+}
+
+fn fill_box_shadow(pixmap: &mut Pixmap, shadow: &ShadowCommand, transform: Affine) {
+    if shadow.color.a == 0 {
+        return;
+    }
+    if shadow.rect.width <= 0.0 || shadow.rect.height <= 0.0 {
+        return;
+    }
+    let blur = shadow.blur_radius.max(0.0);
+
+    if transform.is_identity() {
+        fill_box_shadow_aligned(pixmap, shadow, blur);
+    } else {
+        // The blur falloff lives outside the rect, so the logical bounds
+        // expand by `blur` on every side before we walk screen-space.
+        let bounds = Rect {
+            x: shadow.rect.x - blur,
+            y: shadow.rect.y - blur,
+            width: shadow.rect.width + 2.0 * blur,
+            height: shadow.rect.height + 2.0 * blur,
+        };
+        let color = shadow.color;
+        let rect = shadow.rect;
+        let inverse = transform.inverse();
+        paint_through(pixmap, bounds, transform, inverse, |lx, ly| {
+            let coverage = shadow_coverage(lx, ly, rect, blur);
+            if coverage <= 0.0 {
+                return None;
             }
-            DisplayCommand::Image(image) => {
-                let bounds = Rect {
-                    x: image.x,
-                    y: image.y,
-                    width: image.width,
-                    height: image.height,
-                };
-                let sw = image.source_width;
-                let sh = image.source_height;
-                if sw == 0 || sh == 0 || bounds.width <= 0.0 || bounds.height <= 0.0 {
-                    continue;
-                }
-                paint_through(
-                    buffer,
-                    width,
-                    height,
-                    bounds,
-                    transform,
-                    inverse,
-                    |lx, ly| {
-                        let u = (lx - bounds.x) / bounds.width;
-                        let v = (ly - bounds.y) / bounds.height;
-                        if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
-                            return None;
-                        }
-                        let sx = (u * sw as f32).floor().clamp(0.0, (sw - 1) as f32) as usize;
-                        let sy = (v * sh as f32).floor().clamp(0.0, (sh - 1) as f32) as usize;
-                        let pixel = image.pixels[sy * sw + sx];
-                        Some(Color {
-                            r: ((pixel >> 16) & 0xFF) as u8,
-                            g: ((pixel >> 8) & 0xFF) as u8,
-                            b: (pixel & 0xFF) as u8,
-                            a: 255,
-                        })
-                    },
-                );
+            let alpha = ((color.a as f32) * coverage).clamp(0.0, 255.0) as u8;
+            Some(Color {
+                r: color.r,
+                g: color.g,
+                b: color.b,
+                a: alpha,
+            })
+        });
+    }
+}
+
+fn fill_box_shadow_aligned(pixmap: &mut Pixmap, shadow: &ShadowCommand, blur: f32) {
+    let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
+    // Affected region = shadow rect inflated by `blur` on every side. Anything
+    // farther than `blur` from the rect edge has zero coverage.
+    let x_start = (shadow.rect.x - blur).max(0.0).floor() as usize;
+    let y_start = (shadow.rect.y - blur).max(0.0).floor() as usize;
+    let x_end =
+        (((shadow.rect.x + shadow.rect.width + blur).ceil()).max(0.0) as usize).min(width);
+    let y_end =
+        (((shadow.rect.y + shadow.rect.height + blur).ceil()).max(0.0) as usize).min(height);
+
+    let left = shadow.rect.x;
+    let top = shadow.rect.y;
+    let right = shadow.rect.x + shadow.rect.width;
+    let bottom = shadow.rect.y + shadow.rect.height;
+
+    let data = pixmap.data_mut();
+    for y in y_start..y_end {
+        for x in x_start..x_end {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            // Distance from this pixel to the *closest* point inside the
+            // shadow rect. Pixels inside the rect score zero distance and
+            // therefore full coverage — outside, the linear ramp falls off
+            // over `blur` distance and clamps to 0 beyond that.
+            let dx = (left - px).max(0.0).max(px - right);
+            let dy = (top - py).max(0.0).max(py - bottom);
+            let dist = (dx * dx + dy * dy).sqrt();
+            let coverage = if blur > 0.0 {
+                (1.0 - dist / blur).clamp(0.0, 1.0)
+            } else if dist == 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            let combined_alpha = ((shadow.color.a as f32) * coverage) as u8;
+            if combined_alpha == 0 {
+                continue;
             }
-            DisplayCommand::Text(text) => {
-                draw_text_through(buffer, width, height, text, transform, inverse);
+            let blended = Color {
+                r: shadow.color.r,
+                g: shadow.color.g,
+                b: shadow.color.b,
+                a: combined_alpha,
+            };
+            blend_pixel_bytes(data, (y * width + x) * 4, blended);
+        }
+    }
+}
+
+fn draw_image(pixmap: &mut Pixmap, image: &ImageCommand, transform: Affine) {
+    if image.source_width == 0 || image.source_height == 0 {
+        return;
+    }
+    if image.width <= 0.0 || image.height <= 0.0 {
+        return;
+    }
+
+    if transform.is_identity() {
+        draw_image_aligned(pixmap, image);
+    } else {
+        let bounds = Rect {
+            x: image.x,
+            y: image.y,
+            width: image.width,
+            height: image.height,
+        };
+        let sw = image.source_width;
+        let sh = image.source_height;
+        let inverse = transform.inverse();
+        paint_through(pixmap, bounds, transform, inverse, |lx, ly| {
+            let u = (lx - bounds.x) / bounds.width;
+            let v = (ly - bounds.y) / bounds.height;
+            if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
+                return None;
             }
-            DisplayCommand::TransformGroup(_, _) => {
-                // Nested groups never get emitted by the paint pass — each
-                // box wraps its own primitives at most once with the
-                // cumulative matrix. Ignore defensively if it ever happens.
-            }
+            let sx = (u * sw as f32).floor().clamp(0.0, (sw - 1) as f32) as usize;
+            let sy = (v * sh as f32).floor().clamp(0.0, (sh - 1) as f32) as usize;
+            let pixel = image.pixels[sy * sw + sx];
+            Some(Color {
+                r: ((pixel >> 16) & 0xFF) as u8,
+                g: ((pixel >> 8) & 0xFF) as u8,
+                b: (pixel & 0xFF) as u8,
+                a: 255,
+            })
+        });
+    }
+}
+
+fn draw_image_aligned(pixmap: &mut Pixmap, image: &ImageCommand) {
+    let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
+    let x_start = image.x.max(0.0).floor() as usize;
+    let y_start = image.y.max(0.0).floor() as usize;
+    let x_end = ((image.x + image.width).ceil().max(0.0) as usize).min(width);
+    let y_end = ((image.y + image.height).ceil().max(0.0) as usize).min(height);
+
+    let data = pixmap.data_mut();
+    // Images are scaled with nearest-neighbor sampling to keep the implementation small.
+    for y in y_start..y_end {
+        let source_y = (((y as f32 - image.y) / image.height.max(1.0))
+            * image.source_height as f32)
+            .floor()
+            .clamp(0.0, (image.source_height - 1) as f32) as usize;
+        let row = y * width;
+        for x in x_start..x_end {
+            let source_x = (((x as f32 - image.x) / image.width.max(1.0))
+                * image.source_width as f32)
+                .floor()
+                .clamp(0.0, (image.source_width - 1) as f32) as usize;
+            let pixel = image.pixels[source_y * image.source_width + source_x];
+            let off = (row + x) * 4;
+            data[off] = ((pixel >> 16) & 0xFF) as u8;
+            data[off + 1] = ((pixel >> 8) & 0xFF) as u8;
+            data[off + 2] = (pixel & 0xFF) as u8;
+            data[off + 3] = 255;
         }
     }
 }
 
 fn paint_through<F>(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
+    pixmap: &mut Pixmap,
     logical_bounds: Rect,
     transform: Affine,
     inverse: Affine,
@@ -255,6 +462,7 @@ fn paint_through<F>(
     if logical_bounds.width <= 0.0 || logical_bounds.height <= 0.0 {
         return;
     }
+    let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
     // Project the four logical corners through the matrix to find the
     // screen-space rectangle that needs to be scanned. For axis-aligned
     // transforms the four corners collapse onto the original rect; for
@@ -283,6 +491,7 @@ fn paint_through<F>(
     let x_end = (max_x.ceil().max(0.0) as usize).min(width);
     let y_end = (max_y.ceil().max(0.0) as usize).min(height);
 
+    let data = pixmap.data_mut();
     for y in y_start..y_end {
         let row = y * width;
         for x in x_start..x_end {
@@ -293,23 +502,35 @@ fn paint_through<F>(
             if color.a == 0 {
                 continue;
             }
-            blend_pixel(&mut buffer[row + x], color);
+            blend_pixel_bytes(data, (row + x) * 4, color);
         }
     }
 }
 
-fn blend_pixel(slot: &mut u32, color: Color) {
+// Source-over blend a single pixel at byte offset `byte_idx` (premultiplied
+// RGBA layout). Fast paths the opaque case and assumes the destination
+// alpha is already 255 — true throughout this rasterizer because we start
+// with an opaque white pixmap and never use a non source-over blend mode.
+fn blend_pixel_bytes(data: &mut [u8], byte_idx: usize, color: Color) {
     if color.a == 255 {
-        *slot = rgb_u32(color);
+        data[byte_idx] = color.r;
+        data[byte_idx + 1] = color.g;
+        data[byte_idx + 2] = color.b;
+        data[byte_idx + 3] = 255;
         return;
     }
-    let bg = *slot;
     let a = color.a as u32;
     let inv = 255 - a;
-    let r = (a * color.r as u32 + inv * ((bg >> 16) & 0xFF)) / 255;
-    let g = (a * color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
-    let b = (a * color.b as u32 + inv * (bg & 0xFF)) / 255;
-    *slot = (r << 16) | (g << 8) | b;
+    let bg_r = data[byte_idx] as u32;
+    let bg_g = data[byte_idx + 1] as u32;
+    let bg_b = data[byte_idx + 2] as u32;
+    let r = (a * color.r as u32 + inv * bg_r) / 255;
+    let g = (a * color.g as u32 + inv * bg_g) / 255;
+    let b = (a * color.b as u32 + inv * bg_b) / 255;
+    data[byte_idx] = r as u8;
+    data[byte_idx + 1] = g as u8;
+    data[byte_idx + 2] = b as u8;
+    data[byte_idx + 3] = 255;
 }
 
 fn point_in_logical_rect(lx: f32, ly: f32, rect: Rect) -> bool {
@@ -387,234 +608,6 @@ fn shadow_coverage(lx: f32, ly: f32, rect: Rect, blur: f32) -> f32 {
     }
 }
 
-fn draw_text_through(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
-    text: &TextCommand,
-    transform: Affine,
-    inverse: Affine,
-) {
-    // Per-glyph: get the swash alpha image (laid out in its own local
-    // coordinates), then for every pixel in the screen-space bbox of the
-    // glyph quad, inverse-map back to glyph-local and sample the bitmap.
-    // The glyph itself never needs to know about rotation — only the
-    // placement does.
-    //
-    // No bitmap fallback under transform: the 7x7 toy font has no notion of
-    // rotation, so when no shared FontSystem is installed (test paths) we
-    // simply skip the run rather than paint glyphs at the wrong orientation.
-    let Some(physicals_and_images) = shape_and_images(text) else {
-        return;
-    };
-    for (physical, image) in &physicals_and_images {
-        // Color glyphs (emoji) under transform are uncommon and would need a
-        // bespoke premultiplied source-over inverse-mapped blend; defer them
-        // by skipping rather than painting wrong colours.
-        if !matches!(image.content, SwashContent::Mask) {
-            continue;
-        }
-        let img_w = image.placement.width as usize;
-        let img_h = image.placement.height as usize;
-        let dx0 = (physical.x + image.placement.left) as f32;
-        let dy0 = (physical.y - image.placement.top) as f32;
-        let glyph_bounds = Rect {
-            x: dx0,
-            y: dy0,
-            width: img_w as f32,
-            height: img_h as f32,
-        };
-        let color = text.color;
-        let data = &image.data;
-        paint_through(
-            buffer,
-            width,
-            height,
-            glyph_bounds,
-            transform,
-            inverse,
-            |lx, ly| {
-                let gx = (lx - dx0).floor() as i32;
-                let gy = (ly - dy0).floor() as i32;
-                if gx < 0 || gy < 0 || gx as usize >= img_w || gy as usize >= img_h {
-                    return None;
-                }
-                let alpha = data[gy as usize * img_w + gx as usize];
-                if alpha == 0 {
-                    return None;
-                }
-                let coverage = (alpha as u32 * color.a as u32) / 255;
-                if coverage == 0 {
-                    return None;
-                }
-                Some(Color {
-                    r: color.r,
-                    g: color.g,
-                    b: color.b,
-                    a: coverage as u8,
-                })
-            },
-        );
-    }
-}
-
-fn fill_rect(buffer: &mut [u32], width: usize, height: usize, color: Color, rect: Rect) {
-    let x_start = rect.x.max(0.0).floor() as usize;
-    let y_start = rect.y.max(0.0).floor() as usize;
-    let x_end = (rect.x + rect.width).ceil().max(0.0) as usize;
-    let y_end = (rect.y + rect.height).ceil().max(0.0) as usize;
-    let x_end = x_end.min(width);
-    let y_end = y_end.min(height);
-
-    if color.a == 0 {
-        return;
-    }
-    if color.a == 255 {
-        // Fully opaque: skip the per-pixel blend math.
-        let pixel = rgb_u32(color);
-        for y in y_start..y_end {
-            let row = y * width;
-            for x in x_start..x_end {
-                buffer[row + x] = pixel;
-            }
-        }
-        return;
-    }
-
-    // Source-over with the fill color's alpha as the blend weight against
-    // whatever is already in the buffer at each pixel.
-    let a = color.a as u32;
-    let inv = 255 - a;
-    let cr = color.r as u32;
-    let cg = color.g as u32;
-    let cb = color.b as u32;
-    for y in y_start..y_end {
-        let row = y * width;
-        for x in x_start..x_end {
-            let bg = buffer[row + x];
-            let r = (a * cr + inv * ((bg >> 16) & 0xFF)) / 255;
-            let g = (a * cg + inv * ((bg >> 8) & 0xFF)) / 255;
-            let b = (a * cb + inv * (bg & 0xFF)) / 255;
-            buffer[row + x] = (r << 16) | (g << 8) | b;
-        }
-    }
-}
-
-fn fill_box_shadow(buffer: &mut [u32], width: usize, height: usize, shadow: &ShadowCommand) {
-    if shadow.color.a == 0 {
-        return;
-    }
-    if shadow.rect.width <= 0.0 || shadow.rect.height <= 0.0 {
-        return;
-    }
-
-    let blur = shadow.blur_radius;
-    // Affected region = shadow rect inflated by `blur` on every side. Anything
-    // farther than `blur` from the rect edge has zero coverage.
-    let x_start = (shadow.rect.x - blur).max(0.0).floor() as usize;
-    let y_start = (shadow.rect.y - blur).max(0.0).floor() as usize;
-    let x_end = (((shadow.rect.x + shadow.rect.width + blur).ceil()).max(0.0) as usize).min(width);
-    let y_end =
-        (((shadow.rect.y + shadow.rect.height + blur).ceil()).max(0.0) as usize).min(height);
-
-    let left = shadow.rect.x;
-    let top = shadow.rect.y;
-    let right = shadow.rect.x + shadow.rect.width;
-    let bottom = shadow.rect.y + shadow.rect.height;
-
-    for y in y_start..y_end {
-        for x in x_start..x_end {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-            // Distance from this pixel to the *closest* point inside the
-            // shadow rect. Pixels inside the rect score zero distance and
-            // therefore full coverage — outside, the linear ramp falls off
-            // over `blur` distance and clamps to 0 beyond that.
-            let dx = (left - px).max(0.0).max(px - right);
-            let dy = (top - py).max(0.0).max(py - bottom);
-            let dist = (dx * dx + dy * dy).sqrt();
-            let coverage = if blur > 0.0 {
-                (1.0 - dist / blur).clamp(0.0, 1.0)
-            } else if dist == 0.0 {
-                1.0
-            } else {
-                0.0
-            };
-            let combined_alpha = ((shadow.color.a as f32) * coverage) as u32;
-            if combined_alpha == 0 {
-                continue;
-            }
-
-            let idx = y * width + x;
-            let bg = buffer[idx];
-            let inv = 255 - combined_alpha;
-            let r = (combined_alpha * shadow.color.r as u32 + inv * ((bg >> 16) & 0xFF)) / 255;
-            let g = (combined_alpha * shadow.color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
-            let b = (combined_alpha * shadow.color.b as u32 + inv * (bg & 0xFF)) / 255;
-            buffer[idx] = (r << 16) | (g << 8) | b;
-        }
-    }
-}
-
-fn fill_gradient(buffer: &mut [u32], width: usize, height: usize, gradient: &GradientCommand) {
-    let rect = gradient.rect;
-    let x_start = rect.x.max(0.0).floor() as usize;
-    let y_start = rect.y.max(0.0).floor() as usize;
-    let x_end = ((rect.x + rect.width).ceil().max(0.0) as usize).min(width);
-    let y_end = ((rect.y + rect.height).ceil().max(0.0) as usize).min(height);
-
-    if gradient.stops.is_empty() {
-        return;
-    }
-    if rect.width <= 0.0 || rect.height <= 0.0 {
-        return;
-    }
-
-    // Radial uses the ellipse with semi-axes = half the rect, centered on the
-    // padding box. Sampling each pixel reduces to normalised distance from the
-    // centre, which already lies in the same 0..1 progress space the linear
-    // path uses, so stop sampling and source-over blending are shared.
-    let cx = rect.x + rect.width * 0.5;
-    let cy = rect.y + rect.height * 0.5;
-    let rx = rect.width * 0.5;
-    let ry = rect.height * 0.5;
-
-    for y in y_start..y_end {
-        for x in x_start..x_end {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-            let progress = match gradient.kind {
-                GradientKind::Linear(GradientDirection::ToBottom) => (py - rect.y) / rect.height,
-                GradientKind::Linear(GradientDirection::ToTop) => 1.0 - (py - rect.y) / rect.height,
-                GradientKind::Linear(GradientDirection::ToRight) => (px - rect.x) / rect.width,
-                GradientKind::Linear(GradientDirection::ToLeft) => 1.0 - (px - rect.x) / rect.width,
-                GradientKind::Radial => {
-                    let nx = (px - cx) / rx;
-                    let ny = (py - cy) / ry;
-                    (nx * nx + ny * ny).sqrt()
-                }
-            };
-            let progress = progress.clamp(0.0, 1.0);
-            let color = sample_gradient(&gradient.stops, progress);
-            if color.a == 0 {
-                continue;
-            }
-            let idx = y * width + x;
-            if color.a == 255 {
-                buffer[idx] = rgb_u32(color);
-            } else {
-                let bg = buffer[idx];
-                let a = color.a as u32;
-                let inv = 255 - a;
-                let r = (a * color.r as u32 + inv * ((bg >> 16) & 0xFF)) / 255;
-                let g = (a * color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
-                let b = (a * color.b as u32 + inv * (bg & 0xFF)) / 255;
-                buffer[idx] = (r << 16) | (g << 8) | b;
-            }
-        }
-    }
-}
-
 fn sample_gradient(stops: &[ResolvedStop], progress: f32) -> Color {
     // Clamp to the first/last stop for progress outside the [0, 1] band.
     if progress <= stops[0].position {
@@ -649,116 +642,93 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
     }
 }
 
-fn fill_rounded_rect(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
-    color: Color,
-    rect: Rect,
-    radii: CornerRadii,
-) {
-    // Fall back to the cheaper rectangle filler when no corner is rounded.
-    if radii.tl == 0.0 && radii.tr == 0.0 && radii.br == 0.0 && radii.bl == 0.0 {
-        fill_rect(buffer, width, height, color, rect);
-        return;
-    }
-
-    let x_start = rect.x.max(0.0).floor() as usize;
-    let y_start = rect.y.max(0.0).floor() as usize;
-    let x_end = (rect.x + rect.width).ceil().max(0.0) as usize;
-    let y_end = (rect.y + rect.height).ceil().max(0.0) as usize;
-    let x_end = x_end.min(width);
-    let y_end = y_end.min(height);
-
-    if color.a == 0 {
-        return;
-    }
-
-    // Cap each radius to half the rect so corners never overlap.
-    let max_radius = (rect.width.min(rect.height) / 2.0).max(0.0);
-    let tl = radii.tl.clamp(0.0, max_radius);
-    let tr = radii.tr.clamp(0.0, max_radius);
-    let br = radii.br.clamp(0.0, max_radius);
-    let bl = radii.bl.clamp(0.0, max_radius);
-
-    let left = rect.x;
-    let top = rect.y;
-    let right = rect.x + rect.width;
-    let bottom = rect.y + rect.height;
-
-    let opaque = color.a == 255;
-    let pixel = rgb_u32(color);
-    let a = color.a as u32;
-    let inv = 255 - a;
-    let cr = color.r as u32;
-    let cg = color.g as u32;
-    let cb = color.b as u32;
-
-    for y in y_start..y_end {
-        let py = y as f32 + 0.5;
-        let row = y * width;
-        for x in x_start..x_end {
-            let px = x as f32 + 0.5;
-
-            // Pixels in the straight band always paint; only corner regions need a distance check.
-            let inside = if tl > 0.0 && px < left + tl && py < top + tl {
-                let dx = px - (left + tl);
-                let dy = py - (top + tl);
-                dx * dx + dy * dy <= tl * tl
-            } else if tr > 0.0 && px > right - tr && py < top + tr {
-                let dx = px - (right - tr);
-                let dy = py - (top + tr);
-                dx * dx + dy * dy <= tr * tr
-            } else if br > 0.0 && px > right - br && py > bottom - br {
-                let dx = px - (right - br);
-                let dy = py - (bottom - br);
-                dx * dx + dy * dy <= br * br
-            } else if bl > 0.0 && px < left + bl && py > bottom - bl {
-                let dx = px - (left + bl);
-                let dy = py - (bottom - bl);
-                dx * dx + dy * dy <= bl * bl
-            } else {
-                true
-            };
-
-            if !inside {
-                continue;
-            }
-            if opaque {
-                buffer[row + x] = pixel;
-            } else {
-                let bg = buffer[row + x];
-                let r = (a * cr + inv * ((bg >> 16) & 0xFF)) / 255;
-                let g = (a * cg + inv * ((bg >> 8) & 0xFF)) / 255;
-                let b = (a * cb + inv * (bg & 0xFF)) / 255;
-                buffer[row + x] = (r << 16) | (g << 8) | b;
-            }
-        }
+fn draw_text(pixmap: &mut Pixmap, text: &TextCommand, transform: Affine) {
+    if transform.is_identity() {
+        draw_text_aligned(pixmap, text);
+    } else {
+        draw_text_through(pixmap, text, transform);
     }
 }
 
-fn draw_text(buffer: &mut [u32], width: usize, height: usize, text: &TextCommand) {
+fn draw_text_aligned(pixmap: &mut Pixmap, text: &TextCommand) {
     // When no shared FontSystem is installed (tests, or before
     // `state::install_fonts` has run), `shape_and_images` returns `None` and
     // we hand off to the 7x7 bitmap fallback so the test surface stays
     // deterministic without loading any host font.
     let Some(physicals_and_images) = shape_and_images(text) else {
-        draw_text_bitmap(buffer, width, height, text);
+        draw_text_bitmap(pixmap, text);
         return;
     };
     for (physical, image) in &physicals_and_images {
         match image.content {
             SwashContent::Mask => {
-                blit_swash_mask(buffer, width, height, image, physical, text.color);
+                blit_swash_mask(pixmap, image, physical, text.color);
             }
             SwashContent::Color => {
-                blit_swash_color(buffer, width, height, image, physical);
+                blit_swash_color(pixmap, image, physical);
             }
             // Subpixel masks would need a different per-channel coverage
             // blend; cosmic-text's default Metrics shaping pipeline does
             // not emit them so this branch is currently unreachable.
             SwashContent::SubpixelMask => {}
         }
+    }
+}
+
+fn draw_text_through(pixmap: &mut Pixmap, text: &TextCommand, transform: Affine) {
+    // Per-glyph: get the swash alpha image (laid out in its own local
+    // coordinates), then for every pixel in the screen-space bbox of the
+    // glyph quad, inverse-map back to glyph-local and sample the bitmap.
+    // The glyph itself never needs to know about rotation — only the
+    // placement does.
+    //
+    // No bitmap fallback under transform: the 7x7 toy font has no notion of
+    // rotation, so when no shared FontSystem is installed (test paths) we
+    // simply skip the run rather than paint glyphs at the wrong orientation.
+    let Some(physicals_and_images) = shape_and_images(text) else {
+        return;
+    };
+    let inverse = transform.inverse();
+    for (physical, image) in &physicals_and_images {
+        // Color glyphs (emoji) under transform are uncommon and would need a
+        // bespoke premultiplied source-over inverse-mapped blend; defer them
+        // by skipping rather than painting wrong colours.
+        if !matches!(image.content, SwashContent::Mask) {
+            continue;
+        }
+        let img_w = image.placement.width as usize;
+        let img_h = image.placement.height as usize;
+        let dx0 = (physical.x + image.placement.left) as f32;
+        let dy0 = (physical.y - image.placement.top) as f32;
+        let glyph_bounds = Rect {
+            x: dx0,
+            y: dy0,
+            width: img_w as f32,
+            height: img_h as f32,
+        };
+        let color = text.color;
+        let data = &image.data;
+        paint_through(pixmap, glyph_bounds, transform, inverse, |lx, ly| {
+            let gx = (lx - dx0).floor() as i32;
+            let gy = (ly - dy0).floor() as i32;
+            if gx < 0 || gy < 0 || gx as usize >= img_w || gy as usize >= img_h {
+                return None;
+            }
+            let alpha = data[gy as usize * img_w + gx as usize];
+            if alpha == 0 {
+                return None;
+            }
+            let coverage = (alpha as u32 * color.a as u32) / 255;
+            if coverage == 0 {
+                return None;
+            }
+            Some(Color {
+                r: color.r,
+                g: color.g,
+                b: color.b,
+                a: coverage as u8,
+            })
+        });
     }
 }
 
@@ -818,13 +788,12 @@ fn shape_to_physicals(fs: &mut FontSystem, text: &TextCommand) -> Vec<PhysicalGl
 }
 
 fn blit_swash_mask(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
+    pixmap: &mut Pixmap,
     image: &cosmic_text::SwashImage,
     physical: &PhysicalGlyph,
     color: Color,
 ) {
+    let (width, height) = (pixmap.width() as i32, pixmap.height() as i32);
     let img_w = image.placement.width as usize;
     let img_h = image.placement.height as usize;
     // `placement.left` is the bearing from the glyph origin to the image's
@@ -833,6 +802,8 @@ fn blit_swash_mask(
     let dx0 = physical.x + image.placement.left;
     let dy0 = physical.y - image.placement.top;
 
+    let stride = pixmap.width() as usize;
+    let data = pixmap.data_mut();
     for row in 0..img_h {
         for col in 0..img_w {
             let alpha = image.data[row * img_w + col];
@@ -841,10 +812,9 @@ fn blit_swash_mask(
             }
             let px = dx0 + col as i32;
             let py = dy0 + row as i32;
-            if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
+            if px < 0 || py < 0 || px >= width || py >= height {
                 continue;
             }
-            let idx = py as usize * width + px as usize;
             // Compose glyph coverage with text color's alpha so opacity (or
             // any pre-multiplied alpha on the color) attenuates the visible
             // glyph, not just AA edges.
@@ -852,16 +822,13 @@ fn blit_swash_mask(
             if coverage == 0 {
                 continue;
             }
-            if coverage >= 255 {
-                buffer[idx] = rgb_u32(color);
-            } else {
-                let bg = buffer[idx];
-                let inv = 255 - coverage;
-                let r = (coverage * color.r as u32 + inv * ((bg >> 16) & 0xFF)) / 255;
-                let g = (coverage * color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
-                let b = (coverage * color.b as u32 + inv * (bg & 0xFF)) / 255;
-                buffer[idx] = (r << 16) | (g << 8) | b;
-            }
+            let blended = Color {
+                r: color.r,
+                g: color.g,
+                b: color.b,
+                a: coverage as u8,
+            };
+            blend_pixel_bytes(data, (py as usize * stride + px as usize) * 4, blended);
         }
     }
 }
@@ -873,17 +840,18 @@ fn blit_swash_mask(
 // ignored: a colored glyph carries its own pixel colors, and tinting it would
 // drain the chroma that makes the emoji recognisable.
 fn blit_swash_color(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
+    pixmap: &mut Pixmap,
     image: &cosmic_text::SwashImage,
     physical: &PhysicalGlyph,
 ) {
+    let (width, height) = (pixmap.width() as i32, pixmap.height() as i32);
     let img_w = image.placement.width as usize;
     let img_h = image.placement.height as usize;
     let dx0 = physical.x + image.placement.left;
     let dy0 = physical.y - image.placement.top;
 
+    let stride = pixmap.width() as usize;
+    let data = pixmap.data_mut();
     for row in 0..img_h {
         for col in 0..img_w {
             let i = (row * img_w + col) * 4;
@@ -896,52 +864,44 @@ fn blit_swash_color(
             }
             let px = dx0 + col as i32;
             let py = dy0 + row as i32;
-            if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
+            if px < 0 || py < 0 || px >= width || py >= height {
                 continue;
             }
-            let bidx = py as usize * width + px as usize;
+            let off = (py as usize * stride + px as usize) * 4;
             if a == 255 {
-                buffer[bidx] = (r << 16) | (g << 8) | b;
+                data[off] = r as u8;
+                data[off + 1] = g as u8;
+                data[off + 2] = b as u8;
+                data[off + 3] = 255;
             } else {
-                let bg = buffer[bidx];
                 let inv = 255 - a;
-                let bg_r = (bg >> 16) & 0xFF;
-                let bg_g = (bg >> 8) & 0xFF;
-                let bg_b = bg & 0xFF;
+                let bg_r = data[off] as u32;
+                let bg_g = data[off + 1] as u32;
+                let bg_b = data[off + 2] as u32;
                 let out_r = (r + bg_r * inv / 255).min(255);
                 let out_g = (g + bg_g * inv / 255).min(255);
                 let out_b = (b + bg_b * inv / 255).min(255);
-                buffer[bidx] = (out_r << 16) | (out_g << 8) | out_b;
+                data[off] = out_r as u8;
+                data[off + 1] = out_g as u8;
+                data[off + 2] = out_b as u8;
+                data[off + 3] = 255;
             }
         }
     }
 }
 
-fn draw_text_bitmap(buffer: &mut [u32], width: usize, height: usize, text: &TextCommand) {
+fn draw_text_bitmap(pixmap: &mut Pixmap, text: &TextCommand) {
     let mut cursor_x = text.x;
 
     for ch in text.text.chars() {
-        draw_bitmap_char(
-            buffer,
-            width,
-            height,
-            ch,
-            cursor_x,
-            text.y,
-            text.color,
-            text.font_size,
-        );
+        draw_bitmap_char(pixmap, ch, cursor_x, text.y, text.color, text.font_size);
         let scale = (text.font_size / 8.0).max(1.0).round();
         cursor_x += if ch == ' ' { 4.0 * scale } else { 6.0 * scale };
     }
 }
 
-
-#[allow(clippy::too_many_arguments)]
 fn draw_bitmap_char(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
+    pixmap: &mut Pixmap,
     ch: char,
     x: f32,
     y: f32,
@@ -964,10 +924,8 @@ fn draw_bitmap_char(
             }
             let px = cursor_x + (column_index * scale) as i32;
             let py = baseline_y + (row_index * scale) as i32;
-            fill_rect(
-                buffer,
-                width,
-                height,
+            fill_solid_rect(
+                pixmap,
                 color,
                 Rect {
                     x: px as f32,
@@ -975,43 +933,30 @@ fn draw_bitmap_char(
                     width: scale as f32,
                     height: scale as f32,
                 },
+                Affine::IDENTITY,
             );
         }
     }
 }
 
-fn draw_image(buffer: &mut [u32], width: usize, height: usize, image: &ImageCommand) {
-    let x_start = image.x.max(0.0).floor() as usize;
-    let y_start = image.y.max(0.0).floor() as usize;
-    let x_end = (image.x + image.width).ceil().max(0.0) as usize;
-    let y_end = (image.y + image.height).ceil().max(0.0) as usize;
-    let x_end = x_end.min(width);
-    let y_end = y_end.min(height);
-
-    if image.source_width == 0 || image.source_height == 0 {
-        return;
+fn to_ts_rect(rect: Rect) -> Option<TsRect> {
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return None;
     }
-
-    // Images are scaled with nearest-neighbor sampling to keep the implementation small.
-    for y in y_start..y_end {
-        let source_y = (((y as f32 - image.y) / image.height.max(1.0)) * image.source_height as f32)
-            .floor()
-            .clamp(0.0, (image.source_height - 1) as f32) as usize;
-        let row = y * width;
-
-        for x in x_start..x_end {
-            let source_x = (((x as f32 - image.x) / image.width.max(1.0))
-                * image.source_width as f32)
-                .floor()
-                .clamp(0.0, (image.source_width - 1) as f32) as usize;
-            let pixel = image.pixels[source_y * image.source_width + source_x];
-            buffer[row + x] = pixel;
-        }
-    }
+    TsRect::from_xywh(rect.x, rect.y, rect.width, rect.height)
 }
 
-fn rgb_u32(color: Color) -> u32 {
-    (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+// Our `Affine` stores the matrix as
+//     | a c e |
+//     | b d f |
+//     | 0 0 1 |
+// while tiny-skia's `from_row(sx, ky, kx, sy, tx, ty)` expects
+//     | sx kx tx |
+//     | ky sy ty |
+//     | 0  0  1  |
+// so the direct mapping is sx=a, ky=b, kx=c, sy=d, tx=e, ty=f.
+fn affine_to_ts(a: Affine) -> TsTransform {
+    TsTransform::from_row(a.a, a.b, a.c, a.d, a.e, a.f)
 }
 
 fn glyph_pattern(ch: char) -> [&'static str; 7] {

@@ -17,5 +17,6 @@ precomputed-hash = "0.1"
 selectors = "0.37"
 taffy = "0.10"
 thiserror = "2"
+tiny-skia = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
