@@ -20,4 +20,5 @@ thiserror = "2"
 tiny-skia = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+url = "2"
 winit = "0.30"
