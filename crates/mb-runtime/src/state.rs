@@ -21,7 +21,7 @@ use crate::{
     dom::{NodeId, NodeType},
     html, js, layout,
     navigation::{error_document, load_remote_document},
-    net, render, resource, style, window,
+    input, net, render, resource, style,
 };
 
 #[derive(Debug)]
@@ -287,7 +287,7 @@ impl BrowserState {
         &mut self,
         viewport_width: usize,
         viewport_height: usize,
-        input: &window::WindowInput,
+        input: &input::WindowInput,
     ) -> Vec<render::DisplayCommand> {
         // The browser re-builds its visible scene every frame from current state + fresh input.
         self.frame_index = self.frame_index.wrapping_add(1);
@@ -580,7 +580,7 @@ impl BrowserState {
 
     pub fn apply_input(
         &mut self,
-        input: &window::WindowInput,
+        input: &input::WindowInput,
         viewport_width: usize,
         viewport_height: usize,
     ) {
@@ -696,7 +696,7 @@ impl BrowserState {
     // where that gets wired in. Non-input focus (a div picked up by a
     // future tab path, etc.) still receives the events; only the value
     // mutation is gated by the tag check.
-    fn dispatch_typed_keys(&mut self, focused_path: &[usize], input: &window::WindowInput) {
+    fn dispatch_typed_keys(&mut self, focused_path: &[usize], input: &input::WindowInput) {
         if input.typed.is_empty() && !input.backspace_pressed && !input.enter_pressed {
             return;
         }
@@ -934,7 +934,7 @@ impl BrowserState {
 
     fn clicked_link<'a>(
         &self,
-        input: &window::WindowInput,
+        input: &input::WindowInput,
         links: &'a [LinkTarget],
     ) -> Option<&'a LinkTarget> {
         if !input.left_mouse_pressed {
@@ -946,7 +946,7 @@ impl BrowserState {
 
     fn hovered_link<'a>(
         &self,
-        input: &window::WindowInput,
+        input: &input::WindowInput,
         links: &'a [LinkTarget],
     ) -> Option<&'a LinkTarget> {
         let (mouse_x, mouse_y) = input.mouse_position?;
@@ -1080,7 +1080,7 @@ impl BrowserState {
 
     pub fn hovered_chrome_action(
         &self,
-        input: &window::WindowInput,
+        input: &input::WindowInput,
         viewport_width: usize,
     ) -> Option<ChromeAction> {
         let (mouse_x, mouse_y) = input.mouse_position?;
@@ -1774,7 +1774,7 @@ mod tests {
         // failure on frame 1 doesn't get masked by a stale entry.
         let mut state = make_state("<div>hi</div>");
         assert!(state.cached_view.is_none());
-        let input = window::WindowInput::default();
+        let input = input::WindowInput::default();
         let _ = state.display_list(800, 600, &input);
         assert!(state.cached_view.is_some());
     }
@@ -1788,7 +1788,7 @@ mod tests {
         // also be equal — so we additionally verify the cache slot
         // wasn't dropped between frames by checking is_some both times.)
         let mut state = make_state("<div>hi</div>");
-        let input = window::WindowInput::default();
+        let input = input::WindowInput::default();
         let _ = state.display_list(800, 600, &input);
         let rev_after_first = state
             .cached_view
@@ -1813,7 +1813,7 @@ mod tests {
         // that mutates the DOM would leave the user staring at a stale
         // paint.
         let mut state = make_state("<div>hi</div>");
-        let input = window::WindowInput::default();
+        let input = input::WindowInput::default();
         let _ = state.display_list(800, 600, &input);
         let rev_first = state.cached_view.as_ref().unwrap().revision;
         state.parsed_document.borrow_mut().touch();
@@ -1831,7 +1831,7 @@ mod tests {
         // the very next frame rebuilds against the new tree's images,
         // base URL, and stylesheet rather than serving the prior page.
         let mut state = make_state("<div>old</div>");
-        let input = window::WindowInput::default();
+        let input = input::WindowInput::default();
         let _ = state.display_list(800, 600, &input);
         assert!(state.cached_view.is_some());
         state.install_document(

@@ -17,7 +17,7 @@ mod tests {
         navigation::{describe_network_error, error_document, text_document},
         net, render, resource,
         state::{BrowserState, HistoryEntry, page_step},
-        style, window,
+        input, style,
     };
 
     #[test]
@@ -281,9 +281,9 @@ mod tests {
         );
 
         let hover = browser.hovered_chrome_action(
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((BACK_BUTTON_X + 2.0, NAV_BUTTON_Y + 2.0)),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
         );
@@ -291,9 +291,9 @@ mod tests {
 
         browser.back_stack.push(browser.snapshot());
         let hover = browser.hovered_chrome_action(
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((back_button_rect().x + 2.0, back_button_rect().y + 2.0)),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
         );
@@ -319,9 +319,9 @@ mod tests {
         // chrome strip we subtract inside compute_hovered_dom_path.
         let leaf_window_y = CHROME_HEIGHT + 5.0;
         let path = compute_hovered_dom_path(
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, leaf_window_y)),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             &layout,
             0.0,
@@ -354,9 +354,9 @@ mod tests {
         // no longer overlaps the leaf, only the root.
         let leaf_window_y = CHROME_HEIGHT + 5.0;
         let logical_path = compute_hovered_dom_path(
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, leaf_window_y)),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             &layout,
             0.0,
@@ -367,9 +367,9 @@ mod tests {
 
         // Cursor at screen x=60 lands on the post-translate leaf box.
         let translated_path = compute_hovered_dom_path(
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((60.0, leaf_window_y)),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             &layout,
             0.0,
@@ -403,9 +403,9 @@ mod tests {
         // not its text child.
         let leaf_window_y = CHROME_HEIGHT + 5.0;
         let path = compute_hovered_dom_path(
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((55.0, leaf_window_y)),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             &layout,
             0.0,
@@ -426,9 +426,9 @@ mod tests {
         let plain_styled = style::style_tree(&plain_document, plain_node, &[plain_sheet]);
         let plain_layout = layout::layout_tree(&plain_styled, 800.0);
         let plain_path = compute_hovered_dom_path(
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((55.0, leaf_window_y)),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             &plain_layout,
             0.0,
@@ -460,9 +460,9 @@ mod tests {
 
         let leaf_window_y = CHROME_HEIGHT + 10.0;
         let path = compute_hovered_dom_path(
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((23.0, leaf_window_y)),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             &layout,
             0.0,
@@ -482,9 +482,9 @@ mod tests {
         let plain_styled = style::style_tree(&plain_document, plain_node, &[plain_sheet]);
         let plain_layout = layout::layout_tree(&plain_styled, 800.0);
         let plain_path = compute_hovered_dom_path(
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((23.0, leaf_window_y)),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             &plain_layout,
             0.0,
@@ -502,9 +502,9 @@ mod tests {
 
         // Pointer parked above the chrome cutoff — there is no page element to hover.
         let path = compute_hovered_dom_path(
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, CHROME_HEIGHT - 1.0)),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             &layout,
             0.0,
@@ -526,9 +526,9 @@ mod tests {
         );
         let refresh_rect = refresh_button_rect();
         let hover = browser.hovered_chrome_action(
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((refresh_rect.x + 2.0, refresh_rect.y + 2.0)),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
         );
@@ -553,10 +553,10 @@ mod tests {
         let refresh_rect = refresh_button_rect();
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((refresh_rect.x + 2.0, refresh_rect.y + 2.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -581,9 +581,9 @@ mod tests {
 
         let menu_rect = menu_button_rect(800.0);
         let hover = browser.hovered_chrome_action(
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((menu_rect.x + 2.0, menu_rect.y + 2.0)),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
         );
@@ -606,10 +606,10 @@ mod tests {
         let menu_rect = menu_button_rect(800.0);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((menu_rect.x + 2.0, menu_rect.y + 2.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -867,10 +867,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((50.0, CHROME_HEIGHT + 10.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
         assert_eq!(browser.js.execute("clicks").unwrap(), "1");
@@ -888,10 +888,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((50.0, CHROME_HEIGHT - 1.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
         assert_eq!(browser.js.execute("clicks").unwrap(), "0");
@@ -910,10 +910,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, CHROME_HEIGHT + 5.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
         assert_eq!(
@@ -934,10 +934,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, CHROME_HEIGHT + 5.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
         let document = browser.parsed_document.borrow();
@@ -969,10 +969,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, CHROME_HEIGHT + 5.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
         assert_eq!(browser.document_html, original_html);
@@ -1001,10 +1001,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, CHROME_HEIGHT + 10.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
         assert_eq!(browser.js.execute("trace").unwrap(), "\"a-focus;\"");
@@ -1012,10 +1012,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, CHROME_HEIGHT + 60.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
         assert_eq!(
@@ -1044,10 +1044,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, CHROME_HEIGHT + 10.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
         assert_eq!(browser.js.execute("trace").unwrap(), "\"focus;\"");
@@ -1055,10 +1055,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, CHROME_HEIGHT - 1.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
         assert_eq!(browser.js.execute("trace").unwrap(), "\"focus;blur;\"");
@@ -1080,7 +1080,7 @@ mod tests {
         // the timer (deadline == now), so the page already saw the tick.
         // Confirm here, then verify the next frame doesn't double-fire.
         assert_eq!(browser.js.execute("hits").unwrap(), "1");
-        let _ = browser.display_list(800, 600, &window::WindowInput::default());
+        let _ = browser.display_list(800, 600, &input::WindowInput::default());
         assert_eq!(browser.js.execute("hits").unwrap(), "1");
     }
 
@@ -1094,12 +1094,12 @@ mod tests {
             "",
         );
         assert_eq!(browser.js.execute("hits").unwrap(), "0");
-        let _ = browser.display_list(800, 600, &window::WindowInput::default());
+        let _ = browser.display_list(800, 600, &input::WindowInput::default());
         assert_eq!(browser.js.execute("hits").unwrap(), "1");
         // Snapshot-then-fire: re-rAF inside the handler would queue for
         // next frame, but this handler doesn't, so a second frame is a
         // no-op.
-        let _ = browser.display_list(800, 600, &window::WindowInput::default());
+        let _ = browser.display_list(800, 600, &input::WindowInput::default());
         assert_eq!(browser.js.execute("hits").unwrap(), "1");
     }
 
@@ -1115,9 +1115,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![0]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: "cd".into(),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1136,9 +1136,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![0]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 backspace_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1159,10 +1159,10 @@ mod tests {
         browser.focused_dom_path = None;
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: "abc".into(),
                 backspace_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1188,9 +1188,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: "x".into(),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1218,9 +1218,9 @@ mod tests {
         browser.address_input.clear();
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: "y".into(),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1252,9 +1252,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: " world".into(),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1310,9 +1310,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: "x".into(),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1339,9 +1339,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 backspace_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1365,9 +1365,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 enter_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1392,9 +1392,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: "abc".into(),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1424,9 +1424,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 backspace_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1462,9 +1462,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![0]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: "x".into(),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1497,9 +1497,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![0]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: "y".into(),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1526,9 +1526,9 @@ mod tests {
         browser.address_input.clear();
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: "z".into(),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1557,9 +1557,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: "k".into(),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1592,9 +1592,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: "c".into(),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1617,9 +1617,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 backspace_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1644,9 +1644,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 backspace_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1671,9 +1671,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: "abc".into(),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1725,9 +1725,9 @@ mod tests {
 
         // Type a character — sets the dirty flag.
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: "a".into(),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1738,10 +1738,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, CHROME_HEIGHT - 1.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
 
@@ -1770,10 +1770,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, CHROME_HEIGHT - 1.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
 
@@ -1807,10 +1807,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, CHROME_HEIGHT - 1.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
 
@@ -1838,9 +1838,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![0]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 enter_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1866,9 +1866,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![0]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 enter_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1888,9 +1888,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 enter_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1918,9 +1918,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![0]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 enter_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1947,9 +1947,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![0]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 enter_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -1978,10 +1978,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, CHROME_HEIGHT + 10.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
 
@@ -2008,10 +2008,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, CHROME_HEIGHT + 10.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
 
@@ -2039,10 +2039,10 @@ mod tests {
         let _ = browser.display_list(
             800,
             600,
-            &window::WindowInput {
+            &input::WindowInput {
                 mouse_position: Some((10.0, CHROME_HEIGHT + 10.0)),
                 left_mouse_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
         );
 
@@ -2069,9 +2069,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 typed: "!".into(),
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -2103,9 +2103,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![0]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 enter_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -2138,9 +2138,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 enter_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -2169,9 +2169,9 @@ mod tests {
         browser.focused_dom_path = Some(vec![0]);
 
         browser.apply_input(
-            &window::WindowInput {
+            &input::WindowInput {
                 enter_pressed: true,
-                ..window::WindowInput::default()
+                ..input::WindowInput::default()
             },
             800,
             600,
@@ -2194,7 +2194,7 @@ mod tests {
             r#"<div id="host"></div><script>requestAnimationFrame(function () { var p = document.createElement('p'); p.textContent = 'rafted'; document.getElementById('host').appendChild(p); });</script>"#,
             "",
         );
-        let _ = browser.display_list(800, 600, &window::WindowInput::default());
+        let _ = browser.display_list(800, 600, &input::WindowInput::default());
         let document = browser.parsed_document.borrow();
         let host = document.roots()[0];
         let host_kids = &document.get(host).unwrap().children;

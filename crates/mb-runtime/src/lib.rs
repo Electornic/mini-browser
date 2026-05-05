@@ -15,8 +15,7 @@
 // shorthand `crate::css::Color` / `crate::layout::Rect` paths the moved
 // files expect.
 pub use mb_dom::{css, dom, dom_select, html, style};
-pub use mb_engine::{chrome, display_list, layout, render};
-pub use mb_engine::input as window;
+pub use mb_engine::{chrome, display_list, input, layout, render};
 
 pub mod js;
 pub mod navigation;

@@ -1102,7 +1102,6 @@ dependencies = [
  "markup5ever_rcdom",
  "precomputed-hash",
  "selectors",
- "thiserror 2.0.18",
  "url",
 ]
 

@@ -10,5 +10,4 @@ image = { version = "0.25", default-features = false, features = ["bmp", "gif", 
 markup5ever_rcdom = "0.38"
 precomputed-hash = "0.1"
 selectors = "0.37"
-thiserror = "2"
 url = "2"
