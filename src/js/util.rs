@@ -1,39 +1,36 @@
-// Argument-shape helpers used across every host-API closure: argument
-// stringification (which all DOM string args funnel through) and recovery of
-// a NodeId from any Element wrapper (which mutation methods like
-// `appendChild` rely on to identify their argument).
+// Argument-shape helpers shared across host-API closures. 4.8b will add
+// `read_node_id` here once the Element wrapper factory lands; for 4.8a
+// the file holds the small pieces console / window already need.
 
-use boa_engine::{
-    Context, JsNativeError, JsResult, JsValue, js_string,
-};
+use rquickjs::{Ctx, Function, Result, Value};
 
-use crate::dom::NodeId;
-
-use super::NODE_ID_PROP;
-
-pub(super) fn first_arg_as_string(args: &[JsValue], context: &mut Context) -> JsResult<String> {
-    nth_arg_as_string(args, 0, context)
+/// Coerce a JS value through the global `String(v)` constructor. Returns
+/// the empty string when coercion fails — same lossy fallback boa's
+/// bridge used so a misbehaving `toString` can't crash a host API.
+pub(super) fn coerce_string<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Result<String> {
+    if let Some(js_str) = value.as_string() {
+        return js_str.to_string();
+    }
+    let string_ctor: Function<'js> = ctx.globals().get("String")?;
+    string_ctor.call::<_, String>((value.clone(),))
 }
 
-pub(super) fn nth_arg_as_string(
-    args: &[JsValue],
+/// Pluck the nth positional argument and coerce it to a Rust String.
+/// Missing arguments coerce to "undefined" — matches what real browsers
+/// surface for `getItem()` / `setAttribute(undefined)` etc.
+#[allow(dead_code)]
+pub(super) fn nth_arg_as_string<'js>(
+    args: &[Value<'js>],
     n: usize,
-    context: &mut Context,
-) -> JsResult<String> {
-    let arg = args.get(n).cloned().unwrap_or_default();
-    Ok(arg.to_string(context)?.to_std_string_escaped())
+    ctx: &Ctx<'js>,
+) -> Result<String> {
+    match args.get(n) {
+        Some(v) => coerce_string(ctx, v),
+        None => Ok("undefined".to_string()),
+    }
 }
 
-// Recovers a NodeId from any Element wrapper by reading the hidden `_nodeId`
-// data property the wrapper factory stored. Returns Err for non-Element
-// arguments (foreign objects, primitives) — that's the TypeError the DOM
-// methods report.
-pub(super) fn read_node_id(arg: &JsValue, context: &mut Context) -> JsResult<NodeId> {
-    let object = arg.as_object().ok_or_else(|| {
-        JsNativeError::typ().with_message("expected an Element-like argument")
-    })?;
-    let raw = object
-        .get(js_string!(NODE_ID_PROP), context)?
-        .to_u32(context)?;
-    Ok(NodeId::from_raw(raw))
+#[allow(dead_code)]
+pub(super) fn first_arg_as_string<'js>(args: &[Value<'js>], ctx: &Ctx<'js>) -> Result<String> {
+    nth_arg_as_string(args, 0, ctx)
 }

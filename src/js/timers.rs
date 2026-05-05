@@ -1,294 +1,173 @@
-// setTimeout / setInterval / clearTimeout / clearInterval / requestAnimationFrame /
-// cancelAnimationFrame, plus the per-frame job executor that drives them.
-// Cancellation funnels through a single `HashSet<u32>` shared across all
-// timer-shaped APIs so the spec quirk where `clearTimeout(id)` can cancel
-// a `setInterval` (and vice versa) falls out for free.
+// setTimeout / setInterval / clearTimeout / clearInterval /
+// requestAnimationFrame / cancelAnimationFrame, plus the synthetic clock
+// that backs `Date.now()` and every timer deadline.
+//
+// Design (Phase 4.8c): the entire timer queue lives JS-side inside a
+// closure-scoped IIFE. Rust owns only the clock and a tiny set of hooks
+// (`__mb_clock_now`, `__mb_run_timers`, `__mb_run_raf`) that the
+// scheduler calls from the main loop. Tests use `FixedClock` to drive
+// time deterministically — same role boa's `boa_engine::context::time::
+// FixedClock` played in the previous bridge.
 
-use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::cell::Cell;
 use std::rc::Rc;
-use std::time::Duration;
 
-use boa_engine::{
-    Context, JsNativeError, JsObject, JsResult, JsValue, NativeFunction,
-    context::time::JsInstant,
-    job::{GenericJob, Job, JobExecutor, PromiseJob, TimeoutJob},
-    js_string,
-};
+use rquickjs::{Ctx, Result, prelude::Func};
 
-use super::RafQueue;
-
-// Custom Boa job executor sized for the toy browser's main loop. Boa's
-// stock `SimpleJobExecutor::run_jobs` blocks until every queued timeout has
-// fired — fine for a one-shot script, fatal for a 60 fps render loop. This
-// executor keeps the same FIFO queues but its `run_jobs` only fires
-// timeouts whose deadline has *already arrived*, leaving future ones in the
-// queue for a later drain. Promise/microtask jobs always drain to empty.
-//
-// AsyncJob support is intentionally dropped — we don't expose any host API
-// (top-level await, native streams, fetch) that produces them.
-pub(super) struct FrameJobExecutor {
-    promise_jobs: RefCell<VecDeque<PromiseJob>>,
-    generic_jobs: RefCell<VecDeque<GenericJob>>,
-    // Multiple timeouts can land on the same JsInstant (millisecond clock
-    // resolution + a setTimeout(0) burst from the same script tick), so the
-    // value is a Vec rather than a single job. Keys are absolute due times,
-    // computed at enqueue from `now + delay`.
-    timeout_jobs: RefCell<BTreeMap<JsInstant, Vec<TimeoutJob>>>,
+#[derive(Clone)]
+pub(super) enum ClockSource {
+    System,
+    Fixed(Rc<Cell<u64>>),
 }
 
-impl FrameJobExecutor {
-    pub(super) fn new() -> Self {
+impl ClockSource {
+    pub(super) fn now_ms(&self) -> u64 {
+        match self {
+            Self::System => std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            Self::Fixed(cell) => cell.get(),
+        }
+    }
+}
+
+/// Test-only synthetic clock. Replaces boa's `FixedClock` for the
+/// rquickjs bridge — same `from_millis` / `advance` surface, so the
+/// integration tests in 4.8e can drop in without behaviour drift.
+/// `JsRuntime::new_with_fixed_clock(dom, clock.clone())` wires the
+/// shared `Cell` into the engine; bumping the cell mutates what every
+/// `Date.now()` and every pending timer's `deadline <= now` check
+/// observes on the next drain.
+#[derive(Clone)]
+pub struct FixedClock {
+    inner: Rc<Cell<u64>>,
+}
+
+impl FixedClock {
+    pub fn from_millis(ms: u64) -> Self {
         Self {
-            promise_jobs: RefCell::new(VecDeque::new()),
-            generic_jobs: RefCell::new(VecDeque::new()),
-            timeout_jobs: RefCell::new(BTreeMap::new()),
-        }
-    }
-}
-
-impl JobExecutor for FrameJobExecutor {
-    fn enqueue_job(self: Rc<Self>, job: Job, context: &mut Context) {
-        match job {
-            Job::PromiseJob(p) => self.promise_jobs.borrow_mut().push_back(p),
-            Job::GenericJob(g) => self.generic_jobs.borrow_mut().push_back(g),
-            Job::TimeoutJob(t) => {
-                let due = context.clock().now() + t.timeout();
-                self.timeout_jobs
-                    .borrow_mut()
-                    .entry(due)
-                    .or_default()
-                    .push(t);
-            }
-            Job::AsyncJob(_) => {
-                // No host API in the toy bridge produces NativeAsyncJob, but
-                // if Boa ever queues one internally we surface the drop
-                // rather than silently corrupting the queue.
-                eprintln!("[jobs] dropping unsupported AsyncJob");
-            }
-            // `Job` is `#[non_exhaustive]` upstream; future variants get the
-            // same surfaced-drop treatment as AsyncJob until we decide to
-            // wire them through.
-            _ => eprintln!("[jobs] dropping unrecognised Job variant"),
+            inner: Rc::new(Cell::new(ms)),
         }
     }
 
-    fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
-        // Loop until a full pass produces no work — handlers can enqueue
-        // more microtasks (Promise chains) or arm new timers that may
-        // already be due against the now-current clock.
-        loop {
-            let due_jobs: Vec<TimeoutJob> = {
-                let now = context.clock().now();
-                let mut map = self.timeout_jobs.borrow_mut();
-                let due_keys: Vec<JsInstant> = map.range(..=now).map(|(k, _)| *k).collect();
-                let mut out = Vec::new();
-                for key in due_keys {
-                    if let Some(jobs) = map.remove(&key) {
-                        out.extend(jobs);
-                    }
-                }
-                out
-            };
-            let timeouts_fired = !due_jobs.is_empty();
-            for job in due_jobs {
-                if job.is_cancelled() {
-                    continue;
-                }
-                if let Err(err) = job.call(context) {
-                    eprintln!("[timer] handler error: {err}");
-                }
-            }
+    pub fn advance(&self, ms: u64) {
+        self.inner.set(self.inner.get() + ms);
+    }
 
-            let promise_drained: VecDeque<PromiseJob> =
-                std::mem::take(&mut *self.promise_jobs.borrow_mut());
-            let promise_fired = !promise_drained.is_empty();
-            for job in promise_drained {
-                if let Err(err) = job.call(context) {
-                    eprintln!("[promise] job error: {err}");
-                }
-            }
+    pub fn millis(&self) -> u64 {
+        self.inner.get()
+    }
 
-            let generic_drained: VecDeque<GenericJob> =
-                std::mem::take(&mut *self.generic_jobs.borrow_mut());
-            let generic_fired = !generic_drained.is_empty();
-            for job in generic_drained {
-                if let Err(err) = job.call(context) {
-                    eprintln!("[generic] job error: {err}");
-                }
-            }
-
-            if !timeouts_fired && !promise_fired && !generic_fired {
-                break;
-            }
-        }
-        Ok(())
+    pub(super) fn source(&self) -> ClockSource {
+        ClockSource::Fixed(self.inner.clone())
     }
 }
 
-// Wires the four timer-shaped globals onto the runtime. setTimeout and
-// setInterval enqueue a `Job::TimeoutJob` against the executor; clearTimeout
-// / clearInterval / cancelAnimationFrame all funnel into the same cancelled
-// id set, which the fire path checks before calling the handler. Sharing
-// one set across timers and rAF means the spec quirk that `clearTimeout(id)`
-// can cancel a `setInterval` (and vice versa) falls out for free, matching
-// every browser implementation.
-pub(super) fn register_timers(
-    context: &mut Context,
-    cancelled: Rc<RefCell<HashSet<u32>>>,
-    next_id: Rc<Cell<u32>>,
-    raf: Rc<RefCell<RafQueue>>,
-) {
-    let cancelled_st = cancelled.clone();
-    let next_id_st = next_id.clone();
-    let set_timeout = unsafe {
-        NativeFunction::from_closure(move |_this, args, ctx| {
-            let id = enqueue_timer(args, ctx, &cancelled_st, &next_id_st, false);
-            Ok(JsValue::from(id))
-        })
-    };
-    let _ = context.register_global_builtin_callable(js_string!("setTimeout"), 2, set_timeout);
-
-    let cancelled_si = cancelled.clone();
-    let next_id_si = next_id.clone();
-    let set_interval = unsafe {
-        NativeFunction::from_closure(move |_this, args, ctx| {
-            let id = enqueue_timer(args, ctx, &cancelled_si, &next_id_si, true);
-            Ok(JsValue::from(id))
-        })
-    };
-    let _ = context.register_global_builtin_callable(js_string!("setInterval"), 2, set_interval);
-
-    let cancelled_ct = cancelled.clone();
-    let clear_timeout = unsafe {
-        NativeFunction::from_closure(move |_this, args, ctx| {
-            if let Some(id) = args.first().and_then(|v| v.to_u32(ctx).ok()) {
-                cancelled_ct.borrow_mut().insert(id);
-            }
-            Ok(JsValue::undefined())
-        })
-    };
-    let _ = context.register_global_builtin_callable(js_string!("clearTimeout"), 1, clear_timeout);
-
-    let cancelled_ci = cancelled.clone();
-    let clear_interval = unsafe {
-        NativeFunction::from_closure(move |_this, args, ctx| {
-            if let Some(id) = args.first().and_then(|v| v.to_u32(ctx).ok()) {
-                cancelled_ci.borrow_mut().insert(id);
-            }
-            Ok(JsValue::undefined())
-        })
-    };
-    let _ =
-        context.register_global_builtin_callable(js_string!("clearInterval"), 1, clear_interval);
-
-    let raf_req = raf.clone();
-    let next_id_raf = next_id.clone();
-    let request_animation_frame = unsafe {
-        NativeFunction::from_closure(move |_this, args, _ctx| {
-            let callback = args
-                .first()
-                .and_then(|a| a.as_object())
-                .filter(|o| o.is_callable())
-                .ok_or_else(|| {
-                    JsNativeError::typ()
-                        .with_message("requestAnimationFrame: callback must be a function")
-                })?;
-            let id = next_id_raf.get().wrapping_add(1);
-            next_id_raf.set(id);
-            raf_req.borrow_mut().push((id, callback));
-            Ok(JsValue::from(id))
-        })
-    };
-    let _ = context.register_global_builtin_callable(
-        js_string!("requestAnimationFrame"),
-        1,
-        request_animation_frame,
-    );
-
-    let cancelled_caf = cancelled;
-    let cancel_animation_frame = unsafe {
-        NativeFunction::from_closure(move |_this, args, ctx| {
-            if let Some(id) = args.first().and_then(|v| v.to_u32(ctx).ok()) {
-                cancelled_caf.borrow_mut().insert(id);
-            }
-            Ok(JsValue::undefined())
-        })
-    };
-    let _ = context.register_global_builtin_callable(
-        js_string!("cancelAnimationFrame"),
-        1,
-        cancel_animation_frame,
-    );
+pub(super) fn register_timers(ctx: &Ctx<'_>, clock: ClockSource) -> Result<()> {
+    let clock_now = clock.clone();
+    ctx.globals().set(
+        "__mb_clock_now",
+        Func::from(move || -> f64 { clock_now.now_ms() as f64 }),
+    )?;
+    ctx.eval::<(), _>(TIMERS_BOOT)
 }
 
-// Allocates the next id, validates the callback, and enqueues the timeout
-// job. Shared between setTimeout and setInterval — the only difference is
-// whether the closure re-enqueues itself after firing.
-//
-// A non-callable first arg gets a pre-cancelled id back, matching the spec
-// observation that `setTimeout("not a fn")` in browsers returns a real id
-// even though nothing fires; the toy bridge skips the string-as-code path
-// entirely (we have no eval-by-string) and just inserts the id into the
-// cancelled set so callers don't crash.
-fn enqueue_timer(
-    args: &[JsValue],
-    context: &mut Context,
-    cancelled: &Rc<RefCell<HashSet<u32>>>,
-    next_id: &Rc<Cell<u32>>,
-    interval: bool,
-) -> u32 {
-    let id = next_id.get().wrapping_add(1);
-    next_id.set(id);
-    let Some(handler) = args
-        .first()
-        .and_then(|a| a.as_object())
-        .filter(|o| o.is_callable())
-    else {
-        cancelled.borrow_mut().insert(id);
+const TIMERS_BOOT: &str = r#"
+(function () {
+    // Pending timer queue + raf queue + cancellation set.
+    // Plain JS arrays / object — every operation runs synchronously inside
+    // a single Rust drain, so there's no concurrency to worry about.
+    var queue = [];
+    var rafQueue = [];
+    var nextId = 0;
+    var nextRafId = 0;
+    var cancelled = Object.create(null);
+
+    globalThis.setTimeout = function (cb, ms) {
+        var id = ++nextId;
+        if (typeof cb !== 'function') { cancelled[id] = true; return id; }
+        var delay = Math.max(0, +ms || 0);
+        queue.push({
+            id: id, cb: cb, delay: delay, repeat: false,
+            deadline: globalThis.__mb_clock_now() + delay,
+        });
         return id;
     };
-    // Coerce the delay through ToNumber so `setTimeout(fn, "10")` and
-    // `setTimeout(fn)` (delay omitted, treated as 0) both behave like
-    // browsers. Negative / NaN values clamp to 0.
-    let delay_ms = args
-        .get(1)
-        .map(|v| v.to_number(context).unwrap_or(0.0))
-        .unwrap_or(0.0)
-        .max(0.0) as u64;
-    schedule_timer(context, handler, delay_ms, id, cancelled.clone(), interval);
-    id
-}
 
-fn schedule_timer(
-    context: &mut Context,
-    handler: JsObject,
-    delay_ms: u64,
-    id: u32,
-    cancelled: Rc<RefCell<HashSet<u32>>>,
-    interval: bool,
-) {
-    let job = TimeoutJob::from_duration(
-        move |ctx| {
-            // Cancellation can land between enqueue and fire — check first
-            // so a `clearTimeout(id)` issued during the delay window still
-            // wins even though the job is already in the queue.
-            if cancelled.borrow().contains(&id) {
-                return Ok(JsValue::undefined());
+    globalThis.setInterval = function (cb, ms) {
+        var id = ++nextId;
+        if (typeof cb !== 'function') { cancelled[id] = true; return id; }
+        var delay = Math.max(0, +ms || 0);
+        queue.push({
+            id: id, cb: cb, delay: delay, repeat: true,
+            deadline: globalThis.__mb_clock_now() + delay,
+        });
+        return id;
+    };
+
+    globalThis.clearTimeout = function (id) { cancelled[id] = true; };
+    globalThis.clearInterval = function (id) { cancelled[id] = true; };
+
+    globalThis.requestAnimationFrame = function (cb) {
+        var id = ++nextRafId;
+        if (typeof cb !== 'function') { cancelled['raf:' + id] = true; return id; }
+        rafQueue.push({ id: id, cb: cb });
+        return id;
+    };
+    globalThis.cancelAnimationFrame = function (id) { cancelled['raf:' + id] = true; };
+
+    // Fire every timer whose deadline has passed against the engine
+    // clock, then loop so handlers that re-arm via setTimeout(0) still
+    // get their slot in the same drain. Returns total fired so the Rust
+    // drain knows whether to keep alternating with microtask drains.
+    globalThis.__mb_run_timers = function () {
+        var fired = 0;
+        var iter = 0;
+        while (iter < 1024) {
+            iter++;
+            var now = globalThis.__mb_clock_now();
+            var due = [];
+            var still = [];
+            for (var i = 0; i < queue.length; i++) {
+                var e = queue[i];
+                if (cancelled[e.id]) continue;
+                if (e.deadline <= now) due.push(e); else still.push(e);
             }
-            if let Err(err) = handler.call(&JsValue::undefined(), &[], ctx) {
-                eprintln!("[timer] handler error: {err}");
+            queue = still;
+            if (due.length === 0) break;
+            for (var j = 0; j < due.length; j++) {
+                var entry = due[j];
+                if (cancelled[entry.id]) continue;
+                fired++;
+                try { entry.cb(); } catch (err) { /* swallow handler errors */ }
+                if (entry.repeat && !cancelled[entry.id]) {
+                    queue.push({
+                        id: entry.id, cb: entry.cb, delay: entry.delay, repeat: true,
+                        deadline: globalThis.__mb_clock_now() + entry.delay,
+                    });
+                }
             }
-            // Re-arm intervals from inside the handler so each tick gets a
-            // fresh due time relative to *its own* completion. A handler
-            // that calls `clearInterval(id)` on itself shows up in the set
-            // by the time we re-check, so the interval cleanly stops.
-            if interval && !cancelled.borrow().contains(&id) {
-                schedule_timer(ctx, handler.clone(), delay_ms, id, cancelled.clone(), true);
-            }
-            Ok(JsValue::undefined())
-        },
-        Duration::from_millis(delay_ms),
-    );
-    context.enqueue_job(Job::TimeoutJob(job));
-}
+        }
+        return fired;
+    };
+
+    globalThis.__mb_run_raf = function (timestamp) {
+        // Snapshot so a handler that re-schedules itself queues for the
+        // *next* frame (browser-spec behaviour).
+        var snapshot = rafQueue;
+        rafQueue = [];
+        for (var i = 0; i < snapshot.length; i++) {
+            var entry = snapshot[i];
+            if (cancelled['raf:' + entry.id]) continue;
+            try { entry.cb(timestamp); } catch (err) { /* swallow */ }
+        }
+    };
+
+    // Patch `Date.now()` so it tracks the engine clock — tests using
+    // FixedClock get deterministic `Date.now` reads, production runs see
+    // wall-clock time. Other Date methods continue to use the host
+    // implementation; only `now()` is engine-driven.
+    Date.now = function () { return globalThis.__mb_clock_now(); };
+})();
+"#;
