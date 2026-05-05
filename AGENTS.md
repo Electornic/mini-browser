@@ -1,173 +1,145 @@
 # AGENTS.md
 
-이 문서는 `/Users/leejun/Desktop/Projects/mini-browser` 이하 전체에 적용된다.
+이 문서는 `/Users/leejun/Desktop/Projects/mini-browser` 이하 전체에 적용된다. 작업하는 에이전트가 layout 을 빨리 파악하고 빌드/테스트/커밋 컨벤션에 맞춰 움직이도록 한다.
 
 ## Project Goal
 
-이 프로젝트는 Rust로 구현하는 학습용 미니 브라우저다. 단계(Phase) 단위로 범위를 늘려간다.
+학습용 토이 브라우저. Phase 0–3 까지는 모든 단계를 직접 구현했고, **Phase 4 에서 학습 가치를 다 뽑은 뒤 mature crate 들로 통합**, 4.9 에서 단일 crate 를 4-crate Cargo workspace 로 쪼갰다 (mb-dom / mb-engine / mb-runtime / mb-shell). 이후 작업의 무게중심은 "from-scratch 구현" 이 아니라 **글루 + 기능 보강** 이다.
 
-**Phase 0 (Done)** — 블록 layout 기반 정적 렌더링 파이프라인 + Chrome 스타일 chrome:
-- Window / Event Loop, HTML Parser, DOM Tree, CSS Parser, Style Engine
-- Block Layout Engine (`margin: auto`, `text-align: center` 포함), 기본 inline 흐름
-- Renderer: Rect + RoundedRect + Text + Image, `border-radius` hookup
-- Simple Network Loader (HTTP/HTTPS + redirect), Resource Loader (CSS/이미지/web font)
-- Chrome 스타일 chrome (탭 strip, pill 주소창, chevron 아이콘) + Chrome NTP 모양 시작 페이지
+phase 단위 history 는 [docs/legacy/](docs/legacy/) 의 옛 문서로 archived. 현재 코드와 1:1 대응되진 않으니 의도 파악용으로만 쓸 것.
 
-**Phase 1 (Done)** — CSS Expansion:
-- 단위 `%` / `em` / `rem`, 색상 `rgb()`/`rgba()`/named, descendant/child selector, `:hover`/`:focus`/`:active`
-- `display: inline-block`, `position: relative|absolute|fixed`, stacking context + `z-index`, float + `clear`, margin collapse, `line-height`
-- `opacity`, `linear-gradient`, `radial-gradient`, `box-shadow`, `text-shadow`, `transform: translate/scale/rotate`
-- **Flexbox** (`flex-grow`/`shrink`/`basis`, `justify-content`, `align-items`), **Grid** (`grid-template-*`, `fr` 단위, `grid-area`, line names)
+## Workspace Layout
 
-**Phase 2 (Done)** — JS Engine Integration:
-- Boa 0.21 임베드, `<script>` inline + external 자동 로드/실행, `console` + `globalThis`/`window`/`self` alias
-- DOM read: `document.getElementById` / `querySelector` (descendant + child), `tagName` / `textContent` / `children` / `getAttribute` / `nodeType`
-- DOM mutate: `createElement` / `createTextNode`, `appendChild` / `removeChild` / `insertBefore` / `replaceChild` / `cloneNode`, `setAttribute`, stale handle 시 throw
-- 이벤트: `addEventListener('click', fn)` + bubble dispatch (text → Element retarget, mid-bubble removal 안전)
-- 비동기: `setTimeout` / `setInterval` / `requestAnimationFrame` + Promise microtask drain. 커스텀 `FrameJobExecutor` 가 매 프레임 due 인 timeout 만 발사하고 future 는 큐에 둠
-- Mutation 즉시 reflow: `Rc<RefCell<Document>>` 공유로 핸들러 mutation 이 같은 프레임 layout 에 반영
+```
+[workspace]                                 외부 dep
+├── crates/mb-dom      (no I/O, pure data)  html5ever, cssparser, selectors,
+│                                           image, url, precomputed-hash
+│   - dom              NodeId arena + tombstone subtree
+│   - dom_select       selectors::Element 구현 (matches/closest 진입)
+│   - html             html5ever 브릿지 (parse_document / parse_fragment 두 모드)
+│   - css              cssparser 기반 stylesheet AST + 토큰 파서
+│   - style            cascade + computed values + StyledNode
+│   - resource         LoadedImage 데이터 + decode_image (loaders 는 mb-runtime)
+│   - url              Url + NetworkError + parse/resolve/Display
+│
+├── crates/mb-engine   (layout + paint)     cosmic-text, taffy, tiny-skia
+│   - layout/          taffy 브릿지 + boundary block/inline/flex/grid/table
+│   - render/          DisplayList paint commands + tiny-skia + swash
+│   - chrome           주소창 / 뒤로앞 / 메뉴 페인트 명령
+│   - display_list     DocumentView 빌더 + hit-testing (per-frame entry)
+│   - font_system      shared FontSystem + SwashCache OnceLock 슬롯
+│   - input            WindowInput 데이터 (winit driver 는 mb-shell)
+│   - pub(crate) use mb_dom::{css, dom, resource, style, url} 로 짧은 경로 보존
+│
+├── crates/mb-runtime  (orchestrator + JS)  rquickjs, ureq, url, selectors
+│   - state            BrowserState (per-frame loop driver, 거의 모든 모듈 의존)
+│   - js/              rquickjs runtime + DOM/event/timer/fetch/xhr/storage 브릿지
+│   - net              ureq fetch + Url/NetworkError re-export
+│   - resource         parallel scoped fetch + LoadedImage re-export
+│   - navigation       URL → Document 로더 (네트워크 → parse → install)
+│   - pub use mb_dom::{...} + mb_engine::{...} 으로 외부에 단일 namespace 노출
+│
+└── crates/mb-shell    (binary [[bin]] mb-shell)  anyhow, softbuffer, winit
+    - main.rs          진입점 — install_fonts → window::run(closure)
+    - window.rs        winit 이벤트 루프 + softbuffer 프레임 출력
+```
 
-**Phase 3 (Backlog)** — Interactive Browser:
-- preventDefault / stopPropagation, 키보드/포커스 이벤트, `<input>` / `<textarea>` / `<form>` submit, fetch/XHR (async/await), navigator/location stub, `main.rs` 분할
-- 워킹셋 매트릭스: [Notion 보드](https://www.notion.so/d2148621e352424ba22199e4be237e22)
-- 현재까지의 Phase 3 commit 가이드: [docs/roadmap.md](docs/roadmap.md) Phase 3 섹션
+각 crate 는 위에서 아래로만 의존한다. 순환 dep 없음.
 
-상세 범위와 설계는 아래 문서를 기준으로 한다.
-- `README.md`
-- `docs/spec.md`
-- `docs/architecture.md`
-- `docs/data-model.md`
-- `docs/roadmap.md` (Phase별 task 매트릭스 — source of truth)
+## Build / Test / Lint Commands
 
-작업 전에 관련 문서를 먼저 읽고, 구현 방향이 문서와 어긋나면 문서도 함께 갱신한다.
+```sh
+# 빠른 빌드 체크
+cargo build --workspace 2>&1 | tail -10
 
-## Priorities
+# 테스트 (446 = mb-dom 109 + mb-engine 162 + mb-runtime 86 lib + 80 main + 9 html)
+cargo test --workspace 2>&1 | grep "test result"
 
-1. 요구사항 충족
-2. 최소 변경(minimal diff)
-3. 안전성(빌드/테스트/타입)
-4. 가독성
+# 통합 테스트만
+cargo test --test main_tests -p mb-runtime
+cargo test --test html_tests -p mb-runtime
 
-## Working Rules
+# 린트 + 포맷
+cargo clippy --workspace --all-targets
+cargo fmt --all
+```
 
-- 불필요한 리팩터링, 대규모 포맷팅, 파일 이동 금지
-- 기존 코드 스타일과 패턴을 최대한 유지
-- 작은 단위로 구현하고 단계별로 검증
-- 적당한 작업 단위가 끝날 때마다 `git add .` 후 `git commit`까지 진행해 변경을 작은 단위로 유지
-- 현재 범위를 벗어나는 기능은 임의로 추가하지 않음
-- 미지원 기능은 억지로 일반화하지 말고 명시적으로 제한
-- parser, style, layout, render, network, js 모듈 경계를 흐리지 않음
+테스트 baseline 은 446. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
-## Implementation Guidance
+Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
-- HTML/CSS는 표준 전체를 구현하지 않는다. 필요한 만큼만 단계적으로 늘린다.
-- block layout이 기본. inline 흐름은 `<a>`/`<span>`/`<img>` 같은 명시적 인라인 태그에 한정.
-- Phase 1에서 layout 모드를 추가할 때마다 기존 block 경로를 깨지 않게 한다 (`display: inline-block`, `position`, `flex`, `grid` 등).
-- renderer는 rect/rounded-rect/text/image primitive 중심. 새 paint 효과(gradient, shadow, transform 등)는 새 프리미티브로 추가하고 기존을 깨지 않는다.
-- JS 측 host API 는 `src/js.rs` 안에서만 노출한다. 외부 모듈은 Boa 타입 (`JsObject` / `JsValue` / `Context`) 을 직접 import 하지 않는다 — `JsRuntime` 의 좁은 메서드 (`execute` / `dispatch_event` / `drain_pending_jobs` / `run_animation_frame_callbacks`) 만 호출.
-- 모듈 경계 유지: parser, style, layout, render, network, js 사이의 책임을 흐리지 않는다.
-- 설계 기준 자료구조는 `docs/data-model.md`를 우선 참조한다.
+## Hot Paths (자주 만지는 파일들)
 
-## Code Organization
+| File | Lines | 역할 |
+|---|---:|---|
+| `crates/mb-runtime/src/state.rs` | ~1900 | BrowserState 본체 — 프레임 루프, 입력 디스패치, 캐럿/포커스, view cache 캐싱 |
+| `crates/mb-engine/src/layout/mod.rs` | ~2800 | 박스 모델 + boundary 알고리즘 진입점 |
+| `crates/mb-dom/src/css.rs` | ~2470 | CSS 토큰 파서 + value 파서 (gradient/transform/grid/flex 모두) |
+| `crates/mb-engine/src/render/mod.rs` | ~1750 | rasterizer 본체 + DisplayCommand 정의 |
+| `crates/mb-dom/src/style.rs` | ~1820 | cascade + 상속 + computed values |
+| `crates/mb-runtime/src/js/mod.rs` | ~1020 | rquickjs runtime 부트스트랩 + 글로벌 등록 |
 
-모듈 추가 시 아래 책임 분리를 지향한다.
+`src/main.rs` 같은 옛 root 경로는 더 이상 존재하지 않음 — 모든 코드가 `crates/` 아래.
 
-- `dom`: 문서 트리 자료구조 (현재 NodeId 기반 arena, `Rc<RefCell<Document>>` 공유)
-- `html`: HTML 파싱
-- `css`: CSS 파싱
-- `style`: selector matching, inheritance, computed/specified values
-- `layout/`: block / inline / inline-block / position / float / flex / grid 계산. 알고리즘별로 `block.rs`, `inline.rs`, `flex.rs`, `grid.rs` 로 분리. 공유 자료형 (`LayoutBox`, `Rect`, …) 과 cross-cutting helper, `layout_tree` entry 는 `mod.rs` 에 둠
-- `render/`: `display_list.rs` (LayoutBox → DisplayCommand) + `raster.rs` (DisplayCommand → 픽셀 버퍼) 두 단계로 분리. `mod.rs` 에 `Affine`, `DisplayCommand` enum, 공용 색상 상수만 유지하고 entry 함수는 re-export
-- `net`: URL parsing, HTTP GET, keep-alive 풀, redirect
-- `resource`: HTML 에서 stylesheet / 이미지 / 스크립트 추출 후 병렬 fetch
-- `js/`: Boa engine wrapper. `mod.rs` 에 `JsRuntime` + 공유 타입(`ListenerMap`, `RafQueue`, `NODE_ID_PROP`), 호스트 API 등록은 `console.rs`, `window.rs`, `document.rs`, `timers.rs`, `element.rs`, `event.rs`, `util.rs` 로 분리. 외부에는 `pub struct JsRuntime` + 좁은 메서드만 노출
-- `chrome`: 탭 strip, toolbar, 주소창, 네비/리프레시/메뉴 버튼의 픽셀 그리기 + hit-region rect. `BrowserState` 는 `ChromeState`/`ChromeAction` 만 다루고 페인팅 디테일은 모름
-- `navigation`: `load_remote_document` (네트워크 → HTML/CSS/이미지/스크립트), `error_document`/`text_document` 같은 fallback 템플릿, `describe_*_error`. 순수 함수 — `BrowserState` 외부에서 호출
-- `main` (`BrowserState`): 전체 파이프라인 조립, history, chrome 입력 처리
+## Conventions
 
-한 모듈이 다른 단계의 내부 구현 세부사항을 직접 알지 않도록 유지한다.
+### 코드 스타일
+- 작은 함수 + 좋은 이름 우선, 주석은 *왜* 만 (무엇은 코드가 말함).
+- 모든 변경은 cargo fmt 통과. clippy clean.
+- 새 dep 추가는 의식적으로 — 4-crate 분할의 dep 그래프를 깨지 말 것 (mb-dom 에 IO 금지, mb-engine 에 네트워크 금지 등).
+- 한 crate 안에서 다른 crate 의 데이터 타입을 참조할 때:
+  - mb-engine 내부에서는 `crate::css::Color` 처럼 짧게 (`pub(crate) use mb_dom::*` 덕분).
+  - mb-runtime 도 동일.
+  - 외부 (테스트 / shell) 에서는 `mb_runtime::*` 또는 `mb_dom::*` 로 명시적으로.
 
-## Verification
+### 테스트
+- inline `#[cfg(test)] mod tests` (lib unit) + `tests/*.rs` (integration). 둘 다 baseline 에 포함.
+- integration tests 는 mb-runtime 의 `pub use` re-export 를 통해 모든 surface 에 접근 (`use mb_runtime::{chrome::..., css, layout, ...}`).
+- 새 기능은 가능한 한 unit test 로 커버하고 integration tests 는 cross-cutting 행동 (e.g. 입력 → 화면) 만.
 
-코드 변경 시 가능한 범위에서 아래를 실행한다.
+### Commit
+- Conventional-commit 형식: `feat(scope): ...` / `refactor(scope): ...` / `chore(scope): ...` / `docs(scope): ...`.
+- Phase 작업은 `(Phase X.Y)` suffix.
+- 매 sub-phase 끝에 cargo test green + clippy clean 확인 후 단일 commit.
+- 본문은 *왜* 위주 — 변경의 의도, 트레이드오프, 잔존 이슈.
+- Co-Authored-By 트레일러는 자동.
 
-1. lint
-   - `cargo fmt --check`
-   - `cargo clippy --all-targets --all-features -- -D warnings`
-2. typecheck
-   - `cargo check`
-3. test
-   - `cargo test --lib`
-   - `cargo test --bin mini-browser`
-4. build
-   - `cargo build`
+## Gotchas / 함정 모음
 
-현재 baseline: lib 294 + bin 41 passing, clippy clean.
+이전 phase 들에서 만났던 함정 — 다시 만나지 않도록 기록.
 
-모든 검증이 항상 가능하지 않다면:
-- 실행하지 못한 이유를 명시
-- 필요한 정확한 커맨드를 제시
-- 예상 실패 지점을 짧게 설명
+### 4.9 (workspace split)
+- **orphan impl**: 타입을 다른 crate 로 옮기면 그 타입의 inherent impl 도 같이 옮겨야 함 (E0116). 4.9b 에서 `impl Color { WHITE/BLACK }` 가 별도 파일에 있어서 마이그레이션 중 깨졌음.
+- **unused-import warning**: `pub(crate) use mb_dom::html` 처럼 `#[cfg(test)]` 만 쓰는 경우 일반 빌드에서 경고. `#[cfg(test)] pub(crate) use ...` 로 분리.
+- **`cargo build` vs `cargo build --tests`**: 일반 빌드만 통과하고 테스트 빌드에서 unresolved import 가 나는 케이스 있음. CI 전에 항상 `--tests` 로 한 번 더 확인.
 
-문서만 변경한 경우에는 build/test를 생략할 수 있다.
+### 4.8 (rquickjs)
+- closure 에서 `Ctx<'js>` + 다른 lifetime-bearing arg 를 같이 받으면 HRTB 통합 불가. 해결: **flat-hook 패턴** — 모든 Rust 콜백은 primitive (u32/String/bool/Vec) 만 받고 wrapper instance 는 JS bootstrap 이 `Object.defineProperty` 로 조립.
+- `IntoJs` 가 plain tuple 미지원 — `convert::List<(...)>` wrapper 필요.
 
-## Documentation Rules
+### 4.5 (tiny-skia)
+- `Paint::default()` 의 `anti_alias = true` (docs 와 다름). 픽셀 핀 테스트가 partial coverage 로 깨지므로 `paint.anti_alias = false` 명시 필요.
+- `gradient_transform` 은 `local → canvas` 방향.
 
-아래 항목에 영향이 있으면 관련 문서를 함께 업데이트한다.
-- 사용법
-- 구성
-- 환경변수
-- 스크립트
-- 아키텍처
-- 주요 데이터 구조
-- 구현 범위
-- 주요 플로우
+### 4.6 (winit)
+- winit `KeyEvent.text` 가 control char 도 흘려보냄 — `is_control()` 필터 안 걸면 input 박스에 invisible char 박힘.
+- GUI 검증은 메인 스레드 blocking 이라 백그라운드 task 로 못 돌림. `cargo run --bin mb-shell` 로 직접 확인.
 
-문서 업데이트 후보:
-- `README.md`
-- `docs/spec.md`
-- `docs/architecture.md`
-- `docs/data-model.md`
-- `docs/roadmap.md`
+### 4.7 (ureq)
+- ureq 는 헤더 이름을 wire 에 lowercase 로 보냄 (RFC 9110 §5.1 적합). 헤더 contains 검증 테스트는 `to_ascii_lowercase()` 후 비교.
+- redirect 정책: 301/302/303 → GET 다운그레이드 + body drop, 307/308 → method+body 유지.
+- body cap 50 MB (`limit().read_to_vec`).
 
-문서 변경이 필요 없으면, 왜 생략했는지 한 줄로 남긴다.
+### Font System
+- `font_system::shared_font_system()` 가 `None` 이면 unit test 환경 — `font_size * 0.75` fallback 으로 토이 측정.
+- `install_fonts()` 가 SwashCache 도 같이 재생성 — 글리프 캐시 키가 FontSystem 의 font id 에 의존하므로.
 
-## Output Expectations
+## Stale / Known Issues
 
-작업 보고에는 아래 항목을 포함한다.
+- `examples/css_diag.rs` — `mini_browser::css` import 라 더 이상 컴파일 안 됨. 4-crate 분할에 맞게 위치 이동 + `mb_dom::css` 로 import 갱신 필요.
+- `scripts/package-macos.sh` — `APP_NAME=mini-browser`, `target/release/${APP_NAME}` 가정. 현재 바이너리는 `mb-shell`. 패키징 시 갱신 필요.
+- `packaging/macos/Info.plist` — 마찬가지로 `mini-browser` 가정 가능성.
 
-- 요약(불릿 3~5개)
-- 변경 파일 목록
-- 핵심 diff 또는 패치
-- 실행한 커맨드 및 결과
-- 문서 업데이트 여부(업데이트함/생략함 + 사유 1줄)
+## Knowledge Hub Pointer
 
-## Long-term Roadmap
-
-Phase 0 / 1 / 2 는 main에 반영됨. Phase 3 부터 backlog.
-
-- **Phase 3 — Interactive Browser**: 사용자 입력(`<input>`/`<textarea>`/`<form>` submit), 이벤트 surface 확장 (preventDefault·키보드·focus·input/change), 네트워크 from JS (`fetch`/`XHR` + `async/await`), 호스트 API stub (`navigator`/`location`/`history`), `main.rs` 분할.
-
-Phase별 task 분해와 작업량/학습 가치 매트릭스는 [docs/roadmap.md](docs/roadmap.md)에 있다. Phase 3 워킹셋은 [Notion 보드](https://www.notion.so/d2148621e352424ba22199e4be237e22). 진행 시 두 곳을 source of truth 로 같이 본다.
-
-### 명시적 비포함
-
-다음 항목은 학습 가치 대비 범위 폭증이 커서 로드맵에서 제외한다(필요 시 별도 Phase로 다시 평가):
-
-- WebGL / Canvas 2D context
-- WebSocket, IndexedDB, ServiceWorker, Web Workers
-- HTTP/2, HTTP/3, gzip/brotli compression
-- 멀티탭 UI, 히스토리 페이지 (chrome://history 같은)
-- 폰트 셰이핑(HarfBuzz 수준), BiDi 정교화
-
-## Working Style
-
-- 최소 변경으로 진행한다.
-- 불필요한 리팩터링, 대규모 포맷 변경, 파일 이동은 피한다.
-
-## Git Workflow
-
-- 적당한 작업 단위가 끝날 때마다 `git add .` 후 `git commit`까지 진행해 변경을 작은 단위로 남긴다.
-- GitHub 관련 작업은 가능하면 `gh` CLI를 우선 사용한다.
-- PR 조회, 리뷰 확인, 코멘트 확인, PR 생성 같은 작업은 `gh` 기준으로 수행한다.
-- PR review 사항을 반영한 뒤에는 해당 review thread에 답글을 달고, resolve 처리까지 진행한다.
+작업 중 얻은 재사용 가능한 인사이트는 회사·프로젝트 기밀이 아닌 한 `~/Desktop/Projects/knowledge-hub-private/<domain>/<kebab-case>.md` 에 한 번 물어보고 저장한다.

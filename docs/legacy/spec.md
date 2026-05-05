@@ -70,7 +70,7 @@ URL
 
 ## Phase 3 — Backlog (아직 미구현)
 
-다음 항목은 Phase 3 으로 분리되어 [Notion 보드](https://www.notion.so/d2148621e352424ba22199e4be237e22) 에서 관리됨:
+다음 항목은 Phase 3 으로 분리되어 backlog 에 둠:
 
 - `event.preventDefault` / `stopPropagation` / `currentTarget`
 - 키보드 / 포커스 이벤트 (`keydown` / `keyup` / `focus` / `blur` / `input` / `change`)

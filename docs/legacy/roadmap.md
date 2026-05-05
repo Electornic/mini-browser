@@ -17,7 +17,7 @@
 | 2D | Done | Events & Async | addEventListener('click', ...), Event loop (microtask + timer), setTimeout/setInterval, requestAnimationFrame |
 | 3 | Backlog | Interactive Browser | Form 입력, 이벤트 surface 확장 (preventDefault·키보드·focus·input/change), fetch/XHR, navigator/location stub |
 
-Phase 3 의 워킹셋(개별 task별 status/effort/value/files/notes)은 [Notion 보드](https://www.notion.so/d2148621e352424ba22199e4be237e22)에서 관리한다. 이 문서는 phase 단위 의도와 outcome 의 source of truth.
+이 문서는 phase 단위 의도와 outcome 의 source of truth.
 
 ## Working Principles
 
@@ -169,7 +169,7 @@ Phase 0에서 의도적으로 미뤘던 polish 항목. Phase 1 시작 직전 일
 
 목표: 사용자가 직접 입력하고 폼을 제출하고 키보드/포커스로 상호작용하는 페이지가 동작하는 토이 브라우저로 끌어올린다. 동시에 Step 6/7 에서 의도적으로 미뤘던 이벤트 surface 잔여물 (preventDefault, currentTarget) 을 정리하고, naver-grade SPA 가 first-line ReferenceError 로 죽지 않도록 host API stub 을 채운다.
 
-상세 task 매트릭스 (각 task별 Status/Effort/Value/Files/Dependencies/Notes) 는 [Notion 보드](https://www.notion.so/d2148621e352424ba22199e4be237e22)에 있다. 이 문서는 phase 의도와 섹션 outcome 만 기술.
+이 문서는 phase 의도와 섹션 outcome 만 기술한다.
 
 ### 3A. Event 확장
 - `event.preventDefault()` + link click 차단 wiring
