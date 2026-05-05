@@ -1119,6 +1119,15 @@ dependencies = [
 [[package]]
 name = "mb-dom"
 version = "0.1.0"
+dependencies = [
+ "cssparser",
+ "html5ever",
+ "image",
+ "markup5ever_rcdom",
+ "precomputed-hash",
+ "selectors",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "mb-engine"
@@ -1153,11 +1162,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cosmic-text",
- "cssparser",
- "html5ever",
  "image",
- "markup5ever_rcdom",
- "precomputed-hash",
+ "mb-dom",
  "rquickjs",
  "selectors",
  "softbuffer",

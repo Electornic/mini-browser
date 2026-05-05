@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+cssparser = "0.36"
+html5ever = "0.38"
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png"] }
+markup5ever_rcdom = "0.38"
+precomputed-hash = "0.1"
+selectors = "0.37"
+thiserror = "2"
