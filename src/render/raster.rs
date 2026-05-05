@@ -15,7 +15,10 @@
 // shift those boundary pixels.
 
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, PhysicalGlyph, Shaping, SwashContent};
-use tiny_skia::{Color as TsColor, Paint, Pixmap, Rect as TsRect, Transform as TsTransform};
+use tiny_skia::{
+    Color as TsColor, FillRule, Paint, PathBuilder, Pixmap, Rect as TsRect,
+    Transform as TsTransform,
+};
 
 use crate::css::{Color, GradientDirection, GradientKind};
 use crate::layout::Rect;
@@ -156,11 +159,19 @@ fn fill_solid_rect(pixmap: &mut Pixmap, color: Color, rect: Rect, transform: Aff
     };
     let mut paint = Paint::default();
     paint.set_color_rgba8(color.r, color.g, color.b, color.a);
-    // anti_alias defaults to false for `Paint::default()`, which is what
-    // the pixel-pinned tests want — a rotated rect picks up jagged edges
-    // exactly the way the old hand-rolled inverse-pixel-sample did.
+    // tiny-skia's `Paint::default()` has `anti_alias = true`. Force it off
+    // so a rotated rect's edges stay jagged the way the old hand-rolled
+    // inverse-pixel-sample produced — what the pixel-pinned tests assert.
+    paint.anti_alias = false;
     pixmap.fill_rect(ts_rect, &paint, affine_to_ts(transform), None);
 }
+
+// Quarter-circle cubic bezier coefficient: distance from the on-curve
+// endpoint to its off-curve control point, expressed as a fraction of the
+// radius. Skia / SVG / Inkscape all use 4*(sqrt(2)-1)/3 — the curve
+// deviates from a true circle by under 0.03% so pixel-pinned tests at our
+// 4×4 / 5×5 surface scales never see the difference.
+const QUARTER_ARC_K: f32 = 0.5522847498;
 
 fn fill_rounded_rect(
     pixmap: &mut Pixmap,
@@ -172,79 +183,64 @@ fn fill_rounded_rect(
     if color.a == 0 {
         return;
     }
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return;
+    }
     if radii.tl == 0.0 && radii.tr == 0.0 && radii.br == 0.0 && radii.bl == 0.0 {
-        // Cheaper rectangle filler — and it lets tiny-skia handle the
-        // axis-aligned / rotated dispatch in one place.
+        // Pure rectangle: skip the path build and reuse the fast fill_rect path.
         fill_solid_rect(pixmap, color, rect, transform);
         return;
     }
 
-    if transform.is_identity() {
-        fill_rounded_rect_aligned(pixmap, color, rect, radii);
-    } else {
-        let inverse = transform.inverse();
-        paint_through(pixmap, rect, transform, inverse, |lx, ly| {
-            if point_in_logical_rounded_rect(lx, ly, rect, radii) {
-                Some(color)
-            } else {
-                None
-            }
-        });
-    }
-}
-
-fn fill_rounded_rect_aligned(pixmap: &mut Pixmap, color: Color, rect: Rect, radii: CornerRadii) {
-    let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
-    let x_start = rect.x.max(0.0).floor() as usize;
-    let y_start = rect.y.max(0.0).floor() as usize;
-    let x_end = ((rect.x + rect.width).ceil().max(0.0) as usize).min(width);
-    let y_end = ((rect.y + rect.height).ceil().max(0.0) as usize).min(height);
-
-    // Cap each radius to half the rect so corners never overlap.
+    // Cap each radius to half the rect so adjacent corners never overlap.
     let max_radius = (rect.width.min(rect.height) / 2.0).max(0.0);
     let tl = radii.tl.clamp(0.0, max_radius);
     let tr = radii.tr.clamp(0.0, max_radius);
     let br = radii.br.clamp(0.0, max_radius);
     let bl = radii.bl.clamp(0.0, max_radius);
 
-    let left = rect.x;
-    let top = rect.y;
-    let right = rect.x + rect.width;
-    let bottom = rect.y + rect.height;
+    let l = rect.x;
+    let t = rect.y;
+    let r = rect.x + rect.width;
+    let b = rect.y + rect.height;
 
-    let data = pixmap.data_mut();
-    for y in y_start..y_end {
-        let py = y as f32 + 0.5;
-        let row = y * width;
-        for x in x_start..x_end {
-            let px = x as f32 + 0.5;
-            // Pixels in the straight band always paint; only corner regions need a distance check.
-            let inside = if tl > 0.0 && px < left + tl && py < top + tl {
-                let dx = px - (left + tl);
-                let dy = py - (top + tl);
-                dx * dx + dy * dy <= tl * tl
-            } else if tr > 0.0 && px > right - tr && py < top + tr {
-                let dx = px - (right - tr);
-                let dy = py - (top + tr);
-                dx * dx + dy * dy <= tr * tr
-            } else if br > 0.0 && px > right - br && py > bottom - br {
-                let dx = px - (right - br);
-                let dy = py - (bottom - br);
-                dx * dx + dy * dy <= br * br
-            } else if bl > 0.0 && px < left + bl && py > bottom - bl {
-                let dx = px - (left + bl);
-                let dy = py - (bottom - bl);
-                dx * dx + dy * dy <= bl * bl
-            } else {
-                true
-            };
-
-            if !inside {
-                continue;
-            }
-            blend_pixel_bytes(data, (row + x) * 4, color);
-        }
+    let mut pb = PathBuilder::new();
+    pb.move_to(l + tl, t);
+    pb.line_to(r - tr, t);
+    if tr > 0.0 {
+        let k = tr * QUARTER_ARC_K;
+        pb.cubic_to(r - tr + k, t, r, t + tr - k, r, t + tr);
     }
+    pb.line_to(r, b - br);
+    if br > 0.0 {
+        let k = br * QUARTER_ARC_K;
+        pb.cubic_to(r, b - br + k, r - br + k, b, r - br, b);
+    }
+    pb.line_to(l + bl, b);
+    if bl > 0.0 {
+        let k = bl * QUARTER_ARC_K;
+        pb.cubic_to(l + bl - k, b, l, b - bl + k, l, b - bl);
+    }
+    pb.line_to(l, t + tl);
+    if tl > 0.0 {
+        let k = tl * QUARTER_ARC_K;
+        pb.cubic_to(l, t + tl - k, l + tl - k, t, l + tl, t);
+    }
+    pb.close();
+    let Some(path) = pb.finish() else {
+        return;
+    };
+
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+    paint.anti_alias = false;
+    pixmap.fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        affine_to_ts(transform),
+        None,
+    );
 }
 
 fn fill_gradient(pixmap: &mut Pixmap, gradient: &GradientCommand, transform: Affine) {
@@ -533,45 +529,6 @@ fn blend_pixel_bytes(data: &mut [u8], byte_idx: usize, color: Color) {
     data[byte_idx + 3] = 255;
 }
 
-fn point_in_logical_rect(lx: f32, ly: f32, rect: Rect) -> bool {
-    lx >= rect.x && lx < rect.x + rect.width && ly >= rect.y && ly < rect.y + rect.height
-}
-
-fn point_in_logical_rounded_rect(lx: f32, ly: f32, rect: Rect, radii: CornerRadii) -> bool {
-    if !point_in_logical_rect(lx, ly, rect) {
-        return false;
-    }
-    let max_r = (rect.width.min(rect.height) / 2.0).max(0.0);
-    let tl = radii.tl.clamp(0.0, max_r);
-    let tr = radii.tr.clamp(0.0, max_r);
-    let br = radii.br.clamp(0.0, max_r);
-    let bl = radii.bl.clamp(0.0, max_r);
-    let left = rect.x;
-    let top = rect.y;
-    let right = rect.x + rect.width;
-    let bottom = rect.y + rect.height;
-    if tl > 0.0 && lx < left + tl && ly < top + tl {
-        let dx = lx - (left + tl);
-        let dy = ly - (top + tl);
-        return dx * dx + dy * dy <= tl * tl;
-    }
-    if tr > 0.0 && lx > right - tr && ly < top + tr {
-        let dx = lx - (right - tr);
-        let dy = ly - (top + tr);
-        return dx * dx + dy * dy <= tr * tr;
-    }
-    if br > 0.0 && lx > right - br && ly > bottom - br {
-        let dx = lx - (right - br);
-        let dy = ly - (bottom - br);
-        return dx * dx + dy * dy <= br * br;
-    }
-    if bl > 0.0 && lx < left + bl && ly > bottom - bl {
-        let dx = lx - (left + bl);
-        let dy = ly - (bottom - bl);
-        return dx * dx + dy * dy <= bl * bl;
-    }
-    true
-}
 
 fn gradient_progress(lx: f32, ly: f32, rect: Rect, kind: GradientKind) -> f32 {
     match kind {
