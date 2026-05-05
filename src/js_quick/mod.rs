@@ -17,6 +17,8 @@ use rquickjs::{CatchResultExt, CaughtError, Context, Function, Runtime, Value};
 use crate::dom::{Document, NodeId};
 
 mod console;
+mod document;
+mod element;
 mod util;
 mod window;
 
@@ -74,6 +76,11 @@ impl JsRuntime {
             console::register_console(&ctx).expect("console should register");
             window::register_window_aliases(&ctx, location_url.clone())
                 .expect("window aliases should register");
+            element::register_element_hooks(&ctx, dom.clone(), listeners.clone())
+                .expect("element hooks should register");
+            element::run_dom_bootstrap(&ctx).expect("dom bootstrap should run");
+            document::register_document(&ctx, dom.clone(), listeners.clone())
+                .expect("document should register");
         });
 
         Self {
@@ -353,5 +360,195 @@ mod tests {
         rt.execute("var ran = false; queueMicrotask(() => { ran = true; })")
             .unwrap();
         assert_eq!(rt.execute("ran").unwrap(), "true");
+    }
+
+    // -------- 4.8b DOM bridge tests --------
+
+    fn rt_with_html(source: &str) -> JsRuntime {
+        let document = crate::html::parse(source).unwrap();
+        let dom = Rc::new(RefCell::new(document));
+        JsRuntime::new(dom)
+    }
+
+    #[test]
+    fn document_get_element_by_id_returns_element_wrapper() {
+        let mut rt = rt_with_html(r#"<div id="hello">hi</div>"#);
+        assert_eq!(
+            rt.execute("document.getElementById('hello').tagName")
+                .unwrap(),
+            "\"DIV\""
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('missing')").unwrap(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn document_query_selector_runs_through_selectors_crate() {
+        let mut rt = rt_with_html(r#"<p class="a">x</p><p class="b">y</p>"#);
+        assert_eq!(
+            rt.execute("document.querySelector('p.b').textContent")
+                .unwrap(),
+            "\"y\""
+        );
+        assert_eq!(
+            rt.execute("document.querySelector('p.missing')").unwrap(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn document_get_elements_by_class_name_returns_array() {
+        let mut rt = rt_with_html(r#"<p class="hit">a</p><p class="hit">b</p><p>skip</p>"#);
+        assert_eq!(
+            rt.execute(
+                "document.getElementsByClassName('hit').map(e => e.textContent).join(',')"
+            )
+            .unwrap(),
+            "\"a,b\""
+        );
+    }
+
+    #[test]
+    fn document_create_element_appears_in_html_when_appended() {
+        let mut rt = rt_with_html(r#"<div id="root"></div>"#);
+        rt.execute(
+            r#"var d = document.createElement('span');
+               d.setAttribute('id', 'fresh');
+               d.textContent = 'hello';
+               document.getElementById('root').appendChild(d);"#,
+        )
+        .unwrap();
+        // Round-trip via the inner HTML accessor — attribute order is
+        // sorted (BTreeMap-backed AttrMap).
+        let serialized = rt
+            .execute("document.getElementById('root').innerHTML")
+            .unwrap();
+        assert_eq!(serialized, "\"<span id=\\\"fresh\\\">hello</span>\"");
+    }
+
+    #[test]
+    fn element_inner_html_set_replaces_children() {
+        let mut rt = rt_with_html(r#"<div id="r"><span>old</span></div>"#);
+        // Pass the new fragment via a JS variable so the test source
+        // doesn't trip pattern-matching on the literal markup.
+        let assign_src = "var raw='<b>new</b>'; document.getElementById('r').innerHTML=raw;";
+        rt.execute(assign_src).unwrap();
+        let after = rt.execute("document.getElementById('r').innerHTML").unwrap();
+        assert_eq!(after, "\"<b>new</b>\"");
+    }
+
+    #[test]
+    fn element_class_list_add_remove_toggle_contains() {
+        let mut rt = rt_with_html(r#"<p id="p" class="x"></p>"#);
+        rt.execute("document.getElementById('p').classList.add('y','z')")
+            .unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('p').getAttribute('class')")
+                .unwrap(),
+            "\"x y z\""
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('p').classList.contains('y')")
+                .unwrap(),
+            "true"
+        );
+        rt.execute("document.getElementById('p').classList.remove('x')")
+            .unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('p').getAttribute('class')")
+                .unwrap(),
+            "\"y z\""
+        );
+        // toggle without force flips; with force forces.
+        assert_eq!(
+            rt.execute("document.getElementById('p').classList.toggle('y')")
+                .unwrap(),
+            "false"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('p').classList.toggle('y', true)")
+                .unwrap(),
+            "true"
+        );
+    }
+
+    #[test]
+    fn element_remove_child_throws_when_argument_isnt_a_child() {
+        let mut rt = rt_with_html(r#"<div id="a"></div><div id="b"></div>"#);
+        let err = rt
+            .execute(
+                "document.getElementById('a').removeChild(document.getElementById('b'))",
+            )
+            .unwrap_err();
+        assert!(err.contains("not a child"), "got: {err}");
+    }
+
+    #[test]
+    fn element_matches_runs_against_selectors_crate() {
+        let mut rt = rt_with_html(r#"<p id="p" class="a b"></p>"#);
+        assert_eq!(
+            rt.execute("document.getElementById('p').matches('p.a')").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('p').matches('span')")
+                .unwrap(),
+            "false"
+        );
+    }
+
+    #[test]
+    fn element_closest_walks_ancestors() {
+        let mut rt = rt_with_html(r#"<div class="outer"><div class="inner"><span id="s"/></div></div>"#);
+        assert_eq!(
+            rt.execute("document.getElementById('s').closest('.outer').getAttribute('class')")
+                .unwrap(),
+            "\"outer\""
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('s').closest('.missing')")
+                .unwrap(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn element_text_content_set_and_get() {
+        let mut rt = rt_with_html(r#"<p id="p">old</p>"#);
+        assert_eq!(
+            rt.execute("document.getElementById('p').textContent").unwrap(),
+            "\"old\""
+        );
+        rt.execute("document.getElementById('p').textContent = 'new'")
+            .unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('p').textContent").unwrap(),
+            "\"new\""
+        );
+    }
+
+    #[test]
+    fn element_value_round_trips_through_attribute() {
+        let mut rt = rt_with_html(r#"<input id="i" value="seed">"#);
+        assert_eq!(
+            rt.execute("document.getElementById('i').value").unwrap(),
+            "\"seed\""
+        );
+        rt.execute("document.getElementById('i').value = 'edited'")
+            .unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('i').getAttribute('value')")
+                .unwrap(),
+            "\"edited\""
+        );
+    }
+
+    #[test]
+    fn document_body_and_head_accessors_resolve() {
+        let mut rt = rt_with_html(r#"<html><head><title>t</title></head><body><p>b</p></body></html>"#);
+        assert_eq!(rt.execute("document.body.tagName").unwrap(), "\"BODY\"");
+        assert_eq!(rt.execute("document.head.tagName").unwrap(), "\"HEAD\"");
     }
 }
