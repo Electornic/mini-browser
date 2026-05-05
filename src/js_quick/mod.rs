@@ -19,10 +19,12 @@ mod console;
 mod document;
 mod element;
 mod event;
+mod fetch;
 mod storage;
 mod timers;
 mod util;
 mod window;
+mod xhr;
 
 pub use timers::FixedClock;
 use timers::ClockSource;
@@ -77,6 +79,8 @@ impl JsRuntime {
             event::register_events(&ctx).expect("events should register");
             storage::register_storage(&ctx).expect("storage should register");
             timers::register_timers(&ctx, clock.clone()).expect("timers should register");
+            fetch::register_fetch(&ctx).expect("fetch should register");
+            xhr::register_xhr(&ctx).expect("xhr should register");
         });
 
         Self {
@@ -915,6 +919,88 @@ mod tests {
         let nid = id_to_node(&rt, "d");
         rt.dispatch_event(nid, "click");
         assert_eq!(rt.execute("fired").unwrap(), "1");
+    }
+
+    // -------- 4.8d fetch / xhr surface tests (network-free) --------
+
+    #[test]
+    fn fetch_is_a_function_returning_a_promise() {
+        let mut rt = fresh();
+        assert_eq!(rt.execute("typeof fetch").unwrap(), "\"function\"");
+        // Use an unsupported scheme so net::Url::parse rejects without
+        // hitting the network — the rejection still proves `fetch`
+        // returns a Promise (then/catch are present on the rejected
+        // promise the surface returns).
+        rt.execute(
+            r#"var caught = null;
+               fetch('foo://bad').catch(function(err){ caught = String(err); });"#,
+        )
+        .unwrap();
+        let observed = rt.execute("typeof caught === 'string' && caught.length > 0").unwrap();
+        assert_eq!(observed, "true");
+    }
+
+    #[test]
+    fn fetch_rejects_when_init_is_not_an_object() {
+        let mut rt = fresh();
+        rt.execute(
+            r#"var rejected = false;
+               fetch('foo://bad', 42).catch(function(){ rejected = true; });"#,
+        )
+        .unwrap();
+        assert_eq!(rt.execute("rejected").unwrap(), "true");
+    }
+
+    #[test]
+    fn xmlhttprequest_constructor_starts_in_unsent_state() {
+        let mut rt = fresh();
+        rt.execute("var xhr = new XMLHttpRequest()").unwrap();
+        assert_eq!(rt.execute("xhr.readyState").unwrap(), "0");
+        assert_eq!(rt.execute("xhr.UNSENT").unwrap(), "0");
+        assert_eq!(rt.execute("xhr.DONE").unwrap(), "4");
+        // Class-side constants.
+        assert_eq!(rt.execute("XMLHttpRequest.OPENED").unwrap(), "1");
+    }
+
+    #[test]
+    fn xhr_open_transitions_to_opened_state() {
+        let mut rt = fresh();
+        rt.execute(
+            "var xhr = new XMLHttpRequest(); xhr.open('GET', 'foo://bad')",
+        )
+        .unwrap();
+        assert_eq!(rt.execute("xhr.readyState").unwrap(), "1");
+    }
+
+    #[test]
+    fn xhr_set_request_header_requires_opened_state() {
+        let mut rt = fresh();
+        let err = rt
+            .execute(
+                "var xhr = new XMLHttpRequest(); xhr.setRequestHeader('X', 'y')",
+            )
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("opened"), "got: {err}");
+    }
+
+    #[test]
+    fn xhr_send_throws_when_open_was_not_called() {
+        let mut rt = fresh();
+        let err = rt
+            .execute("var xhr = new XMLHttpRequest(); xhr.send()")
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("opened"), "got: {err}");
+    }
+
+    #[test]
+    fn xhr_open_with_invalid_url_throws_synchronously() {
+        let mut rt = fresh();
+        let err = rt
+            .execute(
+                "var xhr = new XMLHttpRequest(); xhr.open('GET', 'foo://bad'); xhr.send()",
+            )
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("invalid url"), "got: {err}");
     }
 
     #[test]
