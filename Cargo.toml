@@ -15,12 +15,6 @@ edition = "2024"
 anyhow = "1"
 mb-dom = { path = "crates/mb-dom" }
 mb-engine = { path = "crates/mb-engine" }
-rquickjs = { version = "0.11", features = ["macro"] }
-selectors = "0.37"
+mb-runtime = { path = "crates/mb-runtime" }
 softbuffer = "0.4"
-thiserror = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
-ureq = "3"
-url = "2"
 winit = "0.30"

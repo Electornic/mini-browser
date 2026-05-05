@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+mb-dom = { path = "../mb-dom" }
+mb-engine = { path = "../mb-engine" }
+rquickjs = { version = "0.11", features = ["macro"] }
+selectors = "0.37"
+ureq = "3"
+url = "2"
