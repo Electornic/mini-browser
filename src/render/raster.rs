@@ -1,18 +1,26 @@
 // DisplayCommand -> pixel buffer. Software paint pipeline backed by
-// `tiny-skia`: a `Pixmap` of premultiplied RGBA bytes is the buffer; the
-// rasterizer walks the command list and either calls into tiny-skia
-// (axis-aligned and rotated SolidRect) or drives a custom byte loop
-// (rounded-rect / gradient / image / box-shadow / text glyph blit).
+// `tiny-skia`: a `Pixmap` of premultiplied RGBA bytes is the buffer.
+// Most primitives go through tiny-skia natively:
+//   - SolidRect          fill_rect with a solid Paint
+//   - RoundedRect        fill_path on a cubic-bezier corner approximation
+//   - Image              fill_rect with a Pattern shader (nearest filter)
+//   - Gradient           fill_rect with LinearGradient / RadialGradient
+//                        shaders; radial uses gradient_transform =
+//                        scale(rx, ry).post_translate(cx, cy) so a
+//                        non-square box keeps elliptical falloff
 //
-// The custom helpers stay because their semantics are pinned by tests
-// — point-in-rect distance for rounded corners, linear-ramp shadow
-// falloff, swash mask blits with cosmic-text shaping. tiny-skia's
-// path filler can replace those incrementally in later sub-phases.
+// Two helpers stay as custom byte loops driven against `pixmap.data_mut()`:
+//   - BoxShadow          linear-ramp coverage outside the rect — no
+//                        clean tiny-skia equivalent for this falloff
+//   - Text glyphs        cosmic-text shapes runs, swash rasterises each
+//                        glyph; we blit the mask / color image into the
+//                        pixmap directly. Both have a slow path through
+//                        `paint_through` for rotation.
 //
-// Anti-aliasing stays off everywhere: the test surface compares exact
-// pixel u32s against geometric shapes whose boundary rule is "pixel
-// centre ≤ radius / inside the rect".  AA on tiny-skia paints would
-// shift those boundary pixels.
+// Anti-aliasing is forced off on every Paint (tiny-skia's `Paint::default()`
+// has it on): the test surface compares exact pixel u32s against geometric
+// shapes whose boundary rule is "pixel centre ≤ radius / inside the rect",
+// and AA edge coverage flips those boundary pixels.
 
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, PhysicalGlyph, Shaping, SwashContent};
 use tiny_skia::{
