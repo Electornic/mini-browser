@@ -408,6 +408,12 @@ fn draw_text_through(
         return;
     };
     for (physical, image) in &physicals_and_images {
+        // Color glyphs (emoji) under transform are uncommon and would need a
+        // bespoke premultiplied source-over inverse-mapped blend; defer them
+        // by skipping rather than painting wrong colours.
+        if !matches!(image.content, SwashContent::Mask) {
+            continue;
+        }
         let img_w = image.placement.width as usize;
         let img_h = image.placement.height as usize;
         let dx0 = (physical.x + image.placement.left) as f32;
@@ -741,16 +747,29 @@ fn draw_text(buffer: &mut [u32], width: usize, height: usize, text: &TextCommand
         return;
     };
     for (physical, image) in &physicals_and_images {
-        blit_swash_mask(buffer, width, height, image, physical, text.color);
+        match image.content {
+            SwashContent::Mask => {
+                blit_swash_mask(buffer, width, height, image, physical, text.color);
+            }
+            SwashContent::Color => {
+                blit_swash_color(buffer, width, height, image, physical);
+            }
+            // Subpixel masks would need a different per-channel coverage
+            // blend; cosmic-text's default Metrics shaping pipeline does
+            // not emit them so this branch is currently unreachable.
+            SwashContent::SubpixelMask => {}
+        }
     }
 }
 
 // Shape `text.text` through cosmic-text and resolve every glyph to its swash
-// alpha image, returning `(physical_glyph, image)` pairs ready to blit. Both
-// the FontSystem and SwashCache live in shared `Mutex` slots — we acquire
-// each lock for the smallest possible scope. Returning `None` signals the
-// caller to fall back to the bitmap path (e.g. the shared slots have not been
-// initialised yet, or the lock is poisoned).
+// image, returning `(physical_glyph, image)` pairs ready to blit. Both the
+// FontSystem and SwashCache live in shared `Mutex` slots — we acquire each
+// lock for the smallest possible scope. Returning `None` signals the caller
+// to fall back to the bitmap path (e.g. the shared slots have not been
+// initialised yet, or the lock is poisoned). Empty placements (whitespace,
+// non-printing glyphs) are dropped here so the paint loop only iterates real
+// pixel-bearing glyphs.
 fn shape_and_images(text: &TextCommand) -> Option<Vec<(PhysicalGlyph, cosmic_text::SwashImage)>> {
     let fs_slot = crate::state::shared_font_system()?;
     let swash_slot = crate::state::shared_swash_cache()?;
@@ -760,15 +779,10 @@ fn shape_and_images(text: &TextCommand) -> Option<Vec<(PhysicalGlyph, cosmic_tex
     let physicals = shape_to_physicals(&mut fs, text);
     let mut out = Vec::with_capacity(physicals.len());
     for physical in physicals {
-        if let Some(image) = swash.get_image(&mut fs, physical.cache_key).clone() {
-            // Only mask images participate in the alpha-blend path; subpixel
-            // and color images would need their own blend (Phase 4.4 follow-up).
-            if image.placement.width == 0
-                || image.placement.height == 0
-                || !matches!(image.content, SwashContent::Mask)
-            {
-                continue;
-            }
+        if let Some(image) = swash.get_image(&mut fs, physical.cache_key).clone()
+            && image.placement.width != 0
+            && image.placement.height != 0
+        {
             out.push((physical, image));
         }
     }
@@ -847,6 +861,57 @@ fn blit_swash_mask(
                 let g = (coverage * color.g as u32 + inv * ((bg >> 8) & 0xFF)) / 255;
                 let b = (coverage * color.b as u32 + inv * (bg & 0xFF)) / 255;
                 buffer[idx] = (r << 16) | (g << 8) | b;
+            }
+        }
+    }
+}
+
+// Paint a swash color glyph (e.g. emoji from CBDT/sbix/COLR-CPAL tables).
+// Pixels arrive as 32-bit BGRA with **premultiplied alpha**, so the source-over
+// equation is `out = src + bg * (255 - a) / 255` — no further multiplication
+// of the source channels is needed. The TextCommand's `color` is intentionally
+// ignored: a colored glyph carries its own pixel colors, and tinting it would
+// drain the chroma that makes the emoji recognisable.
+fn blit_swash_color(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    image: &cosmic_text::SwashImage,
+    physical: &PhysicalGlyph,
+) {
+    let img_w = image.placement.width as usize;
+    let img_h = image.placement.height as usize;
+    let dx0 = physical.x + image.placement.left;
+    let dy0 = physical.y - image.placement.top;
+
+    for row in 0..img_h {
+        for col in 0..img_w {
+            let i = (row * img_w + col) * 4;
+            let b = image.data[i] as u32;
+            let g = image.data[i + 1] as u32;
+            let r = image.data[i + 2] as u32;
+            let a = image.data[i + 3] as u32;
+            if a == 0 {
+                continue;
+            }
+            let px = dx0 + col as i32;
+            let py = dy0 + row as i32;
+            if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
+                continue;
+            }
+            let bidx = py as usize * width + px as usize;
+            if a == 255 {
+                buffer[bidx] = (r << 16) | (g << 8) | b;
+            } else {
+                let bg = buffer[bidx];
+                let inv = 255 - a;
+                let bg_r = (bg >> 16) & 0xFF;
+                let bg_g = (bg >> 8) & 0xFF;
+                let bg_b = bg & 0xFF;
+                let out_r = (r + bg_r * inv / 255).min(255);
+                let out_g = (g + bg_g * inv / 255).min(255);
+                let out_b = (b + bg_b * inv / 255).min(255);
+                buffer[bidx] = (out_r << 16) | (out_g << 8) | out_b;
             }
         }
     }
