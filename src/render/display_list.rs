@@ -603,6 +603,9 @@ fn text_shadow_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayComm
         y: layout_box.dimensions.content.y + half_leading + shadow.offset_y,
         color: apply_alpha(shadow.color, alpha),
         font_size: glyph_size,
+        // Mirror the visible text's wrap so the shadow tracks line breaks
+        // instead of running off the right edge as a single line.
+        wrap_width: Some(layout_box.dimensions.content.width),
     }))
 }
 
@@ -631,6 +634,10 @@ fn text_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
         y: layout_box.dimensions.content.y + half_leading,
         color: apply_alpha(text_color(node), alpha),
         font_size: glyph_size,
+        // Inline layout reserved `content.height` for the wrapped paragraph
+        // (Phase 4.4c); honour the same wrap budget at paint time so the
+        // glyphs fall on the lines layout planned for.
+        wrap_width: Some(layout_box.dimensions.content.width),
     }))
 }
 
@@ -680,6 +687,10 @@ fn input_value_text_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayC
             y: content.y + half_leading,
             color,
             font_size: glyph_size,
+            // Single-line `<input>` does not wrap — over-long values just
+            // overflow the field box, matching the toy browser's existing
+            // behaviour. Soft wrapping is the textarea path's job.
+            wrap_width: None,
         })];
     }
 
@@ -699,6 +710,9 @@ fn input_value_text_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayC
                 y: content.y + glyph_size * row as f32,
                 color,
                 font_size: glyph_size,
+                // The caller already split on `\n`; each piece prints as
+                // its own row without further wrapping.
+                wrap_width: None,
             })
         })
         .collect()

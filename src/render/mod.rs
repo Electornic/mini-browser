@@ -13,7 +13,7 @@ mod display_list;
 mod raster;
 
 pub use display_list::{PaintContext, build_display_list, transform_for, translate};
-pub use raster::{invalidate_glyph_cache, measure_text_width, rasterize};
+pub use raster::{invalidate_glyph_cache, measure_text_width, measure_text_wrap, rasterize};
 
 /// 2-D affine transform stored as the six matrix entries of
 /// ```text
@@ -210,6 +210,12 @@ pub struct TextCommand {
     pub y: f32,
     pub color: Color,
     pub font_size: f32,
+    // Mid-line wrap budget. `Some(w)` asks the rasteriser to break the
+    // shaped run at `w` pixels (so a long paragraph paints as multiple
+    // lines stacked below `y`); `None` shapes the whole string as a single
+    // unwrapped line — the right shape for chrome chrome / single-line
+    // input values where the caller has already handled line splitting.
+    pub wrap_width: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -375,6 +381,12 @@ mod tests {
                     a: 255,
                 },
                 font_size: 18.0,
+                // Paragraph text emits with the layout box's content width as
+                // its wrap budget. "Hello" measures 67.5px under the toy
+                // estimate (5 chars * 18 * 0.75) and never reaches the 400px
+                // viewport cap, so the box settles at the shrink-to-fit
+                // measured width and that becomes the wrap budget too.
+                wrap_width: Some(67.5),
             })]
         );
     }
@@ -549,6 +561,7 @@ mod tests {
                     y: 6.0,
                     color: Color::BLACK,
                     font_size: 8.0,
+                    wrap_width: None,
                 }),
                 DisplayCommand::Image(ImageCommand {
                     x: 7.0,
@@ -584,6 +597,7 @@ mod tests {
                 y: 26.0,
                 color: Color::BLACK,
                 font_size: 8.0,
+                wrap_width: None,
             })
         );
         assert_eq!(

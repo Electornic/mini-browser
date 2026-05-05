@@ -35,22 +35,47 @@ pub fn invalidate_glyph_cache() {}
 // empty-`fonts`-slice path keeps unit tests deterministic without loading any
 // real font.
 pub fn measure_text_width(text: &str, font_size: f32, fonts: &[fontdue::Font]) -> f32 {
+    measure_text_wrap(text, font_size, None, fonts).0
+}
+
+// Measures `text` shaped by cosmic-text, breaking the run at `wrap_width`
+// when it is `Some` so the result reflects how a paragraph would wrap inside
+// a content box of that width. Returns `(max_line_width, line_count)` —
+// inline layout uses both: max_line_width for line packing, line_count for
+// the vertical space the wrapped paragraph reserves.
+//
+// The empty-`fonts`-slice path keeps unit tests deterministic: no cosmic-text
+// is consulted, the toy `font_size * 0.75` per-char estimate runs, and the
+// caller always sees a single line. Real pages always pass a non-empty fonts
+// slice (the binary primes both fontdue and the shared cosmic-text
+// FontSystem in `build_font_cache`).
+pub fn measure_text_wrap(
+    text: &str,
+    font_size: f32,
+    wrap_width: Option<f32>,
+    fonts: &[fontdue::Font],
+) -> (f32, u32) {
     if fonts.is_empty() {
         let scale = (font_size / 8.0).max(1.0).round();
-        return text
+        let width: f32 = text
             .chars()
             .map(|ch| if ch == ' ' { 4.0 * scale } else { 6.0 * scale })
             .sum();
+        return (width, 1);
     }
 
-    if let Some(width) = measure_with_cosmic(text, font_size) {
-        return width;
+    if let Some(metrics) = measure_with_cosmic(text, font_size, wrap_width) {
+        return metrics;
     }
 
-    measure_with_fontdue(text, font_size, fonts)
+    (measure_with_fontdue(text, font_size, fonts), 1)
 }
 
-fn measure_with_cosmic(text: &str, font_size: f32) -> Option<f32> {
+fn measure_with_cosmic(
+    text: &str,
+    font_size: f32,
+    wrap_width: Option<f32>,
+) -> Option<(f32, u32)> {
     let slot = crate::state::shared_font_system()?;
     let mut fs = slot.lock().ok()?;
 
@@ -61,20 +86,23 @@ fn measure_with_cosmic(text: &str, font_size: f32) -> Option<f32> {
     // `borrow_with` ties the buffer to the font system so subsequent calls
     // can be written without re-passing the font system on every line.
     let mut buffer = buffer.borrow_with(&mut fs);
-    // Unconstrained width so the input is never wrapped — we want the full
-    // shaped advance of `text`, not the width of the longest line after wrap.
-    buffer.set_size(None, None);
+    // `wrap_width = None` shapes the whole string as one unwrapped line; a
+    // `Some(w)` constraint asks cosmic-text to find break opportunities so
+    // the longest visual line fits inside `w`.
+    buffer.set_size(wrap_width, None);
     let attrs = Attrs::new();
     buffer.set_text(text, &attrs, Shaping::Advanced, None);
     buffer.shape_until_scroll(true);
 
     let mut width = 0.0_f32;
+    let mut lines: u32 = 0;
     for run in buffer.layout_runs() {
         if run.line_w > width {
             width = run.line_w;
         }
+        lines += 1;
     }
-    Some(width)
+    Some((width, lines.max(1)))
 }
 
 fn measure_with_fontdue(text: &str, font_size: f32, fonts: &[fontdue::Font]) -> f32 {
@@ -816,7 +844,11 @@ fn shape_to_physicals(fs: &mut FontSystem, text: &TextCommand) -> Vec<PhysicalGl
     let metrics = Metrics::new(size, size * 1.2);
     let mut buffer = Buffer::new(fs, metrics);
     let mut bw = buffer.borrow_with(fs);
-    bw.set_size(None, None);
+    // `wrap_width` mirrors the layout-time wrap decision so the rendered
+    // glyphs land on the same lines layout reserved space for. `None` means
+    // the caller wants the whole string as one unwrapped line (chrome,
+    // single-line input values).
+    bw.set_size(text.wrap_width, None);
     let attrs = Attrs::new();
     bw.set_text(&text.text, &attrs, Shaping::Advanced, None);
     bw.shape_until_scroll(true);

@@ -432,13 +432,19 @@ pub(super) fn layout_inline_block_node(node: &StyledNode, x: f32, y: f32, availa
 }
 
 fn inline_content_width(node: &StyledNode, parent_width: f32) -> f32 {
-    // Text width comes from `measure_inline_text`, which prefers fontdue
-    // advance widths when the layout pass has fonts installed and falls
-    // back to a `font_size * 0.75` per-char estimate for tests.
+    // Text width comes from `measure_inline_text`, which prefers cosmic-text
+    // shaped advance widths when fonts are installed and falls back to a
+    // `font_size * 0.75` per-char estimate for tests. Phase 4.4c caps the
+    // measured run at `parent_width` so a paragraph wider than its container
+    // settles into a single content box at the container width — paint will
+    // then ask cosmic-text to soft-wrap inside the same width budget, and
+    // `inline_content_height` reserves vertical space for the line count
+    // produced by the same wrap.
     length_value(node, "width", parent_width)
         .or_else(|| intrinsic_width(node))
         .unwrap_or_else(|| match &node.node_type {
-            NodeType::Text(text) => measure_inline_text(node, &collapsed_text(node, text)),
+            NodeType::Text(text) => measure_inline_text(node, &collapsed_text(node, text))
+                .min(parent_width),
             NodeType::Element(element) if element.tag_name == "img" => 200.0,
             NodeType::Element(_) => node
                 .children
@@ -452,10 +458,17 @@ fn inline_content_height(node: &StyledNode, parent_width: f32) -> f32 {
     // Same caveat as block height: percent on inline height should reference the parent's
     // height, but we only have parent_width on hand. Toy pages have not exercised this yet.
     length_value(node, "height", parent_width).unwrap_or_else(|| match &node.node_type {
-        // Text contributes its line-height (not just glyph height) so a parent
-        // line box stretches to fit `line-height: 1.5` even when no descendant
-        // declares an explicit height.
-        NodeType::Text(_) => inline_line_height_px(node),
+        // Text reserves `line_count * line_height`. Phase 4.4c: we ask
+        // cosmic-text to soft-wrap the run at `parent_width`, then multiply
+        // the chosen line-height by the resulting line count so a long
+        // paragraph allocates the correct vertical space. The empty-fonts
+        // test path falls back to a single line — which preserves the
+        // pre-4.4c `inline_line_height_px` shape and keeps every layout
+        // assertion that bakes in single-line text intact.
+        NodeType::Text(text) => {
+            let lines = inline_text_line_count(node, &collapsed_text(node, text), parent_width);
+            inline_line_height_px(node) * lines.max(1) as f32
+        }
         NodeType::Element(element) if element.tag_name == "img" => intrinsic_height(node),
         NodeType::Element(_) => node
             .children
@@ -464,6 +477,14 @@ fn inline_content_height(node: &StyledNode, parent_width: f32) -> f32 {
             .fold(0.0, f32::max)
             .max(intrinsic_height(node)),
     })
+}
+
+fn inline_text_line_count(node: &StyledNode, text: &str, wrap_width: f32) -> u32 {
+    let fonts = super::current_fonts();
+    if fonts.is_empty() {
+        return 1;
+    }
+    crate::render::measure_text_wrap(text, inline_font_size(node), Some(wrap_width), fonts).1
 }
 
 fn inline_font_size(node: &StyledNode) -> f32 {
