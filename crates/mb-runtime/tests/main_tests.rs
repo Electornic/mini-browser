@@ -2,7 +2,7 @@
 mod tests {
     use std::collections::HashMap;
 
-    use mini_browser::{
+    use mb_runtime::{
         chrome::{
             ADDRESS_BOX_HEIGHT, ADDRESS_BOX_X, ADDRESS_BOX_Y, BACK_BUTTON_X, CHROME_HEIGHT,
             ChromeAction, MENU_BUTTON_GAP, MENU_BUTTON_RIGHT_PAD, MENU_BUTTON_WIDTH, NAV_BUTTON_Y,

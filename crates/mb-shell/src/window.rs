@@ -20,10 +20,10 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
-// `WindowInput` itself now lives in `mb-engine::input` so the engine and
-// runtime can speak the shape without depending on winit. We re-export it
-// here so existing `crate::window::WindowInput` paths keep resolving.
-pub use mb_engine::input::WindowInput;
+// `WindowInput` lives in `mb-engine::input` so the engine and runtime can
+// speak the shape without depending on winit. Local code paints / reads it
+// through that name.
+use mb_engine::input::WindowInput;
 
 pub fn run<F>(
     title: &str,

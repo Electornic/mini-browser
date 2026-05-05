@@ -12,8 +12,8 @@
 // spec, matching real browsers, so the old "trailing input" error contract
 // no longer applies.
 
-use mini_browser::dom::NodeType;
-use mini_browser::html;
+use mb_runtime::dom::NodeType;
+use mb_runtime::html;
 
 #[test]
 fn parses_nested_elements_and_text() {
@@ -166,10 +166,10 @@ fn implicitly_closes_table_cells_and_rows_when_closer_missing() {
     let table = document.roots()[0];
 
     fn first_descendant_with_tag(
-        document: &mini_browser::dom::Document,
-        node: mini_browser::dom::NodeId,
+        document: &mb_runtime::dom::Document,
+        node: mb_runtime::dom::NodeId,
         tag: &str,
-    ) -> Option<mini_browser::dom::NodeId> {
+    ) -> Option<mb_runtime::dom::NodeId> {
         let n = document.get(node)?;
         if let NodeType::Element(el) = &n.node_type
             && el.tag_name == tag

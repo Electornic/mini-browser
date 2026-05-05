@@ -5,16 +5,4 @@ members = [
     "crates/mb-runtime",
     "crates/mb-shell",
 ]
-
-[package]
-name = "mini-browser"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-anyhow = "1"
-mb-dom = { path = "crates/mb-dom" }
-mb-engine = { path = "crates/mb-engine" }
-mb-runtime = { path = "crates/mb-runtime" }
-softbuffer = "0.4"
-winit = "0.30"
+resolver = "2"

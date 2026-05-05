@@ -1,12 +1,11 @@
 // Binary entry: parse `argv[1]` (if any) as the initial URL, install the
 // shared font system, and hand the per-frame closure to `window::run`. All
-// real work lives in `mini_browser::state::BrowserState::display_list`.
+// real work lives in `mb_runtime::state::BrowserState::display_list`.
 
-use mini_browser::{
-    render,
-    state::{install_fonts, load_initial_state},
-    window,
-};
+mod window;
+
+use mb_engine::render;
+use mb_runtime::state::{install_fonts, load_initial_state};
 
 fn main() {
     let mut browser = load_initial_state();
