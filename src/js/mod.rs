@@ -3291,8 +3291,10 @@ mod tests {
         // very end after the blank line that terminates the header
         // block. Both invariants matter: a server that only reads
         // Content-Length bytes after CRLFCRLF needs both to line up.
+        // Header names are matched case-insensitively per RFC 9110 §5.1
+        // (the underlying `ureq` client normalises them to lowercase).
         assert!(
-            received.contains("Content-Length: 11"),
+            received.to_ascii_lowercase().contains("content-length: 11"),
             "expected Content-Length: 11 (length of 'hello world'), got: {received:?}"
         );
         assert!(
@@ -3329,12 +3331,13 @@ mod tests {
         runtime.execute(&script).unwrap();
         let received = server.join().unwrap();
 
+        let lower = received.to_ascii_lowercase();
         assert!(
-            received.contains("X-Auth: token123"),
+            lower.contains("x-auth: token123"),
             "expected X-Auth header in request, got: {received:?}"
         );
         assert!(
-            received.contains("X-Trace: abc"),
+            lower.contains("x-trace: abc"),
             "expected X-Trace header in request, got: {received:?}"
         );
     }
@@ -3474,7 +3477,7 @@ mod tests {
         let received = server.join().unwrap();
 
         assert!(
-            received.contains("X-Trace: abc"),
+            received.to_ascii_lowercase().contains("x-trace: abc"),
             "expected X-Trace header in request, got: {received:?}"
         );
     }
