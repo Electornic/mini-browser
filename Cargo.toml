@@ -13,15 +13,12 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
-cosmic-text = "0.19"
-image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png"] }
 mb-dom = { path = "crates/mb-dom" }
+mb-engine = { path = "crates/mb-engine" }
 rquickjs = { version = "0.11", features = ["macro"] }
 selectors = "0.37"
 softbuffer = "0.4"
-taffy = "0.10"
 thiserror = "2"
-tiny-skia = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 ureq = "3"

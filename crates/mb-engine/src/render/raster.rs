@@ -75,7 +75,7 @@ fn measure_with_cosmic(
     font_size: f32,
     wrap_width: Option<f32>,
 ) -> Option<(f32, u32)> {
-    let slot = crate::state::shared_font_system()?;
+    let slot = crate::font_system::shared_font_system()?;
     let mut fs = slot.lock().ok()?;
 
     let size = font_size.max(8.0);
@@ -685,8 +685,8 @@ fn draw_text_through(pixmap: &mut Pixmap, text: &TextCommand, transform: Affine)
 // non-printing glyphs) are dropped here so the paint loop only iterates real
 // pixel-bearing glyphs.
 fn shape_and_images(text: &TextCommand) -> Option<Vec<(PhysicalGlyph, cosmic_text::SwashImage)>> {
-    let fs_slot = crate::state::shared_font_system()?;
-    let swash_slot = crate::state::shared_swash_cache()?;
+    let fs_slot = crate::font_system::shared_font_system()?;
+    let swash_slot = crate::font_system::shared_swash_cache()?;
     let mut fs = fs_slot.lock().ok()?;
     let mut swash = swash_slot.lock().ok()?;
 

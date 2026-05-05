@@ -10,7 +10,7 @@ use crate::{
     chrome::CHROME_HEIGHT,
     css, dom,
     dom::{NodeId, NodeType},
-    layout, net, render, resource, style, window,
+    input, layout, render, resource, style, url,
 };
 
 #[derive(Debug, Clone)]
@@ -45,7 +45,7 @@ pub fn build_document_view(
     parsed_document: &dom::Document,
     parsed_stylesheet: &css::Stylesheet,
     viewport_width: usize,
-    current_url: Option<&net::Url>,
+    current_url: Option<&url::Url>,
     images: &HashMap<String, resource::LoadedImage>,
     interaction: style::InteractionState<'_>,
 ) -> Result<DocumentView, String> {
@@ -210,7 +210,7 @@ fn has_text_decoration_none(layout_box: &layout::LayoutBox) -> bool {
 
 pub fn collect_image_commands(
     layout_box: &layout::LayoutBox,
-    base_url: Option<&net::Url>,
+    base_url: Option<&url::Url>,
     images: &HashMap<String, resource::LoadedImage>,
 ) -> Vec<render::DisplayCommand> {
     let mut commands = Vec::new();
@@ -271,7 +271,7 @@ fn src_for_layout_box(layout_box: &layout::LayoutBox) -> Option<&str> {
 
 fn image_command_for_layout_box(
     layout_box: &layout::LayoutBox,
-    base_url: Option<&net::Url>,
+    base_url: Option<&url::Url>,
     images: &HashMap<String, resource::LoadedImage>,
 ) -> Option<render::DisplayCommand> {
     // Layout decides *where* an image box goes; the image cache supplies *what* pixels fill it.
@@ -304,7 +304,7 @@ pub fn point_in_rect(x: f32, y: f32, rect: layout::Rect) -> bool {
 // directly so it can also feed the deepest hit's NodeId into click
 // dispatch.
 pub fn compute_hovered_dom_path(
-    input: &window::WindowInput,
+    input: &input::WindowInput,
     layout_root: &layout::LayoutBox,
     scroll_offset: f32,
 ) -> Option<Vec<usize>> {
@@ -312,7 +312,7 @@ pub fn compute_hovered_dom_path(
 }
 
 pub fn compute_hovered_hit(
-    input: &window::WindowInput,
+    input: &input::WindowInput,
     layout_root: &layout::LayoutBox,
     scroll_offset: f32,
 ) -> Option<HoverHit> {

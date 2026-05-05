@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+cosmic-text = "0.19"
+mb-dom = { path = "../mb-dom" }
+taffy = "0.10"
+tiny-skia = "0.12"

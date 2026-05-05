@@ -480,7 +480,7 @@ fn inline_content_height(node: &StyledNode, parent_width: f32) -> f32 {
 }
 
 fn inline_text_line_count(node: &StyledNode, text: &str, wrap_width: f32) -> u32 {
-    if crate::state::shared_font_system().is_none() {
+    if crate::font_system::shared_font_system().is_none() {
         return 1;
     }
     crate::render::measure_text_wrap(text, inline_font_size(node), Some(wrap_width)).1
@@ -519,7 +519,7 @@ fn inline_char_width(node: &StyledNode) -> f32 {
 // `font_size * 0.75` estimate so layout assertions stay deterministic
 // without touching the host's font set.
 fn measure_inline_text(node: &StyledNode, text: &str) -> f32 {
-    if crate::state::shared_font_system().is_none() {
+    if crate::font_system::shared_font_system().is_none() {
         return text.chars().count() as f32 * inline_char_width(node);
     }
     crate::render::measure_text_width(text, inline_font_size(node))

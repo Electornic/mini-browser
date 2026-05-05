@@ -270,7 +270,7 @@ mod tests {
         let styled = style::style_tree(&document, root, &[stylesheet]);
         let layout = layout::layout_tree(&styled, 400.0);
 
-        let base = crate::net::Url::parse("http://example.com/page").unwrap();
+        let base = crate::url::Url::parse("http://example.com/page").unwrap();
         let resolved = base.resolve("/bg.png").unwrap();
         let mut images: std::collections::HashMap<String, crate::resource::LoadedImage> =
             std::collections::HashMap::new();

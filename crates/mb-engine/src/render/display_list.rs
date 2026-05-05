@@ -9,8 +9,8 @@ use crate::{
     css::{Color, ColorStop, TransformOp, Unit, Value},
     dom::NodeType,
     layout::{Dimensions, LayoutBox, Rect},
-    net::Url,
     resource::LoadedImage,
+    url::Url,
 };
 
 use super::{
