@@ -14,6 +14,11 @@ pub mod dom;
 pub mod dom_select;
 pub mod html;
 pub mod js;
+// Phase 4.8 staging area: rquickjs-backed JsRuntime under construction.
+// 4.8a–d build it up alongside the boa version; 4.8e flips callers over
+// and removes `js`. Unused until then — `dead_code` keeps the build quiet.
+#[allow(dead_code)]
+pub mod js_quick;
 pub mod layout;
 pub mod navigation;
 pub mod net;

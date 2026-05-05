@@ -12,6 +12,7 @@ html5ever = "0.38"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png"] }
 markup5ever_rcdom = "0.38"
 precomputed-hash = "0.1"
+rquickjs = { version = "0.11", features = ["macro"] }
 selectors = "0.37"
 softbuffer = "0.4"
 taffy = "0.10"
