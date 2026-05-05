@@ -1,3 +1,11 @@
+[workspace]
+members = [
+    "crates/mb-dom",
+    "crates/mb-engine",
+    "crates/mb-runtime",
+    "crates/mb-shell",
+]
+
 [package]
 name = "mini-browser"
 version = "0.1.0"
