@@ -16,7 +16,8 @@
 
 use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, PhysicalGlyph, Shaping, SwashContent};
 use tiny_skia::{
-    Color as TsColor, FillRule, Paint, PathBuilder, Pixmap, Rect as TsRect,
+    Color as TsColor, FillRule, FilterQuality, GradientStop, LinearGradient, Paint, PathBuilder,
+    Pattern, Pixmap, Point as TsPoint, RadialGradient, Rect as TsRect, SpreadMode,
     Transform as TsTransform,
 };
 
@@ -24,8 +25,7 @@ use crate::css::{Color, GradientDirection, GradientKind};
 use crate::layout::Rect;
 
 use super::{
-    Affine, CornerRadii, DisplayCommand, GradientCommand, ImageCommand, ResolvedStop,
-    ShadowCommand, TextCommand,
+    Affine, CornerRadii, DisplayCommand, GradientCommand, ImageCommand, ShadowCommand, TextCommand,
 };
 
 // Measures the rendered width of `text` at `font_size`. Callers use this to
@@ -244,48 +244,84 @@ fn fill_rounded_rect(
 }
 
 fn fill_gradient(pixmap: &mut Pixmap, gradient: &GradientCommand, transform: Affine) {
-    if gradient.stops.is_empty() {
+    if gradient.stops.len() < 2 {
         return;
     }
     let rect = gradient.rect;
     if rect.width <= 0.0 || rect.height <= 0.0 {
         return;
     }
+    let Some(dest) = TsRect::from_xywh(rect.x, rect.y, rect.width, rect.height) else {
+        return;
+    };
 
-    if transform.is_identity() {
-        fill_gradient_aligned(pixmap, gradient);
-    } else {
-        let inverse = transform.inverse();
-        paint_through(pixmap, rect, transform, inverse, |lx, ly| {
-            let progress = gradient_progress(lx, ly, rect, gradient.kind);
-            let color = sample_gradient(&gradient.stops, progress.clamp(0.0, 1.0));
-            if color.a == 0 { None } else { Some(color) }
-        });
-    }
-}
+    let stops: Vec<GradientStop> = gradient
+        .stops
+        .iter()
+        .map(|s| {
+            GradientStop::new(
+                s.position,
+                TsColor::from_rgba8(s.color.r, s.color.g, s.color.b, s.color.a),
+            )
+        })
+        .collect();
 
-fn fill_gradient_aligned(pixmap: &mut Pixmap, gradient: &GradientCommand) {
-    let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
-    let rect = gradient.rect;
-    let x_start = rect.x.max(0.0).floor() as usize;
-    let y_start = rect.y.max(0.0).floor() as usize;
-    let x_end = ((rect.x + rect.width).ceil().max(0.0) as usize).min(width);
-    let y_end = ((rect.y + rect.height).ceil().max(0.0) as usize).min(height);
+    let cx = rect.x + rect.width * 0.5;
+    let cy = rect.y + rect.height * 0.5;
+    let rx = rect.width * 0.5;
+    let ry = rect.height * 0.5;
 
-    let data = pixmap.data_mut();
-    for y in y_start..y_end {
-        let py = y as f32 + 0.5;
-        let row = y * width;
-        for x in x_start..x_end {
-            let px = x as f32 + 0.5;
-            let progress = gradient_progress(px, py, rect, gradient.kind).clamp(0.0, 1.0);
-            let color = sample_gradient(&gradient.stops, progress);
-            if color.a == 0 {
-                continue;
-            }
-            blend_pixel_bytes(data, (row + x) * 4, color);
+    let shader = match gradient.kind {
+        GradientKind::Linear(direction) => {
+            // Pin the gradient axis to whichever box dimension the
+            // direction runs along; the cross axis stays at the box centre
+            // so the colour bands are perpendicular to the axis.
+            let (start, end) = match direction {
+                GradientDirection::ToBottom => (
+                    TsPoint::from_xy(cx, rect.y),
+                    TsPoint::from_xy(cx, rect.y + rect.height),
+                ),
+                GradientDirection::ToTop => (
+                    TsPoint::from_xy(cx, rect.y + rect.height),
+                    TsPoint::from_xy(cx, rect.y),
+                ),
+                GradientDirection::ToRight => (
+                    TsPoint::from_xy(rect.x, cy),
+                    TsPoint::from_xy(rect.x + rect.width, cy),
+                ),
+                GradientDirection::ToLeft => (
+                    TsPoint::from_xy(rect.x + rect.width, cy),
+                    TsPoint::from_xy(rect.x, cy),
+                ),
+            };
+            LinearGradient::new(start, end, stops, SpreadMode::Pad, TsTransform::identity())
         }
-    }
+        GradientKind::Radial => {
+            // Bake the box's aspect ratio into the gradient's transform: a
+            // unit-circle radial at local origin, scaled by (rx, ry) and
+            // translated to the box centre, becomes an ellipse aligned to
+            // the rect. Matches CSS `radial-gradient(...)` with the default
+            // farthest-corner ellipse extent.
+            let gradient_transform = TsTransform::from_scale(rx, ry).post_translate(cx, cy);
+            RadialGradient::new(
+                TsPoint::from_xy(0.0, 0.0),
+                0.0,
+                TsPoint::from_xy(0.0, 0.0),
+                1.0,
+                stops,
+                SpreadMode::Pad,
+                gradient_transform,
+            )
+        }
+    };
+    let Some(shader) = shader else {
+        return;
+    };
+
+    let mut paint = Paint::default();
+    paint.anti_alias = false;
+    paint.shader = shader;
+    pixmap.fill_rect(dest, &paint, affine_to_ts(transform), None);
 }
 
 fn fill_box_shadow(pixmap: &mut Pixmap, shadow: &ShadowCommand, transform: Affine) {
@@ -384,66 +420,55 @@ fn draw_image(pixmap: &mut Pixmap, image: &ImageCommand, transform: Affine) {
     if image.width <= 0.0 || image.height <= 0.0 {
         return;
     }
-
-    if transform.is_identity() {
-        draw_image_aligned(pixmap, image);
-    } else {
-        let bounds = Rect {
-            x: image.x,
-            y: image.y,
-            width: image.width,
-            height: image.height,
-        };
-        let sw = image.source_width;
-        let sh = image.source_height;
-        let inverse = transform.inverse();
-        paint_through(pixmap, bounds, transform, inverse, |lx, ly| {
-            let u = (lx - bounds.x) / bounds.width;
-            let v = (ly - bounds.y) / bounds.height;
-            if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
-                return None;
-            }
-            let sx = (u * sw as f32).floor().clamp(0.0, (sw - 1) as f32) as usize;
-            let sy = (v * sh as f32).floor().clamp(0.0, (sh - 1) as f32) as usize;
-            let pixel = image.pixels[sy * sw + sx];
-            Some(Color {
-                r: ((pixel >> 16) & 0xFF) as u8,
-                g: ((pixel >> 8) & 0xFF) as u8,
-                b: (pixel & 0xFF) as u8,
-                a: 255,
-            })
-        });
+    if image.pixels.len() < image.source_width * image.source_height {
+        return;
     }
-}
 
-fn draw_image_aligned(pixmap: &mut Pixmap, image: &ImageCommand) {
-    let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
-    let x_start = image.x.max(0.0).floor() as usize;
-    let y_start = image.y.max(0.0).floor() as usize;
-    let x_end = ((image.x + image.width).ceil().max(0.0) as usize).min(width);
-    let y_end = ((image.y + image.height).ceil().max(0.0) as usize).min(height);
-
-    let data = pixmap.data_mut();
-    // Images are scaled with nearest-neighbor sampling to keep the implementation small.
-    for y in y_start..y_end {
-        let source_y = (((y as f32 - image.y) / image.height.max(1.0))
-            * image.source_height as f32)
-            .floor()
-            .clamp(0.0, (image.source_height - 1) as f32) as usize;
-        let row = y * width;
-        for x in x_start..x_end {
-            let source_x = (((x as f32 - image.x) / image.width.max(1.0))
-                * image.source_width as f32)
-                .floor()
-                .clamp(0.0, (image.source_width - 1) as f32) as usize;
-            let pixel = image.pixels[source_y * image.source_width + source_x];
-            let off = (row + x) * 4;
-            data[off] = ((pixel >> 16) & 0xFF) as u8;
-            data[off + 1] = ((pixel >> 8) & 0xFF) as u8;
-            data[off + 2] = (pixel & 0xFF) as u8;
-            data[off + 3] = 255;
+    // Stage the source pixels into a tiny-skia tile pixmap once, then
+    // rely on the Pattern shader to handle scaling + rotation natively.
+    // Source pixels arrive as 0xRRGGBB (alpha-stripped); bake them into
+    // RGBA bytes with alpha=255 — the test surface treats every loaded
+    // image as fully opaque.
+    let sw = image.source_width as u32;
+    let sh = image.source_height as u32;
+    let Some(mut tile) = Pixmap::new(sw, sh) else {
+        return;
+    };
+    {
+        let dst = tile.data_mut();
+        for (i, &pixel) in image.pixels.iter().take(image.source_width * image.source_height).enumerate() {
+            let off = i * 4;
+            dst[off] = ((pixel >> 16) & 0xFF) as u8;
+            dst[off + 1] = ((pixel >> 8) & 0xFF) as u8;
+            dst[off + 2] = (pixel & 0xFF) as u8;
+            dst[off + 3] = 255;
         }
     }
+
+    // Pattern transform places the tile on the canvas: scale source-pixel
+    // space up to the destination size, then translate to the rect origin.
+    // The outer `transform` argument on `fill_rect` rotates the rect (and
+    // the placed pattern with it), so this stays "logical-coordinates"
+    // simple.
+    let scale_x = image.width / image.source_width as f32;
+    let scale_y = image.height / image.source_height as f32;
+    let pattern_transform =
+        TsTransform::from_scale(scale_x, scale_y).post_translate(image.x, image.y);
+
+    let mut paint = Paint::default();
+    paint.anti_alias = false;
+    paint.shader = Pattern::new(
+        tile.as_ref(),
+        SpreadMode::Pad,
+        FilterQuality::Nearest,
+        1.0,
+        pattern_transform,
+    );
+
+    let Some(dest) = TsRect::from_xywh(image.x, image.y, image.width, image.height) else {
+        return;
+    };
+    pixmap.fill_rect(dest, &paint, affine_to_ts(transform), None);
 }
 
 fn paint_through<F>(
@@ -530,22 +555,6 @@ fn blend_pixel_bytes(data: &mut [u8], byte_idx: usize, color: Color) {
 }
 
 
-fn gradient_progress(lx: f32, ly: f32, rect: Rect, kind: GradientKind) -> f32 {
-    match kind {
-        GradientKind::Linear(GradientDirection::ToBottom) => (ly - rect.y) / rect.height,
-        GradientKind::Linear(GradientDirection::ToTop) => 1.0 - (ly - rect.y) / rect.height,
-        GradientKind::Linear(GradientDirection::ToRight) => (lx - rect.x) / rect.width,
-        GradientKind::Linear(GradientDirection::ToLeft) => 1.0 - (lx - rect.x) / rect.width,
-        GradientKind::Radial => {
-            let cx = rect.x + rect.width * 0.5;
-            let cy = rect.y + rect.height * 0.5;
-            let nx = (lx - cx) / (rect.width * 0.5);
-            let ny = (ly - cy) / (rect.height * 0.5);
-            (nx * nx + ny * ny).sqrt()
-        }
-    }
-}
-
 fn shadow_coverage(lx: f32, ly: f32, rect: Rect, blur: f32) -> f32 {
     // Same linear falloff fill_box_shadow uses for the fast path: distance
     // to the nearest point inside the rect, normalised by the blur radius.
@@ -562,40 +571,6 @@ fn shadow_coverage(lx: f32, ly: f32, rect: Rect, blur: f32) -> f32 {
         1.0
     } else {
         0.0
-    }
-}
-
-fn sample_gradient(stops: &[ResolvedStop], progress: f32) -> Color {
-    // Clamp to the first/last stop for progress outside the [0, 1] band.
-    if progress <= stops[0].position {
-        return stops[0].color;
-    }
-    let last = stops[stops.len() - 1];
-    if progress >= last.position {
-        return last.color;
-    }
-    // Linear search is fine for the small stop counts CSS gradients have in
-    // practice — interpolate the bracketing pair in straight RGB space.
-    for window in stops.windows(2) {
-        let a = window[0];
-        let b = window[1];
-        if progress >= a.position && progress <= b.position {
-            let span = (b.position - a.position).max(f32::EPSILON);
-            let t = (progress - a.position) / span;
-            return lerp_color(a.color, b.color, t);
-        }
-    }
-    last.color
-}
-
-fn lerp_color(a: Color, b: Color, t: f32) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    let inv = 1.0 - t;
-    Color {
-        r: (a.r as f32 * inv + b.r as f32 * t) as u8,
-        g: (a.g as f32 * inv + b.g as f32 * t) as u8,
-        b: (a.b as f32 * inv + b.b as f32 * t) as u8,
-        a: (a.a as f32 * inv + b.a as f32 * t) as u8,
     }
 }
 
