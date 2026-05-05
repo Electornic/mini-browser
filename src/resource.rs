@@ -2,31 +2,15 @@ use std::collections::HashMap;
 
 use crate::{
     dom::{Document, NodeId, NodeType},
-    net::{self, NetworkError, Url},
+    net::{self, Url},
 };
 
-// Resource loading stays separate from HTML parsing so the app can decide when to fetch extras.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResourceError {
-    MissingHref,
-    MissingSrc,
-    DecodeImage(String),
-    Network(NetworkError),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct LoadedImage {
-    pub url: Url,
-    pub width: usize,
-    pub height: usize,
-    pub pixels: Vec<u32>,
-}
-
-impl From<NetworkError> for ResourceError {
-    fn from(value: NetworkError) -> Self {
-        Self::Network(value)
-    }
-}
+// Resource loading stays separate from HTML parsing so the app can decide when
+// to fetch extras. `LoadedImage` + `decode_image` + `ResourceError` now live
+// in `mb-dom::resource` so the engine can paint images without depending on
+// this fetcher; we re-export here so `crate::resource::LoadedImage` paths
+// keep resolving.
+pub use mb_dom::resource::{LoadedImage, ResourceError, decode_image};
 
 pub fn load_stylesheets(document: &Document, base_url: &Url) -> Result<Vec<String>, ResourceError> {
     let stylesheet_urls = stylesheet_urls(document, base_url)?;
@@ -255,28 +239,6 @@ fn collect_image_urls(
     }
 
     Ok(())
-}
-
-fn decode_image(url: Url, bytes: &[u8]) -> Result<LoadedImage, ResourceError> {
-    // Decode to a simple RGB pixel buffer so rendering does not depend on image crate types.
-    let decoded = image::load_from_memory(bytes)
-        .map_err(|error| ResourceError::DecodeImage(error.to_string()))?
-        .to_rgba8();
-    let (width, height) = decoded.dimensions();
-    let pixels = decoded
-        .pixels()
-        .map(|pixel| {
-            let [r, g, b, _a] = pixel.0;
-            (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
-        })
-        .collect();
-
-    Ok(LoadedImage {
-        url,
-        width: width as usize,
-        height: height as usize,
-        pixels,
-    })
 }
 
 pub fn load_fonts(css_sources: &[String], base_url: &Url) -> Vec<Vec<u8>> {

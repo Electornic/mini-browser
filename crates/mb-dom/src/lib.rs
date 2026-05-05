@@ -13,4 +13,6 @@ pub mod css;
 pub mod dom;
 pub mod dom_select;
 pub mod html;
+pub mod resource;
 pub mod style;
+pub mod url;
