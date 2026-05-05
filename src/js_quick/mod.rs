@@ -8,31 +8,29 @@
 // callbacks capture `Rc<RefCell<...>>` host state (DOM, listener map,
 // shared location buffer) — same pattern boa used.
 
-use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use rquickjs::{CatchResultExt, CaughtError, Context, Function, Runtime, Value};
 
-use crate::dom::{Document, NodeId};
+use crate::dom::{Document, NodeId, NodeType};
 
 mod console;
 mod document;
 mod element;
+mod event;
+mod storage;
+mod timers;
 mod util;
 mod window;
 
+pub use timers::FixedClock;
+use timers::ClockSource;
+
 // Hidden property name used to round-trip a NodeId through any Element
 // JsObject — same contract as the boa bridge. 4.8b layers the DOM
-// wrapper factory on this; for 4.8a the constant just reserves the name.
+// wrapper factory on this.
 pub(crate) const NODE_ID_PROP: &str = "_nodeId";
-
-// 4.8c will replace the unit type with `rquickjs::Persistent<Function>`
-// (the rquickjs idiom for keeping a JS callable alive across `with`
-// scopes). For 4.8a the field exists so the runtime layout matches the
-// boa version even though no listener flows in yet.
-pub(crate) type ListenerMap = HashMap<(NodeId, String), Vec<()>>;
-pub(crate) type RafQueue = Vec<(u32, ())>;
 
 pub struct JsRuntime {
     // Both handles are refcounted internally; we keep the `Runtime` even
@@ -40,58 +38,53 @@ pub struct JsRuntime {
     // dropping it before `Context` would tear the realm out from under us.
     runtime: Runtime,
     context: Context,
-    #[allow(dead_code)]
     dom: Rc<RefCell<Document>>,
-    #[allow(dead_code)]
-    listeners: Rc<RefCell<ListenerMap>>,
-    #[allow(dead_code)]
-    raf_callbacks: Rc<RefCell<RafQueue>>,
-    #[allow(dead_code)]
-    cancelled_timers: Rc<RefCell<HashSet<u32>>>,
-    #[allow(dead_code)]
-    next_timer_id: Rc<Cell<u32>>,
     location_url: Rc<RefCell<String>>,
+    clock: ClockSource,
 }
 
 impl JsRuntime {
     pub fn new(dom: Rc<RefCell<Document>>) -> Self {
+        Self::build(dom, ClockSource::System)
+    }
+
+    /// Test-only constructor. The synthetic `FixedClock` drives every
+    /// timer deadline and `Date.now()` read inside the runtime — bumping
+    /// it via `clock.advance(ms)` is what makes a `setTimeout(fn, 50)`
+    /// fire on the next `drain_pending_jobs` call. Production callers
+    /// always go through `new` with the system clock.
+    #[cfg(test)]
+    pub fn new_with_fixed_clock(dom: Rc<RefCell<Document>>, clock: FixedClock) -> Self {
+        Self::build(dom, clock.source())
+    }
+
+    fn build(dom: Rc<RefCell<Document>>, clock: ClockSource) -> Self {
         let runtime = Runtime::new().expect("rquickjs Runtime should construct");
         let context = Context::full(&runtime).expect("rquickjs Context should construct");
-        let listeners: Rc<RefCell<ListenerMap>> = Rc::new(RefCell::new(HashMap::new()));
-        let raf_callbacks: Rc<RefCell<RafQueue>> = Rc::new(RefCell::new(Vec::new()));
-        let cancelled_timers: Rc<RefCell<HashSet<u32>>> = Rc::new(RefCell::new(HashSet::new()));
-        let next_timer_id: Rc<Cell<u32>> = Rc::new(Cell::new(0));
         let location_url: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
 
         context.with(|ctx| {
-            // The display helper turns any JS value into the same shape
-            // boa's `value.display()` produces — strings stringified with
-            // surrounding quotes (via JSON.stringify), primitives via
-            // `String(v)`, objects via JSON.stringify with a String() fallback
-            // for circular / unrepresentable shapes. `execute()` calls this
-            // on the eval result, so the top-level integration tests that
-            // assert against the printed form continue to work.
             ctx.eval::<(), _>(DISPLAY_HELPER)
                 .expect("display helper should compile");
             console::register_console(&ctx).expect("console should register");
             window::register_window_aliases(&ctx, location_url.clone())
                 .expect("window aliases should register");
-            element::register_element_hooks(&ctx, dom.clone(), listeners.clone())
+            element::register_element_hooks(&ctx, dom.clone())
                 .expect("element hooks should register");
             element::run_dom_bootstrap(&ctx).expect("dom bootstrap should run");
-            document::register_document(&ctx, dom.clone(), listeners.clone())
+            document::register_document(&ctx, dom.clone())
                 .expect("document should register");
+            event::register_events(&ctx).expect("events should register");
+            storage::register_storage(&ctx).expect("storage should register");
+            timers::register_timers(&ctx, clock.clone()).expect("timers should register");
         });
 
         Self {
             runtime,
             context,
             dom,
-            listeners,
-            raf_callbacks,
-            cancelled_timers,
-            next_timer_id,
             location_url,
+            clock,
         }
     }
 
@@ -143,45 +136,156 @@ impl JsRuntime {
         })
     }
 
+    /// Drain microtasks (Promise jobs) and any due timers, alternating
+    /// until both queues are quiet. A timer handler that resolves a
+    /// promise must let the microtask drain before the next iteration's
+    /// timer pass observes its side effects, and vice versa.
     pub fn drain_pending_jobs(&mut self) {
-        // `execute_pending_job` returns Ok(true) when a microtask ran,
-        // Ok(false) when the queue is empty, and Err on a runtime-side
-        // failure (which we surface but keep draining around — same
-        // behaviour boa's `run_jobs` had once we ate the error).
+        let mut iterations = 0;
         loop {
-            match self.runtime.execute_pending_job() {
-                Ok(executed) => {
-                    if !executed {
+            iterations += 1;
+            // Microtasks first.
+            let mut microtask_progress = false;
+            loop {
+                match self.runtime.execute_pending_job() {
+                    Ok(true) => microtask_progress = true,
+                    Ok(false) => break,
+                    Err(err) => {
+                        eprintln!("[jobs] error draining job queue: {err:?}");
                         break;
                     }
                 }
-                Err(err) => {
-                    eprintln!("[jobs] error draining job queue: {err:?}");
-                    break;
-                }
+            }
+            // Then any due timers.
+            let timers_fired: u32 = self.context.with(|ctx| {
+                let runner: Function<'_> = match ctx.globals().get("__mb_run_timers") {
+                    Ok(f) => f,
+                    Err(_) => return 0,
+                };
+                runner.call::<_, u32>(()).unwrap_or(0)
+            });
+            if !microtask_progress && timers_fired == 0 {
+                break;
+            }
+            // 1024 alternations is generous — nested 0-delay setTimeouts
+            // resolve quickly in real workloads, and a runaway loop is a
+            // script bug worth surfacing rather than hanging on.
+            if iterations > 1024 {
+                eprintln!("[jobs] gave up draining after {iterations} iterations");
+                break;
             }
         }
     }
 
-    /// 4.8c — fire raf callbacks. Stub for 4.8a.
-    pub fn run_animation_frame_callbacks(&mut self) {}
-
-    /// 4.8b/c — DOM event dispatch. Stub for 4.8a.
-    pub fn dispatch_event(&mut self, _target: NodeId, _event_type: &str) -> bool {
-        false
+    /// Fire every requestAnimationFrame callback that was registered up
+    /// to now, snapshotting the queue first so a handler that
+    /// re-schedules itself queues for the *next* frame (browser-spec
+    /// behaviour). Each callback receives the current engine clock as a
+    /// `DOMHighResTimeStamp` (millis). Microtasks queued by handlers
+    /// drain after the snapshot completes.
+    pub fn run_animation_frame_callbacks(&mut self) {
+        let timestamp = self.clock.now_ms() as f64;
+        self.context.with(|ctx| {
+            let runner: Function<'_> = match ctx.globals().get("__mb_run_raf") {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+            let _ = runner.call::<_, ()>((timestamp,));
+        });
+        self.drain_pending_jobs();
     }
 
-    pub fn dispatch_event_at(&mut self, _target: NodeId, _event_type: &str) -> bool {
-        false
+    /// Synthesise a DOM event at `target` and bubble it through the
+    /// parent chain. Text-node targets retarget to the nearest Element
+    /// ancestor (matches what real browsers do — almost every author
+    /// click handler expects `event.target` to be an Element).
+    pub fn dispatch_event(&mut self, target: NodeId, event_type: &str) -> bool {
+        self.dispatch_event_inner(target, event_type, None, true)
     }
 
+    /// Direct dispatch — fires every listener registered on `target`
+    /// for `event_type`, but does not walk up the parent chain. Used
+    /// for non-bubbling events (`focus` / `blur`).
+    pub fn dispatch_event_at(&mut self, target: NodeId, event_type: &str) -> bool {
+        self.dispatch_event_inner(target, event_type, None, false)
+    }
+
+    /// Bubbling dispatch with a `key` payload exposed on the Event
+    /// object. Used by BrowserState for `keydown` / `keyup`.
     pub fn dispatch_keyboard_event(
         &mut self,
-        _target: NodeId,
-        _event_type: &str,
-        _key: &str,
+        target: NodeId,
+        event_type: &str,
+        key: &str,
     ) -> bool {
-        false
+        self.dispatch_event_inner(target, event_type, Some(key), true)
+    }
+
+    fn dispatch_event_inner(
+        &mut self,
+        target: NodeId,
+        event_type: &str,
+        key: Option<&str>,
+        bubbles: bool,
+    ) -> bool {
+        // Retarget Text → nearest Element ancestor (Text wrappers don't
+        // expose addEventListener; click handlers expect event.target to
+        // be the Element it lives on).
+        let event_target = {
+            let dom = self.dom.borrow();
+            let mut cur = Some(target);
+            loop {
+                match cur {
+                    Some(id) => match dom.get(id) {
+                        Some(node) => match &node.node_type {
+                            NodeType::Element(_) => break Some(id),
+                            NodeType::Text(_) => cur = node.parent,
+                        },
+                        None => break None,
+                    },
+                    None => break None,
+                }
+            }
+        };
+        let Some(event_target) = event_target else {
+            return false;
+        };
+        // Compute the bubble chain (target-first → root) in Rust, since
+        // it needs the live arena. JS-side dispatcher walks the slice.
+        let chain: Vec<u32> = if bubbles {
+            let dom = self.dom.borrow();
+            let mut chain = Vec::new();
+            let mut cur = Some(event_target);
+            while let Some(id) = cur {
+                match dom.get(id) {
+                    Some(node) => {
+                        chain.push(id.raw());
+                        cur = node.parent;
+                    }
+                    None => break,
+                }
+            }
+            chain
+        } else {
+            vec![event_target.raw()]
+        };
+        let target_raw = event_target.raw();
+        let event_type_str = event_type.to_string();
+        let key_str: Option<String> = key.map(|s| s.to_string());
+        let is_keyboard = key.is_some();
+        let prevented: bool = self.context.with(|ctx| {
+            let dispatcher: Function<'_> = match ctx.globals().get("__mb_dispatch_chain") {
+                Ok(f) => f,
+                Err(_) => return false,
+            };
+            dispatcher
+                .call::<_, bool>((target_raw, event_type_str, key_str, is_keyboard, chain))
+                .unwrap_or(false)
+        });
+        // Drain microtasks/timers handlers may have queued before the
+        // caller observes the result.
+        self.drain_pending_jobs();
+        prevented
     }
 }
 
@@ -550,5 +654,287 @@ mod tests {
         let mut rt = rt_with_html(r#"<html><head><title>t</title></head><body><p>b</p></body></html>"#);
         assert_eq!(rt.execute("document.body.tagName").unwrap(), "\"BODY\"");
         assert_eq!(rt.execute("document.head.tagName").unwrap(), "\"HEAD\"");
+    }
+
+    // -------- 4.8c storage / timers / event tests --------
+
+    fn rt_clock(html: &str) -> (JsRuntime, FixedClock) {
+        let document = crate::html::parse(html).unwrap();
+        let dom = Rc::new(RefCell::new(document));
+        let clock = FixedClock::from_millis(0);
+        let runtime = JsRuntime::new_with_fixed_clock(dom, clock.clone());
+        (runtime, clock)
+    }
+
+    fn id_to_node(rt: &JsRuntime, target_id: &str) -> NodeId {
+        let dom = rt.dom_handle();
+        let dom_ref = dom.borrow();
+        fn walk(d: &Document, n: NodeId, target_id: &str) -> Option<NodeId> {
+            let node = d.get(n)?;
+            if let NodeType::Element(e) = &node.node_type
+                && e.attributes.get("id").is_some_and(|v| v == target_id)
+            {
+                return Some(n);
+            }
+            for child in &node.children {
+                if let Some(f) = walk(d, *child, target_id) {
+                    return Some(f);
+                }
+            }
+            None
+        }
+        for &root in dom_ref.roots() {
+            if let Some(found) = walk(&dom_ref, root, target_id) {
+                return found;
+            }
+        }
+        panic!("id `{target_id}` not found in DOM");
+    }
+
+    #[test]
+    fn local_storage_round_trips_keys_and_values() {
+        let mut rt = fresh();
+        rt.execute("localStorage.setItem('k', 'v'); localStorage.setItem('a', 1)")
+            .unwrap();
+        assert_eq!(rt.execute("localStorage.getItem('k')").unwrap(), "\"v\"");
+        // setItem coerces non-strings via String() — `1` becomes `"1"`.
+        assert_eq!(rt.execute("localStorage.getItem('a')").unwrap(), "\"1\"");
+        assert_eq!(rt.execute("localStorage.length").unwrap(), "2");
+        assert_eq!(rt.execute("localStorage.key(0)").unwrap(), "\"k\"");
+        rt.execute("localStorage.removeItem('k')").unwrap();
+        assert_eq!(rt.execute("localStorage.length").unwrap(), "1");
+        rt.execute("localStorage.clear()").unwrap();
+        assert_eq!(rt.execute("localStorage.length").unwrap(), "0");
+    }
+
+    #[test]
+    fn session_storage_is_independent_of_local_storage() {
+        let mut rt = fresh();
+        rt.execute("localStorage.setItem('k','L'); sessionStorage.setItem('k','S')")
+            .unwrap();
+        assert_eq!(rt.execute("localStorage.getItem('k')").unwrap(), "\"L\"");
+        assert_eq!(rt.execute("sessionStorage.getItem('k')").unwrap(), "\"S\"");
+    }
+
+    #[test]
+    fn date_now_tracks_fixed_clock() {
+        let (mut rt, clock) = rt_clock("");
+        assert_eq!(rt.execute("Date.now()").unwrap(), "0");
+        clock.advance(1000);
+        assert_eq!(rt.execute("Date.now()").unwrap(), "1000");
+    }
+
+    #[test]
+    fn set_timeout_fires_after_clock_advance_and_drain() {
+        let (mut rt, clock) = rt_clock("");
+        rt.execute(
+            "var fired = false; setTimeout(function(){ fired = true; }, 50)",
+        )
+        .unwrap();
+        // Not yet — clock at 0, deadline at 50.
+        assert_eq!(rt.execute("fired").unwrap(), "false");
+        clock.advance(50);
+        rt.drain_pending_jobs();
+        assert_eq!(rt.execute("fired").unwrap(), "true");
+    }
+
+    #[test]
+    fn clear_timeout_cancels_pending_handler() {
+        let (mut rt, clock) = rt_clock("");
+        rt.execute(
+            "var fired = false; var id = setTimeout(function(){ fired = true; }, 50); clearTimeout(id)",
+        )
+        .unwrap();
+        clock.advance(100);
+        rt.drain_pending_jobs();
+        assert_eq!(rt.execute("fired").unwrap(), "false");
+    }
+
+    #[test]
+    fn set_interval_repeats_until_cleared() {
+        let (mut rt, clock) = rt_clock("");
+        rt.execute(
+            "var n = 0; var id = setInterval(function(){ n++; if (n >= 3) clearInterval(id); }, 10)",
+        )
+        .unwrap();
+        // Drift-based re-arm: each handler re-schedules at `now + delay`,
+        // so advancing the clock by 50 in one shot only fires the handler
+        // once. Step the clock by `delay` between drains to observe the
+        // expected three-tick / clear-on-third progression.
+        for _ in 0..5 {
+            clock.advance(10);
+            rt.drain_pending_jobs();
+        }
+        assert_eq!(rt.execute("n").unwrap(), "3");
+    }
+
+    #[test]
+    fn request_animation_frame_fires_on_run_animation_frame_callbacks() {
+        let mut rt = rt_with_html("");
+        rt.execute(
+            "var ts = -1; requestAnimationFrame(function(t){ ts = t; })",
+        )
+        .unwrap();
+        rt.run_animation_frame_callbacks();
+        // Default ClockSource::System, so the timestamp is real wall-clock.
+        // Just confirm the handler ran (ts !== -1) and got a positive number.
+        let observed = rt.execute("ts > 0").unwrap();
+        assert_eq!(observed, "true");
+    }
+
+    #[test]
+    fn raf_handler_self_reschedules_to_next_frame_only() {
+        let mut rt = rt_with_html("");
+        rt.execute(
+            "var firedCount = 0;
+             var inner = function(){ firedCount++; };
+             requestAnimationFrame(function(){ requestAnimationFrame(inner); });",
+        )
+        .unwrap();
+        rt.run_animation_frame_callbacks();
+        // Outer fired (queued inner); inner waits for next frame.
+        assert_eq!(rt.execute("firedCount").unwrap(), "0");
+        rt.run_animation_frame_callbacks();
+        assert_eq!(rt.execute("firedCount").unwrap(), "1");
+    }
+
+    #[test]
+    fn add_event_listener_fires_on_dispatch_event() {
+        let mut rt = rt_with_html(r#"<button id="b">x</button>"#);
+        rt.execute(
+            r#"var clicked = 0;
+               document.getElementById('b').addEventListener('click', function(){ clicked++; });"#,
+        )
+        .unwrap();
+        let nid = id_to_node(&rt, "b");
+        let prevented = rt.dispatch_event(nid, "click");
+        assert!(!prevented);
+        assert_eq!(rt.execute("clicked").unwrap(), "1");
+    }
+
+    #[test]
+    fn dispatch_event_bubbles_to_ancestors() {
+        let mut rt = rt_with_html(r#"<div id="outer"><div id="mid"><span id="inner"></span></div></div>"#);
+        rt.execute(
+            r#"var trail = [];
+               document.getElementById('outer').addEventListener('x', function(){ trail.push('outer'); });
+               document.getElementById('mid').addEventListener('x', function(){ trail.push('mid'); });
+               document.getElementById('inner').addEventListener('x', function(){ trail.push('inner'); });"#,
+        )
+        .unwrap();
+        let nid = id_to_node(&rt, "inner");
+        rt.dispatch_event(nid, "x");
+        assert_eq!(
+            rt.execute("trail.join(',')").unwrap(),
+            "\"inner,mid,outer\""
+        );
+    }
+
+    #[test]
+    fn dispatch_event_at_does_not_bubble() {
+        let mut rt = rt_with_html(r#"<div id="outer"><span id="inner"></span></div>"#);
+        rt.execute(
+            r#"var fired = [];
+               document.getElementById('outer').addEventListener('focus', function(){ fired.push('outer'); });
+               document.getElementById('inner').addEventListener('focus', function(){ fired.push('inner'); });"#,
+        )
+        .unwrap();
+        let nid = id_to_node(&rt, "inner");
+        rt.dispatch_event_at(nid, "focus");
+        assert_eq!(rt.execute("fired.join(',')").unwrap(), "\"inner\"");
+    }
+
+    #[test]
+    fn prevent_default_returned_to_dispatcher() {
+        let mut rt = rt_with_html(r#"<a id="a">x</a>"#);
+        rt.execute(
+            r#"document.getElementById('a').addEventListener('click', function(e){ e.preventDefault(); });"#,
+        )
+        .unwrap();
+        let nid = id_to_node(&rt, "a");
+        let prevented = rt.dispatch_event(nid, "click");
+        assert!(prevented);
+    }
+
+    #[test]
+    fn stop_propagation_halts_bubble_after_current_target() {
+        let mut rt = rt_with_html(r#"<div id="outer"><span id="inner"></span></div>"#);
+        rt.execute(
+            r#"var trail = [];
+               document.getElementById('outer').addEventListener('click', function(){ trail.push('outer'); });
+               document.getElementById('inner').addEventListener('click', function(e){ trail.push('inner'); e.stopPropagation(); });"#,
+        )
+        .unwrap();
+        let nid = id_to_node(&rt, "inner");
+        rt.dispatch_event(nid, "click");
+        // Outer never sees the event because the bubble stops after the
+        // inner ancestor finishes its own listener list.
+        assert_eq!(rt.execute("trail.join(',')").unwrap(), "\"inner\"");
+    }
+
+    #[test]
+    fn dispatch_keyboard_event_exposes_key_field() {
+        let mut rt = rt_with_html(r#"<input id="i">"#);
+        rt.execute(
+            r#"var captured = '';
+               document.getElementById('i').addEventListener('keydown', function(e){ captured = e.key; });"#,
+        )
+        .unwrap();
+        let nid = id_to_node(&rt, "i");
+        rt.dispatch_keyboard_event(nid, "keydown", "Enter");
+        assert_eq!(rt.execute("captured").unwrap(), "\"Enter\"");
+    }
+
+    #[test]
+    fn remove_event_listener_drops_handler() {
+        let mut rt = rt_with_html(r#"<div id="d"></div>"#);
+        rt.execute(
+            r#"var fired = 0;
+               var handler = function(){ fired++; };
+               var elem = document.getElementById('d');
+               elem.addEventListener('click', handler);
+               elem.removeEventListener('click', handler);"#,
+        )
+        .unwrap();
+        let nid = id_to_node(&rt, "d");
+        rt.dispatch_event(nid, "click");
+        assert_eq!(rt.execute("fired").unwrap(), "0");
+    }
+
+    #[test]
+    fn duplicate_listener_registration_dedups_per_spec() {
+        let mut rt = rt_with_html(r#"<div id="d"></div>"#);
+        rt.execute(
+            r#"var fired = 0;
+               var handler = function(){ fired++; };
+               var elem = document.getElementById('d');
+               elem.addEventListener('click', handler);
+               elem.addEventListener('click', handler);"#,
+        )
+        .unwrap();
+        let nid = id_to_node(&rt, "d");
+        rt.dispatch_event(nid, "click");
+        assert_eq!(rt.execute("fired").unwrap(), "1");
+    }
+
+    #[test]
+    fn inner_html_setter_prunes_listeners_on_dropped_subtree() {
+        let mut rt = rt_with_html(r#"<div id="root"><span id="kid"></span></div>"#);
+        rt.execute(
+            r#"var fired = 0;
+               document.getElementById('kid').addEventListener('click', function(){ fired++; });"#,
+        )
+        .unwrap();
+        // Snapshot the kid's NodeId BEFORE the innerHTML setter runs —
+        // afterwards the slot is tombstoned and id_to_node's lookup
+        // would fail.
+        let kid = id_to_node(&rt, "kid");
+        // Replace the subtree, which triggers __mb_listener_prune for
+        // the kid's NodeId. Dispatching to the (now-detached) kid id
+        // should surface no handler call.
+        let assign = "var raw='<b>new</b>'; document.getElementById('root').innerHTML=raw;";
+        rt.execute(assign).unwrap();
+        rt.dispatch_event(kid, "click");
+        assert_eq!(rt.execute("fired").unwrap(), "0");
     }
 }

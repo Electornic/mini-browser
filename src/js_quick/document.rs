@@ -13,7 +13,6 @@ use rquickjs::{Ctx, Exception, Result, prelude::Func};
 use crate::css;
 use crate::dom::{Document, NodeId, NodeType};
 
-use super::ListenerMap;
 use super::element::{fresh_attr_map, matches_static_selector};
 use crate::dom_select::MatchingState;
 
@@ -22,11 +21,7 @@ use selectors::context::{
     SelectorCaches,
 };
 
-pub(super) fn register_document(
-    ctx: &Ctx<'_>,
-    dom: Rc<RefCell<Document>>,
-    _listeners: Rc<RefCell<ListenerMap>>,
-) -> Result<()> {
+pub(super) fn register_document(ctx: &Ctx<'_>, dom: Rc<RefCell<Document>>) -> Result<()> {
     let globals = ctx.globals();
 
     let dom_g = dom.clone();
