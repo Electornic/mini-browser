@@ -134,6 +134,56 @@ where
     })
 }
 
+/// Loads the page's favicon, if `<link rel="icon" href="...">` is present
+/// and reachable. The `rel` match is case-insensitive and accepts either
+/// "icon" or "shortcut icon" (legacy HTML4) — the first matching link
+/// wins, so multi-resolution sites take whichever icon hint comes first
+/// in document order. No `/favicon.ico` fallback yet (would need the
+/// `image` crate's `ico` feature, which we have not opted into).
+///
+/// Returns `None` for: no `<link rel="icon">` in the document, missing
+/// `href`, unresolvable URL, network failure, or decode failure. Each
+/// of those falls back to "no favicon"; the user just sees the tab
+/// title without an icon, matching the pre-5.9c behaviour.
+pub fn load_favicon(document: &Document, base_url: &Url) -> Option<LoadedImage> {
+    let url = favicon_url(document, base_url)?;
+    let bytes = net::load_image(&url).ok()?;
+    decode_image(url, &bytes).ok()
+}
+
+pub(crate) fn favicon_url(document: &Document, base_url: &Url) -> Option<Url> {
+    for &root in document.roots() {
+        if let Some(url) = first_favicon_link(document, root, base_url) {
+            return Some(url);
+        }
+    }
+    None
+}
+
+fn first_favicon_link(document: &Document, id: NodeId, base_url: &Url) -> Option<Url> {
+    let node = document.get(id)?;
+    if let NodeType::Element(element) = &node.node_type
+        && element.tag_name.eq_ignore_ascii_case("link")
+    {
+        let rel = element.attributes.get("rel").map(|s| s.as_str()).unwrap_or("");
+        let is_icon = rel
+            .split_ascii_whitespace()
+            .any(|token| token.eq_ignore_ascii_case("icon"));
+        if is_icon
+            && let Some(href) = element.attributes.get("href")
+            && let Ok(resolved) = base_url.resolve(href)
+        {
+            return Some(resolved);
+        }
+    }
+    for &child in &node.children {
+        if let Some(url) = first_favicon_link(document, child, base_url) {
+            return Some(url);
+        }
+    }
+    None
+}
+
 fn stylesheet_urls(document: &Document, base_url: &Url) -> Result<Vec<Url>, ResourceError> {
     let mut urls = Vec::new();
 
@@ -352,7 +402,49 @@ mod tests {
 
     use crate::{html, net::Url};
 
-    use super::{load_images, load_scripts, load_stylesheets};
+    use super::{favicon_url, load_images, load_scripts, load_stylesheets};
+
+    #[test]
+    fn favicon_url_resolves_link_rel_icon_against_base_url() {
+        // The first matching `<link rel="icon">` in document order wins.
+        // The href can be a relative path; resolution uses the page's
+        // base URL the same way stylesheets and images do.
+        let document = html::parse(
+            r#"<head><link rel="icon" href="/static/icon.png"/></head>"#,
+        )
+        .unwrap();
+        let base = Url::parse("https://example.com/page").unwrap();
+        let resolved = favicon_url(&document, &base).expect("favicon URL");
+        assert_eq!(resolved.to_string(), "https://example.com/static/icon.png");
+    }
+
+    #[test]
+    fn favicon_url_accepts_shortcut_icon_legacy_rel_value() {
+        // HTML4-era pages used `rel="shortcut icon"` (two whitespace-
+        // separated tokens). The matcher tokenises on whitespace and
+        // accepts any token equal-ignore-case to "icon", so this still
+        // resolves.
+        let document = html::parse(
+            r#"<head><link rel="shortcut icon" href="favicon.png"/></head>"#,
+        )
+        .unwrap();
+        let base = Url::parse("https://example.com/").unwrap();
+        let resolved = favicon_url(&document, &base).expect("favicon URL");
+        assert_eq!(resolved.to_string(), "https://example.com/favicon.png");
+    }
+
+    #[test]
+    fn favicon_url_returns_none_when_no_link_rel_icon_present() {
+        // No `<link rel="icon">` and no fallback to `/favicon.ico` (yet)
+        // — the loader must report `None` so the chrome can skip the
+        // favicon area entirely.
+        let document = html::parse(
+            r#"<head><link rel="stylesheet" href="/base.css"/></head>"#,
+        )
+        .unwrap();
+        let base = Url::parse("https://example.com/").unwrap();
+        assert!(favicon_url(&document, &base).is_none());
+    }
 
     #[test]
     fn resolves_stylesheet_links_from_document() {

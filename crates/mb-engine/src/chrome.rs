@@ -3,7 +3,7 @@
 // needs `ChromeState` + `chrome_commands` + the per-button rects, with no
 // awareness of pixel-level layout.
 
-use crate::{css, layout, render};
+use crate::{css, layout, render, resource::LoadedImage};
 
 // These constants define the browser chrome at the top of the window.
 // Everything below `CHROME_HEIGHT` is treated as page content. The chrome stacks
@@ -42,6 +42,17 @@ pub const TAB_RADIUS: f32 = 10.0;
 pub const TAB_TITLE_X: f32 = TAB_X + 16.0;
 pub const TAB_TITLE_Y: f32 = TAB_Y + 11.0;
 pub const TAB_TITLE_FONT_SIZE: f32 = 13.0;
+// Favicon sits to the left of the tab title at 16×16. The vertical
+// offset puts it on the title's text baseline (TAB_TITLE_Y - 4 lines
+// up the icon's top with the cap line) so the two read as a single
+// row instead of fighting for vertical center.
+pub const TAB_FAVICON_X: f32 = TAB_X + 14.0;
+pub const TAB_FAVICON_Y: f32 = TAB_Y + 7.0;
+pub const TAB_FAVICON_SIZE: f32 = 16.0;
+// When a favicon is present, the title shifts right by the icon
+// width plus a 6px gap. Tabs without a favicon keep `TAB_TITLE_X`,
+// so plain pages do not pay icon-sized left pad they cannot use.
+pub const TAB_TITLE_X_WITH_FAVICON: f32 = TAB_FAVICON_X + TAB_FAVICON_SIZE + 6.0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ChromeState<'a> {
@@ -62,6 +73,11 @@ pub struct ChromeState<'a> {
     /// the unindented text origin so non-secure pages do not look like
     /// they paid a half-icon worth of pad on the left.
     pub is_https: bool,
+    /// Favicon to render to the left of the tab title, if the document
+    /// exposed `<link rel="icon">` and the fetch + decode succeeded.
+    /// `None` keeps the title at its unshifted origin so plain pages
+    /// do not paint a 16-px gap of nothing.
+    pub tab_favicon: Option<&'a LoadedImage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,7 +195,11 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
         ),
         render::DisplayCommand::Text(render::TextCommand {
             text: chrome.tab_title.to_string(),
-            x: TAB_TITLE_X,
+            x: if chrome.tab_favicon.is_some() {
+                TAB_TITLE_X_WITH_FAVICON
+            } else {
+                TAB_TITLE_X
+            },
             y: TAB_TITLE_Y,
             color: css::Color {
                 r: 60,
@@ -303,6 +323,23 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
                 a: 255,
             },
         ));
+    }
+
+    if let Some(favicon) = chrome.tab_favicon {
+        commands.push(render::DisplayCommand::Image(render::ImageCommand {
+            x: TAB_FAVICON_X,
+            y: TAB_FAVICON_Y,
+            width: TAB_FAVICON_SIZE,
+            height: TAB_FAVICON_SIZE,
+            source_width: favicon.width,
+            source_height: favicon.height,
+            // Cloning the pixel buffer matches `<img>` rendering: the
+            // raster pass owns its commands by value, so the chrome
+            // path can't borrow into the LoadedImage. Tab favicons are
+            // small (typically 16×16 = 1KB) so the per-frame copy is
+            // negligible compared to the layout / paint work.
+            pixels: favicon.pixels.clone(),
+        }));
     }
 
     commands

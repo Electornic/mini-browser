@@ -2742,6 +2742,110 @@ mod tests {
     }
 
     #[test]
+    fn favicon_paints_in_tab_strip_and_indents_title() {
+        // 5.9c: when `BrowserState.favicon` is set, the chrome emits
+        // an `Image` command at the favicon's tab-strip rect and the
+        // tab title shifts right to leave room.
+        let mut browser = BrowserState::new(
+            "http://example.com".into(),
+            "<div></div>".into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            None,
+            "loaded",
+        );
+        // Inject a 1x1 sentinel favicon. The actual pixels do not matter
+        // for the test — we only assert that the chrome built an Image
+        // command of the right shape.
+        browser.favicon = Some(resource::LoadedImage {
+            url: net::Url::parse("http://example.com/icon.png").unwrap(),
+            width: 1,
+            height: 1,
+            pixels: vec![0xC0FFEE],
+        });
+        let commands = browser.display_list(800, 600, &input::WindowInput::default());
+
+        let favicon_cmd = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                render::DisplayCommand::Image(image)
+                    if image.width == mb_runtime::chrome::TAB_FAVICON_SIZE
+                        && image.height == mb_runtime::chrome::TAB_FAVICON_SIZE
+                        && image.x == mb_runtime::chrome::TAB_FAVICON_X
+                        && image.y == mb_runtime::chrome::TAB_FAVICON_Y =>
+                {
+                    Some(image)
+                }
+                _ => None,
+            })
+            .expect("tab favicon Image command");
+        assert_eq!(favicon_cmd.source_width, 1);
+        assert_eq!(favicon_cmd.source_height, 1);
+        assert_eq!(favicon_cmd.pixels, vec![0xC0FFEE]);
+
+        // Tab title shifts right when a favicon is present.
+        let tab_title_x = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                render::DisplayCommand::Text(text)
+                    if text.font_size == mb_runtime::chrome::TAB_TITLE_FONT_SIZE =>
+                {
+                    Some(text.x)
+                }
+                _ => None,
+            })
+            .expect("tab title text command");
+        assert_eq!(tab_title_x, mb_runtime::chrome::TAB_TITLE_X_WITH_FAVICON);
+    }
+
+    #[test]
+    fn no_favicon_keeps_default_tab_title_origin() {
+        // With no favicon the chrome leaves the favicon area empty and
+        // the title sits at the unshifted `TAB_TITLE_X` origin — no
+        // gap of nothing on plain pages.
+        let mut browser = BrowserState::new(
+            "http://example.com".into(),
+            "<div></div>".into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            None,
+            "loaded",
+        );
+        assert!(browser.favicon.is_none());
+        let commands = browser.display_list(800, 600, &input::WindowInput::default());
+
+        // No Image command in the tab favicon rect.
+        let favicon_paints = commands
+            .iter()
+            .filter(|cmd| match cmd {
+                render::DisplayCommand::Image(image) => {
+                    image.x == mb_runtime::chrome::TAB_FAVICON_X
+                        && image.y == mb_runtime::chrome::TAB_FAVICON_Y
+                }
+                _ => false,
+            })
+            .count();
+        assert_eq!(favicon_paints, 0);
+
+        let tab_title_x = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                render::DisplayCommand::Text(text)
+                    if text.font_size == mb_runtime::chrome::TAB_TITLE_FONT_SIZE =>
+                {
+                    Some(text.x)
+                }
+                _ => None,
+            })
+            .expect("tab title text command");
+        assert_eq!(tab_title_x, mb_runtime::chrome::TAB_TITLE_X);
+    }
+
+    #[test]
     fn raf_callback_dom_mutation_lands_in_browser_state_arena() {
         // rAF runs *before* the frame's layout pass, so any DOM mutation
         // it performs is visible to BrowserState's parsed_document arena

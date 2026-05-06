@@ -10,7 +10,9 @@ use crate::{html, net, resource};
 // Bundle of everything `load_remote_document` produces. The `HashMap<String, String>`
 // holds external `<script src>` bodies keyed by the raw `src` attribute string;
 // `install_document` looks them up by attribute when walking the DOM, so no extra
-// URL resolution is needed at execution time.
+// URL resolution is needed at execution time. The trailing `Option<LoadedImage>`
+// is the favicon if the page exposed `<link rel="icon">` and the fetch + decode
+// succeeded (added in Phase 5.9c).
 pub type LoadedDocument = (
     String,
     String,
@@ -18,6 +20,7 @@ pub type LoadedDocument = (
     Vec<Vec<u8>>,
     HashMap<String, String>,
     net::Url,
+    Option<resource::LoadedImage>,
 );
 
 pub fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
@@ -47,6 +50,7 @@ pub fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
             Vec::new(),
             HashMap::new(),
             final_url,
+            None,
         ));
     }
 
@@ -68,6 +72,11 @@ pub fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
         .collect();
     let external_scripts = resource::load_scripts(&document, &final_url)
         .map_err(|error| describe_resource_error(&error))?;
+    // Favicon failures (no `<link rel="icon">`, broken URL, network 404,
+    // unsupported codec) silently fall back to "no icon" — the rest of
+    // the page is still useful, mirroring how broken stylesheets and
+    // missing images degrade.
+    let favicon = resource::load_favicon(&document, &final_url);
     Ok((
         html,
         stylesheets.join("\n"),
@@ -75,6 +84,7 @@ pub fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
         font_data,
         external_scripts,
         final_url,
+        favicon,
     ))
 }
 

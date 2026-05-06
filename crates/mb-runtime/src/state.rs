@@ -51,6 +51,13 @@ pub struct BrowserState {
     pub images: HashMap<String, resource::LoadedImage>,
     pub font_data: Vec<Vec<u8>>,
     pub current_url: Option<net::Url>,
+    /// Favicon for the current document, if `<link rel="icon">` was
+    /// present and the fetch + decode succeeded. The chrome paints it
+    /// in the tab strip when present and shifts the title right to
+    /// make room. Cleared on every fresh navigation; back/forward
+    /// restores the document but not the favicon (that would need
+    /// `HistoryEntry` plumbing — Phase 5.9c+ if requested).
+    pub favicon: Option<resource::LoadedImage>,
 
     // UI state that is shown in the chrome.
     pub status_text: String,
@@ -217,6 +224,11 @@ impl BrowserState {
             external_scripts,
             cached_view: None,
             pending_navigation: None,
+            // Favicon arrives via `commit_navigate` / `commit_refresh` /
+            // `load_initial_state`; the constructor only receives the
+            // document strings + resources, not the favicon. Tests
+            // without a favicon naturally see `None`.
+            favicon: None,
         };
         // The first page seen on construction also runs its scripts so the
         // initial document follows the same lifecycle as later navigations
@@ -516,6 +528,7 @@ impl BrowserState {
             hovered_action,
             tab_title,
             is_https,
+            tab_favicon: self.favicon.as_ref(),
         }));
         commands
     }
@@ -1156,7 +1169,7 @@ impl BrowserState {
         // matching the pre-async behaviour exactly, just delayed by
         // the worker round-trip.
         match result {
-            Ok((document_html, stylesheet, images, font_data, external_scripts, resolved_url)) => {
+            Ok((document_html, stylesheet, images, font_data, external_scripts, resolved_url, favicon)) => {
                 let next_entry = HistoryEntry {
                     address_input: resolved_url.to_string(),
                     document_html,
@@ -1174,18 +1187,25 @@ impl BrowserState {
                     },
                 };
                 self.commit_navigation(next_entry);
+                // Favicon is owned by `BrowserState` rather than
+                // `HistoryEntry` for now — back/forward will not
+                // restore the icon in 5.9c. Set after `commit_navigation`
+                // so a back-forward push doesn't snapshot the new icon
+                // onto the *previous* page's history record.
+                self.favicon = favicon;
             }
             Err(error) => {
                 eprintln!("{error}");
                 let entry = self.error_entry(error_title, &error);
                 self.commit_navigation(entry);
+                self.favicon = None;
             }
         }
     }
 
     fn commit_refresh(&mut self, result: Result<LoadedDocument, String>) {
         match result {
-            Ok((document_html, stylesheet, images, font_data, external_scripts, resolved_url)) => {
+            Ok((document_html, stylesheet, images, font_data, external_scripts, resolved_url, favicon)) => {
                 // Same install_document precondition as restore_entry:
                 // current_url has to land first so the runtime's
                 // `location` global picks up the reloaded URL instead
@@ -1194,6 +1214,7 @@ impl BrowserState {
                 self.install_document(document_html, stylesheet, external_scripts);
                 self.images = images;
                 self.font_data = font_data;
+                self.favicon = favicon;
                 self.scroll_offset = 0.0;
                 self.set_status(
                     "loaded",
@@ -1207,6 +1228,7 @@ impl BrowserState {
             }
             Err(error) => {
                 eprintln!("{error}");
+                self.favicon = None;
                 self.show_error_page("refresh failed", &error);
             }
         }
@@ -1681,8 +1703,8 @@ fn sample_css() -> &'static str {
 pub fn load_initial_state() -> BrowserState {
     match env::args().nth(1) {
         Some(raw_url) => match load_remote_document(&raw_url) {
-            Ok((document_html, stylesheet, images, font_data, external_scripts, current_url)) => {
-                BrowserState::new(
+            Ok((document_html, stylesheet, images, font_data, external_scripts, current_url, favicon)) => {
+                let mut state = BrowserState::new(
                     raw_url,
                     document_html,
                     stylesheet,
@@ -1691,7 +1713,9 @@ pub fn load_initial_state() -> BrowserState {
                     external_scripts,
                     Some(current_url),
                     "loaded",
-                )
+                );
+                state.favicon = favicon;
+                state
             }
             Err(error) => {
                 eprintln!("{error}");
