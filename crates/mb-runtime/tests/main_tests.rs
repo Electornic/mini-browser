@@ -2351,6 +2351,165 @@ mod tests {
     }
 
     #[test]
+    fn link_click_dispatches_load_off_main_thread_and_commits_on_a_later_frame() {
+        // 5.8b: link click should behave like 5.8a's refresh — flip the
+        // browser into pending+loading… on the click frame, then commit
+        // the new document on a later frame once the worker finishes.
+        // Successful loads push to the back/forward stack, matching the
+        // pre-async funnel.
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = "<div id=\"target\">linked</div>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let url = net::Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        // The current page hosts a single link to the same origin.
+        let mut browser = BrowserState::new(
+            url.to_string(),
+            r#"<a id="lnk" href="/next">go</a>"#.into(),
+            r#"#lnk { display: block; width: 200px; height: 50px; }"#.into(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            Some(url),
+            "loaded",
+        );
+
+        // Build the layout once so the link rect is known to hit testing.
+        let _ = browser.display_list(800, 600, &input::WindowInput::default());
+
+        // Click somewhere inside the link's rect — the link sits at the
+        // top of the page (CHROME_HEIGHT below it), 200×50 with the test CSS.
+        // Click dispatch lives inside `display_list` (it needs the layout
+        // to do hit testing), so the click input has to be passed there
+        // rather than to `apply_input`.
+        let click_y = CHROME_HEIGHT + 10.0;
+        let _ = browser.display_list(
+            800,
+            600,
+            &input::WindowInput {
+                mouse_position: Some((20.0, click_y)),
+                left_mouse_pressed: true,
+                ..input::WindowInput::default()
+            },
+        );
+        assert!(
+            browser.has_pending_navigation(),
+            "click on /next should have spawned a worker"
+        );
+        assert_eq!(browser.status_text, "loading…");
+
+        // Drive frames until the worker resolves.
+        let mut frames = 0;
+        while browser.has_pending_navigation() && frames < 200 {
+            let _ = browser.display_list(800, 600, &input::WindowInput::default());
+            if browser.has_pending_navigation() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            frames += 1;
+        }
+
+        assert!(!browser.has_pending_navigation());
+        assert!(
+            browser.document_html.contains("linked"),
+            "expected linked document after async commit, got: {}",
+            browser.document_html
+        );
+        assert_eq!(browser.status_text, "loaded");
+        // History gained the previous page.
+        assert_eq!(browser.back_stack.len(), 1);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn url_bar_enter_dispatches_load_off_main_thread() {
+        // The URL-bar path mirrors the link-click path: typing + Enter
+        // spawns a worker, status flips to "loading…", document only
+        // updates after `poll_pending_navigation` drains the result.
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = "<div id=\"typed\">typed</div>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut browser = BrowserState::new(
+            String::new(),
+            "<div>blank</div>".into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            None,
+            "",
+        );
+        // Simulate a typed URL and Enter on the address bar.
+        browser.address_input = format!("http://127.0.0.1:{port}/");
+        browser.address_bar_focused = true;
+        browser.address_bar_selected = false;
+
+        browser.apply_input(
+            &input::WindowInput {
+                enter_pressed: true,
+                ..input::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        assert!(browser.has_pending_navigation());
+        assert_eq!(browser.status_text, "loading…");
+        assert_eq!(
+            browser.document_html, "<div>blank</div>",
+            "document must not change before the worker reports back"
+        );
+
+        let mut frames = 0;
+        while browser.has_pending_navigation() && frames < 200 {
+            let _ = browser.display_list(800, 600, &input::WindowInput::default());
+            if browser.has_pending_navigation() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            frames += 1;
+        }
+
+        assert!(!browser.has_pending_navigation());
+        assert!(browser.document_html.contains("typed"));
+        assert_eq!(browser.status_text, "loaded");
+        server.join().unwrap();
+    }
+
+    #[test]
     fn raf_callback_dom_mutation_lands_in_browser_state_arena() {
         // rAF runs *before* the frame's layout pass, so any DOM mutation
         // it performs is visible to BrowserState's parsed_document arena

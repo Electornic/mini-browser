@@ -124,6 +124,13 @@ struct PendingNavigation {
 #[derive(Debug, Clone, Copy)]
 enum PendingKind {
     Refresh,
+    /// URL bar Enter or link click / form submit. Successful loads
+    /// push to the back/forward stack via `commit_navigation`; failed
+    /// loads commit the canned error page through the same funnel,
+    /// so the user can `back` out of a broken navigation. The string
+    /// is the title shown on the error page when the load fails —
+    /// "load failed" for URL-bar entries, "link failed" for clicks.
+    Navigate { error_title: &'static str },
 }
 
 // Snapshot of the inputs `build_document_view` was last called with, paired
@@ -817,32 +824,13 @@ impl BrowserState {
             return;
         }
 
-        // Successful navigation replaces the visible page and pushes the old snapshot to history.
-        match load_remote_document(&target) {
-            Ok((document_html, stylesheet, images, font_data, external_scripts, resolved_url)) => {
-                let next_entry = HistoryEntry {
-                    address_input: resolved_url.to_string(),
-                    document_html,
-                    stylesheet,
-                    images,
-                    font_data,
-                    external_scripts,
-                    current_url: Some(resolved_url),
-                    status_text: "loaded".into(),
-                    status_color: css::Color {
-                        r: 40,
-                        g: 120,
-                        b: 40,
-                        a: 255,
-                    },
-                };
-                self.commit_navigation(next_entry);
-            }
-            Err(error) => {
-                eprintln!("{error}");
-                self.commit_navigation(self.error_entry("load failed", &error));
-            }
+        if self.pending_navigation.is_some() {
+            // Another load is already in flight — drop the new request
+            // (first-click-owns), same rationale as `reload_current`.
+            return;
         }
+
+        self.spawn_navigation(target, "load failed");
     }
 
     // Synthesise a `submit` event on `form_id` and, if no handler
@@ -903,6 +891,13 @@ impl BrowserState {
     }
 
     fn navigate_to_href(&mut self, href: &str) {
+        if self.pending_navigation.is_some() {
+            // First-click-owns: a click on a link while a previous
+            // navigation is still loading is dropped silently. The
+            // address bar stays where the in-flight load put it.
+            return;
+        }
+
         let resolved = match self.resolve_href(href) {
             Ok(url) => url,
             Err(error) => {
@@ -912,35 +907,39 @@ impl BrowserState {
             }
         };
 
+        // Sync UI feedback (URL bar shows the click target, focus moves
+        // off the bar) lands the same frame as the click. The actual
+        // load runs on the worker thread and commits later via
+        // `poll_pending_navigation`.
         self.address_input = resolved.to_string();
         self.address_bar_selected = false;
         self.address_bar_focused = false;
-        // Link navigation reuses the same loader path as manual URL entry.
-        match load_remote_document(&resolved.to_string()) {
-            Ok((document_html, stylesheet, images, font_data, external_scripts, resolved_url)) => {
-                let next_entry = HistoryEntry {
-                    address_input: resolved_url.to_string(),
-                    document_html,
-                    stylesheet,
-                    images,
-                    font_data,
-                    external_scripts,
-                    current_url: Some(resolved_url),
-                    status_text: "loaded".into(),
-                    status_color: css::Color {
-                        r: 40,
-                        g: 120,
-                        b: 40,
-                        a: 255,
-                    },
-                };
-                self.commit_navigation(next_entry);
-            }
-            Err(error) => {
-                eprintln!("{error}");
-                self.commit_navigation(self.error_entry("link failed", &error));
-            }
-        }
+        self.spawn_navigation(resolved.to_string(), "link failed");
+    }
+
+    fn spawn_navigation(&mut self, target: String, error_title: &'static str) {
+        // Caller already established `pending_navigation.is_none()` and
+        // resolved the target string. The worker owns the blocking
+        // `load_remote_document` call; the receiver lands on
+        // `pending_navigation` and `poll_pending_navigation` drains it
+        // on a later frame.
+        let (sender, receiver) = mpsc::channel();
+        async_runtime::handle().spawn_blocking(move || {
+            let _ = sender.send(load_remote_document(&target));
+        });
+        self.pending_navigation = Some(PendingNavigation {
+            kind: PendingKind::Navigate { error_title },
+            receiver,
+        });
+        self.set_status(
+            "loading…",
+            css::Color {
+                r: 80,
+                g: 100,
+                b: 140,
+                a: 255,
+            },
+        );
     }
 
     fn set_status(&mut self, text: impl Into<String>, color: css::Color) {
@@ -1136,6 +1135,46 @@ impl BrowserState {
         self.pending_navigation = None;
         match kind {
             PendingKind::Refresh => self.commit_refresh(result),
+            PendingKind::Navigate { error_title } => self.commit_navigate(result, error_title),
+        }
+    }
+
+    fn commit_navigate(
+        &mut self,
+        result: Result<LoadedDocument, String>,
+        error_title: &'static str,
+    ) {
+        // Both URL-bar Enter and link/form clicks land here. Successful
+        // loads push to the back/forward stack via `commit_navigation`;
+        // failed loads commit the canned error page through the same
+        // funnel so the user can `back` out of a broken navigation —
+        // matching the pre-async behaviour exactly, just delayed by
+        // the worker round-trip.
+        match result {
+            Ok((document_html, stylesheet, images, font_data, external_scripts, resolved_url)) => {
+                let next_entry = HistoryEntry {
+                    address_input: resolved_url.to_string(),
+                    document_html,
+                    stylesheet,
+                    images,
+                    font_data,
+                    external_scripts,
+                    current_url: Some(resolved_url),
+                    status_text: "loaded".into(),
+                    status_color: css::Color {
+                        r: 40,
+                        g: 120,
+                        b: 40,
+                        a: 255,
+                    },
+                };
+                self.commit_navigation(next_entry);
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                let entry = self.error_entry(error_title, &error);
+                self.commit_navigation(entry);
+            }
         }
     }
 
