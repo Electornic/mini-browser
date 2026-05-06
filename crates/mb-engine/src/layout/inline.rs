@@ -10,8 +10,8 @@ use crate::{
 
 use super::{
     BoxType, Dimensions, LayoutBox, Rect, apply_relative_offset, child_height, collapsed_text,
-    container_box_type, edge_sizes, intrinsic_height, intrinsic_width, is_display_none,
-    is_out_of_flow, length_value, outer_rect,
+    container_box_type, edge_sizes, has_float, intrinsic_height, intrinsic_width,
+    is_display_none, is_float_right, is_out_of_flow, length_value, outer_rect,
 };
 use super::block::layout_node;
 use super::flex::{is_flex_container, layout_flex_children};
@@ -43,6 +43,16 @@ pub(super) fn layout_inline_children(
         // Absolute children are out of flow — they neither contribute to line
         // width nor cause line breaks. They get laid out separately below.
         if is_out_of_flow(child) {
+            continue;
+        }
+        // Floats are out of flow for line packing too. They sit at the named
+        // edge of the container at the current cursor and surrounding inline
+        // content runs around them (Tufte-sidenote pattern). The MVP places
+        // the float at the parent's content_y without shrinking the line
+        // width — overlap on the right side of long lines is left for a
+        // follow-up sub-phase; the immediate goal is just to stop floats
+        // from being inline-packed at the line's text-width offset.
+        if has_float(child) {
             continue;
         }
         let child_w = inline_total_size(child, content_width).width;
@@ -99,7 +109,37 @@ pub(super) fn layout_inline_children(
         boxes.push(abs_box);
     }
 
-    (boxes, max_bottom - content_y)
+    // Float children: place at the named edge of the container at content_y.
+    // We lay each float out via the block algorithm at a throwaway cursor —
+    // siblings already finished line packing without it, so the float just
+    // sits visually beside them. Right floats are measured at the left first
+    // and shifted into place; left floats land at content_x directly. The
+    // MVP doesn't shrink the affected line widths against the float's
+    // outer rect; on long lines this can leave the rightmost word visually
+    // overlapping the float. Real Tufte sidenotes use `margin-right: -60%`
+    // to escape the parent's content box anyway, which sidesteps the
+    // overlap entirely; getting them onto the right Y is the actual fix.
+    let mut max_float_bottom = content_y;
+    for child in children.iter().filter(|child| has_float(child) && !is_display_none(child)) {
+        let mut throwaway = content_y;
+        let mut float_box = layout_node(child, content_x, &mut throwaway, content_width);
+        if is_float_right(child) {
+            let outer_w = outer_rect(&float_box).width;
+            let dx = (content_x + content_width - outer_w) - content_x;
+            if dx != 0.0 {
+                super::shift_layout_subtree(&mut float_box, dx, 0.0);
+            }
+        }
+        max_float_bottom = max_float_bottom.max(throwaway);
+        boxes.push(float_box);
+    }
+
+    // The container needs to grow to enclose its tallest float too —
+    // otherwise `<p>text<aside style="float: right; height: 200px">…</aside>
+    // </p>` would close at the inline run's bottom and the float would
+    // visually spill below the paragraph background.
+    let height = (max_bottom - content_y).max(max_float_bottom - content_y);
+    (boxes, height)
 }
 
 pub(super) fn layout_inline_or_inline_block(
@@ -215,15 +255,20 @@ fn layout_inline_sequence_no_wrap(
 }
 
 pub(super) fn uses_inline_flow(node: &StyledNode) -> bool {
-    // Inline flow only kicks in when all visible children are inline-ish.
-    // `display: none` siblings are invisible to flow detection — a hidden
-    // <script> alongside inline text should not flip the parent into block
-    // flow. Mixed block/inline trees still fall back to the simpler
-    // vertical block algorithm.
+    // Inline flow only kicks in when all visible **in-flow** children are
+    // inline-ish. `display: none` siblings are invisible to flow detection —
+    // a hidden <script> alongside inline text should not flip the parent
+    // into block flow. Floats are skipped too: spec-wise a float is
+    // out-of-flow for line packing, so a Tufte-style `<p>text<aside
+    // style="float: right">note</aside>more text</p>` should still be
+    // treated as inline flow even though `<aside>` defaults to block.
+    // Without this filter the parent would route through block layout and
+    // anonymously block-wrap each text run, which makes the surrounding
+    // copy stack vertically instead of wrapping around the float.
     let mut visible = node
         .children
         .iter()
-        .filter(|child| !is_display_none(child))
+        .filter(|child| !is_display_none(child) && !has_float(child))
         .peekable();
     visible.peek().is_some() && visible.all(is_inline_node)
 }

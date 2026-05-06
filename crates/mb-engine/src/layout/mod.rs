@@ -400,6 +400,18 @@ pub(super) fn is_out_of_flow(node: &StyledNode) -> bool {
     is_position_absolute(node) || is_position_fixed(node)
 }
 
+pub(super) fn is_float_left(node: &StyledNode) -> bool {
+    matches!(node.value("float"), Some(Value::Keyword(k)) if k == "left")
+}
+
+pub(super) fn is_float_right(node: &StyledNode) -> bool {
+    matches!(node.value("float"), Some(Value::Keyword(k)) if k == "right")
+}
+
+pub(super) fn has_float(node: &StyledNode) -> bool {
+    is_float_left(node) || is_float_right(node)
+}
+
 pub(super) fn is_display_none(node: &StyledNode) -> bool {
     // `display: none` removes the element (and its subtree) from the box tree
     // entirely — no layout, no paint, no hit test. Every algorithm's child
@@ -719,6 +731,82 @@ mod tests {
         let layout = layout_tree(&styled, 1200.0);
 
         assert_eq!(layout.dimensions.content.width, 520.0);
+    }
+
+    #[test]
+    fn right_float_inside_inline_flow_lands_at_container_right_edge() {
+        // Tufte sidenote pattern: container with inline copy + a `float:
+        // right` sibling. Before 5.3 the float was packed into the inline
+        // run at line_x = text_width, so the note overlapped the body copy
+        // as if it were another word. After 5.3, the float is filtered out
+        // of line packing and placed at the parent's right edge at
+        // content_y — the visual outcome real sidenotes need.
+        //
+        // We use `<div>` (not `<p>`) for the container because HTML5's <p>
+        // auto-closes on flow-content children like <aside>, which would
+        // hoist the float out of the paragraph entirely and defeat the test.
+        let styled = styled_root(
+            r#"<div class="para"><span class="copy">body</span><span class="note">side</span><span class="copy">tail</span></div>"#,
+            r#"
+                .para { width: 600px; }
+                .note { float: right; width: 200px; height: 30px; display: block; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        // The float is laid out AFTER the line packing pass and appended to
+        // the box list, so identify it by its 200px content width.
+        let aside = layout
+            .children
+            .iter()
+            .find(|child| (child.dimensions.content.width - 200.0).abs() < 0.001)
+            .expect("expected the 200px-wide float child to land somewhere");
+
+        // 600 container content - 200 aside width = 400.
+        assert_eq!(aside.dimensions.content.x, 400.0);
+        // Float sits at content_y, not at the bottom of the inline run.
+        assert_eq!(aside.dimensions.content.y, 0.0);
+    }
+
+    #[test]
+    fn left_float_inside_inline_flow_lands_at_container_left_edge() {
+        // Mirror of the right-float case: float lands at content_x, not at
+        // line_x (which would put it at the end of the preceding inline run).
+        let styled = styled_root(
+            r#"<div class="para"><span class="copy">body</span><span class="note">side</span></div>"#,
+            r#"
+                .para { width: 600px; }
+                .note { float: left; width: 150px; height: 30px; display: block; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let aside = layout
+            .children
+            .iter()
+            .find(|child| (child.dimensions.content.width - 150.0).abs() < 0.001)
+            .expect("expected the 150px-wide float child to land somewhere");
+
+        assert_eq!(aside.dimensions.content.x, 0.0);
+        assert_eq!(aside.dimensions.content.y, 0.0);
+    }
+
+    #[test]
+    fn float_inside_inline_flow_does_not_collapse_parent_height_below_float() {
+        // The inline run is short (one word) but the float is tall; the
+        // container must enclose the taller of the two so the float doesn't
+        // visually spill below its parent's background box.
+        let styled = styled_root(
+            r#"<div class="para"><span>x</span><span class="note">note</span></div>"#,
+            r#"
+                .para { width: 400px; font-size: 16px; }
+                .note { float: right; width: 100px; height: 200px; display: block; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        assert!(
+            layout.dimensions.content.height >= 200.0,
+            "container content height was {} but should enclose the 200px-tall float",
+            layout.dimensions.content.height
+        );
     }
 
     #[test]

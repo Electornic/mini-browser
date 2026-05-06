@@ -9,7 +9,8 @@ use crate::{
 use super::{
     Dimensions, EdgeSizes, LayoutBox, Rect, apply_relative_offset, child_height,
     container_box_type, edge_sizes, intrinsic_height, intrinsic_width, is_auto, is_display_none,
-    is_layout_whitespace_text, is_out_of_flow, length_value, outer_rect, shift_layout_subtree,
+    is_float_left, is_float_right, is_layout_whitespace_text, is_out_of_flow, length_value,
+    outer_rect, shift_layout_subtree,
 };
 use super::flex::{is_flex_container, layout_flex_children};
 use super::grid::{is_grid_container, layout_grid_children};
@@ -229,14 +230,6 @@ fn collapse_margins(prev: f32, next: f32) -> f32 {
     } else {
         prev + next
     }
-}
-
-fn is_float_left(node: &StyledNode) -> bool {
-    matches!(node.value("float"), Some(Value::Keyword(keyword)) if keyword == "left")
-}
-
-fn is_float_right(node: &StyledNode) -> bool {
-    matches!(node.value("float"), Some(Value::Keyword(keyword)) if keyword == "right")
 }
 
 fn clear_target_y(node: &StyledNode, float_bottom_left: f32, float_bottom_right: f32) -> f32 {

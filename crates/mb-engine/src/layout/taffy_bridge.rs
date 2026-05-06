@@ -43,9 +43,9 @@ use crate::dom::NodeType;
 use crate::style::StyledNode;
 
 use super::{
-    Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, intrinsic_height,
-    intrinsic_width, is_display_none, is_layout_whitespace_text, is_out_of_flow,
-    outer_rect, shift_layout_subtree,
+    Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, has_float, intrinsic_height,
+    intrinsic_width, is_display_none, is_layout_whitespace_text, is_out_of_flow, outer_rect,
+    shift_layout_subtree,
 };
 use super::block::layout_node as legacy_block_layout;
 use super::inline::uses_inline_flow;
@@ -575,10 +575,6 @@ fn is_native_block(node: &StyledNode) -> bool {
         .children
         .iter()
         .any(|c| has_float(c) || has_clear(c) || is_out_of_flow(c))
-}
-
-fn has_float(node: &StyledNode) -> bool {
-    matches!(node.value("float"), Some(Value::Keyword(k)) if k == "left" || k == "right")
 }
 
 fn has_clear(node: &StyledNode) -> bool {
