@@ -1971,6 +1971,112 @@ mod tests {
     }
 
     #[test]
+    fn native_flex_row_with_inline_content_block_children_does_not_squash_to_zero() {
+        // HN/Haskell-blog-style nav: a flex row containing children that
+        // each hold inline text. Forcing `display: block` on the children
+        // pushes the parent through the *native* taffy flex path (it would
+        // otherwise route through the boundary path because all children
+        // are inline-displayed by default). The block children themselves
+        // become boundary leaves because their content is inline.
+        //
+        // Before 5.4 the MinContent probe in `measure_boundary` ran the
+        // legacy block algorithm at `parent_width = 0`, which collapsed
+        // the inline shrink-to-fit width to 0. taffy then saw items with
+        // zero min-content size and could legally shrink them all the way
+        // down — the whole nav collapsed.
+        //
+        // After 5.4 the measure callback returns the legacy box width even
+        // for the MinContent probe (using a finite non-zero width that
+        // mirrors the unconstrained natural-text size), so taffy refuses
+        // to shrink each item below its content and the row stays visible.
+        let styled = styled_root(
+            r#"<header id="nav"><a class="link">Posts</a><a class="link">Categories</a><a class="link">About</a><a class="link">Search</a></header>"#,
+            r#"
+                #nav { display: flex; }
+                .link { display: block; font-size: 16px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        assert_eq!(
+            layout.children.len(),
+            4,
+            "all four nav items should survive flex sizing"
+        );
+        for (i, child) in layout.children.iter().enumerate() {
+            assert!(
+                child.dimensions.content.width > 0.0,
+                "child {i} squashed to zero width — got {}",
+                child.dimensions.content.width
+            );
+            assert!(
+                child.dimensions.content.height > 0.0,
+                "child {i} squashed to zero height — got {}",
+                child.dimensions.content.height
+            );
+        }
+        let first = &layout.children[0];
+        let second = &layout.children[1];
+        let first_right = first.dimensions.content.x + first.dimensions.content.width;
+        assert!(
+            second.dimensions.content.x >= first_right,
+            "second item should sit to the right of the first, got x={} after right={}",
+            second.dimensions.content.x,
+            first_right
+        );
+    }
+
+    #[test]
+    fn native_flex_row_with_nested_inline_children_keeps_natural_widths() {
+        // Closer to real-world nav: each flex item is itself an `<a>`
+        // wrapping nested inline spans, and the link is forced to
+        // `display: block` so the container goes through the native taffy
+        // flex path. The nested structure exercises the inline-flow branch
+        // of `measure_boundary` more thoroughly than a single text child.
+        let styled = styled_root(
+            r#"<header id="nav"><a class="link"><span>Posts</span></a><a class="link"><span>Categories</span></a></header>"#,
+            r#"
+                #nav { display: flex; }
+                .link { display: block; font-size: 16px; padding: 4px 8px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        for child in layout.children.iter() {
+            assert!(
+                child.dimensions.content.width > 0.0,
+                "nested-inline link child squashed: got width {}",
+                child.dimensions.content.width
+            );
+        }
+    }
+
+    #[test]
+    fn native_flex_row_with_padded_inline_block_children_preserves_widths() {
+        // Some pages render nav links as inline-block with padding. Forcing
+        // a native flex row over inline-block children stresses the
+        // boundary measure path because inline-block items also flow
+        // through `layout_inline_block_node` shrink-to-fit, where a
+        // parent_width of 0 used to collapse the natural text size.
+        let styled = styled_root(
+            r#"<header id="nav"><a class="link">Posts</a><a class="link">Categories</a><div></div></header>"#,
+            r#"
+                #nav { display: flex; }
+                .link { display: inline-block; padding: 6px 12px; font-size: 16px; }
+                div { width: 1px; height: 1px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        // Two link items + the spacer div.
+        assert_eq!(layout.children.len(), 3);
+        for (i, child) in layout.children.iter().take(2).enumerate() {
+            assert!(
+                child.dimensions.content.width > 0.0,
+                "inline-block link {i} squashed: got width {}",
+                child.dimensions.content.width
+            );
+        }
+    }
+
+    #[test]
     fn flex_row_lays_children_horizontally_at_flex_start() {
         // Three explicit-width items in a flex row should sit shoulder-to-shoulder
         // starting at the container's content_x, not stacked vertically.
