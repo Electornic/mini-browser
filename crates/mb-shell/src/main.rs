@@ -6,6 +6,7 @@ mod window;
 
 use mb_engine::render;
 use mb_runtime::state::{install_fonts, load_initial_state};
+use window::FrameOutput;
 
 fn main() {
     let mut browser = load_initial_state();
@@ -24,8 +25,14 @@ fn main() {
         }
 
         let commands = browser.display_list(width, height, input);
-
-        render::rasterize(&commands, width, height)
+        let pixels = render::rasterize(&commands, width, height);
+        // Caret blink + pending-navigation poll need follow-up frames
+        // even with no input. Everything else is event-driven and the
+        // shell schedules its own redraw on the matching winit event.
+        FrameOutput {
+            pixels,
+            wants_redraw: browser.wants_continuous_redraw(),
+        }
     }) {
         eprintln!("window error: {error}");
     }

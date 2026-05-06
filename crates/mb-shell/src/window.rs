@@ -25,6 +25,16 @@ use winit::window::{Window, WindowId};
 // through that name.
 use mb_engine::input::WindowInput;
 
+/// What the per-frame closure hands back to the shell. The shell copies
+/// `pixels` into the softbuffer surface, then uses `wants_redraw` to
+/// decide whether to keep animating: `true` schedules another
+/// `request_redraw` from `about_to_wait`, `false` lets winit block on
+/// the next real input event and drops idle CPU to ~0%.
+pub struct FrameOutput {
+    pub pixels: Vec<u32>,
+    pub wants_redraw: bool,
+}
+
 pub fn run<F>(
     title: &str,
     initial_width: usize,
@@ -32,10 +42,15 @@ pub fn run<F>(
     build_scene: F,
 ) -> Result<()>
 where
-    F: FnMut(usize, usize, &WindowInput) -> Vec<u32>,
+    F: FnMut(usize, usize, &WindowInput) -> FrameOutput,
 {
     let event_loop = EventLoop::new().context("create event loop")?;
-    event_loop.set_control_flow(ControlFlow::Poll);
+    // `Wait` lets winit block on the next real event when no animation
+    // is pending. The shell explicitly schedules redraws via
+    // `request_redraw` for input events (keyboard / mouse / scroll /
+    // resize) and for time-driven UI (caret blink, pending nav poll)
+    // when the closure asks for one — see `App::about_to_wait`.
+    event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::new(
         title.to_string(),
         initial_width as u32,
@@ -51,7 +66,7 @@ where
 
 struct App<F>
 where
-    F: FnMut(usize, usize, &WindowInput) -> Vec<u32>,
+    F: FnMut(usize, usize, &WindowInput) -> FrameOutput,
 {
     title: String,
     initial_size: (u32, u32),
@@ -60,6 +75,7 @@ where
     surface: Option<Surface<Rc<Window>, Rc<Window>>>,
     pending: PendingInput,
     last_left_down: bool,
+    last_wants_redraw: bool,
     error: Option<anyhow::Error>,
 }
 
@@ -104,7 +120,7 @@ impl PendingInput {
 
 impl<F> App<F>
 where
-    F: FnMut(usize, usize, &WindowInput) -> Vec<u32>,
+    F: FnMut(usize, usize, &WindowInput) -> FrameOutput,
 {
     fn new(title: String, w: u32, h: u32, build_scene: F) -> Self {
         Self {
@@ -115,6 +131,9 @@ where
             surface: None,
             pending: PendingInput::default(),
             last_left_down: false,
+            // The first frame is unconditionally requested from `resumed`,
+            // and that frame's closure reports back what to do next.
+            last_wants_redraw: false,
             error: None,
         }
     }
@@ -123,11 +142,17 @@ where
         self.error = Some(err);
         event_loop.exit();
     }
+
+    fn request_redraw(&self) {
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+    }
 }
 
 impl<F> ApplicationHandler for App<F>
 where
-    F: FnMut(usize, usize, &WindowInput) -> Vec<u32>,
+    F: FnMut(usize, usize, &WindowInput) -> FrameOutput,
 {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -159,6 +184,12 @@ where
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Every input branch that updates `pending` also schedules a
+        // redraw — without this the shell sits on `ControlFlow::Wait`
+        // forever and the user's keystroke / click never reaches a
+        // frame. `ModifiersChanged` is the lone exception: it just
+        // tracks the chord state for the next keyboard event and has
+        // no visible effect on its own.
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ModifiersChanged(mods) => {
@@ -166,12 +197,15 @@ where
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.handle_keyboard(event_loop, event);
+                self.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.pending.mouse_position = Some((position.x as f32, position.y as f32));
+                self.request_redraw();
             }
             WindowEvent::CursorLeft { .. } => {
                 self.pending.mouse_position = None;
+                self.request_redraw();
             }
             WindowEvent::MouseInput {
                 state,
@@ -179,6 +213,7 @@ where
                 ..
             } => {
                 self.pending.left_held = state == ElementState::Pressed;
+                self.request_redraw();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta {
@@ -188,11 +223,10 @@ where
                     MouseScrollDelta::PixelDelta(p) => (p.y as f32) / 20.0,
                 };
                 self.pending.scroll_y += dy;
+                self.request_redraw();
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
+                self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
                 if let Err(err) = self.redraw() {
@@ -204,15 +238,20 @@ where
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
+        // Drop into `ControlFlow::Wait` (set in `run`) unless the last
+        // frame told us it was animating — caret blink while the
+        // address bar is focused, an in-flight async navigation that
+        // needs polling, etc. Every other case waits for an actual
+        // input event and burns no CPU on idle.
+        if self.last_wants_redraw {
+            self.request_redraw();
         }
     }
 }
 
 impl<F> App<F>
 where
-    F: FnMut(usize, usize, &WindowInput) -> Vec<u32>,
+    F: FnMut(usize, usize, &WindowInput) -> FrameOutput,
 {
     fn handle_keyboard(&mut self, event_loop: &ActiveEventLoop, event: KeyEvent) {
         if event.state != ElementState::Pressed {
@@ -282,8 +321,10 @@ where
             .map_err(|e| anyhow!("softbuffer resize: {e}"))?;
 
         let input = self.pending.drain_for_frame(self.last_left_down);
-        let pixels = (self.build_scene)(size.width as usize, size.height as usize, &input);
+        let frame = (self.build_scene)(size.width as usize, size.height as usize, &input);
         self.last_left_down = input.left_mouse_held;
+        self.last_wants_redraw = frame.wants_redraw;
+        let pixels = frame.pixels;
 
         let mut buffer = surface
             .buffer_mut()

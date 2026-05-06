@@ -1219,6 +1219,28 @@ impl BrowserState {
         self.pending_navigation.is_some()
     }
 
+    /// Reports whether the browser has *time-driven* visual changes
+    /// that need a follow-up frame even with no input. The shell uses
+    /// this to decide whether to schedule another `request_redraw`
+    /// after the current paint — `false` lets winit block on the next
+    /// real event and drops idle CPU to ~0%.
+    ///
+    /// Hover, click, scroll, and keyboard changes are *event-driven*:
+    /// the shell already calls `request_redraw` from the matching
+    /// winit event handler, so they don't need to live here.
+    ///
+    /// Today this covers the caret blink (animating only while the
+    /// address bar owns focus and isn't in select-all mode) and an
+    /// in-flight async navigation (the worker channel must be polled
+    /// every frame until it resolves). JS timers / requestAnimationFrame
+    /// are a follow-up — they don't currently advertise pendingness
+    /// through `js`, so a page that uses `setInterval` will redraw
+    /// only when other triggers happen.
+    pub fn wants_continuous_redraw(&self) -> bool {
+        let caret_blinking = self.address_bar_focused && !self.address_bar_selected;
+        caret_blinking || self.pending_navigation.is_some()
+    }
+
     pub fn hovered_chrome_action(
         &self,
         input: &input::WindowInput,

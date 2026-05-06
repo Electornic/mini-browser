@@ -2607,6 +2607,141 @@ mod tests {
     }
 
     #[test]
+    fn wants_continuous_redraw_is_true_for_focused_address_bar() {
+        // Caret blink animates only while the address bar owns focus
+        // and isn't in select-all mode — a freshly built BrowserState
+        // matches that, so it must drive the shell to keep redrawing.
+        let browser = BrowserState::new(
+            "about:blank".into(),
+            "<div></div>".into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            None,
+            "",
+        );
+        // BrowserState::new defaults to focused & not selected.
+        assert!(browser.address_bar_focused);
+        assert!(!browser.address_bar_selected);
+        assert!(browser.wants_continuous_redraw());
+    }
+
+    #[test]
+    fn wants_continuous_redraw_is_false_for_idle_unfocused_state() {
+        // No caret animation, no pending navigation → the shell
+        // should drop into `ControlFlow::Wait` and burn no idle CPU.
+        let mut browser = BrowserState::new(
+            "http://example.com".into(),
+            "<div>idle</div>".into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            None,
+            "loaded",
+        );
+        browser.address_bar_focused = false;
+        browser.address_bar_selected = false;
+        assert!(!browser.has_pending_navigation());
+        assert!(!browser.wants_continuous_redraw());
+    }
+
+    #[test]
+    fn wants_continuous_redraw_is_false_when_address_bar_is_selected() {
+        // `address_bar_selected` is the select-all-on-focus mode that
+        // suppresses the blinking caret in favour of a static highlight,
+        // so even with focus the shell should not animate.
+        let mut browser = BrowserState::new(
+            "about:blank".into(),
+            "<div></div>".into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            None,
+            "",
+        );
+        browser.address_bar_focused = true;
+        browser.address_bar_selected = true;
+        assert!(!browser.wants_continuous_redraw());
+    }
+
+    #[test]
+    fn wants_continuous_redraw_is_true_while_navigation_is_pending() {
+        // The async navigation worker hands its result back through an
+        // mpsc::Receiver that `display_list` polls every frame. If the
+        // shell stops redrawing, that poll never fires and the new
+        // document never lands — so pending must keep the loop alive.
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            sync::mpsc,
+            thread,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Hold the connection until the test releases it, so the
+        // pending state is observable for the full assertion below.
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let _ = release_rx.recv();
+            let body = "<div>x</div>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let url = net::Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let mut browser = BrowserState::new(
+            url.to_string(),
+            "<div>old</div>".into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            Some(url),
+            "loaded",
+        );
+        // Move address focus off so the only redraw signal is the
+        // pending nav itself — no caret-blink confound.
+        browser.address_bar_focused = false;
+
+        let refresh_rect = refresh_button_rect();
+        browser.apply_input(
+            &input::WindowInput {
+                mouse_position: Some((refresh_rect.x + 2.0, refresh_rect.y + 2.0)),
+                left_mouse_pressed: true,
+                ..input::WindowInput::default()
+            },
+            800,
+            600,
+        );
+        assert!(browser.has_pending_navigation());
+        assert!(browser.wants_continuous_redraw());
+
+        // Release server, drive frames to clean up.
+        release_tx.send(()).unwrap();
+        let mut frames = 0;
+        while browser.has_pending_navigation() && frames < 200 {
+            let _ = browser.display_list(800, 600, &input::WindowInput::default());
+            if browser.has_pending_navigation() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            frames += 1;
+        }
+        // After commit, idle again.
+        assert!(!browser.wants_continuous_redraw());
+        server.join().unwrap();
+    }
+
+    #[test]
     fn raf_callback_dom_mutation_lands_in_browser_state_arena() {
         // rAF runs *before* the frame's layout pass, so any DOM mutation
         // it performs is visible to BrowserState's parsed_document arena
