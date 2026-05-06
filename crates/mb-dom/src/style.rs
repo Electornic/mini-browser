@@ -198,16 +198,25 @@ fn style_tree_inner(
     );
 
     // Replace own font-size with the resolved Px value so descendants see the cascaded
-    // value, then resolve every other em/rem to Px in place. Percent stays untouched —
-    // it depends on layout-time containing-block dimensions.
+    // value, then resolve every other em/rem/ch to Px in place. Percent stays
+    // untouched — it depends on layout-time containing-block dimensions.
+    //
+    // `ch` is the advance width of "0" in the element's font; spec asks for a
+    // glyph metric, but the proportional fonts pages tend to use for body
+    // copy hover around `font-size * 0.5`, which is what Chrome falls back to
+    // for fonts that don't expose the metric. That approximation is enough
+    // for `max-width: 65ch` style reading-width sizing to land within ~5% of
+    // the spec value, which is what 5.2 actually targets.
     specified_values.insert("font-size".into(), Value::Length(own_font_size, Unit::Px));
+    let ch_unit = own_font_size * 0.5;
     for value in specified_values.values_mut() {
         match value {
             Value::Length(v, Unit::Em) => *value = Value::Length(*v * own_font_size, Unit::Px),
             Value::Length(v, Unit::Rem) => *value = Value::Length(*v * root_font_size, Unit::Px),
+            Value::Length(v, Unit::Ch) => *value = Value::Length(*v * ch_unit, Unit::Px),
             // Track lists (grid-template-columns/rows) can mix length tracks
-            // with fr tracks; resolve em/rem inside Length tracks the same way
-            // we resolve top-level lengths so layout only ever sees Px / %.
+            // with fr tracks; resolve em/rem/ch inside Length tracks the same
+            // way we resolve top-level lengths so layout only ever sees Px / %.
             Value::TrackList(tracks) => {
                 for track in tracks.iter_mut() {
                     match track {
@@ -216,6 +225,9 @@ fn style_tree_inner(
                         }
                         TrackSize::Length(v, Unit::Rem) => {
                             *track = TrackSize::Length(*v * root_font_size, Unit::Px);
+                        }
+                        TrackSize::Length(v, Unit::Ch) => {
+                            *track = TrackSize::Length(*v * ch_unit, Unit::Px);
                         }
                         _ => {}
                     }
@@ -259,6 +271,12 @@ fn resolve_font_size(raw: Option<&Value>, parent_font_size: f32, root_font_size:
         Some(Value::Length(v, Unit::Px)) => *v,
         Some(Value::Length(v, Unit::Em)) => *v * parent_font_size,
         Some(Value::Length(v, Unit::Rem)) => *v * root_font_size,
+        // `font-size: 1ch` is unusual but legal; spec resolves the ch unit
+        // against the parent's font (since the element's own font isn't
+        // determined yet), so we use parent_font_size * 0.5 here — same
+        // ratio the cascade applies to other ch lengths below, just rooted
+        // one level up to break the chicken-and-egg.
+        Some(Value::Length(v, Unit::Ch)) => *v * parent_font_size * 0.5,
         // CSS spec resolves font-size: <percent> against the parent's font-size, just like em.
         Some(Value::Length(v, Unit::Percent)) => *v / 100.0 * parent_font_size,
         _ => parent_font_size,
@@ -1891,6 +1909,43 @@ mod tests {
                 b: 130,
                 a: 255,
             }))
+        );
+    }
+
+    #[test]
+    fn ch_unit_resolves_to_half_font_size_in_px_at_default_root() {
+        // Default UA font-size is 16px and our `ch` approximation is
+        // `0.5 * font-size`, so `65ch` should land at 65 * 16 * 0.5 = 520px.
+        let (document, root) = parse_html(r#"<article class="copy">x</article>"#);
+        let stylesheet = parse_css(r#".copy { max-width: 65ch; }"#);
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        assert_eq!(
+            styled.value("max-width"),
+            Some(&Value::Length(520.0, Unit::Px))
+        );
+    }
+
+    #[test]
+    fn ch_unit_scales_with_local_font_size_on_the_same_node() {
+        // The element's own font-size is what `ch` resolves against, even
+        // when it differs from the inherited / root size — same rule we
+        // already enforce for em on non-font-size properties.
+        let (document, root) = parse_html(r#"<article class="copy">x</article>"#);
+        let stylesheet = parse_css(
+            r#"
+                .copy {
+                    font-size: 20px;
+                    max-width: 65ch;
+                }
+            "#,
+        );
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        // 65 * 20 * 0.5 = 650.
+        assert_eq!(
+            styled.value("max-width"),
+            Some(&Value::Length(650.0, Unit::Px))
         );
     }
 

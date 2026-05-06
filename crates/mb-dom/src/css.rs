@@ -404,6 +404,12 @@ pub enum Unit {
     // for the current node and the document root is known.
     Em,
     Rem,
+    // `ch` is the advance width of the glyph "0" in the element's font; resolved at
+    // style time alongside em/rem. We approximate it as `0.5 * font-size`, which is
+    // close enough for the typical proportional fonts pages use to set reading
+    // widths (`max-width: 65ch` ≈ 8 words / line at 16px). A real implementation
+    // would query cosmic-text for the "0" glyph advance.
+    Ch,
     // Percent is containing-block-relative; resolution happens at layout time once
     // the parent's content box is known.
     Percent,
@@ -761,6 +767,7 @@ fn length_with_unit(value: f32, unit: &str) -> Value {
         "px" => Value::Length(value, Unit::Px),
         "em" => Value::Length(value, Unit::Em),
         "rem" => Value::Length(value, Unit::Rem),
+        "ch" => Value::Length(value, Unit::Ch),
         // Unsupported dimensions (e.g. `12pt`) fall back to a keyword that mirrors the
         // original tokens so callers can still distinguish them at the cascade layer.
         other => Value::Keyword(format!("{value}{other}")),
@@ -1647,6 +1654,7 @@ fn parse_grid_track_size<'i, 't>(
             "px" => Ok(TrackSize::Length(value, Unit::Px)),
             "em" => Ok(TrackSize::Length(value, Unit::Em)),
             "rem" => Ok(TrackSize::Length(value, Unit::Rem)),
+            "ch" => Ok(TrackSize::Length(value, Unit::Ch)),
             other => Err(ParseError::new(
                 pos,
                 format!("unsupported grid track unit '{other}'"),
@@ -2519,6 +2527,16 @@ mod tests {
             (&decls[2].name, &decls[2].value),
             (&"flex-basis".to_string(), &Value::Length(80.0, Unit::Px))
         );
+    }
+
+    #[test]
+    fn parses_ch_length_unit() {
+        // `65ch` is the canonical reading-width unit pages use for body
+        // copy. The parser preserves the raw value + unit; cascade later
+        // converts it to Px against the element's resolved font-size.
+        let stylesheet = parse(".article { max-width: 65ch; }").unwrap();
+        let value = &stylesheet.rules[0].declarations[0].value;
+        assert_eq!(*value, Value::Length(65.0, Unit::Ch));
     }
 
     #[test]

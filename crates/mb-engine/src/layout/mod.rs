@@ -663,6 +663,65 @@ mod tests {
     }
 
     #[test]
+    fn max_width_in_ch_with_margin_auto_produces_centered_reading_column() {
+        // The Haskell-blog-style `article { max-width: 65ch; margin: 0 auto }`
+        // pattern — wide viewport, `ch`-bounded reading width, auto-margin
+        // centering. Confirms 5.2's three pieces work together end to end:
+        // `ch` resolves at style time, taffy clamps the width via
+        // max-width, and taffy's block algorithm distributes leftover into
+        // the auto margins.
+        //
+        // The container holds a block child (`<p>`) so it routes through the
+        // native taffy block path — boundary leaves with inline-only content
+        // can clamp width but their cached LayoutBox carries pre-taffy
+        // margins, so auto-margin centering would be lost on that path. Real
+        // articles in the wild always have block children, which is what
+        // this test exercises.
+        //
+        // Default font-size is 16px → 65ch ≈ 65 * 16 * 0.5 = 520px.
+        // 1200 viewport → leftover 680, half on each side = 340px margins.
+        let styled = styled_root(
+            r#"<article class="copy"><p>x</p></article>"#,
+            r#"
+                .copy {
+                    max-width: 65ch;
+                    margin-left: auto;
+                    margin-right: auto;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 1200.0);
+
+        assert_eq!(layout.dimensions.content.width, 520.0);
+        assert_eq!(layout.dimensions.content.x, 340.0);
+        assert_eq!(layout.dimensions.margin.left, 340.0);
+        assert_eq!(layout.dimensions.margin.right, 340.0);
+    }
+
+    #[test]
+    fn max_width_clamps_boundary_leaf_with_inline_only_content() {
+        // Inline-only article goes through the boundary measure-callback
+        // path. With max-width forwarded to the boundary leaf's taffy
+        // style, taffy gives the measure callback a width already capped at
+        // 65ch ≈ 520px instead of the full viewport. Auto-margin centering
+        // is NOT re-applied on this path (the cached LayoutBox preserves
+        // legacy's resolved margins) — that gap is logged as boundary-path
+        // auto-margin limitation; the width clamp alone is what 5.2 needs
+        // for the reading-width target.
+        let styled = styled_root(
+            r#"<article class="copy">just text</article>"#,
+            r#"
+                .copy {
+                    max-width: 65ch;
+                }
+            "#,
+        );
+        let layout = layout_tree(&styled, 1200.0);
+
+        assert_eq!(layout.dimensions.content.width, 520.0);
+    }
+
+    #[test]
     fn one_sided_margin_auto_pushes_content_to_far_side() {
         let styled = styled_root(
             r#"<div id="card"></div>"#,

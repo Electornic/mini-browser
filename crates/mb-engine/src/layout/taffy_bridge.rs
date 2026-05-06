@@ -502,14 +502,33 @@ fn build_taffy_node(
 
 fn boundary_taffy_style(node: &StyledNode) -> Style {
     // Boundary leaves participate in the parent's block flow but expose no
-    // internal structure to taffy — `size: auto` lets the measure callback
-    // determine the BORDER-box dimensions. The node's margin is preserved so
-    // taffy's block algorithm can still collapse it against native sibling
-    // margins; padding/border live inside the cached LayoutBox and must NOT
-    // be forwarded to taffy or they would be double-counted.
+    // internal structure to taffy — `size: auto` (the default) lets the
+    // measure callback determine the BORDER-box dimensions. The node's
+    // margin is preserved so taffy's block algorithm can still collapse it
+    // against native sibling margins; padding/border live inside the cached
+    // LayoutBox and must NOT be forwarded to taffy or they would be
+    // double-counted.
+    //
+    // `width` / `min-width` / `max-width` ARE forwarded so taffy can clamp
+    // the available space the measure callback receives. Without this, a
+    // boundary block with `max-width: 65ch` would be sized at the full
+    // parent width because the legacy block algorithm doesn't read max-width
+    // — the cap only takes effect when taffy applies it before measure runs.
     let mut style = Style::DEFAULT;
     style.display = Display::Block;
     style.margin = edge_lpa(node, "margin");
+    style.size = Size {
+        width: dimension_with_intrinsic(node.value("width"), intrinsic_width(node)),
+        height: Dimension::auto(),
+    };
+    style.min_size = Size {
+        width: dimension(node.value("min-width")),
+        height: Dimension::auto(),
+    };
+    style.max_size = Size {
+        width: dimension(node.value("max-width")),
+        height: Dimension::auto(),
+    };
     style
 }
 
