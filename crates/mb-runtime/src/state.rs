@@ -499,6 +499,10 @@ impl BrowserState {
             0.0,
             CHROME_HEIGHT - self.scroll_offset,
         ));
+        let is_https = self
+            .current_url
+            .as_ref()
+            .is_some_and(|url| url.scheme.eq_ignore_ascii_case("https"));
         commands.extend(chrome_commands(ChromeState {
             viewport_width,
             address_input: &self.address_input,
@@ -511,6 +515,7 @@ impl BrowserState {
             can_go_forward: self.can_go_forward(),
             hovered_action,
             tab_title,
+            is_https,
         }));
         commands
     }

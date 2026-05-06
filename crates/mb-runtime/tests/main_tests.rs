@@ -2510,6 +2510,103 @@ mod tests {
     }
 
     #[test]
+    fn https_url_paints_padlock_in_address_bar_and_indents_text() {
+        // 5.9a: when the active page is https:// the chrome paints a
+        // padlock at the left edge of the address pill and shifts the
+        // address text right so the glyphs do not overlap the icon.
+        let url = net::Url::parse("https://example.com/").unwrap();
+        let mut browser = BrowserState::new(
+            url.to_string(),
+            "<div>secure</div>".into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            Some(url),
+            "loaded",
+        );
+
+        let commands = browser.display_list(800, 600, &input::WindowInput::default());
+        let lock_color = css::Color {
+            r: 95,
+            g: 99,
+            b: 104,
+            a: 255,
+        };
+        let lock_paints = commands
+            .iter()
+            .filter(|cmd| match cmd {
+                render::DisplayCommand::SolidRect(color, _) => *color == lock_color,
+                render::DisplayCommand::RoundedRect(color, _, _) => *color == lock_color,
+                _ => false,
+            })
+            .count();
+        // body (RoundedRect) + 3 shackle bars (SolidRect) — see lock_icon_commands.
+        assert_eq!(lock_paints, 4, "expected the padlock's 4 paints, got {lock_paints}");
+
+        let address_text = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                render::DisplayCommand::Text(t) if t.text == "https://example.com/" => Some(t),
+                _ => None,
+            })
+            .expect("address-bar text command");
+        assert_eq!(
+            address_text.x,
+            mb_runtime::chrome::HTTPS_ADDRESS_TEXT_X,
+            "https URL must use the indented text origin"
+        );
+    }
+
+    #[test]
+    fn http_url_omits_padlock_and_keeps_default_text_origin() {
+        // Insecure pages (and about:blank / file://) leave the padlock
+        // off and fall back to the unindented text origin so we do not
+        // pay a half-icon worth of left pad on every non-secure page.
+        let url = net::Url::parse("http://example.com/").unwrap();
+        let mut browser = BrowserState::new(
+            url.to_string(),
+            "<div>plain</div>".into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            Some(url),
+            "loaded",
+        );
+
+        let commands = browser.display_list(800, 600, &input::WindowInput::default());
+        let lock_color = css::Color {
+            r: 95,
+            g: 99,
+            b: 104,
+            a: 255,
+        };
+        let lock_paints = commands
+            .iter()
+            .filter(|cmd| match cmd {
+                render::DisplayCommand::SolidRect(color, _) => *color == lock_color,
+                render::DisplayCommand::RoundedRect(color, _, _) => *color == lock_color,
+                _ => false,
+            })
+            .count();
+        assert_eq!(lock_paints, 0, "http URL must not paint the lock");
+
+        let address_text = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                render::DisplayCommand::Text(t) if t.text == "http://example.com/" => Some(t),
+                _ => None,
+            })
+            .expect("address-bar text command");
+        assert_eq!(
+            address_text.x,
+            mb_runtime::chrome::ADDRESS_TEXT_X,
+            "http URL must use the default text origin"
+        );
+    }
+
+    #[test]
     fn raf_callback_dom_mutation_lands_in_browser_state_arena() {
         // rAF runs *before* the frame's layout pass, so any DOM mutation
         // it performs is visible to BrowserState's parsed_document arena

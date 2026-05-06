@@ -24,6 +24,11 @@ pub const ADDRESS_BOX_HEIGHT: f32 = 36.0;
 pub const ADDRESS_TEXT_X: f32 = ADDRESS_BOX_X + 16.0;
 pub const ADDRESS_TEXT_Y: f32 = ADDRESS_BOX_Y + 11.0;
 pub const ADDRESS_FONT_SIZE: f32 = 14.0;
+// When the current URL is https, the address bar paints a small padlock
+// at its left edge and shifts the text right so glyphs do not overlap
+// the icon. The HTTPS_ADDRESS_TEXT_X offset is calibrated to leave ~5px
+// breathing room past the lock's rightmost stamp (`lock_icon_commands`).
+pub const HTTPS_ADDRESS_TEXT_X: f32 = ADDRESS_BOX_X + 30.0;
 pub const STATUS_TEXT_Y: f32 = ADDRESS_BOX_Y + ADDRESS_BOX_HEIGHT + 4.0;
 pub const STATUS_FONT_SIZE: f32 = 10.0;
 pub const MENU_BUTTON_WIDTH: f32 = 32.0;
@@ -51,6 +56,12 @@ pub struct ChromeState<'a> {
     pub can_go_forward: bool,
     pub hovered_action: Option<ChromeAction>,
     pub tab_title: &'a str,
+    /// True when the current page was loaded over `https`. Drives the
+    /// padlock icon at the left of the address bar; `false` (http /
+    /// about:blank / file://) leaves that area empty and falls back to
+    /// the unindented text origin so non-secure pages do not look like
+    /// they paid a half-icon worth of pad on the left.
+    pub is_https: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +117,14 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
     let pill_radius = address_box.height / 2.0;
     let pill_outer = render::CornerRadii::uniform(pill_radius);
     let pill_inner = render::CornerRadii::uniform((pill_radius - 1.0).max(0.0));
+    // The padlock and the text live in the same pill, so the text origin
+    // and the caret/selection highlight have to honour the same indent —
+    // otherwise the caret would jump under the icon when the lock paints.
+    let address_text_x = if chrome.is_https {
+        HTTPS_ADDRESS_TEXT_X
+    } else {
+        ADDRESS_TEXT_X
+    };
 
     let toolbar_bg = css::Color {
         r: 236,
@@ -190,7 +209,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
         ),
         render::DisplayCommand::Text(render::TextCommand {
             text: address_display.clone(),
-            x: ADDRESS_TEXT_X,
+            x: address_text_x,
             y: ADDRESS_TEXT_Y,
             color: address_color,
             font_size: ADDRESS_FONT_SIZE,
@@ -238,7 +257,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
                 a: 255,
             },
             layout::Rect {
-                x: ADDRESS_TEXT_X - 2.0,
+                x: address_text_x - 2.0,
                 y: ADDRESS_TEXT_Y - 2.0,
                 width: (measured + 4.0).min((address_box.width - 8.0).max(0.0)),
                 height: ADDRESS_FONT_SIZE + 4.0,
@@ -246,7 +265,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
         ));
         commands.push(render::DisplayCommand::Text(render::TextCommand {
             text: address_display,
-            x: ADDRESS_TEXT_X,
+            x: address_text_x,
             y: ADDRESS_TEXT_Y,
             color: css::Color::BLACK,
             font_size: ADDRESS_FONT_SIZE,
@@ -266,7 +285,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
         commands.push(render::DisplayCommand::SolidRect(
             css::Color::BLACK,
             layout::Rect {
-                x: ADDRESS_TEXT_X + caret_offset,
+                x: address_text_x + caret_offset,
                 y: ADDRESS_TEXT_Y - 1.0,
                 width: 1.0,
                 height: ADDRESS_FONT_SIZE + 2.0,
@@ -274,7 +293,80 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
         ));
     }
 
+    if chrome.is_https {
+        commands.extend(lock_icon_commands(
+            address_box,
+            css::Color {
+                r: 95,
+                g: 99,
+                b: 104,
+                a: 255,
+            },
+        ));
+    }
+
     commands
+}
+
+fn lock_icon_commands(address_box: layout::Rect, color: css::Color) -> Vec<render::DisplayCommand> {
+    // Compact padlock anchored to the left of the address pill: a rounded
+    // body sits a hair below center, three thin strokes form the U-shaped
+    // shackle above it. Sized to fit comfortably in the 36px-tall bar
+    // (~14px of total icon height) with the body's right edge clearing
+    // `HTTPS_ADDRESS_TEXT_X` by ~5px so glyphs do not graze the metal.
+    let cx = address_box.x + 14.0;
+    let cy = address_box.y + address_box.height / 2.0;
+    let body_width = 10.0;
+    let body_height = 8.0;
+    let body_x = cx - body_width / 2.0;
+    let body_y = cy - 1.0;
+    let shackle_width = 6.0;
+    let shackle_height = 5.0;
+    let shackle_x = cx - shackle_width / 2.0;
+    let shackle_y = body_y - shackle_height;
+    let stroke = 1.5;
+    vec![
+        render::DisplayCommand::RoundedRect(
+            color,
+            layout::Rect {
+                x: body_x,
+                y: body_y,
+                width: body_width,
+                height: body_height,
+            },
+            render::CornerRadii::uniform(1.5),
+        ),
+        // Left arm of the shackle.
+        render::DisplayCommand::SolidRect(
+            color,
+            layout::Rect {
+                x: shackle_x,
+                y: shackle_y,
+                width: stroke,
+                height: shackle_height,
+            },
+        ),
+        // Top of the shackle.
+        render::DisplayCommand::SolidRect(
+            color,
+            layout::Rect {
+                x: shackle_x,
+                y: shackle_y,
+                width: shackle_width,
+                height: stroke,
+            },
+        ),
+        // Right arm of the shackle.
+        render::DisplayCommand::SolidRect(
+            color,
+            layout::Rect {
+                x: shackle_x + shackle_width - stroke,
+                y: shackle_y,
+                width: stroke,
+                height: shackle_height,
+            },
+        ),
+    ]
 }
 
 fn nav_button_commands(
