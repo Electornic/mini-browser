@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use selectors::context::{
     MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, QuirksMode,
@@ -161,6 +161,25 @@ fn style_tree_inner(
             specified_values.insert(property.to_string(), value.clone());
         }
     }
+
+    // CSS Custom Properties inherit per the CSS Variables spec. Pull every
+    // `--*` declaration from the parent that isn't shadowed locally so this
+    // node can resolve `var()` references against ancestor values too. The
+    // var-resolve pass below sees the merged map.
+    if let Some(parent) = parent_values {
+        for (name, value) in parent {
+            if name.starts_with("--") && !specified_values.contains_key(name) {
+                specified_values.insert(name.clone(), value.clone());
+            }
+        }
+    }
+
+    // Resolve `var()` references against the `--*` declarations now in scope.
+    // Done before the em/rem rewrite below so a custom property that holds
+    // a length (e.g. `--gap: 1em`) goes through the same em/rem conversion
+    // as if it had been written inline. Cycle-protected; unresolved
+    // references with no fallback degrade to `Keyword("initial")`.
+    resolve_var_references(&mut specified_values);
 
     // Font-size is resolved first because every other em-based length on this node depends
     // on it. Parent font-size has already been resolved to Px during the parent's pass, so
@@ -761,6 +780,59 @@ fn apply_declarations(values: &mut PropertyMap, declarations: &[Declaration]) {
     // Later declarations with the same property name overwrite earlier ones.
     for declaration in declarations {
         values.insert(declaration.name.clone(), declaration.value.clone());
+    }
+}
+
+/// Substitute every `Value::Var` in `values` with the looked-up `--*` value
+/// in the same map. Custom properties inherit, so by the time this runs the
+/// parent's declarations have already been folded in by the cascade caller.
+///
+/// Resolution is iterative: a variable that resolves to another variable is
+/// chased again, with a `seen` set guarding against cycles. The fallback
+/// branch fires only when the named property isn't present at all; once
+/// substitution lands on something that *is* present, we use it even if the
+/// caller also supplied a fallback. Composite values (gradients, shadows,
+/// transforms, …) are not walked into — only top-level Var values are
+/// substituted, which covers `color: var(--accent)` style use which is what
+/// 5.1's site-color recovery target needs.
+fn resolve_var_references(values: &mut PropertyMap) {
+    let custom_props: HashMap<String, Value> = values
+        .iter()
+        .filter(|(name, _)| name.starts_with("--"))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+
+    for (name, value) in values.iter_mut() {
+        if name.starts_with("--") {
+            // Custom-property *definitions* are kept as-is so descendants
+            // that inherit them still see the original (possibly Var)
+            // value. Each descendant runs its own resolve pass.
+            continue;
+        }
+        resolve_var_value(value, &custom_props);
+    }
+}
+
+fn resolve_var_value(value: &mut Value, custom_props: &HashMap<String, Value>) {
+    let mut seen: HashSet<String> = HashSet::new();
+    while let Value::Var { name, fallback } = value {
+        if !seen.insert(name.clone()) {
+            // Cycle detected — collapse to the spec-defined "initial" sentinel.
+            *value = Value::Keyword("initial".into());
+            return;
+        }
+        match custom_props.get(name) {
+            Some(resolved) => {
+                *value = resolved.clone();
+            }
+            None => {
+                let fb = fallback.take();
+                *value = match fb {
+                    Some(boxed) => *boxed,
+                    None => Value::Keyword("initial".into()),
+                };
+            }
+        }
     }
 }
 
@@ -1819,6 +1891,151 @@ mod tests {
                 b: 130,
                 a: 255,
             }))
+        );
+    }
+
+    #[test]
+    fn var_reference_resolves_against_custom_property_on_same_node() {
+        // Both `--accent` and the consuming `color: var(--accent)` live on
+        // the same rule, so the resolve pass finds it in the local map.
+        let (document, root) = parse_html(r#"<div class="card">x</div>"#);
+        let stylesheet = parse_css(
+            r#"
+                .card {
+                    --accent: #7e2882;
+                    color: var(--accent);
+                }
+            "#,
+        );
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        assert_eq!(
+            styled.value("color"),
+            Some(&Value::Color(Color {
+                r: 0x7e,
+                g: 0x28,
+                b: 0x82,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn var_reference_falls_back_when_custom_property_is_missing() {
+        // No `--accent` declaration anywhere in scope — the fallback wins.
+        let (document, root) = parse_html(r#"<div>x</div>"#);
+        let stylesheet = parse_css(r#"div { color: var(--accent, #00ff00); }"#);
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        assert_eq!(
+            styled.value("color"),
+            Some(&Value::Color(Color {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn var_reference_resolves_against_inherited_custom_property_from_ancestor() {
+        // `--accent` is defined on the outer `<div>` and consumed inside
+        // the nested `<span>` — proves custom properties inherit and the
+        // var-resolve pass on the child sees the merged map.
+        let (document, root) = parse_html(r#"<div class="root"><span>x</span></div>"#);
+        let stylesheet = parse_css(
+            r#"
+                .root { --accent: #ff0000; }
+                span  { color: var(--accent); }
+            "#,
+        );
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let span = &styled.children[0];
+        assert_eq!(
+            span.value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn var_reference_local_definition_shadows_inherited_value() {
+        // Child redefines `--accent`; its `color: var(--accent)` should
+        // pick up the local value, not the ancestor's.
+        let (document, root) = parse_html(r#"<div class="root"><span class="leaf">x</span></div>"#);
+        let stylesheet = parse_css(
+            r#"
+                .root { --accent: #ff0000; }
+                .leaf { --accent: #0000ff; color: var(--accent); }
+            "#,
+        );
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let span = &styled.children[0];
+        assert_eq!(
+            span.value("color"),
+            Some(&Value::Color(Color {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn var_reference_through_chained_custom_properties() {
+        // `--primary` resolves to another var; the resolve loop should
+        // chase it to the concrete color.
+        let (document, root) = parse_html(r#"<div class="card">x</div>"#);
+        let stylesheet = parse_css(
+            r#"
+                .card {
+                    --base: #112233;
+                    --primary: var(--base);
+                    color: var(--primary);
+                }
+            "#,
+        );
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        assert_eq!(
+            styled.value("color"),
+            Some(&Value::Color(Color {
+                r: 0x11,
+                g: 0x22,
+                b: 0x33,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn var_reference_cycle_collapses_to_initial_keyword() {
+        // `--a` → `--b` → `--a` would loop forever without cycle protection.
+        // The resolve pass should bail out at the first revisited name and
+        // produce `Keyword("initial")` instead of recursing.
+        let (document, root) = parse_html(r#"<div class="card">x</div>"#);
+        let stylesheet = parse_css(
+            r#"
+                .card {
+                    --a: var(--b);
+                    --b: var(--a);
+                    color: var(--a);
+                }
+            "#,
+        );
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        assert_eq!(
+            styled.value("color"),
+            Some(&Value::Keyword("initial".into()))
         );
     }
 }

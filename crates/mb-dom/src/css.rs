@@ -284,6 +284,15 @@ pub enum Value {
     // against the document's base URL when fetching, and the painter does
     // the same when looking the loaded pixels back up at paint time.
     ImageUrl(String),
+    // `var(--name)` / `var(--name, fallback)` reference. Survives parse time
+    // unresolved; the cascade in `style.rs` walks every value at style time
+    // and substitutes the looked-up `--*` declaration in scope (custom
+    // properties inherit per spec). Unresolved references — name not in
+    // scope and no fallback — fall through as `Keyword("initial")`.
+    Var {
+        name: String,
+        fallback: Option<Box<Value>>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -814,6 +823,7 @@ fn parse_function<'i, 't>(
                 "linear-gradient" => parse_linear_gradient(inner),
                 "radial-gradient" => parse_radial_gradient(inner),
                 "url" => parse_url_function(inner),
+                "var" => parse_var_function(inner),
                 other => Err(ParseError::new(
                     inner.position().byte_index(),
                     format!("unsupported function '{other}'"),
@@ -1017,6 +1027,53 @@ fn parse_url_function<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, Pa
     };
     input.skip_whitespace();
     Ok(Value::ImageUrl(url))
+}
+
+// -----------------------------------------------------------------------------
+// var(--name [, fallback])
+// -----------------------------------------------------------------------------
+
+/// Inside the nested block opened by `Function("var")`. cssparser tokenises
+/// `--name` as a regular `Token::Ident` (CSS Syntax L3 allows leading `--`),
+/// so the first token is always the property name. A trailing fallback after
+/// the comma is parsed by reusing the generic `parse_value`, which means the
+/// fallback inherits whatever value shapes that helper accepts (colors,
+/// lengths, keywords, even a nested `var()`). The value returned here is
+/// substituted later in `style::resolve_var` once cascade has gathered the
+/// `--*` declarations in scope.
+fn parse_var_function<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, ParseError> {
+    input.skip_whitespace();
+    let pos = input.position().byte_index();
+    let token = input
+        .next()
+        .map_err(|err| convert_basic_error_at(pos, err))?
+        .clone();
+    let name = match token {
+        Token::Ident(ident) if ident.starts_with("--") => ident.to_string(),
+        other => {
+            return Err(token_error(
+                input,
+                &other,
+                "var() expects a custom-property name starting with '--'",
+            ));
+        }
+    };
+    input.skip_whitespace();
+
+    // Optional fallback after a comma. `try_parse` only commits on success so
+    // we either consume the comma + parse the fallback, or leave the parser
+    // positioned at the closing `)`.
+    let fallback = if input
+        .try_parse(|p| p.expect_comma())
+        .is_ok()
+    {
+        Some(Box::new(parse_value(input)?))
+    } else {
+        None
+    };
+    input.skip_whitespace();
+
+    Ok(Value::Var { name, fallback })
 }
 
 // -----------------------------------------------------------------------------
@@ -2462,5 +2519,59 @@ mod tests {
             (&decls[2].name, &decls[2].value),
             (&"flex-basis".to_string(), &Value::Length(80.0, Unit::Px))
         );
+    }
+
+    #[test]
+    fn parses_custom_property_declaration() {
+        // `--accent: #ff0000` should round-trip through the generic
+        // parse_value fallback because `parse_declaration_value` doesn't
+        // special-case `--*` names — they reuse the same value grammar as
+        // every other property.
+        let stylesheet = parse(":root { --accent: #ff0000; }").unwrap();
+        let decl = &stylesheet.rules[0].declarations[0];
+        assert_eq!(decl.name, "--accent");
+        assert_eq!(
+            decl.value,
+            Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_var_reference_with_no_fallback() {
+        let stylesheet = parse(".a { color: var(--accent); }").unwrap();
+        let value = &stylesheet.rules[0].declarations[0].value;
+        match value {
+            Value::Var { name, fallback } => {
+                assert_eq!(name, "--accent");
+                assert!(fallback.is_none());
+            }
+            other => panic!("expected Var, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_var_reference_with_color_fallback() {
+        let stylesheet = parse(".a { color: var(--accent, #00ff00); }").unwrap();
+        let value = &stylesheet.rules[0].declarations[0].value;
+        match value {
+            Value::Var { name, fallback } => {
+                assert_eq!(name, "--accent");
+                assert_eq!(
+                    fallback.as_deref(),
+                    Some(&Value::Color(Color {
+                        r: 0,
+                        g: 255,
+                        b: 0,
+                        a: 255,
+                    }))
+                );
+            }
+            other => panic!("expected Var, got {other:?}"),
+        }
     }
 }
