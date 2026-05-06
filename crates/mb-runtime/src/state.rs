@@ -5,9 +5,10 @@
 // for chrome painting. Pure helpers (sample HTML/CSS, the env-arg loader, the
 // font cache builder) live at the bottom so `main` can stay a one-liner.
 
-use std::{cell::RefCell, collections::HashMap, env, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, env, rc::Rc, sync::mpsc};
 
 use crate::{
+    async_runtime,
     chrome::{
         CHROME_HEIGHT, ChromeAction, ChromeState, address_bar_rect, back_button_rect,
         chrome_commands, forward_button_rect, menu_button_rect, refresh_button_rect,
@@ -20,7 +21,7 @@ use crate::{
     dom,
     dom::{NodeId, NodeType},
     html, js, layout,
-    navigation::{error_document, load_remote_document},
+    navigation::{LoadedDocument, error_document, load_remote_document},
     input, net, render, resource, style,
 };
 
@@ -99,6 +100,30 @@ pub struct BrowserState {
     // page commands (see `display_list()`), so they don't participate in the
     // key — that keeps the cache hit rate high during normal idle.
     cached_view: Option<CachedView>,
+
+    // In-flight navigation kicked off via `async_runtime::handle().spawn_blocking`.
+    // `display_list()` polls this at the top of every frame; when the worker
+    // finishes the result lands on the receiver and the matching `PendingKind`
+    // arm decides how to install the document. While the slot is `Some`, the
+    // dispatch sites refuse to start a second load — last-wins coalescing is
+    // not modelled because the user-visible "loading…" status already signals
+    // that one fetch owns the page right now.
+    //
+    // Phase 5.8a only routes the refresh button through this state; future
+    // sub-phase will fold `navigate` and `navigate_to_href` in once their
+    // many existing sync tests pick up a wait-for-pending helper.
+    pending_navigation: Option<PendingNavigation>,
+}
+
+#[derive(Debug)]
+struct PendingNavigation {
+    kind: PendingKind,
+    receiver: mpsc::Receiver<Result<LoadedDocument, String>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PendingKind {
+    Refresh,
 }
 
 // Snapshot of the inputs `build_document_view` was last called with, paired
@@ -184,6 +209,7 @@ impl BrowserState {
             js,
             external_scripts,
             cached_view: None,
+            pending_navigation: None,
         };
         // The first page seen on construction also runs its scripts so the
         // initial document follows the same lifecycle as later navigations
@@ -291,6 +317,12 @@ impl BrowserState {
     ) -> Vec<render::DisplayCommand> {
         // The browser re-builds its visible scene every frame from current state + fresh input.
         self.frame_index = self.frame_index.wrapping_add(1);
+        // Drain any completed async load before input dispatch. Refresh today,
+        // navigate / navigate_to_href once 5.8b lands. Doing it before
+        // `apply_input` matters: a click that lands the same frame the load
+        // resolves should see the freshly installed document, not the stale
+        // one whose paint we're about to discard.
+        self.poll_pending_navigation();
         self.apply_input(input, viewport_width, viewport_height);
 
         // Step 7 async: pump the JS event loop once per frame *before* the
@@ -1037,6 +1069,14 @@ impl BrowserState {
         // Refresh refetches the current document in place. Unlike navigate(), it does not
         // touch the back/forward stacks — the user expects "reload" to land on the same
         // page they were already viewing.
+        if self.pending_navigation.is_some() {
+            // A previous refresh is still in flight — let it finish.
+            // Last-wins coalescing would force-cancel the worker, but
+            // ureq has no cancellation token, so the simpler rule is
+            // "first click owns the slot until the worker reports back".
+            return;
+        }
+
         let Some(url) = self.current_url.clone() else {
             self.set_status(
                 "nothing to refresh",
@@ -1050,7 +1090,57 @@ impl BrowserState {
             return;
         };
 
-        match load_remote_document(&url.to_string()) {
+        let (sender, receiver) = mpsc::channel();
+        let target = url.to_string();
+        async_runtime::handle().spawn_blocking(move || {
+            // The worker thread owns the blocking `load_remote_document` call.
+            // Send may fail if the BrowserState was dropped while the load
+            // was in flight (e.g. window close mid-fetch); ignore that case.
+            let _ = sender.send(load_remote_document(&target));
+        });
+        self.pending_navigation = Some(PendingNavigation {
+            kind: PendingKind::Refresh,
+            receiver,
+        });
+        self.set_status(
+            "loading…",
+            css::Color {
+                r: 80,
+                g: 100,
+                b: 140,
+                a: 255,
+            },
+        );
+    }
+
+    // Drain at most one completed result from the worker channel. Called at
+    // the top of every `display_list()` so that a finished load lands before
+    // the frame's input dispatch sees stale `current_url` / status. The
+    // `Disconnected` arm protects against a worker thread that panicked
+    // inside the spawn_blocking closure: the slot clears and the user gets
+    // an error page rather than a permanently stuck "loading…" indicator.
+    fn poll_pending_navigation(&mut self) {
+        let Some(pending) = self.pending_navigation.as_ref() else {
+            return;
+        };
+        let result = match pending.receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending_navigation = None;
+                self.show_error_page("refresh failed", "worker disconnected");
+                return;
+            }
+        };
+        let kind = pending.kind;
+        self.pending_navigation = None;
+        match kind {
+            PendingKind::Refresh => self.commit_refresh(result),
+        }
+    }
+
+    fn commit_refresh(&mut self, result: Result<LoadedDocument, String>) {
+        match result {
             Ok((document_html, stylesheet, images, font_data, external_scripts, resolved_url)) => {
                 // Same install_document precondition as restore_entry:
                 // current_url has to land first so the runtime's
@@ -1076,6 +1166,13 @@ impl BrowserState {
                 self.show_error_page("refresh failed", &error);
             }
         }
+    }
+
+    /// Returns true while a navigation is awaiting its worker thread.
+    /// Tests use this to drive the per-frame poll loop without poking
+    /// the private channel directly.
+    pub fn has_pending_navigation(&self) -> bool {
+        self.pending_navigation.is_some()
     }
 
     pub fn hovered_chrome_action(

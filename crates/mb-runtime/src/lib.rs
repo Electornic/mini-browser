@@ -17,6 +17,7 @@
 pub use mb_dom::{css, dom, dom_select, html, style};
 pub use mb_engine::{chrome, display_list, input, layout, render};
 
+pub mod async_runtime;
 pub mod js;
 pub mod navigation;
 pub mod net;

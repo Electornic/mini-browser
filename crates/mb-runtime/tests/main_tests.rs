@@ -2187,6 +2187,170 @@ mod tests {
     }
 
     #[test]
+    fn refresh_dispatches_load_off_main_thread_and_commits_on_a_later_frame() {
+        // 5.8a: clicking refresh hands the blocking `load_remote_document`
+        // call to the tokio spawn_blocking pool. The first click only flips
+        // the browser into a `pending` state with a "loading…" status —
+        // the new document only lands when a subsequent `display_list`
+        // call observes the worker's result on the channel and commits it
+        // through the same install_document funnel restore_entry uses.
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = "<div id=\"reloaded\">second</div>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let url = net::Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let mut browser = BrowserState::new(
+            url.to_string(),
+            "<div id=\"first\">first</div>".into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            Some(url),
+            "loaded",
+        );
+
+        let refresh_rect = refresh_button_rect();
+        browser.apply_input(
+            &input::WindowInput {
+                mouse_position: Some((refresh_rect.x + 2.0, refresh_rect.y + 2.0)),
+                left_mouse_pressed: true,
+                ..input::WindowInput::default()
+            },
+            800,
+            600,
+        );
+
+        // The click only spawned the worker — document is still the old one.
+        assert!(browser.has_pending_navigation());
+        assert_eq!(browser.status_text, "loading…");
+        assert!(browser.document_html.contains("first"));
+
+        // Drive display_list frames until the pending slot clears. The
+        // worker thread is on tokio's blocking pool so the resolve time
+        // is bounded by the mock server's accept/respond — well under
+        // the 1s budget below even on a loaded CI box.
+        let mut frames = 0;
+        while browser.has_pending_navigation() && frames < 200 {
+            let _ = browser.display_list(800, 600, &input::WindowInput::default());
+            if browser.has_pending_navigation() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            frames += 1;
+        }
+
+        assert!(
+            !browser.has_pending_navigation(),
+            "pending navigation should have resolved within {frames} frames"
+        );
+        assert!(
+            browser.document_html.contains("reloaded"),
+            "expected document to reflect server body, got: {}",
+            browser.document_html
+        );
+        assert_eq!(browser.status_text, "loaded");
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn refresh_click_while_pending_does_not_restart_loader() {
+        // Reentrancy guard: a second refresh click while a worker is in
+        // flight is a no-op. Without the guard the receiver field would
+        // be replaced and the original worker's send would silently drop
+        // its document; we'd also waste a network request.
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            sync::mpsc,
+            thread,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // The server sits on the connection until told to release, so
+        // the test owns the timing window where `pending_navigation`
+        // stays `Some` regardless of host load.
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let _ = release_rx.recv();
+            let body = "<div id=\"reloaded\">second</div>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let url = net::Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let mut browser = BrowserState::new(
+            url.to_string(),
+            "<div id=\"first\">first</div>".into(),
+            String::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            Some(url),
+            "loaded",
+        );
+
+        let refresh_rect = refresh_button_rect();
+        let refresh_input = input::WindowInput {
+            mouse_position: Some((refresh_rect.x + 2.0, refresh_rect.y + 2.0)),
+            left_mouse_pressed: true,
+            ..input::WindowInput::default()
+        };
+
+        browser.apply_input(&refresh_input, 800, 600);
+        assert!(browser.has_pending_navigation());
+        assert_eq!(browser.status_text, "loading…");
+
+        // Second click while the worker is still parked on the channel.
+        // The status text is still "loading…" — the click is dropped
+        // without touching state, so the assertion below is the same
+        // value we observed after the first click.
+        browser.apply_input(&refresh_input, 800, 600);
+        assert!(browser.has_pending_navigation());
+        assert_eq!(browser.status_text, "loading…");
+
+        // Release the server so the worker can finish; drive frames
+        // until the pending slot clears.
+        release_tx.send(()).unwrap();
+        let mut frames = 0;
+        while browser.has_pending_navigation() && frames < 200 {
+            let _ = browser.display_list(800, 600, &input::WindowInput::default());
+            if browser.has_pending_navigation() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            frames += 1;
+        }
+
+        assert!(!browser.has_pending_navigation());
+        assert!(browser.document_html.contains("reloaded"));
+        server.join().unwrap();
+    }
+
+    #[test]
     fn raf_callback_dom_mutation_lands_in_browser_state_arena() {
         // rAF runs *before* the frame's layout pass, so any DOM mutation
         // it performs is visible to BrowserState's parsed_document arena
