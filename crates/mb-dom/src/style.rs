@@ -154,6 +154,12 @@ fn style_tree_inner(
         // a child of an element — without inheritance the text wouldn't
         // see `<pre>`'s `white-space: pre` declaration.
         "white-space",
+        // Spec-mandated inheritance — without it, the UA defaults that put
+        // `<pre>` / `<code>` / `<kbd>` / `<samp>` / `<tt>` into a monospace
+        // family would never reach the text child the renderer actually
+        // shapes, so the page would still draw code in the proportional
+        // fallback font.
+        "font-family",
     ] {
         if !specified_values.contains_key(property)
             && let Some(value) = parent_values.and_then(|values| values.get(property))
@@ -724,6 +730,62 @@ fn default_values(document: &Document, node_id: NodeId) -> PropertyMap {
             // permanently locked in for any page that resets cell padding via
             // `td { padding: 0 }`. Real browsers default to ~1px; once
             // shorthand expansion lands we can restore that.
+        }
+        // Real browsers give `<pre>` `white-space: pre`, a monospace font,
+        // and a small vertical margin. Without these UA defaults a code
+        // block on an unstyled page collapses its newlines (looks like one
+        // long line) and renders in the proportional fallback (visually
+        // indistinguishable from prose). Padding + a faint background let
+        // the block read as a code panel even before any author CSS lands;
+        // author rules win because UA defaults are applied before matched
+        // declarations.
+        "pre" => {
+            values.insert("white-space".into(), Value::Keyword("pre".into()));
+            values.insert("font-family".into(), Value::Keyword("monospace".into()));
+            values.insert(
+                "margin-top".into(),
+                Value::Length(12.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "margin-bottom".into(),
+                Value::Length(12.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "padding-top".into(),
+                Value::Length(8.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "padding-bottom".into(),
+                Value::Length(8.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "padding-left".into(),
+                Value::Length(10.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "padding-right".into(),
+                Value::Length(10.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "background-color".into(),
+                Value::Color(crate::css::Color {
+                    r: 246,
+                    g: 248,
+                    b: 250,
+                    a: 255,
+                }),
+            );
+        }
+        // The HTML phrasing tags whose UA stylesheet is `font-family:
+        // monospace`. Inline whitelist (layout::inline::is_inline_node)
+        // already keeps them on the same line as surrounding text — what
+        // they were missing was the family signal the renderer needs to
+        // pick the monospace fallback. No bg / padding here: real browsers
+        // leave that to author CSS, and bundling it would visually
+        // double-up inside `<pre><code>` blocks (which already paint the
+        // `<pre>` chrome).
+        "code" | "kbd" | "samp" | "tt" => {
+            values.insert("font-family".into(), Value::Keyword("monospace".into()));
         }
         "input" | "textarea" => {
             values.insert(
@@ -1556,6 +1618,87 @@ mod tests {
         assert_eq!(
             styled.value("width"),
             Some(&Value::Length(50.0, Unit::Percent))
+        );
+    }
+
+    #[test]
+    fn pre_gets_monospace_white_space_padding_and_background_ua_defaults() {
+        // Phase 5.5: a bare `<pre>` should arrive at the renderer with the
+        // four UA defaults that turn it into a recognizable code block —
+        // monospace family, `white-space: pre` so newlines survive,
+        // padding so the text doesn't kiss the edge, and a faint
+        // background so the block reads as a panel even with no author
+        // CSS. Without these, a code-heavy page (Haskell Blog) renders
+        // its code blocks as one-line proportional prose.
+        let (document, root) = parse_html(r#"<pre>x</pre>"#);
+        let styled = style::style_tree(&document, root, &[]);
+
+        assert_eq!(
+            styled.value("white-space"),
+            Some(&Value::Keyword("pre".into()))
+        );
+        assert_eq!(
+            styled.value("font-family"),
+            Some(&Value::Keyword("monospace".into()))
+        );
+        assert_eq!(
+            styled.value("padding-left"),
+            Some(&Value::Length(10.0, Unit::Px))
+        );
+        assert_eq!(
+            styled.value("padding-top"),
+            Some(&Value::Length(8.0, Unit::Px))
+        );
+        assert_eq!(
+            styled.value("background-color"),
+            Some(&Value::Color(Color {
+                r: 246,
+                g: 248,
+                b: 250,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn code_kbd_samp_tt_get_monospace_font_family_ua_default() {
+        // Phase 5.5: the four phrasing tags whose UA stylesheet maps to
+        // `font-family: monospace`. The renderer routes shaping through
+        // cosmic-text's Family::Monospace whenever the cascaded keyword is
+        // `monospace`, so without this default an unstyled `<code>` would
+        // shape with the proportional fallback even though the tag's
+        // semantic meaning is "verbatim source text".
+        for tag in ["code", "kbd", "samp", "tt"] {
+            let (document, root) = parse_html(&format!("<{tag}>x</{tag}>"));
+            let styled = style::style_tree(&document, root, &[]);
+            assert_eq!(
+                styled.value("font-family"),
+                Some(&Value::Keyword("monospace".into())),
+                "{tag} should default to font-family: monospace",
+            );
+        }
+    }
+
+    #[test]
+    fn pre_font_family_inherits_to_text_and_nested_code_child() {
+        // The renderer reads `font-family` off each text-bearing leaf, so
+        // the UA default on `<pre>` only matters if it inherits down.
+        // This locks in the contract for both the immediate text child
+        // and a `<pre><code>...` nesting (the canonical code-block
+        // markup) — both must see `monospace` on the leaf the painter
+        // actually shapes.
+        let (document, root) = parse_html(r#"<pre><code>x</code></pre>"#);
+        let styled = style::style_tree(&document, root, &[]);
+        let code = &styled.children[0];
+        let text = &code.children[0];
+
+        assert_eq!(
+            code.value("font-family"),
+            Some(&Value::Keyword("monospace".into()))
+        );
+        assert_eq!(
+            text.value("font-family"),
+            Some(&Value::Keyword("monospace".into()))
         );
     }
 

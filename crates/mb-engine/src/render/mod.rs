@@ -13,7 +13,7 @@ mod display_list;
 mod raster;
 
 pub use display_list::{PaintContext, build_display_list, transform_for, translate};
-pub use raster::{measure_text_width, measure_text_wrap, rasterize};
+pub use raster::{measure_text_width, measure_text_wrap, measure_text_wrap_with_family, rasterize};
 
 /// 2-D affine transform stored as the six matrix entries of
 /// ```text
@@ -216,6 +216,12 @@ pub struct TextCommand {
     // unwrapped line — the right shape for chrome chrome / single-line
     // input values where the caller has already handled line splitting.
     pub wrap_width: Option<f32>,
+    // Cascaded `font-family` value, lowercased. Only the generic keyword
+    // "monospace" is acted on today (routes shaping through cosmic-text's
+    // `Family::Monospace`); every other value is treated as the default
+    // sans-serif, matching what the renderer would do without a family at
+    // all. `None` means the cascade had no `font-family` for this run.
+    pub font_family: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -371,7 +377,111 @@ mod tests {
                 // viewport cap, so the box settles at the shrink-to-fit
                 // measured width and that becomes the wrap budget too.
                 wrap_width: Some(67.5),
+                font_family: None,
             })]
+        );
+    }
+
+    #[test]
+    fn code_inline_emits_text_with_monospace_family_keyword() {
+        // Phase 5.5: a bare `<code>` arrives at the renderer with the UA
+        // default `font-family: monospace`, which inherits down to the
+        // text leaf. The text-leaf LayoutBox is what emits the
+        // TextCommand, so the `font_family` field is what proves the
+        // cascade reached the rasteriser — without it, raster's
+        // `attrs_for_family` falls back to sans-serif and the glyph row
+        // shapes with the wrong font even when Menlo is loaded.
+        let commands = display_list(r#"<code>x</code>"#, "");
+        let text = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DisplayCommand::Text(text) if text.text == "x" => Some(text),
+                _ => None,
+            })
+            .expect("code element must paint its text leaf");
+        assert_eq!(text.font_family.as_deref(), Some("monospace"));
+    }
+
+    #[test]
+    fn inline_code_paints_author_background_and_padding() {
+        // Phase 5.5: an author-styled inline `<code>` (background + padding)
+        // must emit a SolidRect at its padding-box. The inline whitelist
+        // (layout::inline) already gives `<code>` its own LayoutBox with
+        // padding folded into the box dims, so this test is what catches
+        // any future regression where inline elements stop running through
+        // the paint_self/background_command path. The padding-box width is
+        // measured("x") + 4px*2 ≈ 16.5px under the toy text estimate.
+        let commands = display_list(
+            r#"<p><code>x</code></p>"#,
+            r#"
+                code {
+                    background-color: #ff0000;
+                    padding-left: 4px;
+                    padding-right: 4px;
+                    padding-top: 2px;
+                    padding-bottom: 2px;
+                }
+            "#,
+        );
+
+        let red_rect = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DisplayCommand::SolidRect(color, rect)
+                    if *color
+                        == (Color {
+                            r: 255,
+                            g: 0,
+                            b: 0,
+                            a: 255,
+                        }) =>
+                {
+                    Some(rect)
+                }
+                _ => None,
+            })
+            .expect("inline <code>'s author background must paint as a SolidRect");
+        // Padding-box height = content_height (= font-size) + top + bottom = 16 + 4 = 20.
+        assert_eq!(red_rect.height, 20.0);
+        // Padding-box width = inline content width + 4 + 4 = at least 8px wider than 0.
+        assert!(
+            red_rect.width >= 8.0,
+            "padding-box width must include 4px left+right padding (got {})",
+            red_rect.width,
+        );
+    }
+
+    #[test]
+    fn pre_paints_ua_default_background_panel() {
+        // Phase 5.5: even with no author CSS, a `<pre>` should arrive at
+        // the painter as a panel — the faint #f6f8fa background is what
+        // separates a code block from surrounding prose. This test pins
+        // the UA color so a future cascade tweak that drops the bg shows
+        // up here instead of silently regressing the page's look.
+        let commands = display_list(r#"<pre>x</pre>"#, "");
+        let bg = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DisplayCommand::SolidRect(color, rect)
+                    if *color
+                        == (Color {
+                            r: 246,
+                            g: 248,
+                            b: 250,
+                            a: 255,
+                        }) =>
+                {
+                    Some(rect)
+                }
+                _ => None,
+            })
+            .expect("<pre> UA-default background must paint as a SolidRect");
+        // 8px top + 8px bottom padding wraps a one-line glyph row, so the
+        // padding-box is taller than the glyph itself (>= 16 + 16).
+        assert!(
+            bg.height >= 32.0,
+            "padding-box height must include 8px top+bottom padding (got {})",
+            bg.height,
         );
     }
 
@@ -545,6 +655,7 @@ mod tests {
                     color: Color::BLACK,
                     font_size: 8.0,
                     wrap_width: None,
+                    font_family: None,
                 }),
                 DisplayCommand::Image(ImageCommand {
                     x: 7.0,
@@ -581,6 +692,7 @@ mod tests {
                 color: Color::BLACK,
                 font_size: 8.0,
                 wrap_width: None,
+                font_family: None,
             })
         );
         assert_eq!(

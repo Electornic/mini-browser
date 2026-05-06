@@ -39,6 +39,7 @@ mod tests {
                 color: css::Color::BLACK,
                 font_size: 8.0,
                 wrap_width: None,
+                font_family: None,
             }),
         ];
 

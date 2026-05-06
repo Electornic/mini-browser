@@ -22,7 +22,7 @@
 // shapes whose boundary rule is "pixel centre ≤ radius / inside the rect",
 // and AA edge coverage flips those boundary pixels.
 
-use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, PhysicalGlyph, Shaping, SwashContent};
+use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, PhysicalGlyph, Shaping, SwashContent};
 use tiny_skia::{
     Color as TsColor, FillRule, FilterQuality, GradientStop, LinearGradient, Paint, PathBuilder,
     Pattern, Pixmap, Point as TsPoint, RadialGradient, Rect as TsRect, SpreadMode,
@@ -49,6 +49,20 @@ pub fn measure_text_width(text: &str, font_size: f32) -> f32 {
     measure_text_wrap(text, font_size, None).0
 }
 
+/// Translate the cascaded `font-family` keyword into the cosmic-text
+/// `Attrs` the shaper consults. Only the generic `monospace` keyword
+/// is acted on today — anything else falls back to the default
+/// sans-serif fallback chain. Kept private because the only sensible
+/// callers are the measure / shape paths that already exist in this
+/// file.
+fn attrs_for_family(family_keyword: Option<&str>) -> Attrs<'static> {
+    let attrs = Attrs::new();
+    match family_keyword {
+        Some("monospace") => attrs.family(Family::Monospace),
+        _ => attrs,
+    }
+}
+
 // Measures `text` shaped by cosmic-text, breaking the run at `wrap_width`
 // when it is `Some` so the result reflects how a paragraph would wrap inside
 // a content box of that width. Returns `(max_line_width, line_count)` —
@@ -59,7 +73,23 @@ pub fn measure_text_width(text: &str, font_size: f32) -> f32 {
 // `state::install_fonts`), the toy `font_size * 0.75` per-char estimate
 // runs and the caller always sees a single line.
 pub fn measure_text_wrap(text: &str, font_size: f32, wrap_width: Option<f32>) -> (f32, u32) {
-    if let Some(metrics) = measure_with_cosmic(text, font_size, wrap_width) {
+    measure_text_wrap_with_family(text, font_size, wrap_width, None)
+}
+
+/// Family-aware variant of [`measure_text_wrap`]. The `family_keyword` is
+/// the lowercased cascaded `font-family` value (see
+/// `display_list::font_family_keyword`); only the generic `"monospace"`
+/// keyword is acted on today. Inline layout uses this so a `<code>` run
+/// gets the same shaped advances the paint pass will use, instead of
+/// measuring with the proportional fallback and then drawing with the
+/// monospace font (which would over- or under-shoot line packing).
+pub fn measure_text_wrap_with_family(
+    text: &str,
+    font_size: f32,
+    wrap_width: Option<f32>,
+    family_keyword: Option<&str>,
+) -> (f32, u32) {
+    if let Some(metrics) = measure_with_cosmic(text, font_size, wrap_width, family_keyword) {
         return metrics;
     }
     let scale = (font_size / 8.0).max(1.0).round();
@@ -74,6 +104,7 @@ fn measure_with_cosmic(
     text: &str,
     font_size: f32,
     wrap_width: Option<f32>,
+    family_keyword: Option<&str>,
 ) -> Option<(f32, u32)> {
     let slot = crate::font_system::shared_font_system()?;
     let mut fs = slot.lock().ok()?;
@@ -89,7 +120,7 @@ fn measure_with_cosmic(
     // `Some(w)` constraint asks cosmic-text to find break opportunities so
     // the longest visual line fits inside `w`.
     buffer.set_size(wrap_width, None);
-    let attrs = Attrs::new();
+    let attrs = attrs_for_family(family_keyword);
     buffer.set_text(text, &attrs, Shaping::Advanced, None);
     buffer.shape_until_scroll(true);
 
@@ -713,7 +744,7 @@ fn shape_to_physicals(fs: &mut FontSystem, text: &TextCommand) -> Vec<PhysicalGl
     // the caller wants the whole string as one unwrapped line (chrome,
     // single-line input values).
     bw.set_size(text.wrap_width, None);
-    let attrs = Attrs::new();
+    let attrs = attrs_for_family(text.font_family.as_deref());
     bw.set_text(&text.text, &attrs, Shaping::Advanced, None);
     bw.shape_until_scroll(true);
 

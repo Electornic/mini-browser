@@ -528,7 +528,14 @@ fn inline_text_line_count(node: &StyledNode, text: &str, wrap_width: f32) -> u32
     if crate::font_system::shared_font_system().is_none() {
         return 1;
     }
-    crate::render::measure_text_wrap(text, inline_font_size(node), Some(wrap_width)).1
+    let family = inline_font_family(node);
+    crate::render::measure_text_wrap_with_family(
+        text,
+        inline_font_size(node),
+        Some(wrap_width),
+        family.as_deref(),
+    )
+    .1
 }
 
 fn inline_font_size(node: &StyledNode) -> f32 {
@@ -567,5 +574,19 @@ fn measure_inline_text(node: &StyledNode, text: &str) -> f32 {
     if crate::font_system::shared_font_system().is_none() {
         return text.chars().count() as f32 * inline_char_width(node);
     }
-    crate::render::measure_text_width(text, inline_font_size(node))
+    let family = inline_font_family(node);
+    crate::render::measure_text_wrap_with_family(
+        text,
+        inline_font_size(node),
+        None,
+        family.as_deref(),
+    )
+    .0
+}
+
+fn inline_font_family(node: &StyledNode) -> Option<String> {
+    match node.value("font-family") {
+        Some(Value::Keyword(keyword)) => Some(keyword.to_ascii_lowercase()),
+        _ => None,
+    }
 }

@@ -606,6 +606,7 @@ fn text_shadow_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayComm
         // Mirror the visible text's wrap so the shadow tracks line breaks
         // instead of running off the right edge as a single line.
         wrap_width: Some(layout_box.dimensions.content.width),
+        font_family: font_family_keyword(node),
     }))
 }
 
@@ -638,6 +639,7 @@ fn text_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
         // (Phase 4.4c); honour the same wrap budget at paint time so the
         // glyphs fall on the lines layout planned for.
         wrap_width: Some(layout_box.dimensions.content.width),
+        font_family: font_family_keyword(node),
     }))
 }
 
@@ -679,6 +681,8 @@ fn input_value_text_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayC
     let color = apply_alpha(text_color(node), alpha);
     let content = layout_box.dimensions.content;
 
+    let family = font_family_keyword(node);
+
     if !is_textarea {
         let half_leading = ((content.height - glyph_size) / 2.0).max(0.0);
         return vec![DisplayCommand::Text(TextCommand {
@@ -691,6 +695,7 @@ fn input_value_text_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayC
             // overflow the field box, matching the toy browser's existing
             // behaviour. Soft wrapping is the textarea path's job.
             wrap_width: None,
+            font_family: family,
         })];
     }
 
@@ -713,6 +718,7 @@ fn input_value_text_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayC
                 // The caller already split on `\n`; each piece prints as
                 // its own row without further wrapping.
                 wrap_width: None,
+                font_family: family.clone(),
             })
         })
         .collect()
@@ -797,6 +803,18 @@ fn font_size(node: &crate::style::StyledNode) -> f32 {
     match node.value("font-size") {
         Some(Value::Length(value, Unit::Px)) => *value,
         _ => 16.0,
+    }
+}
+
+/// Read the cascaded `font-family` value as a lowercased keyword. The
+/// renderer only acts on the generic keyword "monospace" today (it
+/// routes shaping through cosmic-text's `Family::Monospace`); every
+/// other family name still ships down so a future commit can add named
+/// families without re-plumbing through the layout / paint walks.
+fn font_family_keyword(node: &crate::style::StyledNode) -> Option<String> {
+    match node.value("font-family") {
+        Some(Value::Keyword(keyword)) => Some(keyword.to_ascii_lowercase()),
+        _ => None,
     }
 }
 
