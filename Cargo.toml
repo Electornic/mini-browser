@@ -6,3 +6,11 @@ members = [
     "crates/mb-shell",
 ]
 resolver = "2"
+
+# Optimise dependency crates even in dev builds. tiny-skia / cosmic-text /
+# rquickjs / taffy run hot loops every frame (per-pixel rasterisation, glyph
+# shaping, JS bytecode interpretation) and an unoptimised dev build is
+# 10–50x slower than release. Our own crates stay at opt-level 0 so
+# debugger / incremental rebuilds stay fast.
+[profile.dev.package."*"]
+opt-level = 3
