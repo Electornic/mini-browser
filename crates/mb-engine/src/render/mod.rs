@@ -452,6 +452,64 @@ mod tests {
     }
 
     #[test]
+    fn hn_votearrow_inline_block_paints_sprite_via_background_shorthand() {
+        // Phase 5.6: end-to-end probe of the HN-style sprite. An
+        // inline-block sized purely by author CSS, with the sprite
+        // installed via the `background:` shorthand, must paint as an
+        // Image command at the box's padding box. This catches future
+        // regressions in any of three pieces — shorthand parsing,
+        // image lookup, or padding-box geometry — under a single
+        // assertion. Inline-block already takes width/height correctly
+        // and the renderer already resolves `background-image`; the
+        // pre-5.6 gap was that the shorthand silently dropped on the
+        // trailing `no-repeat` token, so neither side ever saw the URL.
+        let document = html::parse(r##"<a class="vote"></a>"##).unwrap();
+        let root = document.roots()[0];
+        let stylesheet = css::parse(
+            r#"
+                .vote {
+                    display: inline-block;
+                    width: 10px;
+                    height: 10px;
+                    background: url("/grayarrow.gif") no-repeat;
+                }
+            "#,
+        )
+        .unwrap();
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let layout = layout::layout_tree(&styled, 400.0);
+
+        let base = crate::url::Url::parse("http://example.com/").unwrap();
+        let resolved = base.resolve("/grayarrow.gif").unwrap();
+        let mut images: std::collections::HashMap<String, crate::resource::LoadedImage> =
+            std::collections::HashMap::new();
+        images.insert(
+            resolved.to_string(),
+            crate::resource::LoadedImage {
+                url: resolved,
+                width: 1,
+                height: 1,
+                pixels: vec![0x808080],
+            },
+        );
+        let ctx = render::PaintContext {
+            base_url: Some(&base),
+            images: &images,
+        };
+        let commands = render::build_display_list(&layout, &ctx);
+
+        let sprite = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DisplayCommand::Image(img) => Some(img),
+                _ => None,
+            })
+            .expect("sprite must paint as an Image command");
+        assert_eq!(sprite.width, 10.0);
+        assert_eq!(sprite.height, 10.0);
+    }
+
+    #[test]
     fn pre_paints_ua_default_background_panel() {
         // Phase 5.5: even with no author CSS, a `<pre>` should arrive at
         // the painter as a panel — the faint #f6f8fa background is what

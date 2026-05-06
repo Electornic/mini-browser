@@ -690,6 +690,9 @@ fn parse_declaration_value<'i, 't>(
     if name == "flex" {
         return parse_flex_shorthand(input);
     }
+    if name == "background" {
+        return parse_background_shorthand(input);
+    }
     if name == "grid-template-columns" || name == "grid-template-rows" {
         let value = parse_grid_track_list(input)?;
         return Ok(vec![Declaration {
@@ -1251,6 +1254,73 @@ fn parse_flex_shorthand<'i, 't>(
             name: "flex-basis".into(),
             value: basis_value,
         });
+    }
+    Ok(decls)
+}
+
+// -----------------------------------------------------------------------------
+// background shorthand
+// -----------------------------------------------------------------------------
+
+/// Expand `background: <bg-image> | <bg-color> | <repeat> | <position>` into
+/// the longhand declarations the cascade actually reads. The MVP handles the
+/// two pieces real pages care about — the color (`background-color`) and the
+/// image (`background-image`, either `url(...)` or a `linear-gradient(...)`)
+/// — and discards everything else (`no-repeat`, position keywords / percents,
+/// `repeat-x`, etc.). Without this expansion HN's `.votearrow { background:
+/// url(grayarrow.gif) no-repeat; }` silently dropped because cssparser
+/// errored on the trailing tokens after the URL, which left the painter
+/// with no image to draw.
+fn parse_background_shorthand<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<Vec<Declaration>, ParseError> {
+    let mut color: Option<Value> = None;
+    let mut image: Option<Value> = None;
+
+    loop {
+        input.skip_whitespace();
+        let probe = input.state();
+        let value = match parse_value(input) {
+            Ok(v) => v,
+            Err(_) => {
+                // EOF or token shape we don't understand — restore the
+                // input cursor so the surrounding declaration block parser
+                // can continue past this declaration without choking.
+                input.reset(&probe);
+                break;
+            }
+        };
+        match value {
+            Value::Color(_) if color.is_none() => color = Some(value),
+            Value::ImageUrl(_) | Value::Gradient(_) if image.is_none() => image = Some(value),
+            // Position keywords (`top`, `left`, `center`, …), repeat
+            // keywords (`no-repeat`, `repeat-x`, …), positions written
+            // as lengths/percentages, and the `none` / `transparent`
+            // sentinels all land here. Real CSS would route them into
+            // the per-axis longhands; keeping them as a no-op is the
+            // pragmatic shape until a page actually needs them.
+            _ => {}
+        }
+    }
+
+    let mut decls = Vec::new();
+    if let Some(c) = color {
+        decls.push(Declaration {
+            name: "background-color".into(),
+            value: c,
+        });
+    }
+    if let Some(i) = image {
+        decls.push(Declaration {
+            name: "background-image".into(),
+            value: i,
+        });
+    }
+    if decls.is_empty() {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            "background shorthand requires at least a color or image",
+        ));
     }
     Ok(decls)
 }
@@ -2527,6 +2597,77 @@ mod tests {
             (&decls[2].name, &decls[2].value),
             (&"flex-basis".to_string(), &Value::Length(80.0, Unit::Px))
         );
+    }
+
+    #[test]
+    fn background_shorthand_with_url_and_repeat_keyword_expands_to_image_longhand() {
+        // Phase 5.6: HN's `.votearrow { background: url(grayarrow.gif)
+        // no-repeat; }` shape. Pre-5.6 the trailing `no-repeat` token
+        // tripped the generic parse_value path so the entire declaration
+        // got dropped, which in turn meant the resource fetcher and the
+        // painter never saw the URL. The longhand expansion is what
+        // lands the value where the rest of the pipeline expects it.
+        let stylesheet =
+            parse(r#".vote { background: url("grayarrow.gif") no-repeat; }"#).unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+        let image = decls
+            .iter()
+            .find(|d| d.name == "background-image")
+            .expect("image longhand missing");
+        assert_eq!(
+            image.value,
+            Value::ImageUrl("grayarrow.gif".to_string()),
+        );
+        // The trailing `no-repeat` keyword is silently discarded — the
+        // toy renderer only paints non-tiled bg images today, so
+        // splitting it into its own longhand would be dead plumbing
+        // that future work would just delete.
+        assert!(
+            !decls.iter().any(|d| d.name == "background-repeat"),
+            "no-repeat keyword should not synthesise a background-repeat longhand yet",
+        );
+    }
+
+    #[test]
+    fn background_shorthand_with_color_and_url_emits_both_longhands() {
+        // Order-insensitive: token role is decided by value shape (Color
+        // vs ImageUrl), not position. A page that authors the URL first
+        // would also work — important because real CSS authors mix the
+        // order freely.
+        let stylesheet =
+            parse(r#".panel { background: #ff0000 url("foo.png") no-repeat; }"#).unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+        let color = decls
+            .iter()
+            .find(|d| d.name == "background-color")
+            .expect("color longhand missing");
+        let image = decls
+            .iter()
+            .find(|d| d.name == "background-image")
+            .expect("image longhand missing");
+        assert_eq!(
+            color.value,
+            Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
+        );
+        assert_eq!(image.value, Value::ImageUrl("foo.png".to_string()));
+    }
+
+    #[test]
+    fn background_shorthand_with_color_only_emits_background_color() {
+        // Plain `background: red` — used by pages that want a flat
+        // panel without an image. The shorthand walker must handle this
+        // without insisting on an image too, otherwise legacy pages
+        // that wrote bg colors via the shorthand would lose them.
+        let stylesheet = parse(r#".panel { background: red; }"#).unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].name, "background-color");
+        assert!(matches!(decls[0].value, Value::Color(_)));
     }
 
     #[test]
