@@ -467,8 +467,10 @@ pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
     // Tolerant recovery: `StyleSheetParser` itself walks past a broken rule's
     // block before yielding the next item, so we just keep the successes and
     // discard the errors — same semantic as the previous `skip_to_end_of_block`.
-    for rule in iter.flatten() {
-        rules.push(rule);
+    // Each yielded item is a Vec<Rule>: top-level qualified rules contribute
+    // a single entry, `@media` blocks contribute N (Phase 6.F).
+    for batch in iter.flatten() {
+        rules.extend(batch);
     }
     Ok(Stylesheet { rules })
 }
@@ -563,7 +565,11 @@ type CssError = ParseError;
 
 impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler {
     type Prelude = RulePrelude;
-    type QualifiedRule = Rule;
+    // Vec<Rule> instead of a single `Rule` so the parse() iterator can fold
+    // both qualified rules and at-rule expansions through the same channel.
+    // Top-level `.foo {…}` always returns a single-element vec; `@media`
+    // expands to N entries (Phase 6.F).
+    type QualifiedRule = Vec<Rule>;
     type Error = CssError;
 
     fn parse_prelude<'t>(
@@ -591,20 +597,86 @@ impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler {
     ) -> Result<Self::QualifiedRule, CssParseError<'i, Self::Error>> {
         let declarations =
             parse_declaration_block(input).map_err(|err| input.new_custom_error(err))?;
-        Ok(Rule {
+        Ok(vec![Rule {
             selectors: prelude.0,
             declarations,
-        })
+        }])
     }
 }
 
+/// Discriminator the at-rule parser hands from `parse_prelude` to
+/// `parse_block`. We model only `@media` today; everything else trips the
+/// `Reject` arm so `parse_block` can return an empty Vec without invoking
+/// any parsing.
+enum AtRulePrelude {
+    Media,
+    Reject,
+}
+
 impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
-    // At-rules (@media, @charset, @keyframes, etc.) are not modeled by the toy
-    // parser. Reject every prelude so cssparser cleanly skips both inline and
-    // block forms — same semantics as the previous `skip_at_rule` path.
-    type Prelude = ();
-    type AtRule = Rule;
+    type Prelude = AtRulePrelude;
+    // Vec<Rule>: `@media` unfolds into N qualified rules (Phase 6.F),
+    // every other at-rule yields an empty vec.
+    type AtRule = Vec<Rule>;
     type Error = CssError;
+
+    fn parse_prelude<'t>(
+        &mut self,
+        name: cssparser::CowRcStr<'i>,
+        input: &mut CssParser<'i, 't>,
+    ) -> Result<Self::Prelude, CssParseError<'i, Self::Error>> {
+        // `@media` rules: drop the condition (we always match) and let
+        // `parse_block` recurse into the body. Real evaluation of
+        // `(min-width: 768px)` etc. against the viewport is a follow-up;
+        // pretending every condition matches is the right default for a
+        // desktop-window toy browser, where most pages are mobile-first
+        // and the desktop overrides are the ones that should win.
+        if name.eq_ignore_ascii_case("media") {
+            // Consume the prelude tokens (the condition list) so cssparser
+            // can move on to `parse_block`. We don't store anything from
+            // the condition — it's a no-op match.
+            while input.next().is_ok() {}
+            return Ok(AtRulePrelude::Media);
+        }
+        // Other at-rules (@charset, @keyframes, @font-face, …) keep the
+        // pre-6.F behaviour: skip the prelude + body. parse_block returns
+        // an empty Vec and the iter::flatten in `parse()` quietly drops it.
+        Ok(AtRulePrelude::Reject)
+    }
+
+    fn parse_block<'t>(
+        &mut self,
+        prelude: Self::Prelude,
+        _start: &ParserState,
+        input: &mut CssParser<'i, 't>,
+    ) -> Result<Self::AtRule, CssParseError<'i, Self::Error>> {
+        match prelude {
+            AtRulePrelude::Media => {
+                // Recurse into the @media body using the same handler.
+                // The inner StyleSheetParser walks qualified rules just
+                // like the outer pass, so nested `@media` blocks would
+                // also flatten — which matches what real browsers do
+                // for chained media conditions when both happen to match.
+                let mut handler = StylesheetHandler;
+                let iter = StyleSheetParser::new(input, &mut handler);
+                let mut rules = Vec::new();
+                for inner in iter.flatten() {
+                    rules.extend(inner);
+                }
+                Ok(rules)
+            }
+            AtRulePrelude::Reject => Ok(Vec::new()),
+        }
+    }
+
+    fn rule_without_block(
+        &mut self,
+        _prelude: Self::Prelude,
+        _start: &ParserState,
+    ) -> Result<Self::AtRule, ()> {
+        // Block-less forms (`@charset "utf-8";`) — drop quietly.
+        Ok(Vec::new())
+    }
 }
 
 // =============================================================================
@@ -2962,6 +3034,58 @@ mod tests {
         assert_eq!(by_name("margin-right"), Value::Keyword("auto".into()));
         assert_eq!(by_name("margin-bottom"), Value::Length(0.0, Unit::Px));
         assert_eq!(by_name("margin-left"), Value::Keyword("auto".into()));
+    }
+
+    #[test]
+    fn media_rule_unfolds_inner_rules_into_top_level_stylesheet() {
+        // Phase 6.F: `@media (min-width: 768px) { ... }` is the desktop
+        // override mobile-first sites layer on top of their default
+        // (mobile) rules. mb opens at desktop width, so the simplest
+        // useful behaviour is to always match — unfolding the inner
+        // rules into the top-level stylesheet so the cascade applies
+        // them like any other declaration.
+        let stylesheet = parse(
+            r#"
+                .foo { color: blue; }
+                @media (min-width: 768px) {
+                    .foo { color: red; }
+                    .bar { display: flex; }
+                }
+                .baz { font-size: 14px; }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(stylesheet.rules.len(), 4);
+        // Final cascade order: .foo (mobile) then .foo (desktop), the
+        // selectors-crate sort will pick the later one. Source-order
+        // here verifies the @media block kept its inner rules.
+        let names: Vec<_> = stylesheet
+            .rules
+            .iter()
+            .flat_map(|r| r.declarations.iter().map(|d| d.name.as_str()))
+            .collect();
+        assert!(names.contains(&"display"), "@media inner rule lost");
+    }
+
+    #[test]
+    fn unknown_at_rules_are_skipped_without_error() {
+        // `@charset` and `@font-face` aren't modeled; the parser must
+        // walk past them and keep returning the surrounding qualified
+        // rules. Pre-Phase 6.F this was the at-rule behaviour for
+        // every variant, including @media — Phase 6.F only carves out
+        // @media as a recognised at-rule.
+        let stylesheet = parse(
+            r#"
+                @charset "utf-8";
+                @font-face { font-family: "X"; src: url("x.woff"); }
+                .foo { color: red; }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(stylesheet.rules.len(), 1);
+        assert_eq!(stylesheet.rules[0].declarations[0].name, "color");
     }
 
     #[test]
