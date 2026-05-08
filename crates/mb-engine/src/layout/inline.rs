@@ -534,6 +534,7 @@ fn inline_text_line_count(node: &StyledNode, text: &str, wrap_width: f32) -> u32
         inline_font_size(node),
         Some(wrap_width),
         family.as_deref(),
+        inline_font_weight(node),
     )
     .1
 }
@@ -588,6 +589,7 @@ fn measure_inline_text(node: &StyledNode, text: &str) -> f32 {
         inline_font_size(node),
         None,
         family.as_deref(),
+        inline_font_weight(node),
     )
     .0
 }
@@ -596,5 +598,22 @@ fn inline_font_family(node: &StyledNode) -> Option<String> {
     match node.value("font-family") {
         Some(Value::Keyword(keyword)) => Some(keyword.to_ascii_lowercase()),
         _ => None,
+    }
+}
+
+fn inline_font_weight(node: &StyledNode) -> u16 {
+    // Mirrors `display_list::font_weight_value`: keyword bold/normal map to
+    // 700/400, numeric values pass through clamped, anything else falls
+    // back to the cosmic-text default of 400. Inline measurement consults
+    // this so a `<b>` run shapes against the same bold face the paint pass
+    // will render, keeping shrink-to-fit widths consistent.
+    match node.value("font-weight") {
+        Some(Value::Keyword(keyword)) => match keyword.to_ascii_lowercase().as_str() {
+            "bold" => 700,
+            "normal" => 400,
+            _ => 400,
+        },
+        Some(Value::Number(n)) => (n.round() as i32).clamp(1, 1000) as u16,
+        _ => 400,
     }
 }

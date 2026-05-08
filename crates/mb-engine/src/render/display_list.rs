@@ -607,6 +607,7 @@ fn text_shadow_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayComm
         // instead of running off the right edge as a single line.
         wrap_width: Some(layout_box.dimensions.content.width),
         font_family: font_family_keyword(node),
+        font_weight: font_weight_value(node),
     }))
 }
 
@@ -640,6 +641,7 @@ fn text_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
         // glyphs fall on the lines layout planned for.
         wrap_width: Some(layout_box.dimensions.content.width),
         font_family: font_family_keyword(node),
+        font_weight: font_weight_value(node),
     }))
 }
 
@@ -682,6 +684,7 @@ fn input_value_text_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayC
     let content = layout_box.dimensions.content;
 
     let family = font_family_keyword(node);
+    let weight = font_weight_value(node);
 
     if !is_textarea {
         let half_leading = ((content.height - glyph_size) / 2.0).max(0.0);
@@ -696,6 +699,7 @@ fn input_value_text_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayC
             // behaviour. Soft wrapping is the textarea path's job.
             wrap_width: None,
             font_family: family,
+            font_weight: weight,
         })];
     }
 
@@ -719,6 +723,7 @@ fn input_value_text_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayC
                 // its own row without further wrapping.
                 wrap_width: None,
                 font_family: family.clone(),
+                font_weight: weight,
             })
         })
         .collect()
@@ -815,6 +820,26 @@ fn font_family_keyword(node: &crate::style::StyledNode) -> Option<String> {
     match node.value("font-family") {
         Some(Value::Keyword(keyword)) => Some(keyword.to_ascii_lowercase()),
         _ => None,
+    }
+}
+
+/// Resolve the cascaded `font-weight` to the CSS numeric scale (1-1000).
+/// `bold` and `normal` keywords map to 700 / 400; explicit numeric values
+/// pass through clamped. Anything else (missing declaration, unparsed
+/// value, relative keywords like `bolder`/`lighter` we don't yet handle)
+/// falls back to 400, which is what cosmic-text uses for the default
+/// face.
+pub(crate) fn font_weight_value(node: &crate::style::StyledNode) -> u16 {
+    match node.value("font-weight") {
+        Some(Value::Keyword(keyword)) => {
+            match keyword.to_ascii_lowercase().as_str() {
+                "bold" => 700,
+                "normal" => 400,
+                _ => 400,
+            }
+        }
+        Some(Value::Number(n)) => (n.round() as i32).clamp(1, 1000) as u16,
+        _ => 400,
     }
 }
 

@@ -210,6 +210,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             font_size: TAB_TITLE_FONT_SIZE,
             wrap_width: None,
             font_family: None,
+            font_weight: 400,
         }),
         render::DisplayCommand::RoundedRect(border_color, address_box, pill_outer),
         render::DisplayCommand::RoundedRect(
@@ -235,6 +236,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             font_size: ADDRESS_FONT_SIZE,
             wrap_width: None,
             font_family: None,
+            font_weight: 400,
         }),
         render::DisplayCommand::Text(render::TextCommand {
             text: chrome.status_text.to_string(),
@@ -244,6 +246,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             font_size: STATUS_FONT_SIZE,
             wrap_width: None,
             font_family: None,
+            font_weight: 400,
         }),
     ];
     commands.extend(nav_button_commands(
@@ -291,6 +294,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             font_size: ADDRESS_FONT_SIZE,
             wrap_width: None,
             font_family: None,
+            font_weight: 400,
         }));
     } else if chrome.show_caret {
         // Caret position is measured from the *actual input* (empty when only the

@@ -222,6 +222,13 @@ pub struct TextCommand {
     // sans-serif, matching what the renderer would do without a family at
     // all. `None` means the cascade had no `font-family` for this run.
     pub font_family: Option<String>,
+    // Cascaded `font-weight` resolved to the CSS numeric scale (1-1000).
+    // 400 is the default (`normal`), 700 maps to `bold`. Values ≥ 600 ask
+    // the rasteriser to pick a bold face from cosmic-text's matched
+    // family. Only the keywords `normal`/`bold` and explicit numeric
+    // values land here; relative `bolder`/`lighter` resolve to the parent
+    // weight at cascade time.
+    pub font_weight: u16,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -381,6 +388,7 @@ mod tests {
                 // measured width and that becomes the wrap budget too.
                 wrap_width: Some(67.5),
                 font_family: None,
+                font_weight: 400,
             })]
         );
     }
@@ -392,7 +400,7 @@ mod tests {
         // text leaf. The text-leaf LayoutBox is what emits the
         // TextCommand, so the `font_family` field is what proves the
         // cascade reached the rasteriser — without it, raster's
-        // `attrs_for_family` falls back to sans-serif and the glyph row
+        // `attrs_for_run` falls back to sans-serif and the glyph row
         // shapes with the wrong font even when Menlo is loaded.
         let commands = display_list(r#"<code>x</code>"#, "");
         let text = commands
@@ -403,6 +411,29 @@ mod tests {
             })
             .expect("code element must paint its text leaf");
         assert_eq!(text.font_family.as_deref(), Some("monospace"));
+    }
+
+    #[test]
+    fn bold_inline_emits_text_with_700_font_weight() {
+        // Phase 6.C mirror of the monospace test: a UA-bold `<b>` run
+        // must arrive at the rasteriser with `font_weight = 700` so
+        // cosmic-text picks the bold face from the matched family. A
+        // sibling plain-text run must stay at the 400 default to prove
+        // inheritance only flows through the bolded subtree.
+        let commands = display_list(r#"<p>plain<b>bold</b></p>"#, "");
+        let mut bold_weight = None;
+        let mut plain_weight = None;
+        for cmd in &commands {
+            if let DisplayCommand::Text(text) = cmd {
+                match text.text.as_str() {
+                    "bold" => bold_weight = Some(text.font_weight),
+                    "plain" => plain_weight = Some(text.font_weight),
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(bold_weight, Some(700));
+        assert_eq!(plain_weight, Some(400));
     }
 
     #[test]
@@ -719,6 +750,7 @@ mod tests {
                     font_size: 8.0,
                     wrap_width: None,
                     font_family: None,
+                    font_weight: 400,
                 }),
                 DisplayCommand::Image(ImageCommand {
                     x: 7.0,
@@ -756,6 +788,7 @@ mod tests {
                 font_size: 8.0,
                 wrap_width: None,
                 font_family: None,
+                font_weight: 400,
             })
         );
         assert_eq!(

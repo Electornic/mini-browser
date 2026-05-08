@@ -160,6 +160,11 @@ fn style_tree_inner(
         // shapes, so the page would still draw code in the proportional
         // fallback font.
         "font-family",
+        // Same reasoning for font-weight: the UA defaults give `<b>`,
+        // `<strong>`, `<th>`, and headings a bold weight, but the renderer
+        // shapes the *text* child. Without inheritance, a `<b>Hi</b>` run
+        // never tells cosmic-text to pick the bold face.
+        "font-weight",
     ] {
         if !specified_values.contains_key(property)
             && let Some(value) = parent_values.and_then(|values| values.get(property))
@@ -666,6 +671,20 @@ fn default_values(document: &Document, node_id: NodeId) -> PropertyMap {
                 "margin-bottom".into(),
                 Value::Length(16.0, crate::css::Unit::Px),
             );
+            values.insert("font-weight".into(), Value::Keyword("bold".into()));
+        }
+        // h2..h6 get the bold weight every browser ships in its UA stylesheet
+        // even though we don't size them yet — without it, headings look
+        // visually identical to body copy on pages that rely on the UA
+        // default for emphasis. Sizes are a follow-up; bolding alone is
+        // enough to restore reading hierarchy on plain HTML.
+        "h2" | "h3" | "h4" | "h5" | "h6" => {
+            values.insert("font-weight".into(), Value::Keyword("bold".into()));
+        }
+        // The HTML emphasis tags. Author CSS still wins because UA defaults
+        // run before matched declarations.
+        "b" | "strong" => {
+            values.insert("font-weight".into(), Value::Keyword("bold".into()));
         }
         "a" => {
             values.insert(
@@ -733,13 +752,21 @@ fn default_values(document: &Document, node_id: NodeId) -> PropertyMap {
         "tr" => {
             values.insert("display".into(), Value::Keyword("table-row".into()));
         }
-        "td" | "th" => {
+        "td" => {
             values.insert("display".into(), Value::Keyword("table-cell".into()));
             // No UA padding default for now: the toy CSS parser doesn't expand
             // the `padding` shorthand, so a non-zero default here would be
             // permanently locked in for any page that resets cell padding via
             // `td { padding: 0 }`. Real browsers default to ~1px; once
             // shorthand expansion lands we can restore that.
+        }
+        "th" => {
+            // <th> is the header-cell variant of <td>: same table-cell display,
+            // but UA stylesheets add bold weight + centered text so a header
+            // row stands out without author CSS. Author rules still win.
+            values.insert("display".into(), Value::Keyword("table-cell".into()));
+            values.insert("font-weight".into(), Value::Keyword("bold".into()));
+            values.insert("text-align".into(), Value::Keyword("center".into()));
         }
         // Real browsers give `<pre>` `white-space: pre`, a monospace font,
         // and a small vertical margin. Without these UA defaults a code
@@ -2149,6 +2176,58 @@ mod tests {
             }
             other => panic!("unexpected padding-left: {other:?}"),
         }
+    }
+
+    #[test]
+    fn bold_emphasis_tags_cascade_font_weight_and_inherit_to_text() {
+        // Phase 6.C: <b>, <strong>, and <th> get a UA `font-weight: bold`
+        // default. font-weight is now an inheritable property in the
+        // cascade, so the text leaf inside the bolded element sees the
+        // same Keyword("bold") and the rasteriser routes shaping through
+        // cosmic-text's bold face.
+        let (document, root) = parse_html(r#"<p>plain<b>bold</b></p>"#);
+        let styled = style::style_tree(&document, root, &[]);
+
+        let bold_span = &styled.children[1];
+        assert_eq!(
+            bold_span.value("font-weight"),
+            Some(&Value::Keyword("bold".into()))
+        );
+        // The text node inside <b> must inherit the weight — without that
+        // the rasteriser still picks the regular face for the actual
+        // glyph row.
+        let bold_text = &bold_span.children[0];
+        assert_eq!(
+            bold_text.value("font-weight"),
+            Some(&Value::Keyword("bold".into()))
+        );
+        // And a sibling text node (direct child of <p>) must NOT pick up
+        // the weight — inheritance only flows through the styled subtree.
+        let plain_text = &styled.children[0];
+        assert_eq!(plain_text.value("font-weight"), None);
+    }
+
+    #[test]
+    fn th_cascades_bold_weight_and_centered_text() {
+        // <th> diverges from <td>: same display, but UA-bold + center
+        // alignment so a header cell stands out without author CSS.
+        let (document, root) = parse_html(r#"<table><tr><th>Hdr</th><td>Body</td></tr></table>"#);
+        let styled = style::style_tree(&document, root, &[]);
+
+        let row = &styled.children[0].children[0];
+        let th_cell = &row.children[0];
+        let td_cell = &row.children[1];
+
+        assert_eq!(
+            th_cell.value("font-weight"),
+            Some(&Value::Keyword("bold".into()))
+        );
+        assert_eq!(
+            th_cell.value("text-align"),
+            Some(&Value::Keyword("center".into()))
+        );
+        // <td> stays at the cascade default — only <th> opts in.
+        assert_eq!(td_cell.value("font-weight"), None);
     }
 
     #[test]

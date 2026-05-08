@@ -40,6 +40,7 @@ mod tests {
                 font_size: 8.0,
                 wrap_width: None,
                 font_family: None,
+                font_weight: 400,
             }),
         ];
 
