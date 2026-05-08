@@ -343,6 +343,8 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             // small (typically 16×16 = 1KB) so the per-frame copy is
             // negligible compared to the layout / paint work.
             pixels: favicon.pixels.clone(),
+            source_x: 0.0,
+            source_y: 0.0,
         }));
     }
 

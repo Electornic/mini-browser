@@ -482,6 +482,16 @@ fn background_image_command(
     if rect.width <= 0.0 || rect.height <= 0.0 {
         return None;
     }
+    // CSS `background-position` lets a page slice a sprite strip without
+    // scaling: a negative position tells the painter "the image origin
+    // sits N pixels above/left of the box, so the visible portion starts
+    // N pixels into the source." Convert that into the rasteriser's
+    // `source_x`/`source_y` (positive = clip from the left/top of the
+    // source). Keywords / percent values that don't yet round-trip to a
+    // length default to 0, which keeps unstyled backgrounds at the
+    // existing scale-to-fit behaviour.
+    let source_x = -read_position_axis(node, "background-position-x");
+    let source_y = -read_position_axis(node, "background-position-y");
     Some(DisplayCommand::Image(ImageCommand {
         x: rect.x,
         y: rect.y,
@@ -490,7 +500,16 @@ fn background_image_command(
         source_width: image.width,
         source_height: image.height,
         pixels: image.pixels.clone(),
+        source_x,
+        source_y,
     }))
+}
+
+fn read_position_axis(node: &crate::style::StyledNode, name: &str) -> f32 {
+    match node.value(name) {
+        Some(Value::Length(v, Unit::Px)) => *v,
+        _ => 0.0,
+    }
 }
 
 fn gradient_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {

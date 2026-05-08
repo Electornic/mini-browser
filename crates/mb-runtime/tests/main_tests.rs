@@ -158,6 +158,8 @@ mod tests {
                 source_width: 1,
                 source_height: 1,
                 pixels: vec![0xFF0000],
+                source_x: 0.0,
+                source_y: 0.0,
             })]
         );
     }

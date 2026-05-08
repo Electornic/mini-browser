@@ -291,6 +291,8 @@ fn image_command_for_layout_box(
         source_width: image.width,
         source_height: image.height,
         pixels: image.pixels.clone(),
+        source_x: 0.0,
+        source_y: 0.0,
     }))
 }
 

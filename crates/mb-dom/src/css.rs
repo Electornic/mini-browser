@@ -710,6 +710,9 @@ fn parse_declaration_value<'i, 't>(
     if name == "background" {
         return parse_background_shorthand(input);
     }
+    if name == "background-position" {
+        return parse_background_position(input);
+    }
     if name == "grid-template-columns" || name == "grid-template-rows" {
         let value = parse_grid_track_list(input)?;
         return Ok(vec![Declaration {
@@ -1341,6 +1344,66 @@ fn parse_background_shorthand<'i, 't>(
         ));
     }
     Ok(decls)
+}
+
+/// Expand `background-position: <x> <y>` into the per-axis longhands
+/// `background-position-x` and `background-position-y`. The toy renderer
+/// only acts on numeric (length / percentage) values today — the keyword
+/// forms (`top`, `left`, `center`, etc.) drop through to a no-op so the
+/// declaration still validates without contributing a longhand. HN's
+/// vote arrow uses `background-position: 0 -10px` to slice a vertical
+/// sprite strip, which the longhands let `background_image_command`
+/// pick up at paint time.
+fn parse_background_position<'i, 't>(
+    input: &mut CssParser<'i, 't>,
+) -> Result<Vec<Declaration>, ParseError> {
+    input.skip_whitespace();
+    let x = parse_position_axis(input)?;
+    input.skip_whitespace();
+    // Spec: an omitted second value defaults to `center` (= 50%). We don't
+    // model keywords yet, so a missing second value falls back to 0 — the
+    // dominant case for sprite slicing where the strip is vertical.
+    let y = if input.is_exhausted() {
+        Value::Length(0.0, Unit::Px)
+    } else {
+        parse_position_axis(input)?
+    };
+    Ok(vec![
+        Declaration {
+            name: "background-position-x".into(),
+            value: x,
+        },
+        Declaration {
+            name: "background-position-y".into(),
+            value: y,
+        },
+    ])
+}
+
+fn parse_position_axis<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, ParseError> {
+    let probe = input.state();
+    let position = input.position();
+    let token = input
+        .next()
+        .map_err(|err| convert_basic_error_at(position.byte_index(), err))?
+        .clone();
+    match token {
+        Token::Dimension { value, unit, .. } => Ok(length_with_unit(value, unit.as_ref())),
+        Token::Number { value, .. } => Ok(Value::Length(value, Unit::Px)),
+        Token::Percentage { unit_value, .. } => {
+            Ok(Value::Length(unit_value * 100.0, Unit::Percent))
+        }
+        // Keyword positions are accepted but not yet mapped to lengths;
+        // the renderer falls back to (0, 0) for them.
+        Token::Ident(name) => Ok(Value::Keyword(name.to_string())),
+        _ => {
+            input.reset(&probe);
+            Err(ParseError::new(
+                position.byte_index(),
+                "expected length / percentage / keyword in background-position",
+            ))
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -2697,6 +2760,34 @@ mod tests {
         let stylesheet = parse(".article { max-width: 65ch; }").unwrap();
         let value = &stylesheet.rules[0].declarations[0].value;
         assert_eq!(*value, Value::Length(65.0, Unit::Ch));
+    }
+
+    #[test]
+    fn parses_background_position_into_two_longhands() {
+        // Phase 6.G: HN's vote arrow uses `background-position: 0 -10px`
+        // to slice a vertical sprite strip. The parser splits the
+        // 2-value form into the per-axis longhands `background-position-x`
+        // / `-y` so the renderer can read them independently at paint
+        // time without reparsing the shorthand.
+        let stylesheet = parse(".vote { background-position: -10px -20px; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+        let x = decls.iter().find(|d| d.name == "background-position-x").expect("x longhand");
+        let y = decls.iter().find(|d| d.name == "background-position-y").expect("y longhand");
+        assert_eq!(x.value, Value::Length(-10.0, Unit::Px));
+        assert_eq!(y.value, Value::Length(-20.0, Unit::Px));
+    }
+
+    #[test]
+    fn background_position_omitted_y_falls_back_to_zero() {
+        // Single-value form (only x) — HN actually uses `0 -10px` so the
+        // 2-value path is the hot one, but stray inputs like
+        // `background-position: 50%` shouldn't error out the cascade.
+        let stylesheet = parse(".vote { background-position: 5px; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+        let x = decls.iter().find(|d| d.name == "background-position-x").expect("x longhand");
+        let y = decls.iter().find(|d| d.name == "background-position-y").expect("y longhand");
+        assert_eq!(x.value, Value::Length(5.0, Unit::Px));
+        assert_eq!(y.value, Value::Length(0.0, Unit::Px));
     }
 
     #[test]

@@ -499,15 +499,28 @@ fn draw_image(pixmap: &mut Pixmap, image: &ImageCommand, transform: Affine) {
         }
     }
 
-    // Pattern transform places the tile on the canvas: scale source-pixel
-    // space up to the destination size, then translate to the rect origin.
-    // The outer `transform` argument on `fill_rect` rotates the rect (and
-    // the placed pattern with it), so this stays "logical-coordinates"
-    // simple.
-    let scale_x = image.width / image.source_width as f32;
-    let scale_y = image.height / image.source_height as f32;
-    let pattern_transform =
-        TsTransform::from_scale(scale_x, scale_y).post_translate(image.x, image.y);
+    // Pattern transform places the tile on the canvas. There are two
+    // shapes we need to render:
+    //
+    // 1. `<img>` and un-positioned `background-image: url(...)` —
+    //    stretch the source pixels to fill the box (scale_x/y derived
+    //    from the dest:source ratio).
+    // 2. Sprite slice via `background-position: -Npx -Mpx` — render at
+    //    the source's native pixel size, with the source origin shifted
+    //    by (source_x, source_y) so the box reveals only that slice.
+    //
+    // Phase 6.G's branching: when either source_x or source_y is
+    // non-zero we know the page asked for the sprite shape; otherwise
+    // the legacy stretch path runs and existing `<img>` / bg tests
+    // continue to assert the same geometry.
+    let is_sprite = image.source_x != 0.0 || image.source_y != 0.0;
+    let pattern_transform = if is_sprite {
+        TsTransform::from_translate(image.x - image.source_x, image.y - image.source_y)
+    } else {
+        let scale_x = image.width / image.source_width as f32;
+        let scale_y = image.height / image.source_height as f32;
+        TsTransform::from_scale(scale_x, scale_y).post_translate(image.x, image.y)
+    };
 
     let paint = Paint {
         anti_alias: false,

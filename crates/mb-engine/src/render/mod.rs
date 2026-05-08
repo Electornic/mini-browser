@@ -240,6 +240,14 @@ pub struct ImageCommand {
     pub source_width: usize,
     pub source_height: usize,
     pub pixels: Vec<u32>,
+    // Source-pixel offset that lands at the box's top-left, used by
+    // `background-position` to slice a sprite strip without scaling. When
+    // both are zero the existing scale-to-fit path runs (current
+    // behaviour for `<img>` / un-positioned backgrounds); when either is
+    // non-zero the rasteriser switches to native-pixel rendering with
+    // the source clipped to the box rect.
+    pub source_x: f32,
+    pub source_y: f32,
 }
 
 #[cfg(test)]
@@ -485,6 +493,63 @@ mod tests {
             "padding-box width must include 4px left+right padding (got {})",
             red_rect.width,
         );
+    }
+
+    #[test]
+    fn background_position_emits_image_with_source_offset() {
+        // Phase 6.G: a sprite-style sliced background should arrive at
+        // the rasteriser with `source_x`/`source_y` set so it switches
+        // to native-pixel rendering with the source clipped to the box.
+        // CSS `background-position: -10px -20px` flips sign in the
+        // pipeline (positive `source_x`/`y` = clip from the left/top of
+        // the source).
+        let document =
+            html::parse(r##"<a class="vote"></a>"##).unwrap();
+        let root = document.roots()[0];
+        let stylesheet = css::parse(
+            r#"
+                .vote {
+                    display: inline-block;
+                    width: 10px;
+                    height: 10px;
+                    background-image: url("/sprite.png");
+                    background-position: -10px -20px;
+                }
+            "#,
+        )
+        .unwrap();
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let layout = layout::layout_tree(&styled, 400.0);
+
+        let base = crate::url::Url::parse("http://example.com/").unwrap();
+        let resolved = base.resolve("/sprite.png").unwrap();
+        let mut images: std::collections::HashMap<String, crate::resource::LoadedImage> =
+            std::collections::HashMap::new();
+        // 30×30 source: the box reveals a 10×10 slice starting at (10, 20).
+        images.insert(
+            resolved.to_string(),
+            crate::resource::LoadedImage {
+                url: resolved,
+                width: 30,
+                height: 30,
+                pixels: vec![0; 900],
+            },
+        );
+        let ctx = render::PaintContext {
+            base_url: Some(&base),
+            images: &images,
+        };
+        let commands = render::build_display_list(&layout, &ctx);
+
+        let sprite = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DisplayCommand::Image(img) => Some(img),
+                _ => None,
+            })
+            .expect("sprite must paint as an Image command");
+        assert_eq!(sprite.source_x, 10.0);
+        assert_eq!(sprite.source_y, 20.0);
     }
 
     #[test]
@@ -760,6 +825,8 @@ mod tests {
                     source_width: 1,
                     source_height: 1,
                     pixels: vec![0x112233],
+                    source_x: 0.0,
+                    source_y: 0.0,
                 }),
             ],
             10.0,
@@ -801,6 +868,8 @@ mod tests {
                 source_width: 1,
                 source_height: 1,
                 pixels: vec![0x112233],
+                source_x: 0.0,
+                source_y: 0.0,
             })
         );
     }
@@ -816,6 +885,8 @@ mod tests {
                 source_width: 2,
                 source_height: 2,
                 pixels: vec![0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF],
+                source_x: 0.0,
+                source_y: 0.0,
             })],
             2,
             2,
