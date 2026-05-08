@@ -512,8 +512,10 @@ mod tests {
         assert_eq!(layout.dimensions.content.width, 300.0);
         assert_eq!(first.dimensions.content.y, 5.0);
         // Adjacent vertical margins collapse: gap between blocks is max(7, 5) = 7,
-        // not sum (12). Second block's content_y = first bottom (25) + 7 = 32.
-        assert_eq!(second.dimensions.content.y, 32.0);
+        // not sum (12). First <p> contains one line at 20px font-size; with
+        // `line-height: normal` ≈ 1.2× (Phase 6.B) the line box is 24, so first
+        // bottom = 5 + 24 = 29 and second.content_y = 29 + 7 = 36.
+        assert_eq!(second.dimensions.content.y, 36.0);
     }
 
     #[test]
@@ -561,7 +563,11 @@ mod tests {
     }
 
     #[test]
-    fn text_nodes_use_font_size_as_intrinsic_height() {
+    fn text_nodes_use_line_height_as_intrinsic_height() {
+        // A single-line text run reserves one line box of vertical space.
+        // Phase 6.B made `line-height: normal` resolve to font-size × 1.2,
+        // so an 18px font-size gives a 21.6 line box (the spec's
+        // metric-driven default that Chrome's body copy clusters around).
         let styled = styled_root(
             r#"<p class="copy">Hello</p>"#,
             r#"
@@ -572,7 +578,7 @@ mod tests {
         let layout = layout_tree(&styled, 400.0);
         let text = &layout.children[0];
 
-        assert_eq!(text.dimensions.content.height, 18.0);
+        assert_eq!(text.dimensions.content.height, 21.6);
     }
 
     #[test]
@@ -1714,6 +1720,28 @@ mod tests {
     }
 
     #[test]
+    fn line_height_normal_uses_metric_driven_ratio() {
+        // Phase 6.B: `line-height: normal` (or unset) should resolve to a
+        // metric-driven multiplier ≈ 1.2× the font-size, not the bare 1.0
+        // identity that left HN body looking 17% tighter than Chrome.
+        // Tested via two equivalent declarations to lock both code paths
+        // (explicit `normal` keyword and missing declaration).
+        let unset = styled_root(
+            r#"<p>Hello</p>"#,
+            r#"p { font-size: 20px; }"#,
+        );
+        let normal = styled_root(
+            r#"<p>Hello</p>"#,
+            r#"p { font-size: 20px; line-height: normal; }"#,
+        );
+        let unset_text = &layout_tree(&unset, 400.0).children[0];
+        let normal_text = &layout_tree(&normal, 400.0).children[0];
+
+        assert_eq!(unset_text.dimensions.content.height, 24.0);
+        assert_eq!(normal_text.dimensions.content.height, 24.0);
+    }
+
+    #[test]
     fn line_height_number_multiplies_font_size() {
         // Unitless line-height applies as a multiplier of the element's own
         // font-size at every level — 16px × 1.5 = 24px tall text.
@@ -1781,8 +1809,10 @@ mod tests {
 
     #[test]
     fn line_box_stretches_to_tallest_inline_child() {
-        // A line containing a 12px span and a 30px span should be 30 tall —
-        // that's the max of the per-child line heights, not their sum.
+        // A line containing a 12px span and a 30px span should pick up the
+        // taller child's line box, not the sum. With Phase 6.B's
+        // metric-driven `line-height: normal` ≈ 1.2× the line heights are
+        // 14.4 and 36 → max = 36.
         let styled = styled_root(
             r#"<p><span class="small">a</span><span class="big">b</span></p>"#,
             r#"
@@ -1793,7 +1823,7 @@ mod tests {
         );
         let layout = layout_tree(&styled, 400.0);
 
-        assert_eq!(layout.dimensions.content.height, 30.0);
+        assert_eq!(layout.dimensions.content.height, 36.0);
     }
 
     #[test]

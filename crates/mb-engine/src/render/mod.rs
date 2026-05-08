@@ -363,7 +363,10 @@ mod tests {
             vec![DisplayCommand::Text(TextCommand {
                 text: "Hello".into(),
                 x: 0.0,
-                y: 12.0,
+                // Paint y = content_y (12, from <p> UA margin-top) + half-leading.
+                // With Phase 6.B normal line-height = 1.2× the line box is 21.6
+                // for an 18px font; half-leading = (21.6 - 18) / 2 = 1.8 → y = 13.8.
+                y: 13.8,
                 color: Color {
                     r: 0,
                     g: 255,
@@ -441,8 +444,10 @@ mod tests {
                 _ => None,
             })
             .expect("inline <code>'s author background must paint as a SolidRect");
-        // Padding-box height = content_height (= font-size) + top + bottom = 16 + 4 = 20.
-        assert_eq!(red_rect.height, 20.0);
+        // Padding-box height = content_height + top + bottom. Default font-size is
+        // 16, content_height = 16 × 1.2 = 19.2 (Phase 6.B normal line-height),
+        // plus 2+2 padding gives 23.2.
+        assert_eq!(red_rect.height, 23.2);
         // Padding-box width = inline content width + 4 + 4 = at least 8px wider than 0.
         assert!(
             red_rect.width >= 8.0,

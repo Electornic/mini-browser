@@ -543,19 +543,27 @@ fn inline_font_size(node: &StyledNode) -> f32 {
     length_value(node, "font-size", 0.0).unwrap_or(16.0)
 }
 
+/// Multiplier used for `line-height: normal` (and unset). The spec lets a UA
+/// derive this from font metrics (ascent + descent + line gap), which Chrome
+/// and Firefox do per font; 1.2 is the conservative average that proportional
+/// body fonts (Helvetica, Arial, Times, system UI) cluster around — close
+/// enough that text renders within ~1px per line of Chrome on the pages
+/// Phase 6 targets, without plumbing per-font metrics through cosmic-text.
+pub(crate) const NORMAL_LINE_HEIGHT_RATIO: f32 = 1.2;
+
 pub(crate) fn inline_line_height_px(node: &StyledNode) -> f32 {
     // CSS `line-height` resolves against the element's *own* font-size:
     // - <number>: bare multiplier (inherits as the number, applied per element)
     // - <length>: absolute (em/rem already converted to Px during style)
     // - <percent>: applied to this node's font-size
-    // - keyword `normal` / unset: identity (= font-size); skip extra leading
+    // - keyword `normal` / unset: metric-driven; we approximate with 1.2×.
     let font_size = inline_font_size(node);
     match node.value("line-height") {
         Some(Value::Number(multiplier)) => font_size * multiplier,
         Some(Value::Length(value, Unit::Px)) => *value,
         Some(Value::Length(value, Unit::Percent)) => font_size * value / 100.0,
         Some(Value::Length(value, _)) => *value,
-        _ => font_size,
+        _ => font_size * NORMAL_LINE_HEIGHT_RATIO,
     }
 }
 
