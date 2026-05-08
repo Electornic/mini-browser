@@ -446,13 +446,15 @@ mod tests {
 
     #[test]
     fn inline_code_paints_author_background_and_padding() {
-        // Phase 5.5: an author-styled inline `<code>` (background + padding)
-        // must emit a SolidRect at its padding-box. The inline whitelist
+        // Phase 5.5 / 6.H: an author-styled inline `<code>` (background +
+        // padding) must paint at its padding-box. The inline whitelist
         // (layout::inline) already gives `<code>` its own LayoutBox with
         // padding folded into the box dims, so this test is what catches
         // any future regression where inline elements stop running through
-        // the paint_self/background_command path. The padding-box width is
-        // measured("x") + 4px*2 ≈ 16.5px under the toy text estimate.
+        // the paint_self/background_command path. Phase 6.H adds a UA
+        // 3px border-radius, so the emitted command is a RoundedRect
+        // rather than a SolidRect. The padding-box width is measured("x")
+        // + 4px*2 ≈ 16.5px under the toy text estimate.
         let commands = display_list(
             r#"<p><code>x</code></p>"#,
             r#"
@@ -469,7 +471,7 @@ mod tests {
         let red_rect = commands
             .iter()
             .find_map(|cmd| match cmd {
-                DisplayCommand::SolidRect(color, rect)
+                DisplayCommand::RoundedRect(color, rect, _)
                     if *color
                         == (Color {
                             r: 255,
@@ -482,7 +484,9 @@ mod tests {
                 }
                 _ => None,
             })
-            .expect("inline <code>'s author background must paint as a SolidRect");
+            .expect(
+                "inline <code>'s author background must paint as a RoundedRect (UA border-radius)",
+            );
         // Padding-box height = content_height + top + bottom. Default font-size is
         // 16, content_height = 16 × 1.2 = 19.2 (Phase 6.B normal line-height),
         // plus 2+2 padding gives 23.2.

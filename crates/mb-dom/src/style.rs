@@ -411,6 +411,27 @@ fn parent_is_center(document: &Document, node_id: NodeId) -> bool {
     )
 }
 
+/// Walk the ancestry chain looking for a `<pre>`. Used by the `<code>` UA
+/// default to suppress the inline pill when the code lives inside a
+/// `<pre>` panel — the pill would visually double-up on the panel's
+/// background and add padding that breaks line packing inside the
+/// monospace block.
+fn has_pre_ancestor(document: &Document, node_id: NodeId) -> bool {
+    let mut current = document.get(node_id).and_then(|n| n.parent);
+    while let Some(parent_id) = current {
+        match document.get(parent_id).map(|n| &n.node_type) {
+            Some(NodeType::Element(element))
+                if element.tag_name.eq_ignore_ascii_case("pre") =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+        current = document.get(parent_id).and_then(|n| n.parent);
+    }
+    false
+}
+
 // Re-export of the selector impl so the MatchingContext type parameter
 // stays readable in `specified_values`. Keeps all selectors-crate
 // generics on a single line per use-site.
@@ -853,15 +874,59 @@ fn default_values(document: &Document, node_id: NodeId) -> PropertyMap {
                 }),
             );
         }
-        // The HTML phrasing tags whose UA stylesheet is `font-family:
-        // monospace`. Inline whitelist (layout::inline::is_inline_node)
-        // already keeps them on the same line as surrounding text — what
-        // they were missing was the family signal the renderer needs to
-        // pick the monospace fallback. No bg / padding here: real browsers
-        // leave that to author CSS, and bundling it would visually
-        // double-up inside `<pre><code>` blocks (which already paint the
-        // `<pre>` chrome).
-        "code" | "kbd" | "samp" | "tt" => {
+        // <code> standalone (not the `<pre><code>` block form) gets the
+        // GitHub-style inline pill: monospace family + faint #f6f8fa
+        // background + small horizontal padding + softly rounded corners.
+        // The same chrome on a `<code>` inside `<pre>` would double up on
+        // the `<pre>` panel and force redundant padding into the wrapped
+        // text, so we suppress the pill in that case and let the parent
+        // panel carry the look.
+        "code" => {
+            values.insert("font-family".into(), Value::Keyword("monospace".into()));
+            if !has_pre_ancestor(document, node_id) {
+                values.insert(
+                    "background-color".into(),
+                    Value::Color(crate::css::Color {
+                        r: 246,
+                        g: 248,
+                        b: 250,
+                        a: 255,
+                    }),
+                );
+                // Padding is sized in `em` so the pill scales with the
+                // surrounding font-size (10pt body keeps a tight pill,
+                // a 24px heading gets a chunkier one). The cascade pass
+                // resolves the em values to Px alongside the rest of
+                // the descendant lengths.
+                values.insert(
+                    "padding-top".into(),
+                    Value::Length(0.1, crate::css::Unit::Em),
+                );
+                values.insert(
+                    "padding-bottom".into(),
+                    Value::Length(0.1, crate::css::Unit::Em),
+                );
+                values.insert(
+                    "padding-left".into(),
+                    Value::Length(0.3, crate::css::Unit::Em),
+                );
+                values.insert(
+                    "padding-right".into(),
+                    Value::Length(0.3, crate::css::Unit::Em),
+                );
+                for side in ["top-left", "top-right", "bottom-right", "bottom-left"] {
+                    values.insert(
+                        format!("border-{side}-radius"),
+                        Value::Length(3.0, crate::css::Unit::Px),
+                    );
+                }
+            }
+        }
+        // The other monospace phrasing tags get only the family signal —
+        // their visual shape is closer to plain inline text than to a
+        // pill, and bundling chrome would visually compete with the
+        // surrounding paragraph.
+        "kbd" | "samp" | "tt" => {
             values.insert("font-family".into(), Value::Keyword("monospace".into()));
         }
         "input" | "textarea" => {
@@ -2368,6 +2433,60 @@ mod tests {
                 a: 255,
             }))
         );
+    }
+
+    #[test]
+    fn standalone_inline_code_gets_ua_pill_background() {
+        // Phase 6.H: a bare `<code>` outside `<pre>` should arrive at
+        // the painter with the GitHub-style #f6f8fa background, small
+        // em-scaled padding, and a 3px border-radius. Without this the
+        // inline `<code>` runs render visually identical to body text
+        // on unstyled pages — barely distinguishable from a regular
+        // span.
+        let (document, root) = parse_html(r#"<p>plain <code>x</code></p>"#);
+        let styled = style::style_tree(&document, root, &[]);
+        let code = &styled.children[1];
+
+        assert_eq!(
+            code.value("background-color"),
+            Some(&Value::Color(Color {
+                r: 246,
+                g: 248,
+                b: 250,
+                a: 255,
+            }))
+        );
+        // Padding is em-based and resolves to Px during the cascade —
+        // 0.3em at the inherited 16px UA default lands at 4.8px.
+        assert_eq!(
+            code.value("padding-left"),
+            Some(&Value::Length(4.8, Unit::Px))
+        );
+        assert_eq!(
+            code.value("border-top-left-radius"),
+            Some(&Value::Length(3.0, Unit::Px))
+        );
+    }
+
+    #[test]
+    fn code_inside_pre_skips_pill_to_avoid_double_chrome() {
+        // The `<pre>` panel already paints its own faint #f6f8fa
+        // background; a nested `<code>` adding another pill would
+        // double up and force redundant padding. UA suppresses the
+        // pill in that case but still hands down the monospace family
+        // (which the existing test already covers).
+        let (document, root) = parse_html(r#"<pre><code>x = 1</code></pre>"#);
+        let styled = style::style_tree(&document, root, &[]);
+        // pre → code is the only child path here.
+        let code = &styled.children[0];
+
+        assert_eq!(code.value("padding-left"), None);
+        assert_eq!(code.value("border-top-left-radius"), None);
+        // Code still inherits the `<pre>`'s background-color through
+        // the cascade, but the suppression is about the UA pill — the
+        // test confirms we didn't add a *second* layer of chrome.
+        // background-color comes through as the inherited pre value;
+        // we just verify the pill markers (padding / radius) are absent.
     }
 
     #[test]
