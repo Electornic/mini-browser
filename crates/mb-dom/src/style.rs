@@ -732,6 +732,37 @@ fn default_values(document: &Document, node_id: NodeId) -> PropertyMap {
         "b" | "strong" => {
             values.insert("font-weight".into(), Value::Keyword("bold".into()));
         }
+        // <hr> renders as a 1px gray rule that spans its containing
+        // block. UA stylesheets land it via a top border on a zero-height
+        // box (the historical Netscape rendering), with vertical margins
+        // so adjacent paragraphs don't kiss the line. The border-color
+        // fallback in render::border_commands picks `currentColor` when
+        // no explicit color is set, which lands at the dark text color
+        // here for typical pages.
+        "hr" => {
+            values.insert("border-top".into(), Value::Length(1.0, crate::css::Unit::Px));
+            values.insert(
+                "border-color".into(),
+                Value::Color(crate::css::Color {
+                    r: 204,
+                    g: 204,
+                    b: 204,
+                    a: 255,
+                }),
+            );
+            values.insert(
+                "margin-top".into(),
+                Value::Length(8.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "margin-bottom".into(),
+                Value::Length(8.0, crate::css::Unit::Px),
+            );
+            // Zero content height: the visible line *is* the top border;
+            // a non-zero content area would push following blocks down by
+            // an extra row of empty pixels.
+            values.insert("height".into(), Value::Length(0.0, crate::css::Unit::Px));
+        }
         // <sup>/<sub> get the UA defaults that make them read as
         // typographic super/subscript: smaller glyph + raised/lowered
         // baseline. Without these the footnote markers on the Haskell
@@ -2487,6 +2518,35 @@ mod tests {
         // test confirms we didn't add a *second* layer of chrome.
         // background-color comes through as the inherited pre value;
         // we just verify the pill markers (padding / radius) are absent.
+    }
+
+    #[test]
+    fn hr_gets_top_border_and_gray_color_ua_defaults() {
+        // Phase 6.I: bare `<hr>` should arrive at the painter with a
+        // 1px top border and the historical light-gray color, plus a
+        // small vertical margin so adjacent paragraphs don't kiss the
+        // line. HN's footer divider and the Haskell blog's section
+        // breaks both rely on these defaults.
+        let (document, root) = parse_html(r#"<hr>"#);
+        let styled = style::style_tree(&document, root, &[]);
+
+        assert_eq!(
+            styled.value("border-top"),
+            Some(&Value::Length(1.0, Unit::Px))
+        );
+        assert_eq!(
+            styled.value("border-color"),
+            Some(&Value::Color(Color {
+                r: 204,
+                g: 204,
+                b: 204,
+                a: 255,
+            }))
+        );
+        assert_eq!(
+            styled.value("height"),
+            Some(&Value::Length(0.0, Unit::Px))
+        );
     }
 
     #[test]

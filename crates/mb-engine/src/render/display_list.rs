@@ -753,9 +753,14 @@ fn border_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayCommand> {
         Some(node) => node,
         None => return Vec::new(),
     };
+    // CSS spec: when `border-color` is unset, the border paints in the
+    // element's `color` (effectively `currentColor`). Falling back here
+    // means a `<hr>` or `<div style="border-top: 1px solid">` paints
+    // even without an explicit border-color, matching what every real
+    // browser does.
     let color = match node.value("border-color") {
         Some(Value::Color(color)) => apply_alpha(*color, alpha),
-        _ => return Vec::new(),
+        _ => apply_alpha(text_color(node), alpha),
     };
     let border = layout_box.dimensions.border;
     if border.left == 0.0 && border.right == 0.0 && border.top == 0.0 && border.bottom == 0.0 {

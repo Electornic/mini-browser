@@ -500,6 +500,68 @@ mod tests {
     }
 
     #[test]
+    fn hr_paints_one_pixel_gray_top_border() {
+        // Phase 6.I: bare `<hr>` lands a 1px-tall gray rectangle
+        // spanning the containing block's width via the UA `border-top`.
+        // This catches a regression in either the cascade default or
+        // the border paint path the same way the inline-code test
+        // catches background-color regressions.
+        let commands = display_list(r#"<hr>"#, "");
+        let divider = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DisplayCommand::SolidRect(color, rect)
+                    if rect.height == 1.0
+                        && *color
+                            == (Color {
+                                r: 204,
+                                g: 204,
+                                b: 204,
+                                a: 255,
+                            }) =>
+                {
+                    Some(rect)
+                }
+                _ => None,
+            })
+            .expect("<hr> must paint a 1px gray top border");
+        // The divider should span the viewport (400px in display_list's
+        // helper). We just check it's wider than zero rather than pin
+        // an exact width — a future layout tweak that switches the
+        // containing block size shouldn't rip this test.
+        assert!(
+            divider.width > 0.0,
+            "<hr>'s border must span a non-zero width (got {})",
+            divider.width
+        );
+    }
+
+    #[test]
+    fn border_top_falls_back_to_currentcolor_when_no_border_color_set() {
+        // Phase 6.I: a `<div style="border-top: 1px solid">` with no
+        // explicit `border-color` should paint in the element's `color`
+        // (the CSS spec's `currentColor` fallback). Before 6.I the paint
+        // path bailed early when border-color was absent, leaving the
+        // divider invisible.
+        let commands = display_list(
+            r#"<div></div>"#,
+            r#"div { color: red; border-top: 2px; height: 10px; }"#,
+        );
+        let red_top = commands.iter().find(|cmd| {
+            matches!(
+                cmd,
+                DisplayCommand::SolidRect(color, rect)
+                    if rect.height == 2.0
+                        && *color == (Color { r: 255, g: 0, b: 0, a: 255 })
+            )
+        });
+        assert!(
+            red_top.is_some(),
+            "border-top should paint in the element's `color` when border-color is unset",
+        );
+    }
+
+    #[test]
     fn background_position_emits_image_with_source_offset() {
         // Phase 6.G: a sprite-style sliced background should arrive at
         // the rasteriser with `source_x`/`source_y` set so it switches
