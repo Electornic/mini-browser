@@ -473,6 +473,19 @@ pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
     Ok(Stylesheet { rules })
 }
 
+/// Parse the contents of a `style="..."` attribute as a flat declaration
+/// list (no surrounding braces). The returned declarations carry the same
+/// shape as a stylesheet rule's body — including longhand expansion for
+/// shorthand properties — so the cascade applies them through the same
+/// `apply_declarations` path. Errors on individual declarations are
+/// tolerated; the offending entry is dropped and the rest continue,
+/// matching the stylesheet parser's recovery behaviour.
+pub fn parse_inline_style(source: &str) -> Vec<Declaration> {
+    let mut input = ParserInput::new(source);
+    let mut parser = CssParser::new(&mut input);
+    parse_declaration_block(&mut parser).unwrap_or_default()
+}
+
 /// Parse a single complex selector (e.g. `div.card > a`). Used by JS-facing
 /// `document.querySelector` to reuse the same selector grammar as the
 /// stylesheet parser without going through a full stylesheet rule.

@@ -370,6 +370,19 @@ fn specified_values(
         apply_declarations(&mut values, declarations);
     }
 
+    // Inline `style="..."` carries the highest author specificity per the CSS
+    // spec — it beats every selector match, even an `!important`-free ID
+    // selector. Apply after the matched-rules sort so a `<td style="width:
+    // 60px">` value lands on top of any author `td { width: 100px; }` rule.
+    // !important inside the inline style is not yet honoured (we don't model
+    // !important anywhere); revisit once important folding is implemented.
+    if let Some(NodeType::Element(elem_data)) = document.get(node_id).map(|n| &n.node_type)
+        && let Some(inline_source) = elem_data.attributes.get("style")
+    {
+        let inline_decls = crate::css::parse_inline_style(inline_source);
+        apply_declarations(&mut values, &inline_decls);
+    }
+
     // Legacy `<center>` element: real browsers center every block child
     // through quirks-mode magic (effectively `margin: 0 auto`). HN still
     // wraps its main table in `<center>` for that reason. Without this
@@ -2304,6 +2317,56 @@ mod tests {
         assert_eq!(
             sub.value("vertical-align"),
             Some(&Value::Keyword("sub".into()))
+        );
+    }
+
+    #[test]
+    fn inline_style_attribute_overrides_matched_author_rules() {
+        // Phase 6.E: per the CSS spec, the `style="..."` attribute beats
+        // every selector match. HN's homepage cells use inline `style="width:
+        // 60px"` (and friends) to control spacing; without inline-style
+        // parsing that declaration was dropped on the floor and the cell
+        // fell back to the author rule's width.
+        let (document, root) =
+            parse_html(r#"<div class="card" style="width: 60px; color: red">x</div>"#);
+        let stylesheet = parse_css(r#".card { width: 100px; color: blue; }"#);
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+
+        // Inline width wins over the .card class rule.
+        assert_eq!(
+            styled.value("width"),
+            Some(&Value::Length(60.0, Unit::Px))
+        );
+        // Inline color wins for the same reason.
+        assert_eq!(
+            styled.value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }))
+        );
+    }
+
+    #[test]
+    fn inline_style_falls_back_when_attribute_is_missing() {
+        // No `style` attribute → behaviour matches what the cascade
+        // produced before Phase 6.E. A regression here would mean the
+        // new code is doing something even on un-styled elements.
+        let (document, root) = parse_html(r#"<div class="card">x</div>"#);
+        let stylesheet = parse_css(r#".card { color: green; }"#);
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        assert_eq!(
+            styled.value("color"),
+            Some(&Value::Color(Color {
+                r: 0,
+                g: 128,
+                b: 0,
+                a: 255,
+            }))
         );
     }
 
