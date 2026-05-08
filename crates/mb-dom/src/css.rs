@@ -410,6 +410,10 @@ pub enum Unit {
     // widths (`max-width: 65ch` ≈ 8 words / line at 16px). A real implementation
     // would query cosmic-text for the "0" glyph advance.
     Ch,
+    // Absolute typographic unit: 1pt = 1/72in, with CSS pinning 1in = 96px → 1pt = 4/3 px.
+    // Resolved to Px during the cascade alongside em/rem so downstream layout only
+    // sees Px / Percent. Common on legacy pages that set `font-size: 10pt` on body.
+    Pt,
     // Percent is containing-block-relative; resolution happens at layout time once
     // the parent's content box is known.
     Percent,
@@ -771,8 +775,9 @@ fn length_with_unit(value: f32, unit: &str) -> Value {
         "em" => Value::Length(value, Unit::Em),
         "rem" => Value::Length(value, Unit::Rem),
         "ch" => Value::Length(value, Unit::Ch),
-        // Unsupported dimensions (e.g. `12pt`) fall back to a keyword that mirrors the
-        // original tokens so callers can still distinguish them at the cascade layer.
+        "pt" => Value::Length(value, Unit::Pt),
+        // Unsupported dimensions fall back to a keyword that mirrors the original
+        // tokens so callers can still distinguish them at the cascade layer.
         other => Value::Keyword(format!("{value}{other}")),
     }
 }
@@ -1725,6 +1730,7 @@ fn parse_grid_track_size<'i, 't>(
             "em" => Ok(TrackSize::Length(value, Unit::Em)),
             "rem" => Ok(TrackSize::Length(value, Unit::Rem)),
             "ch" => Ok(TrackSize::Length(value, Unit::Ch)),
+            "pt" => Ok(TrackSize::Length(value, Unit::Pt)),
             other => Err(ParseError::new(
                 pos,
                 format!("unsupported grid track unit '{other}'"),
@@ -2678,6 +2684,17 @@ mod tests {
         let stylesheet = parse(".article { max-width: 65ch; }").unwrap();
         let value = &stylesheet.rules[0].declarations[0].value;
         assert_eq!(*value, Value::Length(65.0, Unit::Ch));
+    }
+
+    #[test]
+    fn parses_pt_length_unit() {
+        // `10pt` is HN's body font-size; before Phase 6.A the parser fell
+        // through to `Keyword("10pt")` and the cascade defaulted body to 16px,
+        // making text look 25% small. Now it round-trips as Length(_, Pt) so
+        // the cascade can scale it to 13.33px (10 × 4/3).
+        let stylesheet = parse(".body { font-size: 10pt; }").unwrap();
+        let value = &stylesheet.rules[0].declarations[0].value;
+        assert_eq!(*value, Value::Length(10.0, Unit::Pt));
     }
 
     #[test]

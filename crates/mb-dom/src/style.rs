@@ -215,13 +215,16 @@ fn style_tree_inner(
     // the spec value, which is what 5.2 actually targets.
     specified_values.insert("font-size".into(), Value::Length(own_font_size, Unit::Px));
     let ch_unit = own_font_size * 0.5;
+    // 1pt = 1/72in, CSS pins 1in = 96px → 4/3 px.
+    const PT_TO_PX: f32 = 4.0 / 3.0;
     for value in specified_values.values_mut() {
         match value {
             Value::Length(v, Unit::Em) => *value = Value::Length(*v * own_font_size, Unit::Px),
             Value::Length(v, Unit::Rem) => *value = Value::Length(*v * root_font_size, Unit::Px),
             Value::Length(v, Unit::Ch) => *value = Value::Length(*v * ch_unit, Unit::Px),
+            Value::Length(v, Unit::Pt) => *value = Value::Length(*v * PT_TO_PX, Unit::Px),
             // Track lists (grid-template-columns/rows) can mix length tracks
-            // with fr tracks; resolve em/rem/ch inside Length tracks the same
+            // with fr tracks; resolve em/rem/ch/pt inside Length tracks the same
             // way we resolve top-level lengths so layout only ever sees Px / %.
             Value::TrackList(tracks) => {
                 for track in tracks.iter_mut() {
@@ -234,6 +237,9 @@ fn style_tree_inner(
                         }
                         TrackSize::Length(v, Unit::Ch) => {
                             *track = TrackSize::Length(*v * ch_unit, Unit::Px);
+                        }
+                        TrackSize::Length(v, Unit::Pt) => {
+                            *track = TrackSize::Length(*v * PT_TO_PX, Unit::Px);
                         }
                         _ => {}
                     }
@@ -283,6 +289,10 @@ fn resolve_font_size(raw: Option<&Value>, parent_font_size: f32, root_font_size:
         // ratio the cascade applies to other ch lengths below, just rooted
         // one level up to break the chicken-and-egg.
         Some(Value::Length(v, Unit::Ch)) => *v * parent_font_size * 0.5,
+        // 1pt = 4/3 px (1/72in × 96px/in). Common on legacy pages: HN sets
+        // `font-size: 10pt` which lands at 13.33px — 25% larger than the bare
+        // 10px we used to fall back to before pt was a first-class unit.
+        Some(Value::Length(v, Unit::Pt)) => *v * (4.0 / 3.0),
         // CSS spec resolves font-size: <percent> against the parent's font-size, just like em.
         Some(Value::Length(v, Unit::Percent)) => *v / 100.0 * parent_font_size,
         _ => parent_font_size,
@@ -2090,6 +2100,55 @@ mod tests {
             styled.value("max-width"),
             Some(&Value::Length(650.0, Unit::Px))
         );
+    }
+
+    #[test]
+    fn pt_unit_resolves_to_four_thirds_px_in_cascade() {
+        // 1pt = 1/72in, CSS pins 1in = 96px → 4/3 px. A `padding: 12pt`
+        // declaration should land at exactly 16px, the same value Chrome
+        // reports in DevTools for the same input.
+        let (document, root) = parse_html(r#"<div class="card">x</div>"#);
+        let stylesheet = parse_css(r#".card { padding-left: 12pt; }"#);
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        assert_eq!(
+            styled.value("padding-left"),
+            Some(&Value::Length(16.0, Unit::Px))
+        );
+    }
+
+    #[test]
+    fn pt_font_size_scales_inherited_em_lengths() {
+        // HN-style: body `font-size: 10pt` → 13.333px. A child whose own
+        // declarations use em should resolve against that, not the 16px UA
+        // default. This is the regression Phase 6.A is built to fix —
+        // before pt parsed, `10pt` fell through to a Keyword and the body
+        // stayed at 16px.
+        let (document, root) =
+            parse_html(r#"<body class="page"><span class="lead">x</span></body>"#);
+        let stylesheet = parse_css(
+            r#"
+                .page { font-size: 10pt; }
+                .lead { padding-left: 2em; }
+            "#,
+        );
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        // body: 10pt → 40/3 ≈ 13.333px.
+        match styled.value("font-size") {
+            Some(Value::Length(v, Unit::Px)) => {
+                assert!((v - 40.0 / 3.0).abs() < 1e-4, "got {v}");
+            }
+            other => panic!("unexpected font-size: {other:?}"),
+        }
+        // child padding-left: 2em against 13.333px → 80/3 ≈ 26.666px.
+        let child = &styled.children[0];
+        match child.value("padding-left") {
+            Some(Value::Length(v, Unit::Px)) => {
+                assert!((v - 80.0 / 3.0).abs() < 1e-4, "got {v}");
+            }
+            other => panic!("unexpected padding-left: {other:?}"),
+        }
     }
 
     #[test]
