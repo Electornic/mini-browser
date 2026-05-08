@@ -683,6 +683,9 @@ fn parse_declaration_value<'i, 't>(
     if name == "border-radius" {
         return parse_border_radius_shorthand(name, input);
     }
+    if name == "padding" || name == "margin" {
+        return parse_box_edge_shorthand(name, input);
+    }
     if name == "box-shadow" {
         let value = parse_box_shadow_value(input)?;
         return Ok(vec![Declaration {
@@ -1207,6 +1210,100 @@ fn parse_border_radius_shorthand<'i, 't>(
         Declaration {
             name: "border-bottom-left-radius".into(),
             value: bl,
+        },
+    ])
+}
+
+// -----------------------------------------------------------------------------
+// padding / margin shorthand (CSS clockwise convention)
+// -----------------------------------------------------------------------------
+
+/// Expand `padding: 2px` / `margin: 8px 4px` etc. into the four per-side
+/// longhands (`padding-top`, `-right`, `-bottom`, `-left`). Phase 6.K
+/// catches the HN homepage's `<td style="padding: 2px">` and the orange
+/// header's `<table style="padding:2px">` — both shorthand-only forms
+/// the toy parser previously dropped on the floor (the value landed
+/// under the literal `padding` key, which the cascade never reads).
+///
+/// `margin` accepts the same value grammar; `auto` is also legal there
+/// per spec (used for horizontal centering) and folds through as a
+/// `Keyword("auto")` so layout's existing auto-margin path picks it up.
+fn parse_box_edge_shorthand<'i, 't>(
+    name: &str,
+    input: &mut CssParser<'i, 't>,
+) -> Result<Vec<Declaration>, ParseError> {
+    let mut values: Vec<Value> = Vec::new();
+    let allow_auto = name == "margin";
+    loop {
+        input.skip_whitespace();
+        if input.is_exhausted() {
+            break;
+        }
+        // `margin: auto` and `margin: 0 auto` are common; only attempt
+        // the keyword path on margin so we don't accidentally accept
+        // `padding: auto` (which has no spec meaning).
+        if allow_auto {
+            let probe = input.state();
+            if let Ok(Token::Ident(ident)) = input.next()
+                && ident.as_ref() == "auto"
+            {
+                values.push(Value::Keyword("auto".into()));
+                if values.len() == 4 {
+                    break;
+                }
+                continue;
+            }
+            input.reset(&probe);
+        }
+        if !peek_starts_length(input) {
+            break;
+        }
+        // CSS spec: bare zero is the only unitless number that's legal
+        // in a length context (`margin: 0 auto`). Promote it to a Px
+        // length here so the cascade / layout always consume a Length,
+        // not a Number — `lpa_or_zero` would silently treat any other
+        // unitless number as zero, which would mask malformed input.
+        let value = match parse_length_or_number(input)? {
+            Value::Number(n) if n == 0.0 => Value::Length(0.0, Unit::Px),
+            other => other,
+        };
+        values.push(value);
+        if values.len() == 4 {
+            break;
+        }
+    }
+
+    if values.is_empty() {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            format!("{name} requires at least one value"),
+        ));
+    }
+
+    let (top, right, bottom, left) = match values.as_slice() {
+        [v] => (v.clone(), v.clone(), v.clone(), v.clone()),
+        [v0, v1] => (v0.clone(), v1.clone(), v0.clone(), v1.clone()),
+        [v0, v1, v2] => (v0.clone(), v1.clone(), v2.clone(), v1.clone()),
+        [v0, v1, v2, v3] => (v0.clone(), v1.clone(), v2.clone(), v3.clone()),
+        _ => unreachable!(),
+    };
+
+    Ok(vec![
+        Declaration {
+            name: format!("{name}-top"),
+            value: top,
+        },
+        Declaration {
+            name: format!("{name}-right"),
+            value: right,
+        },
+        Declaration {
+            name: format!("{name}-bottom"),
+            value: bottom,
+        },
+        Declaration {
+            name: format!("{name}-left"),
+            value: left,
         },
     ])
 }
@@ -2218,12 +2315,29 @@ mod tests {
         .unwrap();
 
         let decls = &stylesheet.rules[0].declarations;
-        assert_eq!(decls[0].name, "width");
-        assert_eq!(decls[0].value, Value::Length(50.0, Unit::Percent));
-        assert_eq!(decls[1].name, "padding");
-        assert_eq!(decls[1].value, Value::Length(1.5, Unit::Em));
-        assert_eq!(decls[2].name, "font-size");
-        assert_eq!(decls[2].value, Value::Length(0.875, Unit::Rem));
+        // Phase 6.K expands `padding` into the four per-side longhands,
+        // so look up properties by name rather than by index.
+        let by_name = |target: &str| {
+            decls
+                .iter()
+                .find(|d| d.name == target)
+                .unwrap_or_else(|| panic!("missing declaration {target}"))
+        };
+        assert_eq!(by_name("width").value, Value::Length(50.0, Unit::Percent));
+        assert_eq!(by_name("padding-top").value, Value::Length(1.5, Unit::Em));
+        assert_eq!(
+            by_name("padding-right").value,
+            Value::Length(1.5, Unit::Em)
+        );
+        assert_eq!(
+            by_name("padding-bottom").value,
+            Value::Length(1.5, Unit::Em)
+        );
+        assert_eq!(by_name("padding-left").value, Value::Length(1.5, Unit::Em));
+        assert_eq!(
+            by_name("font-size").value,
+            Value::Length(0.875, Unit::Rem)
+        );
     }
 
     #[test]
@@ -2788,6 +2902,66 @@ mod tests {
         let y = decls.iter().find(|d| d.name == "background-position-y").expect("y longhand");
         assert_eq!(x.value, Value::Length(5.0, Unit::Px));
         assert_eq!(y.value, Value::Length(0.0, Unit::Px));
+    }
+
+    #[test]
+    fn padding_shorthand_expands_to_four_longhands_clockwise() {
+        // Phase 6.K: HN's orange header uses `<table style="padding:2px">`,
+        // which never reached layout before because `padding` only landed
+        // under the literal shorthand key. The cascade reads
+        // `padding-{top|right|bottom|left}`, so the shorthand has to
+        // expand at parse time.
+        let stylesheet = parse(".hd { padding: 1px 2px 3px 4px; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+        let by_name = |target: &str| {
+            decls
+                .iter()
+                .find(|d| d.name == target)
+                .unwrap_or_else(|| panic!("missing {target}"))
+                .value
+                .clone()
+        };
+        assert_eq!(by_name("padding-top"), Value::Length(1.0, Unit::Px));
+        assert_eq!(by_name("padding-right"), Value::Length(2.0, Unit::Px));
+        assert_eq!(by_name("padding-bottom"), Value::Length(3.0, Unit::Px));
+        assert_eq!(by_name("padding-left"), Value::Length(4.0, Unit::Px));
+    }
+
+    #[test]
+    fn padding_single_value_expands_uniformly() {
+        // The HN orange-header form: `padding:2px` (no spaces) — every
+        // side ends up at the same length.
+        let stylesheet = parse(".hd { padding: 2px; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+        for side in ["top", "right", "bottom", "left"] {
+            let target = format!("padding-{side}");
+            let decl = decls
+                .iter()
+                .find(|d| d.name == target)
+                .unwrap_or_else(|| panic!("missing {target}"));
+            assert_eq!(decl.value, Value::Length(2.0, Unit::Px));
+        }
+    }
+
+    #[test]
+    fn margin_shorthand_accepts_auto_keyword_for_horizontal_centering() {
+        // `margin: 0 auto` is the canonical centering trick; `auto` must
+        // round-trip as a Keyword so layout's auto-margin path picks it
+        // up, while the numeric sides stay as Length.
+        let stylesheet = parse(".centered { margin: 0 auto; }").unwrap();
+        let decls = &stylesheet.rules[0].declarations;
+        let by_name = |target: &str| {
+            decls
+                .iter()
+                .find(|d| d.name == target)
+                .unwrap_or_else(|| panic!("missing {target}"))
+                .value
+                .clone()
+        };
+        assert_eq!(by_name("margin-top"), Value::Length(0.0, Unit::Px));
+        assert_eq!(by_name("margin-right"), Value::Keyword("auto".into()));
+        assert_eq!(by_name("margin-bottom"), Value::Length(0.0, Unit::Px));
+        assert_eq!(by_name("margin-left"), Value::Keyword("auto".into()));
     }
 
     #[test]
