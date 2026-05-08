@@ -88,10 +88,21 @@ pub(super) fn layout_inline_children(
         let mut line_height = 0.0f32;
         for &child_idx in line_children {
             let child = &children[child_idx];
-            let child_box = layout_inline_or_inline_block(child, line_x, line_y, content_width);
+            let mut child_box =
+                layout_inline_or_inline_block(child, line_x, line_y, content_width);
             let outer = outer_rect(&child_box);
             line_x += outer.width;
             line_height = line_height.max(outer.height);
+            // `vertical-align: super`/`sub` shifts the child's whole
+            // subtree up or down so super/subscript glyphs sit off the
+            // baseline. The shift is folded in here (rather than during
+            // the child's own layout) so line packing measures the
+            // unshifted box for line-height — moving sup up doesn't
+            // shrink the parent's line box, matching what Chrome does
+            // for typographic super/subscript.
+            if let Some(dy) = vertical_align_shift_dy(child) {
+                super::shift_layout_subtree(&mut child_box, 0.0, dy);
+            }
             boxes.push(child_box);
         }
         max_bottom = max_bottom.max(line_y + line_height);
@@ -597,6 +608,25 @@ fn measure_inline_text(node: &StyledNode, text: &str) -> f32 {
 fn inline_font_family(node: &StyledNode) -> Option<String> {
     match node.value("font-family") {
         Some(Value::Keyword(keyword)) => Some(keyword.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+/// CSS `vertical-align` shift in pixels relative to the line's baseline.
+/// Positive moves down (sub), negative moves up (super); `None` means
+/// the child stays at the line's natural top-aligned position. The shift
+/// is rooted in the child's own font-size so a sup nested in a 30px
+/// heading lifts further than a sup inside 14px body copy. 0.4× the
+/// child's font (which is ~0.33× the parent under the `font-size:
+/// smaller` ratio) is the conservative offset Chrome and Firefox both
+/// land near for footnote markers.
+fn vertical_align_shift_dy(node: &StyledNode) -> Option<f32> {
+    match node.value("vertical-align") {
+        Some(Value::Keyword(keyword)) => match keyword.as_str() {
+            "super" => Some(-0.4 * inline_font_size(node)),
+            "sub" => Some(0.4 * inline_font_size(node)),
+            _ => None,
+        },
         _ => None,
     }
 }

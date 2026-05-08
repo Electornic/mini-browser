@@ -300,6 +300,18 @@ fn resolve_font_size(raw: Option<&Value>, parent_font_size: f32, root_font_size:
         Some(Value::Length(v, Unit::Pt)) => *v * (4.0 / 3.0),
         // CSS spec resolves font-size: <percent> against the parent's font-size, just like em.
         Some(Value::Length(v, Unit::Percent)) => *v / 100.0 * parent_font_size,
+        // CSS keywords `smaller` / `larger` step relative to the parent.
+        // The spec defines a scaling-factor table that varies per family;
+        // browsers in practice use a single ratio close to 0.83 (= 5/6)
+        // and 1.2 (= 6/5). That's the ratio Phase 6.D's `<sup>`/`<sub>` UA
+        // defaults rely on — `font-size: smaller` lands the footnote
+        // glyphs at ~10.6px next to a 13.3px body, matching Chrome's
+        // default footnote rendering on Haskell-blog-style pages.
+        Some(Value::Keyword(keyword)) => match keyword.as_str() {
+            "smaller" => parent_font_size * 0.83,
+            "larger" => parent_font_size * 1.2,
+            _ => parent_font_size,
+        },
         _ => parent_font_size,
     }
 }
@@ -685,6 +697,21 @@ fn default_values(document: &Document, node_id: NodeId) -> PropertyMap {
         // run before matched declarations.
         "b" | "strong" => {
             values.insert("font-weight".into(), Value::Keyword("bold".into()));
+        }
+        // <sup>/<sub> get the UA defaults that make them read as
+        // typographic super/subscript: smaller glyph + raised/lowered
+        // baseline. Without these the footnote markers on the Haskell
+        // blog (and the bug-report `<sup>` markers on legacy GitHub
+        // issues) render as full-size digits squatting at the top of the
+        // line — visibly broken even before the line-height issue gets
+        // factored in.
+        "sup" => {
+            values.insert("font-size".into(), Value::Keyword("smaller".into()));
+            values.insert("vertical-align".into(), Value::Keyword("super".into()));
+        }
+        "sub" => {
+            values.insert("font-size".into(), Value::Keyword("smaller".into()));
+            values.insert("vertical-align".into(), Value::Keyword("sub".into()));
         }
         "a" => {
             values.insert(
@@ -2228,6 +2255,56 @@ mod tests {
         );
         // <td> stays at the cascade default — only <th> opts in.
         assert_eq!(td_cell.value("font-weight"), None);
+    }
+
+    #[test]
+    fn sup_cascades_smaller_font_and_super_alignment() {
+        // Phase 6.D: <sup> picks up `font-size: smaller` (0.83×) and
+        // `vertical-align: super` from the UA stylesheet so footnote
+        // markers (Haskell blog `<sup>1</sup>`) shrink + raise instead
+        // of squatting at full size in the middle of the line.
+        let (document, root) =
+            parse_html(r#"<p class="copy">Body<sup>1</sup></p>"#);
+        let stylesheet = parse_css(r#".copy { font-size: 18px; }"#);
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let sup = &styled.children[1];
+
+        match sup.value("font-size") {
+            // 18 × 0.83 = 14.94. Float compare with a small tolerance to
+            // keep the test stable if the ratio gets refined.
+            Some(Value::Length(v, Unit::Px)) => {
+                assert!((v - 18.0 * 0.83).abs() < 1e-3, "got {v}");
+            }
+            other => panic!("unexpected font-size: {other:?}"),
+        }
+        assert_eq!(
+            sup.value("vertical-align"),
+            Some(&Value::Keyword("super".into()))
+        );
+    }
+
+    #[test]
+    fn sub_cascades_smaller_font_and_sub_alignment() {
+        // Mirror of the sup test — `<sub>` gets the same shrink with the
+        // opposite vertical-align, used by chemistry/equation pages.
+        let (document, root) =
+            parse_html(r#"<p class="copy">H<sub>2</sub>O</p>"#);
+        let stylesheet = parse_css(r#".copy { font-size: 20px; }"#);
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let sub = &styled.children[1];
+
+        match sub.value("font-size") {
+            Some(Value::Length(v, Unit::Px)) => {
+                assert!((v - 20.0 * 0.83).abs() < 1e-3, "got {v}");
+            }
+            other => panic!("unexpected font-size: {other:?}"),
+        }
+        assert_eq!(
+            sub.value("vertical-align"),
+            Some(&Value::Keyword("sub".into()))
+        );
     }
 
     #[test]

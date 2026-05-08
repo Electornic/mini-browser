@@ -1808,6 +1808,27 @@ mod tests {
     }
 
     #[test]
+    fn sup_inline_shifts_baseline_up_relative_to_sibling_text() {
+        // Phase 6.D: a `<sup>` inside a paragraph should sit above the
+        // baseline of the sibling text run that lives on the same line.
+        // The exact offset depends on the cascaded font-size (which
+        // `<sup>` shrinks via `font-size: smaller`), so the test checks
+        // the relative ordering rather than a specific pixel.
+        let styled = styled_root(r#"<p>X<sup>1</sup></p>"#, r#""#);
+        let layout = layout_tree(&styled, 400.0);
+
+        let plain_text = &layout.children[0];
+        let sup_element = &layout.children[1];
+
+        assert!(
+            sup_element.dimensions.content.y < plain_text.dimensions.content.y,
+            "sup element should sit above the plain text baseline (sup y = {}, text y = {})",
+            sup_element.dimensions.content.y,
+            plain_text.dimensions.content.y,
+        );
+    }
+
+    #[test]
     fn line_box_stretches_to_tallest_inline_child() {
         // A line containing a 12px span and a 30px span should pick up the
         // taller child's line box, not the sum. With Phase 6.B's
