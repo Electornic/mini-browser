@@ -2296,8 +2296,10 @@ mod tests {
         let mut state = make_state("");
         state.address_bar_focused = false;
         state.address_bar_selected = false;
-        let mut input = input::WindowInput::default();
-        input.focus_address_bar = true;
+        let input = input::WindowInput {
+            focus_address_bar: true,
+            ..Default::default()
+        };
 
         state.apply_input(&input, 800, 600);
 
@@ -2316,8 +2318,10 @@ mod tests {
         state.address_input = "https://old.example/".to_string();
         state.address_bar_focused = true;
         state.address_bar_selected = true;
-        let mut input = input::WindowInput::default();
-        input.typed = "a".to_string();
+        let input = input::WindowInput {
+            typed: "a".to_string(),
+            ..Default::default()
+        };
 
         state.apply_input(&input, 800, 600);
 
@@ -2334,8 +2338,10 @@ mod tests {
         state.address_input = "ab".to_string();
         state.address_bar_focused = true;
         state.address_bar_selected = false;
-        let mut input = input::WindowInput::default();
-        input.typed = "cd".to_string();
+        let input = input::WindowInput {
+            typed: "cd".to_string(),
+            ..Default::default()
+        };
 
         state.apply_input(&input, 800, 600);
 
@@ -2352,8 +2358,10 @@ mod tests {
         state.address_input = "abc".to_string();
         state.address_bar_focused = true;
         state.address_bar_selected = false;
-        let mut input = input::WindowInput::default();
-        input.backspace_pressed = true;
+        let input = input::WindowInput {
+            backspace_pressed: true,
+            ..Default::default()
+        };
 
         state.apply_input(&input, 800, 600);
 
@@ -2370,8 +2378,10 @@ mod tests {
         state.address_input = "https://old.example/".to_string();
         state.address_bar_focused = true;
         state.address_bar_selected = true;
-        let mut input = input::WindowInput::default();
-        input.backspace_pressed = true;
+        let input = input::WindowInput {
+            backspace_pressed: true,
+            ..Default::default()
+        };
 
         state.apply_input(&input, 800, 600);
 
@@ -2387,8 +2397,10 @@ mod tests {
         let mut state = make_state("");
         state.address_input = "untouched".to_string();
         state.address_bar_focused = false;
-        let mut input = input::WindowInput::default();
-        input.typed = "x".to_string();
+        let input = input::WindowInput {
+            typed: "x".to_string(),
+            ..Default::default()
+        };
 
         state.apply_input(&input, 800, 600);
 
@@ -2402,8 +2414,10 @@ mod tests {
         // and keeps keyboard navigation at parity with mouse scrolling.
         let mut state = make_state("<div style='height: 5000px'></div>");
         state.scroll_offset = 100.0;
-        let mut input = input::WindowInput::default();
-        input.move_down = true;
+        let input = input::WindowInput {
+            move_down: true,
+            ..Default::default()
+        };
 
         state.apply_input(&input, 800, 600);
 
@@ -2417,8 +2431,10 @@ mod tests {
         // keyboard step regardless of mouse vs trackpad scroll deltas.
         let mut state = make_state("<div style='height: 5000px'></div>");
         state.scroll_offset = 100.0;
-        let mut input = input::WindowInput::default();
-        input.move_up = true;
+        let input = input::WindowInput {
+            move_up: true,
+            ..Default::default()
+        };
 
         state.apply_input(&input, 800, 600);
 
@@ -2434,8 +2450,10 @@ mod tests {
         // *advance* the document.
         let mut state = make_state("<div style='height: 5000px'></div>");
         state.scroll_offset = 200.0;
-        let mut input = input::WindowInput::default();
-        input.scroll_y = -2.0;
+        let input = input::WindowInput {
+            scroll_y: -2.0,
+            ..Default::default()
+        };
 
         state.apply_input(&input, 800, 600);
 
@@ -2463,8 +2481,10 @@ mod tests {
             status_text: String::new(),
             status_color: css::Color::BLACK,
         });
-        let mut input = input::WindowInput::default();
-        input.back_pressed = true;
+        let input = input::WindowInput {
+            back_pressed: true,
+            ..Default::default()
+        };
 
         state.apply_input(&input, 800, 600);
 
