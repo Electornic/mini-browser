@@ -2030,6 +2030,154 @@ mod tests {
     }
 
     #[test]
+    fn clamp_scroll_pins_to_zero_when_document_fits_viewport() {
+        // Document shorter than the visible page area → no scrolling
+        // possible; whatever the user accumulated must collapse to 0.
+        // Otherwise the page would slide above the chrome and reveal a
+        // blank band underneath.
+        let mut state = make_state("<div>hi</div>");
+        state.scroll_offset = 500.0;
+        state.clamp_scroll(800, 100.0);
+        assert_eq!(state.scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn clamp_scroll_caps_at_document_height_minus_visible() {
+        // viewport_height=800 → visible = 800 - CHROME_HEIGHT (102) = 698.
+        // doc_height=1000 → max scroll = 1000 - 698 = 302. A request
+        // beyond that pins to the cap so the page bottom anchors to the
+        // viewport bottom rather than scrolling into empty space.
+        let mut state = make_state("<div>hi</div>");
+        state.scroll_offset = 5_000.0;
+        state.clamp_scroll(800, 1_000.0);
+        assert_eq!(state.scroll_offset, 1_000.0 - (800.0 - CHROME_HEIGHT));
+    }
+
+    #[test]
+    fn clamp_scroll_rejects_negative_offsets() {
+        // Trackpad inertia + the `-=` accumulation in apply_input can
+        // drift the raw scroll below zero; clamp must snap to 0 so the
+        // user can't pull the page below the chrome.
+        let mut state = make_state("<div>hi</div>");
+        state.scroll_offset = -200.0;
+        state.clamp_scroll(800, 2_000.0);
+        assert_eq!(state.scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn show_caret_alternates_with_frame_index_when_address_bar_focused() {
+        // The blink uses 30-frame buckets (`frame_index / 30`) with an
+        // is-even gate, so frames 0..29 paint the caret and 30..59 hide
+        // it. Verifying both halves of the same cycle locks the rhythm.
+        let mut state = make_state("");
+        state.address_bar_focused = true;
+        state.address_bar_selected = false;
+        state.frame_index = 0;
+        assert!(state.show_caret());
+        state.frame_index = 30;
+        assert!(!state.show_caret());
+        state.frame_index = 60;
+        assert!(state.show_caret());
+    }
+
+    #[test]
+    fn show_caret_off_when_address_bar_unfocused() {
+        // No focus → no caret regardless of frame phase. Without this
+        // guard, the caret would keep blinking after a page click moved
+        // focus into the document.
+        let mut state = make_state("");
+        state.address_bar_focused = false;
+        state.frame_index = 0;
+        assert!(!state.show_caret());
+    }
+
+    #[test]
+    fn show_caret_off_while_selection_active() {
+        // Cmd-L / focus-after-navigate select-all the URL; in that state
+        // the chrome paints a highlight band instead of a caret. Showing
+        // both at once would look like two cursors stacked on the URL.
+        let mut state = make_state("");
+        state.address_bar_focused = true;
+        state.address_bar_selected = true;
+        state.frame_index = 0;
+        assert!(!state.show_caret());
+    }
+
+    #[test]
+    fn resolve_href_accepts_absolute_url_without_base() {
+        // Anything containing `://` is treated as already-absolute and
+        // parses directly, even when the browser has no current page —
+        // matches Chrome's "Open Link in New Tab" semantics where the
+        // target works fine on a fresh tab with no referrer.
+        let state = make_state("");
+        let url = state.resolve_href("https://example.com/path").unwrap();
+        assert_eq!(url.scheme, "https");
+        assert_eq!(url.host, "example.com");
+    }
+
+    #[test]
+    fn resolve_href_rejects_relative_when_no_base() {
+        // The NTP has no `current_url`, so a relative link has nothing
+        // to resolve against. The error message goes straight into the
+        // error page so the user sees *why* the click failed rather
+        // than a generic "couldn't load".
+        let state = make_state("");
+        let err = state.resolve_href("/about").unwrap_err();
+        assert!(err.contains("relative link"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_href_joins_relative_against_current_url() {
+        // Standard same-origin relative resolution. `/about` against
+        // `https://example.com/blog/post` should land on the document
+        // root, not append. This is the path most in-page <a href>
+        // clicks take, so a regression here would break navigation
+        // on essentially every real page.
+        let mut state = make_state("");
+        state.current_url = Some(net::Url::parse("https://example.com/blog/post").unwrap());
+        let url = state.resolve_href("/about").unwrap();
+        assert_eq!(url.scheme, "https");
+        assert_eq!(url.host, "example.com");
+        assert_eq!(url.path, "/about");
+    }
+
+    #[test]
+    fn wants_continuous_redraw_true_when_address_bar_blinks() {
+        // Caret blink is the canonical idle-but-animating case; the
+        // shell needs to keep scheduling redraws so the cursor stays
+        // alive. Without this the caret would freeze the moment input
+        // stopped flowing.
+        let mut state = make_state("");
+        state.address_bar_focused = true;
+        state.address_bar_selected = false;
+        assert!(state.wants_continuous_redraw());
+    }
+
+    #[test]
+    fn wants_continuous_redraw_false_when_idle_and_address_bar_blurred() {
+        // No focus, no select-all band, no pending nav → fully idle.
+        // The shell drops to `ControlFlow::Wait` and burns ~0% CPU.
+        // This is the case that closes the regression Phase 5 chased.
+        let mut state = make_state("");
+        state.address_bar_focused = false;
+        state.address_bar_selected = false;
+        assert!(state.pending_navigation.is_none());
+        assert!(!state.wants_continuous_redraw());
+    }
+
+    #[test]
+    fn wants_continuous_redraw_false_when_address_bar_in_select_all() {
+        // Select-all paints a static highlight band, not a blinking
+        // caret. The shell can park itself until the next real event
+        // (keystroke, click) without dropping frames the user would
+        // perceive.
+        let mut state = make_state("");
+        state.address_bar_focused = true;
+        state.address_bar_selected = true;
+        assert!(!state.wants_continuous_redraw());
+    }
+
+    #[test]
     fn collect_script_sources_labels_external_scripts_with_src_attr() {
         // External scripts (with a `src`) keep the raw attribute value as
         // the label. The page URL is unused here because the `src` is
