@@ -1049,18 +1049,18 @@ fn sample_css() -> &'static str {
 pub fn load_initial_state() -> BrowserState {
     match env::args().nth(1) {
         Some(raw_url) => match load_remote_document(&raw_url) {
-            Ok((document_html, stylesheet, images, font_data, external_scripts, current_url, favicon)) => {
+            Ok(loaded) => {
                 let mut state = BrowserState::new(
                     raw_url,
-                    document_html,
-                    stylesheet,
-                    images,
-                    font_data,
-                    external_scripts,
-                    Some(current_url),
+                    loaded.document_html,
+                    loaded.stylesheet,
+                    loaded.images,
+                    loaded.font_data,
+                    loaded.external_scripts,
+                    Some(loaded.final_url),
                     "loaded",
                 );
-                state.favicon = favicon;
+                state.favicon = loaded.favicon;
                 state
             }
             Err(error) => {

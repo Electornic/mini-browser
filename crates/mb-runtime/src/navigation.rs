@@ -7,21 +7,22 @@ use std::collections::HashMap;
 
 use crate::{html, net, resource};
 
-// Bundle of everything `load_remote_document` produces. The `HashMap<String, String>`
-// holds external `<script src>` bodies keyed by the raw `src` attribute string;
-// `install_document` looks them up by attribute when walking the DOM, so no extra
-// URL resolution is needed at execution time. The trailing `Option<LoadedImage>`
-// is the favicon if the page exposed `<link rel="icon">` and the fetch + decode
-// succeeded (added in Phase 5.9c).
-pub type LoadedDocument = (
-    String,
-    String,
-    HashMap<String, resource::LoadedImage>,
-    Vec<Vec<u8>>,
-    HashMap<String, String>,
-    net::Url,
-    Option<resource::LoadedImage>,
-);
+// Bundle of everything `load_remote_document` produces. `external_scripts`
+// holds external `<script src>` bodies keyed by the raw `src` attribute
+// string; `install_document` looks them up by attribute when walking the
+// DOM, so no extra URL resolution is needed at execution time. `favicon`
+// is the icon for the tab strip when the page exposed `<link rel="icon">`
+// and the fetch + decode succeeded (added in Phase 5.9c).
+#[derive(Debug)]
+pub struct LoadedDocument {
+    pub document_html: String,
+    pub stylesheet: String,
+    pub images: HashMap<String, resource::LoadedImage>,
+    pub font_data: Vec<Vec<u8>>,
+    pub external_scripts: HashMap<String, String>,
+    pub final_url: net::Url,
+    pub favicon: Option<resource::LoadedImage>,
+}
 
 pub fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
     // This function is the app-facing loader. It translates low-level fetch/content-type details
@@ -43,15 +44,15 @@ pub fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
         let body = String::from_utf8(response.body)
             .map_err(|_| describe_network_error(&net::NetworkError::InvalidBodyEncoding))?;
         let (document_html, stylesheet) = text_document(&body, &final_url.to_string());
-        return Ok((
+        return Ok(LoadedDocument {
             document_html,
             stylesheet,
-            HashMap::new(),
-            Vec::new(),
-            HashMap::new(),
+            images: HashMap::new(),
+            font_data: Vec::new(),
+            external_scripts: HashMap::new(),
             final_url,
-            None,
-        ));
+            favicon: None,
+        });
     }
 
     if !content_type.starts_with("text/html") {
@@ -77,15 +78,15 @@ pub fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
     // the page is still useful, mirroring how broken stylesheets and
     // missing images degrade.
     let favicon = resource::load_favicon(&document, &final_url);
-    Ok((
-        html,
-        stylesheets.join("\n"),
+    Ok(LoadedDocument {
+        document_html: html,
+        stylesheet: stylesheets.join("\n"),
         images,
         font_data,
         external_scripts,
         final_url,
         favicon,
-    ))
+    })
 }
 
 pub fn describe_network_error(error: &net::NetworkError) -> String {

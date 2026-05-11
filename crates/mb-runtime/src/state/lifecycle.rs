@@ -252,15 +252,15 @@ impl BrowserState {
         // matching the pre-async behaviour exactly, just delayed by
         // the worker round-trip.
         match result {
-            Ok((document_html, stylesheet, images, font_data, external_scripts, resolved_url, favicon)) => {
+            Ok(loaded) => {
                 let next_entry = HistoryEntry {
-                    address_input: resolved_url.to_string(),
-                    document_html,
-                    stylesheet,
-                    images,
-                    font_data,
-                    external_scripts,
-                    current_url: Some(resolved_url),
+                    address_input: loaded.final_url.to_string(),
+                    document_html: loaded.document_html,
+                    stylesheet: loaded.stylesheet,
+                    images: loaded.images,
+                    font_data: loaded.font_data,
+                    external_scripts: loaded.external_scripts,
+                    current_url: Some(loaded.final_url),
                     status_text: "loaded".into(),
                     status_color: css::Color {
                         r: 40,
@@ -275,7 +275,7 @@ impl BrowserState {
                 // restore the icon in 5.9c. Set after `commit_navigation`
                 // so a back-forward push doesn't snapshot the new icon
                 // onto the *previous* page's history record.
-                self.favicon = favicon;
+                self.favicon = loaded.favicon;
             }
             Err(error) => {
                 eprintln!("{error}");
@@ -288,16 +288,16 @@ impl BrowserState {
 
     fn commit_refresh(&mut self, result: Result<LoadedDocument, String>) {
         match result {
-            Ok((document_html, stylesheet, images, font_data, external_scripts, resolved_url, favicon)) => {
+            Ok(loaded) => {
                 // Same install_document precondition as restore_entry:
                 // current_url has to land first so the runtime's
                 // `location` global picks up the reloaded URL instead
                 // of the previous page's.
-                self.current_url = Some(resolved_url);
-                self.install_document(document_html, stylesheet, external_scripts);
-                self.images = images;
-                self.font_data = font_data;
-                self.favicon = favicon;
+                self.current_url = Some(loaded.final_url);
+                self.install_document(loaded.document_html, loaded.stylesheet, loaded.external_scripts);
+                self.images = loaded.images;
+                self.font_data = loaded.font_data;
+                self.favicon = loaded.favicon;
                 self.scroll_offset = 0.0;
                 self.set_status(
                     "loaded",
