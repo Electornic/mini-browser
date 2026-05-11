@@ -199,3 +199,172 @@ fn escape_html(value: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describe_network_error_maps_each_variant_to_a_stable_phrase() {
+        // The status bar paints these strings directly; user-facing
+        // text is part of the public contract. Renaming a variant
+        // without updating its phrase would silently degrade the
+        // message users see on a failed load.
+        assert_eq!(
+            describe_network_error(&net::NetworkError::UnsupportedScheme("ftp".into())),
+            "unsupported scheme"
+        );
+        assert_eq!(
+            describe_network_error(&net::NetworkError::InvalidUrl("::".into())),
+            "invalid url"
+        );
+        assert_eq!(
+            describe_network_error(&net::NetworkError::Io("ECONNREFUSED".into())),
+            "network connection failed"
+        );
+        assert_eq!(
+            describe_network_error(&net::NetworkError::Tls("handshake".into())),
+            "tls connection failed"
+        );
+        assert_eq!(
+            describe_network_error(&net::NetworkError::InvalidResponse("garbage".into())),
+            "invalid server response"
+        );
+        assert_eq!(
+            describe_network_error(&net::NetworkError::MissingLocationHeader),
+            "redirect missing location"
+        );
+        assert_eq!(
+            describe_network_error(&net::NetworkError::RedirectLimitExceeded),
+            "too many redirects"
+        );
+        assert_eq!(
+            describe_network_error(&net::NetworkError::InvalidBodyEncoding),
+            "invalid response body encoding"
+        );
+    }
+
+    #[test]
+    fn describe_network_error_embeds_http_status_code_in_message() {
+        // HttpStatus is the only variant whose human phrase has to
+        // carry numeric context — without the code, "http status" on
+        // its own would tell the user nothing diagnostic. The reason
+        // phrase is intentionally dropped: most servers send terse or
+        // marketing-flavoured reasons that confuse rather than help.
+        assert_eq!(
+            describe_network_error(&net::NetworkError::HttpStatus(
+                404,
+                "Not Found".to_string()
+            )),
+            "http status 404"
+        );
+        assert_eq!(
+            describe_network_error(&net::NetworkError::HttpStatus(500, String::new())),
+            "http status 500"
+        );
+    }
+
+    #[test]
+    fn describe_network_error_embeds_unexpected_content_type() {
+        // Content-type mismatches happen on every misconfigured server
+        // (e.g. `image/jpeg` returned where the link expected HTML);
+        // showing the offending value lets the user spot the issue
+        // without DevTools.
+        assert_eq!(
+            describe_network_error(&net::NetworkError::UnexpectedContentType(
+                "application/pdf".into()
+            )),
+            "unsupported content type application/pdf"
+        );
+    }
+
+    #[test]
+    fn describe_resource_error_delegates_network_variant_to_network_describer() {
+        // ResourceError wraps NetworkError for fetch failures during
+        // sub-resource loads (stylesheets, images, scripts). The
+        // resource path therefore inherits the same phrasing as the
+        // top-level fetch — anything else would create two divergent
+        // glossaries for the same underlying failure.
+        let inner = net::NetworkError::HttpStatus(503, "Service Unavailable".into());
+        let wrapped = resource::ResourceError::Network(inner);
+        assert_eq!(describe_resource_error(&wrapped), "http status 503");
+    }
+
+    #[test]
+    fn describe_resource_error_maps_local_variants_to_human_strings() {
+        assert_eq!(
+            describe_resource_error(&resource::ResourceError::MissingHref),
+            "stylesheet missing href"
+        );
+        assert_eq!(
+            describe_resource_error(&resource::ResourceError::MissingSrc),
+            "image missing src"
+        );
+        assert_eq!(
+            describe_resource_error(&resource::ResourceError::DecodeImage("png".into())),
+            "image decode failed"
+        );
+    }
+
+    #[test]
+    fn text_document_escapes_html_special_chars_in_body() {
+        // Plain-text bodies routinely contain `<` / `>` / `&` — log
+        // files, source code, raw JSON. Without escaping, that text
+        // would be parsed as markup and either render as garbage or
+        // (worse) execute unintended elements. The wrapper has to
+        // neutralise every meta char before injection.
+        let (html, _) =
+            text_document("<script>alert(1)</script>", "https://example.com/file.txt");
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("&lt;/script&gt;"));
+        assert!(!html.contains("<script>"));
+    }
+
+    #[test]
+    fn text_document_omits_target_paragraph_when_empty() {
+        // An empty target string means the loader couldn't resolve a
+        // URL (rare but possible during the bootstrap path). The
+        // wrapper must not emit a stray `<p></p>` band — the page
+        // would paint an empty highlight strip where the URL ought to be.
+        let (html, _) = text_document("hello", "");
+        assert!(!html.contains("<p></p>"));
+    }
+
+    #[test]
+    fn text_document_escapes_target_url_special_chars() {
+        // URLs can technically carry `&` (query-string separators), and
+        // exotic ones can include `<` / `>` via percent-decoded smuggled
+        // values. The display paragraph must escape them so the URL
+        // shows as text, not as HTML.
+        let (html, _) =
+            text_document("body", "https://example.com/?a=1&b=<x>");
+        assert!(html.contains("a=1&amp;b=&lt;x&gt;"));
+    }
+
+    #[test]
+    fn error_document_escapes_title_and_message() {
+        // The error path frequently feeds it back text that came from
+        // server responses or untrusted input (e.g. a status line). If
+        // the wrapper failed to escape, a crafted server message could
+        // inject DOM into the user's error page — a low-impact but
+        // real XSS-shaped bug.
+        let (html, _) = error_document(
+            "<bad>",
+            "value & \"more\"",
+            "javascript:alert('x')",
+        );
+        assert!(html.contains("&lt;bad&gt;"));
+        assert!(html.contains("value &amp; &quot;more&quot;"));
+        assert!(html.contains("javascript:alert(&#39;x&#39;)"));
+        assert!(!html.contains("<bad>"));
+    }
+
+    #[test]
+    fn error_document_omits_target_paragraph_when_empty() {
+        // Same contract as text_document: no stray `<p></p>` band when
+        // there's no target URL to display (the user pressed Enter on
+        // an empty address bar).
+        let (html, _) = error_document("oops", "details", "");
+        assert!(!html.contains("<p></p>"));
+    }
+}
