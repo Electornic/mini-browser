@@ -2365,6 +2365,190 @@ mod tests {
     }
 
     #[test]
+    fn apply_input_focus_address_bar_flag_selects_existing_text() {
+        // Cmd-L (the only producer of `focus_address_bar`) is the
+        // "edit the URL" shortcut; both real browsers and this toy
+        // select the current URL on focus so the next keystroke
+        // replaces it instead of appending to the end.
+        let mut state = make_state("");
+        state.address_bar_focused = false;
+        state.address_bar_selected = false;
+        let mut input = input::WindowInput::default();
+        input.focus_address_bar = true;
+
+        state.apply_input(&input, 800, 600);
+
+        assert!(state.address_bar_focused);
+        assert!(state.address_bar_selected);
+    }
+
+    #[test]
+    fn apply_input_typed_char_replaces_selection_then_appends() {
+        // First keystroke after Cmd-L: the select-all band must clear
+        // first, then the char appends to an empty buffer. Without the
+        // clear, the user would see their typing concatenated onto the
+        // previous URL, which would surprise anyone retyping a fresh
+        // address.
+        let mut state = make_state("");
+        state.address_input = "https://old.example/".to_string();
+        state.address_bar_focused = true;
+        state.address_bar_selected = true;
+        let mut input = input::WindowInput::default();
+        input.typed = "a".to_string();
+
+        state.apply_input(&input, 800, 600);
+
+        assert_eq!(state.address_input, "a");
+        assert!(!state.address_bar_selected);
+    }
+
+    #[test]
+    fn apply_input_subsequent_chars_append_after_selection_cleared() {
+        // After the first keystroke cleared select-all, every later
+        // char is a plain append. This is the steady-state typing
+        // path and exercises the loop boundary inside `apply_input`.
+        let mut state = make_state("");
+        state.address_input = "ab".to_string();
+        state.address_bar_focused = true;
+        state.address_bar_selected = false;
+        let mut input = input::WindowInput::default();
+        input.typed = "cd".to_string();
+
+        state.apply_input(&input, 800, 600);
+
+        assert_eq!(state.address_input, "abcd");
+    }
+
+    #[test]
+    fn apply_input_backspace_pops_last_char_when_no_selection() {
+        // Backspace with no selection deletes one trailing char; the
+        // typed buffer stays empty so a paired typed event doesn't
+        // confuse the two paths. Matches the legacy minifb behaviour
+        // where Backspace was a level-press with `KeyRepeat::Yes`.
+        let mut state = make_state("");
+        state.address_input = "abc".to_string();
+        state.address_bar_focused = true;
+        state.address_bar_selected = false;
+        let mut input = input::WindowInput::default();
+        input.backspace_pressed = true;
+
+        state.apply_input(&input, 800, 600);
+
+        assert_eq!(state.address_input, "ab");
+    }
+
+    #[test]
+    fn apply_input_backspace_during_selection_clears_entire_buffer() {
+        // With select-all active, Backspace must empty the buffer
+        // (not just pop one char). Mirrors the typing-replaces-
+        // selection branch — both forms of "first edit after Cmd-L"
+        // converge on the same blank-slate state.
+        let mut state = make_state("");
+        state.address_input = "https://old.example/".to_string();
+        state.address_bar_focused = true;
+        state.address_bar_selected = true;
+        let mut input = input::WindowInput::default();
+        input.backspace_pressed = true;
+
+        state.apply_input(&input, 800, 600);
+
+        assert!(state.address_input.is_empty());
+        assert!(!state.address_bar_selected);
+    }
+
+    #[test]
+    fn apply_input_typing_when_address_bar_blurred_does_not_mutate_url() {
+        // Keystrokes outside the address bar route to page JS handlers,
+        // never to the URL. Without this guard, typing in a search box
+        // on the page would also append to the URL bar.
+        let mut state = make_state("");
+        state.address_input = "untouched".to_string();
+        state.address_bar_focused = false;
+        let mut input = input::WindowInput::default();
+        input.typed = "x".to_string();
+
+        state.apply_input(&input, 800, 600);
+
+        assert_eq!(state.address_input, "untouched");
+    }
+
+    #[test]
+    fn apply_input_arrow_down_advances_scroll_by_one_step() {
+        // Arrow keys move the page in 24-px increments — the same step
+        // size the scroll wheel emits. Matches the legacy `minifb` feel
+        // and keeps keyboard navigation at parity with mouse scrolling.
+        let mut state = make_state("<div style='height: 5000px'></div>");
+        state.scroll_offset = 100.0;
+        let mut input = input::WindowInput::default();
+        input.move_down = true;
+
+        state.apply_input(&input, 800, 600);
+
+        assert_eq!(state.scroll_offset, 124.0);
+    }
+
+    #[test]
+    fn apply_input_arrow_up_retreats_scroll_by_one_step() {
+        // Symmetric to arrow-down; the offset decreases by the same
+        // 24-px constant. Together they pin the page to a uniform
+        // keyboard step regardless of mouse vs trackpad scroll deltas.
+        let mut state = make_state("<div style='height: 5000px'></div>");
+        state.scroll_offset = 100.0;
+        let mut input = input::WindowInput::default();
+        input.move_up = true;
+
+        state.apply_input(&input, 800, 600);
+
+        assert_eq!(state.scroll_offset, 76.0);
+    }
+
+    #[test]
+    fn apply_input_scroll_y_subtracts_from_offset_with_24_multiplier() {
+        // Mouse-wheel / trackpad scroll arrives as "lines per second"
+        // and gets multiplied by 24 px/line to match keyboard arrow
+        // distance. The sign flips because positive scroll_y means
+        // "wheel pushed up / page goes down" — a one-line spin should
+        // *advance* the document.
+        let mut state = make_state("<div style='height: 5000px'></div>");
+        state.scroll_offset = 200.0;
+        let mut input = input::WindowInput::default();
+        input.scroll_y = -2.0;
+
+        state.apply_input(&input, 800, 600);
+
+        // -=  (-2.0 * 24.0) → +48 movement
+        assert_eq!(state.scroll_offset, 248.0);
+    }
+
+    #[test]
+    fn apply_input_back_pressed_pops_back_stack() {
+        // Cmd-[ / Alt-Left both surface as `back_pressed`. They must
+        // walk the history independently of mouse clicks on the
+        // chrome back button — keyboard users never touch the
+        // chrome strip. Both paths share `go_back`, so this just
+        // verifies the wiring from the input bit to the stack pop.
+        let mut state = make_state("<p>start</p>");
+        state.address_input = "start".to_string();
+        state.commit_navigation(HistoryEntry {
+            address_input: "next".to_string(),
+            document_html: "<p>next</p>".to_string(),
+            stylesheet: String::new(),
+            images: HashMap::new(),
+            font_data: Vec::new(),
+            external_scripts: HashMap::new(),
+            current_url: None,
+            status_text: String::new(),
+            status_color: css::Color::BLACK,
+        });
+        let mut input = input::WindowInput::default();
+        input.back_pressed = true;
+
+        state.apply_input(&input, 800, 600);
+
+        assert_eq!(state.address_input, "start");
+    }
+
+    #[test]
     fn collect_script_sources_labels_external_scripts_with_src_attr() {
         // External scripts (with a `src`) keep the raw attribute value as
         // the label. The page URL is unused here because the `src` is
