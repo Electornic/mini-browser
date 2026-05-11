@@ -2178,6 +2178,193 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_captures_visible_browser_state() {
+        // The snapshot is the unit history pushes onto the back/forward
+        // stacks; anything user-visible at the moment of capture must
+        // make it across. Today that is: address bar text, the raw
+        // HTML/CSS pair, the resolved current URL, and the status line.
+        // Decoded images / font bytes / external scripts also travel
+        // so back/forward can repaint without re-fetching.
+        let mut state = make_state("<p>hello</p>");
+        state.address_input = "https://example.com/".to_string();
+        state.current_url = Some(net::Url::parse("https://example.com/").unwrap());
+        state.status_text = "ready".to_string();
+
+        let snap = state.snapshot();
+        assert_eq!(snap.address_input, "https://example.com/");
+        assert_eq!(snap.document_html, "<p>hello</p>");
+        assert_eq!(
+            snap.current_url.as_ref().map(|u| u.host.as_str()),
+            Some("example.com")
+        );
+        assert_eq!(snap.status_text, "ready");
+    }
+
+    #[test]
+    fn commit_navigation_pushes_previous_snapshot_onto_back_stack() {
+        // A successful navigation pushes the page the user is leaving
+        // onto the back stack, then swaps in the new one. Without this
+        // half of the contract `go_back` would have nothing to pop.
+        let mut state = make_state("<p>first</p>");
+        state.address_input = "first".to_string();
+        let next = HistoryEntry {
+            address_input: "second".to_string(),
+            document_html: "<p>second</p>".to_string(),
+            stylesheet: String::new(),
+            images: HashMap::new(),
+            font_data: Vec::new(),
+            external_scripts: HashMap::new(),
+            current_url: None,
+            status_text: String::new(),
+            status_color: css::Color::BLACK,
+        };
+
+        state.commit_navigation(next);
+
+        assert_eq!(state.back_stack.len(), 1);
+        assert_eq!(state.back_stack[0].address_input, "first");
+        assert_eq!(state.address_input, "second");
+    }
+
+    #[test]
+    fn commit_navigation_clears_forward_stack() {
+        // Following a `back` with a brand new navigation must drop the
+        // forward stack — the linear-history model says the future
+        // changes the moment the user diverges. Otherwise stale entries
+        // would resurface on a later forward press.
+        let mut state = make_state("<p>a</p>");
+        state.forward_stack.push(HistoryEntry {
+            address_input: "stale".to_string(),
+            document_html: String::new(),
+            stylesheet: String::new(),
+            images: HashMap::new(),
+            font_data: Vec::new(),
+            external_scripts: HashMap::new(),
+            current_url: None,
+            status_text: String::new(),
+            status_color: css::Color::BLACK,
+        });
+
+        state.commit_navigation(HistoryEntry {
+            address_input: "fresh".to_string(),
+            document_html: String::new(),
+            stylesheet: String::new(),
+            images: HashMap::new(),
+            font_data: Vec::new(),
+            external_scripts: HashMap::new(),
+            current_url: None,
+            status_text: String::new(),
+            status_color: css::Color::BLACK,
+        });
+
+        assert!(state.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn go_back_restores_previous_and_routes_current_to_forward_stack() {
+        // back/forward is the user's most-used navigation surface. The
+        // invariant: pressing back pops the back stack, pushes the page
+        // we were just on onto the forward stack, and restores the
+        // popped entry. A second back press would then dig deeper into
+        // history. Without the forward-push half, `forward` couldn't
+        // undo a back press.
+        let mut state = make_state("<p>start</p>");
+        state.address_input = "start".to_string();
+        state.commit_navigation(HistoryEntry {
+            address_input: "next".to_string(),
+            document_html: "<p>next</p>".to_string(),
+            stylesheet: String::new(),
+            images: HashMap::new(),
+            font_data: Vec::new(),
+            external_scripts: HashMap::new(),
+            current_url: None,
+            status_text: String::new(),
+            status_color: css::Color::BLACK,
+        });
+        assert_eq!(state.address_input, "next");
+
+        state.go_back();
+
+        assert_eq!(state.address_input, "start");
+        assert_eq!(state.forward_stack.len(), 1);
+        assert_eq!(state.forward_stack[0].address_input, "next");
+        assert!(state.back_stack.is_empty());
+    }
+
+    #[test]
+    fn go_forward_undoes_go_back() {
+        // After a back/forward round-trip the user should land back on
+        // the exact entry they began with, with the back stack rebuilt
+        // and the forward stack drained — a contract real users notice
+        // when the URL bar text changes between presses.
+        let mut state = make_state("<p>start</p>");
+        state.address_input = "start".to_string();
+        state.commit_navigation(HistoryEntry {
+            address_input: "next".to_string(),
+            document_html: "<p>next</p>".to_string(),
+            stylesheet: String::new(),
+            images: HashMap::new(),
+            font_data: Vec::new(),
+            external_scripts: HashMap::new(),
+            current_url: None,
+            status_text: String::new(),
+            status_color: css::Color::BLACK,
+        });
+        state.go_back();
+
+        state.go_forward();
+
+        assert_eq!(state.address_input, "next");
+        assert!(state.forward_stack.is_empty());
+        assert_eq!(state.back_stack.len(), 1);
+    }
+
+    #[test]
+    fn go_back_is_noop_on_empty_back_stack() {
+        // The NTP has no prior page; pressing back must not corrupt
+        // current state. Real browsers grey the button out, but the
+        // toy keeps the chrome button hover-enabled and relies on this
+        // guard for the actual no-op.
+        let mut state = make_state("<p>only</p>");
+        state.address_input = "only".to_string();
+        assert!(state.back_stack.is_empty());
+
+        state.go_back();
+
+        assert_eq!(state.address_input, "only");
+        assert!(state.back_stack.is_empty());
+        assert!(state.forward_stack.is_empty());
+    }
+
+    #[test]
+    fn restore_entry_resets_scroll_and_selection() {
+        // Restoring a snapshot lands the user at the top of the
+        // restored page with the address-bar select-all band cleared.
+        // Without the resets, jumping back to a previously deep-
+        // scrolled page would start mid-document and the URL bar would
+        // appear highlighted as if the user had just pressed Cmd-L.
+        let mut state = make_state("<p>start</p>");
+        state.scroll_offset = 250.0;
+        state.address_bar_selected = true;
+
+        state.restore_entry(HistoryEntry {
+            address_input: "restored".to_string(),
+            document_html: "<p>restored</p>".to_string(),
+            stylesheet: String::new(),
+            images: HashMap::new(),
+            font_data: Vec::new(),
+            external_scripts: HashMap::new(),
+            current_url: None,
+            status_text: String::new(),
+            status_color: css::Color::BLACK,
+        });
+
+        assert_eq!(state.scroll_offset, 0.0);
+        assert!(!state.address_bar_selected);
+        assert_eq!(state.address_input, "restored");
+    }
+
+    #[test]
     fn collect_script_sources_labels_external_scripts_with_src_attr() {
         // External scripts (with a `src`) keep the raw attribute value as
         // the label. The page URL is unused here because the `src` is
