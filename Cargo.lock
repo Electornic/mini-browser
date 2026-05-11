@@ -1158,6 +1158,7 @@ dependencies = [
 name = "mb-runtime"
 version = "0.1.0"
 dependencies = [
+ "image",
  "mb-dom",
  "mb-engine",
  "rquickjs",
