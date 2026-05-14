@@ -11,19 +11,7 @@
 
 브라우저 내부를 직접 짜보는 학습용 토이 프로젝트. URL 또는 정적 입력에서 HTML/CSS/JS 를 읽어 DOM/스타일/레이아웃을 거쳐 화면에 그리고, JS 가 DOM 을 mutate 하면 같은 프레임에서 재반영한다.
 
-Phase 0–3 까지는 모든 단계를 직접 구현했고 (block layout, inline flow, flex, grid, stacking context, gradient, transform, JS bridge ...), Phase 4 에서 학습 가치를 다 뽑은 뒤 battle-tested 라이브러리들로 통합 — `html5ever` / `cssparser` + `selectors` / `taffy` / `cosmic-text` / `tiny-skia` / `winit` + `softbuffer` / `ureq` + `url` / `rquickjs` — 으로 갈아탔다. Phase 4 의 마지막 단계인 4.9 에서 단일 crate 를 4-crate Cargo workspace 로 쪼갰다.
-
-## Phase Status
-
-| Phase | Status | 테마 |
-|---|---|---|
-| 0 | Done | Block layout + Chrome 스타일 UI + NTP 시작 페이지 |
-| 1 | Done | CSS 확장 — units, selectors, position, transform, gradient, **flexbox**, **grid** |
-| 2 | Done | JS Engine — DOM read/mutate + 이벤트 + microtask/setTimeout/rAF |
-| 3 | Done | Interactive Browser — 입력, 키보드, fetch/XHR, host API stub |
-| 4 | Done | Library Pivot — 직접 구현을 mature crate 들로 교체, workspace split 으로 마무리 |
-
-자세한 history 는 [docs/legacy/](docs/legacy/) 의 옛 문서들 참조 — 현재 코드와 1:1 대응되진 않지만 phase 별 의도를 보존한다.
+핵심 의존성: `html5ever` / `cssparser` + `selectors` / `taffy` / `cosmic-text` / `tiny-skia` / `winit` + `softbuffer` / `ureq` + `url` / `rquickjs`. 코드는 4-crate Cargo workspace.
 
 ## Workspace Layout
 
@@ -34,7 +22,7 @@ Phase 0–3 까지는 모든 단계를 직접 구현했고 (block layout, inline
 ├── crates/mb-engine   → 레이아웃 + 페인트 (mb-dom 위)
 │                        taffy / cosmic-text / tiny-skia
 ├── crates/mb-runtime  → 오케스트레이터 + JS + IO (mb-engine 위)
-│                        rquickjs / ureq / state.rs
+│                        rquickjs / ureq / tokio / state/
 └── crates/mb-shell    → 바이너리 (mb-runtime 위)
                          winit / softbuffer
 ```
@@ -55,7 +43,7 @@ URL or sample HTML/CSS
        │ setTimeout / rAF / Promise microtask
   -> Style Engine (cascade, :hover/:focus/:active) [mb-dom::style]
   -> Layout (taffy + boundary block/inline/flex/grid/table) [mb-engine::layout]
-  -> Display List (Solid/Rounded/Text/Image/Gradient/Shadow/Transform) [mb-engine::display_list]
+  -> Display List (Solid/Rounded/Text/Image/Gradient/Shadow/Transform) [mb-engine::view]
   -> Rasterizer (tiny-skia + cosmic-text + swash) [mb-engine::render]
   -> Window (winit + softbuffer)             [mb-shell::window]
 ```
@@ -74,7 +62,7 @@ cargo build --workspace
 cargo run --bin mb-shell                 # 시작 페이지 (NTP)
 cargo run --bin mb-shell -- https://example.com
 
-# 테스트 (446 = mb-dom 109 + mb-engine 162 + mb-runtime 86 lib + 80 main + 9 html)
+# 테스트
 cargo test --workspace
 
 # 린트
