@@ -126,8 +126,17 @@ impl BrowserState {
         // `pending_navigation` and `poll_pending_navigation` drains it
         // on a later frame.
         let (sender, receiver) = mpsc::channel();
+        let wake = self.navigation_wake.clone();
         async_runtime::handle().spawn_blocking(move || {
             let _ = sender.send(load_remote_document(&target));
+            // Poke the shell's `EventLoopProxy` so the next frame fires
+            // immediately. Without this the main thread would have to
+            // poll `pending_navigation.is_some()` via
+            // `wants_continuous_redraw` and stay at 60 fps until the
+            // worker landed — which it used to do.
+            if let Some(hook) = wake {
+                hook.call();
+            }
         });
         self.pending_navigation = Some(PendingNavigation {
             kind: PendingKind::Navigate { error_title },
@@ -192,11 +201,17 @@ impl BrowserState {
 
         let (sender, receiver) = mpsc::channel();
         let target = url.to_string();
+        let wake = self.navigation_wake.clone();
         async_runtime::handle().spawn_blocking(move || {
             // The worker thread owns the blocking `load_remote_document` call.
             // Send may fail if the BrowserState was dropped while the load
             // was in flight (e.g. window close mid-fetch); ignore that case.
             let _ = sender.send(load_remote_document(&target));
+            // Wake the main thread so the next frame fires immediately;
+            // same rationale as `spawn_navigation`.
+            if let Some(hook) = wake {
+                hook.call();
+            }
         });
         self.pending_navigation = Some(PendingNavigation {
             kind: PendingKind::Refresh,

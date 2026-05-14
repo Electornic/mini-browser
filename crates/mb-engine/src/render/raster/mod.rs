@@ -44,9 +44,32 @@ pub use text::{measure_text_width, measure_text_wrap, measure_text_wrap_with_fam
 
 use super::{Affine, DisplayCommand};
 
+/// Rasterise into a freshly allocated `Vec<u32>`. Convenience for tests
+/// and anything that doesn't already own a presentation buffer; production
+/// callers should prefer `rasterize_into` so the swizzled output lands
+/// directly in the softbuffer surface and the per-frame allocation drops
+/// out of the hot path.
 pub fn rasterize(commands: &[DisplayCommand], width: usize, height: usize) -> Vec<u32> {
     if width == 0 || height == 0 {
         return Vec::new();
+    }
+    let mut buf = vec![0u32; width * height];
+    rasterize_into(commands, width, height, &mut buf);
+    buf
+}
+
+/// Rasterise into a caller-provided `&mut [u32]`. The slice must be at
+/// least `width * height` long (any tail beyond that is ignored, any
+/// shortfall stops the swizzle early). Each output pixel is packed as
+/// `0x00RRGGBB`, matching the legacy `Vec<u32>` contract softbuffer wants.
+pub fn rasterize_into(
+    commands: &[DisplayCommand],
+    width: usize,
+    height: usize,
+    target: &mut [u32],
+) {
+    if width == 0 || height == 0 || target.is_empty() {
+        return;
     }
     let mut pixmap = Pixmap::new(width as u32, height as u32)
         .expect("non-zero width/height should fit a Pixmap allocation");
@@ -56,20 +79,24 @@ pub fn rasterize(commands: &[DisplayCommand], width: usize, height: usize) -> Ve
         rasterize_command(&mut pixmap, command, Affine::IDENTITY);
     }
 
-    pixmap_to_u32(&pixmap)
+    write_pixmap_into(&pixmap, target);
 }
 
 // The pixmap's alpha is always 255 (we start with opaque white and every
 // blend equation is source-over, which preserves dst.a == 255), so
 // premultiplied RGB bytes equal straight RGB bytes — drop the alpha and
-// pack as 0x00RRGGBB to match what the legacy `Vec<u32>` buffer held.
-fn pixmap_to_u32(pixmap: &Pixmap) -> Vec<u32> {
+// pack as 0x00RRGGBB to match what softbuffer expects. Writing in place
+// into the caller's slice skips the intermediate `Vec<u32>` allocation
+// that the older `pixmap_to_u32` helper produced every frame.
+fn write_pixmap_into(pixmap: &Pixmap, target: &mut [u32]) {
     let data = pixmap.data();
-    let mut out = Vec::with_capacity(data.len() / 4);
-    for chunk in data.chunks_exact(4) {
-        out.push((u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]));
+    let pixel_count = (data.len() / 4).min(target.len());
+    for (slot, chunk) in target[..pixel_count]
+        .iter_mut()
+        .zip(data.chunks_exact(4))
+    {
+        *slot = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
     }
-    out
 }
 
 fn rasterize_command(pixmap: &mut Pixmap, command: &DisplayCommand, transform: Affine) {

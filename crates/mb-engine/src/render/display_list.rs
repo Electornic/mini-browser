@@ -499,7 +499,7 @@ fn background_image_command(
         height: rect.height,
         source_width: image.width,
         source_height: image.height,
-        pixels: image.pixels.clone(),
+        pixels: std::rc::Rc::new(image.pixels.clone()),
         source_x,
         source_y,
     }))

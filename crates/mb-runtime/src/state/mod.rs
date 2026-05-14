@@ -9,7 +9,35 @@ mod events;
 mod history;
 mod lifecycle;
 
-use std::{cell::RefCell, collections::HashMap, env, rc::Rc, sync::mpsc};
+use std::{cell::RefCell, collections::HashMap, env, rc::Rc, sync::Arc, sync::mpsc};
+
+/// Cross-thread wake-up the navigation worker pokes after the
+/// blocking `load_remote_document` returns. The shell installs a real
+/// `EventLoopProxy::send_event` here on the first frame; tests leave
+/// it `None` and rely on the synchronous `poll_pending_navigation`
+/// drain inside `display_list`.
+///
+/// Wrapping the `Arc<dyn Fn>` in a newtype keeps the `Debug` derive on
+/// `BrowserState` working — the trait object alone wouldn't implement
+/// Debug.
+#[derive(Clone)]
+pub struct NavigationWake(Arc<dyn Fn() + Send + Sync>);
+
+impl NavigationWake {
+    pub fn from_arc(hook: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self(hook)
+    }
+
+    pub(crate) fn call(&self) {
+        (self.0)();
+    }
+}
+
+impl std::fmt::Debug for NavigationWake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NavigationWake(<fn>)")
+    }
+}
 
 use crate::{
     chrome::{CHROME_HEIGHT, ChromeAction, ChromeState, chrome_commands},
@@ -120,6 +148,31 @@ pub struct BrowserState {
     // sub-phase will fold `navigate` and `navigate_to_href` in once their
     // many existing sync tests pick up a wait-for-pending helper.
     pending_navigation: Option<PendingNavigation>,
+
+    // Optional hook the navigation worker calls after sending its
+    // result through `mpsc`. The shell wires this up to an
+    // `EventLoopProxy::send_event` so the next frame fires
+    // immediately instead of waiting on `wants_continuous_redraw`'s
+    // poll. Left `None` in tests / headless runs — the synchronous
+    // `try_recv` inside `poll_pending_navigation` covers those.
+    navigation_wake: Option<NavigationWake>,
+
+    // Resolved `focused_dom_path → NodeId` from the last time it was
+    // asked for, paired with the document revision and the path slice
+    // it was resolved against. The caret renderer asks for this every
+    // frame; without the cache we walk the DOM by index path each
+    // time. `RefCell` because lookups happen through `&self` paths
+    // (e.g. `assemble_display_commands`); the borrow scopes never
+    // overlap with `parsed_document.borrow()` so refcell panics aren't
+    // possible.
+    focused_node_cache: RefCell<Option<FocusCache>>,
+}
+
+#[derive(Debug, Clone)]
+struct FocusCache {
+    path: Option<Vec<usize>>,
+    revision: u64,
+    node_id: Option<NodeId>,
 }
 
 #[derive(Debug)]
@@ -143,9 +196,9 @@ enum PendingKind {
 // Snapshot of the inputs `build_document_view` was last called with, paired
 // with its output. The struct lives next to `BrowserState` because it's an
 // implementation detail of `display_list()` — no other module needs to know
-// about it. Cloning a `DocumentView` to satisfy the per-frame consume-by-
-// value pattern in `render::translate` is still much cheaper than rerunning
-// style + layout + paint, so the indirection pays for itself.
+// about it. The `view` is `Rc`-wrapped so cache hits are O(1) clones of a
+// refcount rather than deep copies of the `links` Vec and the recursive
+// `layout_root` tree.
 #[derive(Debug)]
 struct CachedView {
     revision: u64,
@@ -153,7 +206,7 @@ struct CachedView {
     hover_path: Option<Vec<usize>>,
     focus_path: Option<Vec<usize>>,
     active: bool,
-    view: DocumentView,
+    view: Rc<DocumentView>,
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +277,8 @@ impl BrowserState {
             external_scripts,
             cached_view: None,
             pending_navigation: None,
+            navigation_wake: None,
+            focused_node_cache: RefCell::new(None),
             // Favicon arrives via `commit_navigate` / `commit_refresh` /
             // `load_initial_state`; the constructor only receives the
             // document strings + resources, not the favicon. Tests
@@ -428,7 +483,7 @@ impl BrowserState {
         let hovered_action = self.hovered_chrome_action(input, viewport_width);
         self.assemble_display_commands(
             viewport_width,
-            document_view,
+            &document_view,
             hovered_href.as_deref(),
             hovered_action,
         )
@@ -495,7 +550,7 @@ impl BrowserState {
     fn assemble_display_commands(
         &self,
         viewport_width: usize,
-        document_view: DocumentView,
+        document_view: &DocumentView,
         hovered_href: Option<&str>,
         hovered_action: Option<ChromeAction>,
     ) -> Vec<render::DisplayCommand> {
@@ -506,7 +561,11 @@ impl BrowserState {
             .filter(|host| !host.is_empty())
             .unwrap_or("New Tab");
         let translate_y = CHROME_HEIGHT - self.scroll_offset;
-        let mut commands = render::translate(document_view.commands, 0.0, translate_y);
+        // `document_view` is shared behind `Rc` (the view cache hands out
+        // refcount clones, so deep-cloning the whole struct would defeat the
+        // cache). Only the page commands need an owned Vec because `translate`
+        // mutates in place; links + layout_root stay borrowed.
+        let mut commands = render::translate(document_view.commands.clone(), 0.0, translate_y);
         commands.extend(render::translate(
             link_decoration_commands(&document_view.links, hovered_href),
             0.0,
@@ -515,10 +574,7 @@ impl BrowserState {
         // Page input caret rides on top of the page's own painted commands
         // and any link decorations, but underneath the chrome strip — same
         // z-order story as link underlines.
-        let focused_node_id = self
-            .focused_dom_path
-            .as_deref()
-            .and_then(|path| node_id_for_dom_path(&self.parsed_document.borrow(), path));
+        let focused_node_id = self.focused_node_id();
         commands.extend(render::translate(
             caret_commands_for_focused_input(
                 &document_view.layout_root,
@@ -575,7 +631,7 @@ impl BrowserState {
     //
     // Render failures don't get cached — we want the next frame to retry
     // a fresh build (the failure may have been transient).
-    fn build_or_reuse_view(&mut self, viewport_width: usize, active: bool) -> DocumentView {
+    fn build_or_reuse_view(&mut self, viewport_width: usize, active: bool) -> Rc<DocumentView> {
         let revision = self.parsed_document.borrow().revision();
         if let Some(cached) = self.cached_view.as_ref()
             && cached.revision == revision
@@ -584,7 +640,7 @@ impl BrowserState {
             && cached.hover_path == self.hovered_dom_path
             && cached.focus_path == self.focused_dom_path
         {
-            return cached.view.clone();
+            return Rc::clone(&cached.view);
         }
         let interaction = style::InteractionState {
             hover: self.hovered_dom_path.as_deref(),
@@ -614,15 +670,16 @@ impl BrowserState {
         };
         match layout_result {
             Ok(view) => {
+                let shared = Rc::new(view);
                 self.cached_view = Some(CachedView {
                     revision,
                     viewport_width,
                     hover_path: self.hovered_dom_path.clone(),
                     focus_path: self.focused_dom_path.clone(),
                     active,
-                    view: view.clone(),
+                    view: Rc::clone(&shared),
                 });
-                view
+                shared
             }
             Err(build_error) => {
                 eprintln!("{build_error}");
@@ -638,7 +695,7 @@ impl BrowserState {
                 // Tear down any stale cached view from before the failure
                 // so a subsequent recovery rebuilds against current inputs.
                 self.cached_view = None;
-                DocumentView {
+                Rc::new(DocumentView {
                     commands: Vec::new(),
                     links: Vec::new(),
                     // Empty fallback root so downstream hit-testing can run safely.
@@ -647,7 +704,7 @@ impl BrowserState {
                         dimensions: layout::Dimensions::default(),
                         children: Vec::new(),
                     },
-                }
+                })
             }
         }
     }
@@ -663,15 +720,55 @@ impl BrowserState {
     /// winit event handler, so they don't need to live here.
     ///
     /// Today this covers the caret blink (animating only while the
-    /// address bar owns focus and isn't in select-all mode) and an
-    /// in-flight async navigation (the worker channel must be polled
-    /// every frame until it resolves). JS timers / requestAnimationFrame
-    /// are a follow-up — they don't currently advertise pendingness
-    /// through `js`, so a page that uses `setInterval` will redraw
-    /// only when other triggers happen.
+    /// address bar owns focus and isn't in select-all mode) and any
+    /// live JS-side timer or `requestAnimationFrame` callback
+    /// (`js.has_pending_work()` surfaces a Rust-mirrored count that
+    /// the timer module syncs at every queue mutation). In-flight
+    /// navigations used to ride here too, which forced a 60 fps poll
+    /// for the worker channel; that arm now flows through the
+    /// `navigation_wake` hook instead — the worker thread pokes the
+    /// shell's `EventLoopProxy` when its `mpsc::Sender` lands, so the
+    /// next frame fires once and the shell sleeps at 0% CPU in
+    /// between.
     pub fn wants_continuous_redraw(&self) -> bool {
         let caret_blinking = self.address_bar_focused && !self.address_bar_selected;
-        caret_blinking || self.pending_navigation.is_some()
+        caret_blinking || self.js.has_pending_work()
+    }
+
+    /// Install the cross-thread wake hook that the navigation worker
+    /// invokes after `load_remote_document` completes. The shell binds
+    /// this to its winit `EventLoopProxy` on the first frame; tests
+    /// (and any embedder that drives `display_list` synchronously)
+    /// leave it `None` and the change is invisible — the `try_recv`
+    /// inside `poll_pending_navigation` still drains a finished load
+    /// whenever the next frame happens to run.
+    pub fn set_navigation_wake(&mut self, hook: Arc<dyn Fn() + Send + Sync>) {
+        self.navigation_wake = Some(NavigationWake::from_arc(hook));
+    }
+
+    /// Resolve `focused_dom_path` to a `NodeId` against the current
+    /// document, memoised against the path + document revision. The
+    /// caret renderer hits this every frame, so the cache turns what
+    /// was a per-frame DOM walk into a single-pointer comparison on
+    /// idle frames. The cache invalidates automatically when either
+    /// the focus path or the document revision changes.
+    fn focused_node_id(&self) -> Option<NodeId> {
+        let revision = self.parsed_document.borrow().revision();
+        if let Some(cache) = self.focused_node_cache.borrow().as_ref()
+            && cache.revision == revision
+            && cache.path == self.focused_dom_path
+        {
+            return cache.node_id;
+        }
+        let resolved = self.focused_dom_path.as_deref().and_then(|path| {
+            node_id_for_dom_path(&self.parsed_document.borrow(), path)
+        });
+        *self.focused_node_cache.borrow_mut() = Some(FocusCache {
+            path: self.focused_dom_path.clone(),
+            revision,
+            node_id: resolved,
+        });
+        resolved
     }
 }
 
@@ -1538,6 +1635,24 @@ mod tests {
         state.address_bar_focused = true;
         state.address_bar_selected = true;
         assert!(!state.wants_continuous_redraw());
+    }
+
+    #[test]
+    fn wants_continuous_redraw_true_while_js_timer_outstanding() {
+        // A page that installs `setInterval(fn, 16)` (or queues a rAF)
+        // must keep getting frames even when the address bar is blurred
+        // and no input is flowing — otherwise the timer never fires.
+        // `JsRuntime` syncs the live timer/rAF count to Rust at every
+        // queue mutation, and `wants_continuous_redraw` reads it via
+        // `js.has_pending_work()`.
+        let mut state = make_state("<html><body></body></html>");
+        state.address_bar_focused = false;
+        state.address_bar_selected = false;
+        assert!(!state.wants_continuous_redraw());
+        // Arm an interval through the JS surface — same path a real
+        // page would use — and confirm the redraw signal flips on.
+        state.js.execute("setInterval(function(){}, 16);").unwrap();
+        assert!(state.wants_continuous_redraw());
     }
 
     #[test]

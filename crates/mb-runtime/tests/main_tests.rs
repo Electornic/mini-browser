@@ -157,7 +157,7 @@ mod tests {
                 height: 8.0,
                 source_width: 1,
                 source_height: 1,
-                pixels: vec![0xFF0000],
+                pixels: std::rc::Rc::new(vec![0xFF0000]),
                 source_x: 0.0,
                 source_y: 0.0,
             })]
@@ -2671,15 +2671,22 @@ mod tests {
     }
 
     #[test]
-    fn wants_continuous_redraw_is_true_while_navigation_is_pending() {
-        // The async navigation worker hands its result back through an
-        // mpsc::Receiver that `display_list` polls every frame. If the
-        // shell stops redrawing, that poll never fires and the new
-        // document never lands — so pending must keep the loop alive.
+    fn pending_navigation_wakes_via_hook_not_continuous_redraw() {
+        // The async navigation worker no longer rides
+        // `wants_continuous_redraw` — that used to force a 60 fps poll
+        // for the full duration of a network load. Instead the shell
+        // installs a wake hook (an `EventLoopProxy::send_event`
+        // closure) that the worker invokes after the `mpsc::Sender`
+        // lands, so the next frame fires exactly once. This test
+        // exercises both halves of that contract.
         use std::{
             io::{Read, Write},
             net::TcpListener,
-            sync::mpsc,
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+                mpsc,
+            },
             thread,
         };
 
@@ -2712,9 +2719,17 @@ mod tests {
             Some(url),
             "loaded",
         );
-        // Move address focus off so the only redraw signal is the
-        // pending nav itself — no caret-blink confound.
+        // Move address focus off so no caret-blink hides the
+        // wants_continuous_redraw signal we're inspecting.
         browser.address_bar_focused = false;
+
+        // Install a recorder so we can verify the worker fires the
+        // hook on completion.
+        let wake_calls = Arc::new(AtomicUsize::new(0));
+        let counter = wake_calls.clone();
+        browser.set_navigation_wake(Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
 
         let refresh_rect = refresh_button_rect();
         browser.apply_input(
@@ -2727,9 +2742,16 @@ mod tests {
             600,
         );
         assert!(browser.has_pending_navigation());
-        assert!(browser.wants_continuous_redraw());
+        // Critical: pending nav must NOT trigger continuous redraw —
+        // that's what makes the shell drop to 0% CPU during a load.
+        assert!(!browser.wants_continuous_redraw());
+        // The worker hasn't completed yet (server is blocked on
+        // `release_rx`), so no wake should have fired.
+        assert_eq!(wake_calls.load(Ordering::SeqCst), 0);
 
-        // Release server, drive frames to clean up.
+        // Release the server. Spin the polling loop ourselves — the
+        // shell would normally wake on `user_event` instead, but this
+        // test has no winit loop to bind to.
         release_tx.send(()).unwrap();
         let mut frames = 0;
         while browser.has_pending_navigation() && frames < 200 {
@@ -2739,8 +2761,15 @@ mod tests {
             }
             frames += 1;
         }
-        // After commit, idle again.
+        // Document committed, idle resumes.
         assert!(!browser.wants_continuous_redraw());
+        // And the worker must have pinged the hook at least once on
+        // its way out — that's the signal a real winit shell would
+        // observe through `user_event`.
+        assert!(
+            wake_calls.load(Ordering::SeqCst) >= 1,
+            "navigation worker should have invoked the wake hook"
+        );
         server.join().unwrap();
     }
 
@@ -2786,7 +2815,7 @@ mod tests {
             .expect("tab favicon Image command");
         assert_eq!(favicon_cmd.source_width, 1);
         assert_eq!(favicon_cmd.source_height, 1);
-        assert_eq!(favicon_cmd.pixels, vec![0xC0FFEE]);
+        assert_eq!(*favicon_cmd.pixels, vec![0xC0FFEE]);
 
         // Tab title shifts right when a favicon is present.
         let tab_title_x = commands

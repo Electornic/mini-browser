@@ -10,13 +10,14 @@
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use softbuffer::{Context as SbContext, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
@@ -25,16 +26,39 @@ use winit::window::{Window, WindowId};
 // through that name.
 use mb_engine::input::WindowInput;
 
-/// What the per-frame closure hands back to the shell. The shell copies
-/// `pixels` into the softbuffer surface, then uses `wants_redraw` to
-/// decide whether to keep animating: `true` schedules another
-/// `request_redraw` from `about_to_wait`, `false` lets winit block on
-/// the next real input event and drops idle CPU to ~0%.
-pub struct FrameOutput {
-    pub pixels: Vec<u32>,
-    pub wants_redraw: bool,
+/// Cross-thread wake-up handle. Workers (currently just the navigation
+/// loader) call `wake()` after they finish so the shell promptly
+/// schedules a redraw — that's what lets `wants_continuous_redraw`
+/// drop the `pending_navigation.is_some()` arm and idle at 0% CPU
+/// while a fetch is in flight. `as_arc` packages the proxy into the
+/// `Arc<dyn Fn() + Send + Sync>` shape `BrowserState` stores.
+#[derive(Clone)]
+pub struct WakeHandle {
+    proxy: EventLoopProxy<()>,
 }
 
+impl WakeHandle {
+    /// Package the proxy into the `Arc<dyn Fn() + Send + Sync>` shape
+    /// `BrowserState` stores so it can hand the hook to worker
+    /// threads. Send may fail if the event loop has already exited
+    /// (e.g. user closed the window mid-fetch); the closure drops the
+    /// error since there is nothing left to redraw.
+    pub fn as_arc(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let proxy = self.proxy.clone();
+        Arc::new(move || {
+            let _ = proxy.send_event(());
+        })
+    }
+}
+
+/// The per-frame closure paints directly into the softbuffer surface
+/// (`target`) and returns whether the browser wants another frame even
+/// without input: `true` schedules another `request_redraw` from
+/// `about_to_wait`, `false` lets winit block on the next real input
+/// event and drops idle CPU to ~0%. The `wake` handle is the same on
+/// every invocation; callers typically register it with their state
+/// on the first frame so background workers can poke the shell when
+/// they finish.
 pub fn run<F>(
     title: &str,
     initial_width: usize,
@@ -42,20 +66,25 @@ pub fn run<F>(
     build_scene: F,
 ) -> Result<()>
 where
-    F: FnMut(usize, usize, &WindowInput) -> FrameOutput,
+    F: FnMut(usize, usize, &WindowInput, &mut [u32], &WakeHandle) -> bool,
 {
     let event_loop = EventLoop::new().context("create event loop")?;
     // `Wait` lets winit block on the next real event when no animation
     // is pending. The shell explicitly schedules redraws via
     // `request_redraw` for input events (keyboard / mouse / scroll /
-    // resize) and for time-driven UI (caret blink, pending nav poll)
-    // when the closure asks for one — see `App::about_to_wait`.
+    // resize), for time-driven UI (caret blink, JS timers) when the
+    // closure asks for one — see `App::about_to_wait` — and via the
+    // `UserEvent` arm below when a background worker pokes the proxy.
     event_loop.set_control_flow(ControlFlow::Wait);
+    let wake = WakeHandle {
+        proxy: event_loop.create_proxy(),
+    };
     let mut app = App::new(
         title.to_string(),
         initial_width as u32,
         initial_height as u32,
         build_scene,
+        wake,
     );
     event_loop.run_app(&mut app).context("run event loop")?;
     if let Some(err) = app.error.take() {
@@ -66,11 +95,12 @@ where
 
 struct App<F>
 where
-    F: FnMut(usize, usize, &WindowInput) -> FrameOutput,
+    F: FnMut(usize, usize, &WindowInput, &mut [u32], &WakeHandle) -> bool,
 {
     title: String,
     initial_size: (u32, u32),
     build_scene: F,
+    wake: WakeHandle,
     window: Option<Rc<Window>>,
     surface: Option<Surface<Rc<Window>, Rc<Window>>>,
     pending: PendingInput,
@@ -120,13 +150,14 @@ impl PendingInput {
 
 impl<F> App<F>
 where
-    F: FnMut(usize, usize, &WindowInput) -> FrameOutput,
+    F: FnMut(usize, usize, &WindowInput, &mut [u32], &WakeHandle) -> bool,
 {
-    fn new(title: String, w: u32, h: u32, build_scene: F) -> Self {
+    fn new(title: String, w: u32, h: u32, build_scene: F, wake: WakeHandle) -> Self {
         Self {
             title,
             initial_size: (w, h),
             build_scene,
+            wake,
             window: None,
             surface: None,
             pending: PendingInput::default(),
@@ -152,7 +183,7 @@ where
 
 impl<F> ApplicationHandler for App<F>
 where
-    F: FnMut(usize, usize, &WindowInput) -> FrameOutput,
+    F: FnMut(usize, usize, &WindowInput, &mut [u32], &WakeHandle) -> bool,
 {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -237,12 +268,21 @@ where
         }
     }
 
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
+        // A background worker (currently just the navigation loader)
+        // pinged the proxy from off-thread because something it owns
+        // is now ready to be picked up by the next frame. We don't
+        // care which worker — just schedule one redraw so the closure
+        // runs and drains whatever channel it owns.
+        self.request_redraw();
+    }
+
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         // Drop into `ControlFlow::Wait` (set in `run`) unless the last
         // frame told us it was animating — caret blink while the
-        // address bar is focused, an in-flight async navigation that
-        // needs polling, etc. Every other case waits for an actual
-        // input event and burns no CPU on idle.
+        // address bar is focused, a live JS timer / rAF, etc. Every
+        // other case waits for an actual input event (or a worker
+        // `user_event` wake) and burns no CPU on idle.
         if self.last_wants_redraw {
             self.request_redraw();
         }
@@ -251,7 +291,7 @@ where
 
 impl<F> App<F>
 where
-    F: FnMut(usize, usize, &WindowInput) -> FrameOutput,
+    F: FnMut(usize, usize, &WindowInput, &mut [u32], &WakeHandle) -> bool,
 {
     fn handle_keyboard(&mut self, event_loop: &ActiveEventLoop, event: KeyEvent) {
         if event.state != ElementState::Pressed {
@@ -321,23 +361,23 @@ where
             .map_err(|e| anyhow!("softbuffer resize: {e}"))?;
 
         let input = self.pending.drain_for_frame(self.last_left_down);
-        let frame = (self.build_scene)(size.width as usize, size.height as usize, &input);
         self.last_left_down = input.left_mouse_held;
-        self.last_wants_redraw = frame.wants_redraw;
-        let pixels = frame.pixels;
 
         let mut buffer = surface
             .buffer_mut()
             .map_err(|e| anyhow!("softbuffer buffer: {e}"))?;
-        let n = buffer.len().min(pixels.len());
-        buffer[..n].copy_from_slice(&pixels[..n]);
-        // If the closure produced fewer pixels than the surface (e.g. mid-resize
-        // race) zero the tail so we don't show stale junk.
-        if n < buffer.len() {
-            for slot in &mut buffer[n..] {
-                *slot = 0;
-            }
-        }
+        // softbuffer's `resize` above guarantees `buffer.len() == width *
+        // height`, and the renderer paints every pixel inside that
+        // rectangle starting from an opaque-white pixmap. No prior-frame
+        // residue can leak through, so no explicit zero pass is needed.
+        let wants_redraw = (self.build_scene)(
+            size.width as usize,
+            size.height as usize,
+            &input,
+            &mut buffer,
+            &self.wake,
+        );
+        self.last_wants_redraw = wants_redraw;
         buffer
             .present()
             .map_err(|e| anyhow!("softbuffer present: {e}"))?;

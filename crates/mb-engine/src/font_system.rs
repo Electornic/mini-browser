@@ -4,12 +4,19 @@
 // reloads on navigation propagate. The SwashCache lives as long as the
 // FontSystem because its keys reference font ids inside that database.
 
+use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 
 use cosmic_text::{FontSystem, SwashCache};
 
 static SHARED_FONT_SYSTEM: OnceLock<Mutex<FontSystem>> = OnceLock::new();
 static SHARED_SWASH_CACHE: OnceLock<Mutex<SwashCache>> = OnceLock::new();
+// Hash of the most-recently-installed font set (page fonts + macOS
+// fallbacks, in order). Lets us skip the FontSystem rebuild when a
+// navigation hands us a byte-identical set — keeping the swash glyph
+// cache warm across reloads and back/forward moves between same-font
+// pages.
+static LAST_FONT_HASH: OnceLock<Mutex<Option<u64>>> = OnceLock::new();
 
 pub fn shared_font_system() -> Option<&'static Mutex<FontSystem>> {
     SHARED_FONT_SYSTEM.get()
@@ -35,6 +42,30 @@ pub fn shared_swash_cache() -> Option<&'static Mutex<SwashCache>> {
 // Missing files are silently skipped — useful for non-macOS hosts and CI
 // (the toy fallback path inside `measure_text_wrap` still produces a
 // reasonable estimate).
+// Stable content hash over the ordered (page fonts then fallbacks)
+// byte slices. `DefaultHasher` is fine here: it's not cryptographic
+// but its collision probability is wildly below the practical "two
+// font sets that happen to hash the same" threshold, and any rare
+// false positive would just mean reusing the swash cache against an
+// equally-sized but different font set — bad-looking glyphs, not
+// memory safety.
+fn compute_font_hash(font_data: &[Vec<u8>], macos_fallbacks: &[Vec<u8>]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // Hash lengths first so a `[a, ab]` set doesn't collide with
+    // `[aab, ]` (concatenation ambiguity).
+    font_data.len().hash(&mut hasher);
+    for data in font_data {
+        data.len().hash(&mut hasher);
+        data.hash(&mut hasher);
+    }
+    macos_fallbacks.len().hash(&mut hasher);
+    for data in macos_fallbacks {
+        data.len().hash(&mut hasher);
+        data.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 pub fn install_fonts(font_data: &[Vec<u8>]) {
     let macos_fallbacks: Vec<Vec<u8>> = [
         "/System/Library/Fonts/AppleSDGothicNeo.ttc",
@@ -47,12 +78,36 @@ pub fn install_fonts(font_data: &[Vec<u8>]) {
 }
 
 fn install_shared_font_system(font_data: &[Vec<u8>], macos_fallbacks: &[Vec<u8>]) {
+    // Hash the page-fonts-plus-fallbacks byte set so a navigation
+    // whose fonts are content-identical to the previous install
+    // (reload, back/forward to a same-font page, intra-site nav
+    // sharing the same `<link rel="stylesheet">` chain) can keep the
+    // existing FontSystem + SwashCache. The SwashCache contains
+    // already-rasterised glyph images; throwing it away forces every
+    // visible glyph through swash again on the first frame after the
+    // swap — a multi-hundred-ms first-paint cost on text-heavy pages.
+    let new_hash = compute_font_hash(font_data, macos_fallbacks);
+    let last_hash_slot =
+        LAST_FONT_HASH.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = last_hash_slot.lock()
+        && *guard == Some(new_hash)
+        && SHARED_FONT_SYSTEM.get().is_some()
+    {
+        // Identical content + FontSystem already initialised →
+        // nothing to do. Skip the FontSystem rebuild and leave
+        // the swash glyph cache untouched.
+        return;
+    }
+
     let mut fs = FontSystem::new();
     for data in font_data {
         fs.db_mut().load_font_data(data.clone());
     }
     for bytes in macos_fallbacks {
         fs.db_mut().load_font_data(bytes.clone());
+    }
+    if let Ok(mut guard) = last_hash_slot.lock() {
+        *guard = Some(new_hash);
     }
     match SHARED_FONT_SYSTEM.get() {
         Some(slot) => {

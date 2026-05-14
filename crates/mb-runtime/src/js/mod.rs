@@ -8,7 +8,7 @@
 // callbacks capture `Rc<RefCell<...>>` host state (DOM, listener map,
 // shared location buffer) — same pattern boa used.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use rquickjs::{CatchResultExt, CaughtError, Context, Function, Runtime, Value};
@@ -38,6 +38,13 @@ pub struct JsRuntime {
     dom: Rc<RefCell<Document>>,
     location_url: Rc<RefCell<String>>,
     clock: ClockSource,
+    // Live count of `queue.length + rafQueue.length` inside the JS timer
+    // module. Mirrored from JS via `__mb_set_pending` at every queue
+    // mutation. Cancellations don't decrement live (the cancelled flag
+    // is only consulted during the next `__mb_run_timers` filter pass),
+    // so the count can be slightly stale-high — that costs one extra
+    // frame of redraw, never under-redraw.
+    pending_jobs: Rc<Cell<u32>>,
 }
 
 impl JsRuntime {
@@ -60,6 +67,7 @@ impl JsRuntime {
         let runtime = Runtime::new().expect("rquickjs Runtime should construct");
         let context = Context::full(&runtime).expect("rquickjs Context should construct");
         let location_url: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+        let pending_jobs: Rc<Cell<u32>> = Rc::new(Cell::new(0));
 
         context.with(|ctx| {
             ctx.eval::<(), _>(DISPLAY_HELPER)
@@ -74,7 +82,8 @@ impl JsRuntime {
                 .expect("document should register");
             event::register_events(&ctx).expect("events should register");
             storage::register_storage(&ctx).expect("storage should register");
-            timers::register_timers(&ctx, clock.clone()).expect("timers should register");
+            timers::register_timers(&ctx, clock.clone(), pending_jobs.clone())
+                .expect("timers should register");
             fetch::register_fetch(&ctx).expect("fetch should register");
             xhr::register_xhr(&ctx).expect("xhr should register");
         });
@@ -85,7 +94,17 @@ impl JsRuntime {
             dom,
             location_url,
             clock,
+            pending_jobs,
         }
+    }
+
+    /// True when the JS runtime owns time-driven work that needs another
+    /// frame: an outstanding `setTimeout`/`setInterval` deadline, or a
+    /// queued `requestAnimationFrame` callback. The shell composes this
+    /// with the chrome-side reasons (caret blink, in-flight navigation)
+    /// to decide whether to keep redrawing.
+    pub fn has_pending_work(&self) -> bool {
+        self.pending_jobs.get() > 0
     }
 
     /// Update the URL backing `window.location.*`. Read-on-access getters

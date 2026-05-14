@@ -64,11 +64,27 @@ impl FixedClock {
     }
 }
 
-pub(super) fn register_timers(ctx: &Ctx<'_>, clock: ClockSource) -> Result<()> {
+pub(super) fn register_timers(
+    ctx: &Ctx<'_>,
+    clock: ClockSource,
+    pending: Rc<Cell<u32>>,
+) -> Result<()> {
     let clock_now = clock.clone();
     ctx.globals().set(
         "__mb_clock_now",
         Func::from(move || -> f64 { clock_now.now_ms() as f64 }),
+    )?;
+    // JS-side queue mutations call `__mb_set_pending(queue.length +
+    // rafQueue.length)` so the Rust side knows whether the runtime
+    // still has time-driven callbacks to fire. `JsRuntime::
+    // has_pending_work()` reads this; `wants_continuous_redraw`
+    // uses it to keep scheduling frames while timers/rAFs are live.
+    let pending_setter = pending.clone();
+    ctx.globals().set(
+        "__mb_set_pending",
+        Func::from(move |count: u32| {
+            pending_setter.set(count);
+        }),
     )?;
     ctx.eval::<(), _>(TIMERS_BOOT)
 }
@@ -84,6 +100,17 @@ const TIMERS_BOOT: &str = r#"
     var nextRafId = 0;
     var cancelled = Object.create(null);
 
+    // Push the current pending count out to Rust so `has_pending_work()`
+    // (and through it `wants_continuous_redraw`) can decide whether the
+    // shell needs to keep redrawing. Called at every mutation point that
+    // changes `queue.length + rafQueue.length`. Cancellations don't
+    // change the live count — the entry sits in the queue until the
+    // next `__mb_run_timers` filter pass — so they piggyback on that
+    // drain's sync instead of syncing here.
+    function syncPending() {
+        globalThis.__mb_set_pending(queue.length + rafQueue.length);
+    }
+
     globalThis.setTimeout = function (cb, ms) {
         var id = ++nextId;
         if (typeof cb !== 'function') { cancelled[id] = true; return id; }
@@ -92,6 +119,7 @@ const TIMERS_BOOT: &str = r#"
             id: id, cb: cb, delay: delay, repeat: false,
             deadline: globalThis.__mb_clock_now() + delay,
         });
+        syncPending();
         return id;
     };
 
@@ -103,6 +131,7 @@ const TIMERS_BOOT: &str = r#"
             id: id, cb: cb, delay: delay, repeat: true,
             deadline: globalThis.__mb_clock_now() + delay,
         });
+        syncPending();
         return id;
     };
 
@@ -113,6 +142,7 @@ const TIMERS_BOOT: &str = r#"
         var id = ++nextRafId;
         if (typeof cb !== 'function') { cancelled['raf:' + id] = true; return id; }
         rafQueue.push({ id: id, cb: cb });
+        syncPending();
         return id;
     };
     globalThis.cancelAnimationFrame = function (id) { cancelled['raf:' + id] = true; };
@@ -149,6 +179,7 @@ const TIMERS_BOOT: &str = r#"
                 }
             }
         }
+        syncPending();
         return fired;
     };
 
@@ -157,11 +188,14 @@ const TIMERS_BOOT: &str = r#"
         // *next* frame (browser-spec behaviour).
         var snapshot = rafQueue;
         rafQueue = [];
+        syncPending();
         for (var i = 0; i < snapshot.length; i++) {
             var entry = snapshot[i];
             if (cancelled['raf:' + entry.id]) continue;
             try { entry.cb(timestamp); } catch (err) { /* swallow */ }
         }
+        // A handler may have queued a new rAF or timer; resync after.
+        syncPending();
     };
 
     // Patch `Date.now()` so it tracks the engine clock — tests using

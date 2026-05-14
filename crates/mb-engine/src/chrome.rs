@@ -337,12 +337,10 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             height: TAB_FAVICON_SIZE,
             source_width: favicon.width,
             source_height: favicon.height,
-            // Cloning the pixel buffer matches `<img>` rendering: the
-            // raster pass owns its commands by value, so the chrome
-            // path can't borrow into the LoadedImage. Tab favicons are
-            // small (typically 16×16 = 1KB) so the per-frame copy is
-            // negligible compared to the layout / paint work.
-            pixels: favicon.pixels.clone(),
+            // One Vec copy at chrome construction so the raster pass
+            // owns its data; subsequent display-list clones (cache
+            // hits) only bump the Rc refcount.
+            pixels: std::rc::Rc::new(favicon.pixels.clone()),
             source_x: 0.0,
             source_y: 0.0,
         }));

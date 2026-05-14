@@ -13,7 +13,10 @@ mod display_list;
 mod raster;
 
 pub use display_list::{PaintContext, build_display_list, transform_for, translate};
-pub use raster::{measure_text_width, measure_text_wrap, measure_text_wrap_with_family, rasterize};
+pub use raster::{
+    measure_text_width, measure_text_wrap, measure_text_wrap_with_family, rasterize,
+    rasterize_into,
+};
 
 /// 2-D affine transform stored as the six matrix entries of
 /// ```text
@@ -239,7 +242,11 @@ pub struct ImageCommand {
     pub height: f32,
     pub source_width: usize,
     pub source_height: usize,
-    pub pixels: Vec<u32>,
+    // `Rc` so cache-hit clones of the surrounding `Vec<DisplayCommand>` only
+    // bump a refcount rather than copying every decoded pixel. The source
+    // `LoadedImage` still owns its own `Vec<u32>` — the wrap happens once
+    // at display-list construction.
+    pub pixels: std::rc::Rc<Vec<u32>>,
     // Source-pixel offset that lands at the box's top-left, used by
     // `background-position` to slice a sprite strip without scaling. When
     // both are zero the existing scale-to-fit path runs (current
@@ -890,7 +897,7 @@ mod tests {
                     height: 10.0,
                     source_width: 1,
                     source_height: 1,
-                    pixels: vec![0x112233],
+                    pixels: std::rc::Rc::new(vec![0x112233]),
                     source_x: 0.0,
                     source_y: 0.0,
                 }),
@@ -933,7 +940,7 @@ mod tests {
                 height: 10.0,
                 source_width: 1,
                 source_height: 1,
-                pixels: vec![0x112233],
+                pixels: std::rc::Rc::new(vec![0x112233]),
                 source_x: 0.0,
                 source_y: 0.0,
             })
@@ -950,7 +957,7 @@ mod tests {
                 height: 2.0,
                 source_width: 2,
                 source_height: 2,
-                pixels: vec![0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF],
+                pixels: std::rc::Rc::new(vec![0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF]),
                 source_x: 0.0,
                 source_y: 0.0,
             })],
