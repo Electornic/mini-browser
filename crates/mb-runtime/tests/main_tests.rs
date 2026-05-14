@@ -9,7 +9,7 @@ mod tests {
             address_bar_rect, back_button_rect, menu_button_rect, refresh_button_rect,
         },
         css,
-        display_list::{
+        view::{
             LinkTarget, collect_image_commands, collect_link_targets, compute_hovered_dom_path,
             document_height, link_decoration_commands, point_in_rect,
         },

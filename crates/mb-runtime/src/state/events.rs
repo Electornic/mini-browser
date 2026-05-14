@@ -13,7 +13,7 @@ use crate::{
         menu_button_rect, refresh_button_rect,
     },
     css,
-    display_list::{LinkTarget, point_in_rect},
+    view::{LinkTarget, point_in_rect},
     input,
 };
 

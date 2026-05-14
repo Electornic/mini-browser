@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use mb_runtime::{css, display_list::build_document_view, html, render, style};
+use mb_runtime::{css, html, render, style, view::build_document_view};
 
 const VIEWPORT_W: usize = 320;
 const VIEWPORT_H: usize = 240;

@@ -1,7 +1,7 @@
 // BrowserState owns everything the per-frame loop has to keep coherent: the
 // parsed document/CSS caches, the JS runtime that shares the document arena,
 // the address bar / scroll / history state, and the `display_list` driver
-// that calls into `crate::display_list` for view building and `crate::chrome`
+// that calls into `crate::view` for view building and `crate::chrome`
 // for chrome painting. Pure helpers (sample HTML/CSS, the env-arg loader, the
 // font cache builder) live at the bottom so `main` can stay a one-liner.
 
@@ -14,7 +14,7 @@ use std::{cell::RefCell, collections::HashMap, env, rc::Rc, sync::mpsc};
 use crate::{
     chrome::{CHROME_HEIGHT, ChromeState, chrome_commands},
     css,
-    display_list::{
+    view::{
         DocumentView, build_document_view, caret_commands_for_focused_input, compute_hovered_hit,
         document_height, link_decoration_commands,
     },
@@ -533,7 +533,7 @@ impl BrowserState {
         commands
     }
 
-    // Cache-aware wrapper around `display_list::build_document_view`. The
+    // Cache-aware wrapper around `view::build_document_view`. The
     // function returns a `DocumentView` either by cloning a previously
     // computed one (if every input that style/layout/paint depends on is
     // unchanged) or by rerunning the full pipeline and refreshing the
@@ -953,7 +953,7 @@ fn build_form_submit_url(action: &str, data: &[(String, String)]) -> String {
 
 // Walks a stored hover/focus path back to its NodeId. The path is a
 // sequence of child indices starting at the document's last root —
-// matching the convention in `display_list::build_document_view`, which
+// matching the convention in `view::build_document_view`, which
 // picks `roots().last()` as the visible page root, and the hit-test in
 // `compute_hovered_hit`, which produces paths against the same tree.
 // Layout child positions still mirror DOM child positions today (no
