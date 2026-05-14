@@ -12,7 +12,7 @@ mod lifecycle;
 use std::{cell::RefCell, collections::HashMap, env, rc::Rc, sync::mpsc};
 
 use crate::{
-    chrome::{CHROME_HEIGHT, ChromeState, chrome_commands},
+    chrome::{CHROME_HEIGHT, ChromeAction, ChromeState, chrome_commands},
     css,
     view::{
         DocumentView, build_document_view, caret_commands_for_focused_input, compute_hovered_hit,
@@ -421,83 +421,100 @@ impl BrowserState {
         // forward, no double-pass per frame required.
         self.hovered_dom_path = hover_hit.map(|hit| hit.path);
 
-        // A page-area click moves :focus to the just-hovered element; clicks
-        // anywhere outside the page (chrome buttons, the address bar,
-        // off-window) clear it. When the path actually changes we also fire
-        // blur on the previously-focused element and focus on the new one
-        // (non-bubbling per spec — handlers register directly, ancestors
-        // shouldn't see the event).
-        if input.left_mouse_pressed {
-            let new_focus = match input.mouse_position {
-                Some((_, mouse_y)) if mouse_y >= CHROME_HEIGHT => self.hovered_dom_path.clone(),
-                _ => None,
-            };
-            if new_focus != self.focused_dom_path {
-                // Resolve both old and new paths in a single short-lived
-                // borrow so the dispatch calls below (which re-borrow the
-                // shared Document via the JsRuntime) don't conflict.
-                let (old_id, new_id) = {
-                    let document = self.parsed_document.borrow();
-                    (
-                        self.focused_dom_path
-                            .as_deref()
-                            .and_then(|path| node_id_for_dom_path(&document, path)),
-                        new_focus
-                            .as_deref()
-                            .and_then(|path| node_id_for_dom_path(&document, path)),
-                    )
-                };
-                if let Some(id) = old_id {
-                    // `change` fires when focus leaves an input whose
-                    // value was edited during this focus session. Spec
-                    // order is change-then-blur, and it bubbles (modern
-                    // spec), so use `dispatch_event` not `dispatch_event_at`.
-                    // The dirty flag is set only by user keystrokes —
-                    // pure JS-driven `.value =` never trips it, matching
-                    // the HTML spec's "user committed change" semantics.
-                    if self.focused_input_dirty {
-                        self.js.dispatch_event(id, "change");
-                    }
-                    self.js.dispatch_event_at(id, "blur");
-                }
-                // Reset for the next focus session whether or not we
-                // fired change — the new input starts with a clean slate.
-                self.focused_input_dirty = false;
-                if let Some(id) = new_id {
-                    self.js.dispatch_event_at(id, "focus");
-                }
-                self.focused_dom_path = new_focus;
-            }
-        }
+        self.dispatch_focus_change(input);
         let hovered_href = self
             .hovered_link(input, &document_view.links)
-            .map(|link| link.href.as_str());
+            .map(|link| link.href.to_string());
         let hovered_action = self.hovered_chrome_action(input, viewport_width);
+        self.assemble_display_commands(
+            viewport_width,
+            document_view,
+            hovered_href.as_deref(),
+            hovered_action,
+        )
+    }
 
+    // A page-area click moves :focus to the just-hovered element; clicks
+    // anywhere outside the page (chrome buttons, the address bar,
+    // off-window) clear it. When the path actually changes we also fire
+    // blur on the previously-focused element and focus on the new one
+    // (non-bubbling per spec — handlers register directly, ancestors
+    // shouldn't see the event).
+    fn dispatch_focus_change(&mut self, input: &input::WindowInput) {
+        if !input.left_mouse_pressed {
+            return;
+        }
+        let new_focus = match input.mouse_position {
+            Some((_, mouse_y)) if mouse_y >= CHROME_HEIGHT => self.hovered_dom_path.clone(),
+            _ => None,
+        };
+        if new_focus == self.focused_dom_path {
+            return;
+        }
+        // Resolve both old and new paths in a single short-lived
+        // borrow so the dispatch calls below (which re-borrow the
+        // shared Document via the JsRuntime) don't conflict.
+        let (old_id, new_id) = {
+            let document = self.parsed_document.borrow();
+            (
+                self.focused_dom_path
+                    .as_deref()
+                    .and_then(|path| node_id_for_dom_path(&document, path)),
+                new_focus
+                    .as_deref()
+                    .and_then(|path| node_id_for_dom_path(&document, path)),
+            )
+        };
+        if let Some(id) = old_id {
+            // `change` fires when focus leaves an input whose
+            // value was edited during this focus session. Spec
+            // order is change-then-blur, and it bubbles (modern
+            // spec), so use `dispatch_event` not `dispatch_event_at`.
+            // The dirty flag is set only by user keystrokes —
+            // pure JS-driven `.value =` never trips it, matching
+            // the HTML spec's "user committed change" semantics.
+            if self.focused_input_dirty {
+                self.js.dispatch_event(id, "change");
+            }
+            self.js.dispatch_event_at(id, "blur");
+        }
+        // Reset for the next focus session whether or not we
+        // fired change — the new input starts with a clean slate.
+        self.focused_input_dirty = false;
+        if let Some(id) = new_id {
+            self.js.dispatch_event_at(id, "focus");
+        }
+        self.focused_dom_path = new_focus;
+    }
+
+    // Painter's-algorithm assembly of the final command list:
+    // page commands first, then link decorations, then the input caret —
+    // all translated by the chrome height minus current scroll — and
+    // finally the chrome strip painted last so it stays pinned on top
+    // even as page content scrolls into the y < CHROME_HEIGHT band.
+    fn assemble_display_commands(
+        &self,
+        viewport_width: usize,
+        document_view: DocumentView,
+        hovered_href: Option<&str>,
+        hovered_action: Option<ChromeAction>,
+    ) -> Vec<render::DisplayCommand> {
         let tab_title = self
             .current_url
             .as_ref()
             .map(|url| url.host.as_str())
             .filter(|host| !host.is_empty())
             .unwrap_or("New Tab");
-        // Painter's-algorithm order: page first, then chrome on top. Painting
-        // chrome last means any page content that would otherwise scroll up
-        // into the chrome band (y < CHROME_HEIGHT) gets covered, so the chrome
-        // visually pins to the top instead of "scrolling away" with the page.
-        let mut commands = render::translate(
-            document_view.commands,
-            0.0,
-            CHROME_HEIGHT - self.scroll_offset,
-        );
+        let translate_y = CHROME_HEIGHT - self.scroll_offset;
+        let mut commands = render::translate(document_view.commands, 0.0, translate_y);
         commands.extend(render::translate(
             link_decoration_commands(&document_view.links, hovered_href),
             0.0,
-            CHROME_HEIGHT - self.scroll_offset,
+            translate_y,
         ));
         // Page input caret rides on top of the page's own painted commands
         // and any link decorations, but underneath the chrome strip — same
-        // z-order story as link underlines. Translation matches the page
-        // commands so the caret scrolls with the input box it belongs to.
+        // z-order story as link underlines.
         let focused_node_id = self
             .focused_dom_path
             .as_deref()
@@ -509,7 +526,7 @@ impl BrowserState {
                 self.frame_index,
             ),
             0.0,
-            CHROME_HEIGHT - self.scroll_offset,
+            translate_y,
         ));
         let is_https = self
             .current_url
