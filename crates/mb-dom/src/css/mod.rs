@@ -7,10 +7,12 @@
 mod error;
 mod gradient;
 mod grid;
+mod shadow;
 
 use error::{convert_basic_error_at, convert_error, token_error};
 use gradient::{parse_linear_gradient, parse_radial_gradient};
 use grid::{parse_grid_placement, parse_grid_template_areas, parse_grid_track_list};
+use shadow::{parse_box_shadow_value, parse_text_shadow_value};
 
 use std::borrow::Borrow;
 use std::fmt;
@@ -1597,108 +1599,6 @@ fn parse_angle_token<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<f32, Parse
     };
     Ok(radians)
 }
-
-// -----------------------------------------------------------------------------
-// box-shadow / text-shadow
-// -----------------------------------------------------------------------------
-
-fn parse_box_shadow_value<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<Value, ParseError> {
-    let offset_x = parse_length_token(input)?;
-    input.skip_whitespace();
-    let offset_y = parse_length_token(input)?;
-    input.skip_whitespace();
-
-    let mut blur_radius = 0.0;
-    let mut spread_radius = 0.0;
-    for slot in 0..2 {
-        if !peek_starts_length(input) {
-            break;
-        }
-        let value = parse_length_token(input)?;
-        if slot == 0 {
-            blur_radius = value.max(0.0);
-        } else {
-            spread_radius = value;
-        }
-        input.skip_whitespace();
-    }
-
-    let color = if input.is_exhausted() {
-        Color {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 255,
-        }
-    } else {
-        match parse_value(input)? {
-            Value::Color(color) => color,
-            other => {
-                return Err(ParseError::new(
-                    input.position().byte_index(),
-                    format!("expected color in box-shadow, got {other:?}"),
-                ));
-            }
-        }
-    };
-
-    Ok(Value::BoxShadow(BoxShadow {
-        offset_x,
-        offset_y,
-        blur_radius,
-        spread_radius,
-        color,
-    }))
-}
-
-fn parse_text_shadow_value<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<Value, ParseError> {
-    let offset_x = parse_length_token(input)?;
-    input.skip_whitespace();
-    let offset_y = parse_length_token(input)?;
-    input.skip_whitespace();
-
-    let blur_radius = if peek_starts_length(input) {
-        let value = parse_length_token(input)?.max(0.0);
-        input.skip_whitespace();
-        value
-    } else {
-        0.0
-    };
-
-    let color = if input.is_exhausted() {
-        Color {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 255,
-        }
-    } else {
-        match parse_value(input)? {
-            Value::Color(color) => color,
-            other => {
-                return Err(ParseError::new(
-                    input.position().byte_index(),
-                    format!("expected color in text-shadow, got {other:?}"),
-                ));
-            }
-        }
-    };
-
-    Ok(Value::TextShadow(TextShadow {
-        offset_x,
-        offset_y,
-        blur_radius,
-        color,
-    }))
-}
-
-// -----------------------------------------------------------------------------
-// grid-* values
-// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
