@@ -7,10 +7,8 @@
 use cssparser::{Parser as CssParser, Token};
 
 use super::error::convert_basic_error_at;
-use super::{
-    Declaration, ParseError, Unit, Value, length_with_unit, parse_length_or_number, parse_value,
-    peek_starts_length,
-};
+use super::parse::{length_with_unit, parse_length_or_number, parse_value, peek_starts_length};
+use super::{Declaration, ParseError, Unit, Value};
 
 // -----------------------------------------------------------------------------
 // border-radius

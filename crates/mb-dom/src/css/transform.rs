@@ -6,7 +6,8 @@
 use cssparser::{Parser as CssParser, Token};
 
 use super::error::{convert_basic_error_at, convert_error, token_error};
-use super::{ParseError, TransformOp, Value, parse_length_token};
+use super::parse::parse_length_token;
+use super::{ParseError, TransformOp, Value};
 
 pub(super) fn parse_transform_value<'i, 't>(
     input: &mut CssParser<'i, 't>,

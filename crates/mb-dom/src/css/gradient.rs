@@ -7,9 +7,8 @@
 use cssparser::{Parser as CssParser, Token};
 
 use super::error::{convert_basic_error_at, token_error};
-use super::{
-    ColorStop, Gradient, GradientDirection, GradientKind, ParseError, Value, parse_value,
-};
+use super::parse::parse_value;
+use super::{ColorStop, Gradient, GradientDirection, GradientKind, ParseError, Value};
 
 pub(super) fn parse_linear_gradient<'i, 't>(
     input: &mut CssParser<'i, 't>,

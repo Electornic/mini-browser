@@ -10,10 +10,8 @@
 
 use cssparser::Parser as CssParser;
 
-use super::{
-    BoxShadow, Color, ParseError, TextShadow, Value, parse_length_token, parse_value,
-    peek_starts_length,
-};
+use super::parse::{parse_length_token, parse_value, peek_starts_length};
+use super::{BoxShadow, Color, ParseError, TextShadow, Value};
 
 pub(super) fn parse_box_shadow_value<'i, 't>(
     input: &mut CssParser<'i, 't>,
