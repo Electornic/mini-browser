@@ -6,10 +6,8 @@
 
 use cssparser::{Parser as CssParser, Token};
 
-use super::{
-    GridLine, GridPlacement, ParseError, TrackSize, Unit, Value, convert_basic_error_at,
-    token_error,
-};
+use super::error::{convert_basic_error_at, token_error};
+use super::{GridLine, GridPlacement, ParseError, TrackSize, Unit, Value};
 
 pub(super) fn parse_grid_template_areas<'i, 't>(
     input: &mut CssParser<'i, 't>,
