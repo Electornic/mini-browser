@@ -9,7 +9,8 @@ use cssparser::{Parser as CssParser, Token};
 
 use super::error::{convert_basic_error_at, convert_error, token_error};
 use super::gradient::{parse_linear_gradient, parse_radial_gradient};
-use super::{Color, ParseError, Unit, Value, named_color};
+use super::color::named_color;
+use super::{Color, ParseError, Unit, Value};
 
 pub(super) fn parse_value<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, ParseError> {
     input.skip_whitespace();
