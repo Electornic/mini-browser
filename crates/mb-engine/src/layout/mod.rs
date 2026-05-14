@@ -7,8 +7,8 @@
 // algorithm needs (containing-block math, edge sizes, intrinsic sizes, …).
 
 use crate::{
-    css::{Unit, Value},
-    dom::{ElementData, NodeType},
+    css::Value,
+    dom::NodeType,
     style::StyledNode,
 };
 
@@ -17,6 +17,7 @@ mod block;
 mod flex;
 mod grid;
 mod inline;
+mod properties;
 mod table;
 mod taffy_bridge;
 
@@ -24,6 +25,11 @@ use absolute::{ContainingBlock, reposition_absolutes};
 use block::layout_node;
 use flex::is_flex_container;
 use grid::is_grid_container;
+pub(super) use properties::{
+    apply_relative_offset, attribute_length, edge_sizes, has_float, is_auto, is_display_none,
+    is_float_left, is_float_right, is_layout_whitespace_text, is_out_of_flow, length_value,
+    shift_layout_subtree,
+};
 use table::is_table_container;
 
 // Layout uses a single rectangular box model for both block and simple inline flow.
@@ -270,132 +276,6 @@ pub(super) fn intrinsic_height(node: &StyledNode) -> f32 {
         }
         NodeType::Element(_) => 0.0,
     }
-}
-
-pub(super) fn edge_sizes(node: &StyledNode, prefix: &str, base: f32) -> EdgeSizes {
-    // CSS resolves percent margin/padding against the containing block's *width*, even
-    // for the top and bottom sides — a common gotcha worth keeping in mind here.
-    EdgeSizes {
-        left: length_value(node, &format!("{prefix}-left"), base).unwrap_or(0.0),
-        right: length_value(node, &format!("{prefix}-right"), base).unwrap_or(0.0),
-        top: length_value(node, &format!("{prefix}-top"), base).unwrap_or(0.0),
-        bottom: length_value(node, &format!("{prefix}-bottom"), base).unwrap_or(0.0),
-    }
-}
-
-pub(super) fn length_value(node: &StyledNode, name: &str, base: f32) -> Option<f32> {
-    // `base` is the containing-block dimension a Percent length resolves against. For
-    // properties that should never see a percent (font-size after style resolution, etc.)
-    // callers can safely pass any value.
-    match node.value(name) {
-        Some(Value::Length(value, Unit::Px)) => Some(*value),
-        Some(Value::Length(value, Unit::Percent)) => Some(*value / 100.0 * base),
-        _ => None,
-    }
-}
-
-pub(super) fn is_auto(node: &StyledNode, name: &str) -> bool {
-    matches!(node.value(name), Some(Value::Keyword(keyword)) if keyword == "auto")
-}
-
-pub(super) fn is_position_relative(node: &StyledNode) -> bool {
-    matches!(node.value("position"), Some(Value::Keyword(keyword)) if keyword == "relative")
-}
-
-pub(super) fn is_position_absolute(node: &StyledNode) -> bool {
-    matches!(node.value("position"), Some(Value::Keyword(keyword)) if keyword == "absolute")
-}
-
-pub(super) fn is_position_fixed(node: &StyledNode) -> bool {
-    matches!(node.value("position"), Some(Value::Keyword(keyword)) if keyword == "fixed")
-}
-
-pub(super) fn is_out_of_flow(node: &StyledNode) -> bool {
-    // Both `absolute` and `fixed` skip in-flow placement during pass 1; they
-    // differ only in which containing block pass 2 resolves them against.
-    is_position_absolute(node) || is_position_fixed(node)
-}
-
-pub(super) fn is_float_left(node: &StyledNode) -> bool {
-    matches!(node.value("float"), Some(Value::Keyword(k)) if k == "left")
-}
-
-pub(super) fn is_float_right(node: &StyledNode) -> bool {
-    matches!(node.value("float"), Some(Value::Keyword(k)) if k == "right")
-}
-
-pub(super) fn has_float(node: &StyledNode) -> bool {
-    is_float_left(node) || is_float_right(node)
-}
-
-pub(super) fn is_display_none(node: &StyledNode) -> bool {
-    // `display: none` removes the element (and its subtree) from the box tree
-    // entirely — no layout, no paint, no hit test. Every algorithm's child
-    // iteration filters on this so a hidden node never contributes to flow,
-    // line packing, flex tracks, grid placement, or inline-flow detection.
-    matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "none")
-}
-
-/// Whether `node` is a text node consisting purely of HTML whitespace.
-/// The HTML parser preserves inter-element whitespace as `" "` text nodes
-/// so inline runs keep their separating spaces; in non-inline layout modes
-/// (block flow, flex item placement, grid placement, table cell stacking)
-/// that whitespace would otherwise become a visible empty box / phantom
-/// item. Inline layout intentionally does NOT filter on this — there the
-/// whitespace text contributes the space the author wrote between
-/// adjacent inline elements.
-pub(super) fn is_layout_whitespace_text(node: &StyledNode) -> bool {
-    matches!(
-        &node.node_type,
-        NodeType::Text(text) if text.chars().all(char::is_whitespace)
-    )
-}
-
-pub(super) fn relative_offset(node: &StyledNode, base: f32) -> Option<(f32, f32)> {
-    // CSS spec: top/bottom percent resolves against the containing block's height
-    // and left/right against its width. The layout walk only carries width on hand,
-    // so percent offsets reuse `base` for both axes — same shortcut already taken
-    // for percent margin/padding.
-    if !is_position_relative(node) {
-        return None;
-    }
-    let left = length_value(node, "left", base);
-    let right = length_value(node, "right", base);
-    let top = length_value(node, "top", base);
-    let bottom = length_value(node, "bottom", base);
-    // When both sides are set, the start side wins (LTR + top-down): `left` and
-    // `top` take precedence and the opposite side is ignored.
-    let dx = left.unwrap_or_else(|| -right.unwrap_or(0.0));
-    let dy = top.unwrap_or_else(|| -bottom.unwrap_or(0.0));
-    if dx == 0.0 && dy == 0.0 {
-        None
-    } else {
-        Some((dx, dy))
-    }
-}
-
-pub(super) fn apply_relative_offset(layout_box: &mut LayoutBox, node: &StyledNode, base: f32) {
-    if let Some((dx, dy)) = relative_offset(node, base) {
-        shift_layout_subtree(layout_box, dx, dy);
-    }
-}
-
-pub(super) fn shift_layout_subtree(layout_box: &mut LayoutBox, dx: f32, dy: f32) {
-    // Relative positioning shifts the visual rect of the box and *every*
-    // descendant — siblings and cursors keep using the unshifted geometry, so
-    // we only mutate this subtree.
-    layout_box.dimensions.content.x += dx;
-    layout_box.dimensions.content.y += dy;
-    for child in &mut layout_box.children {
-        shift_layout_subtree(child, dx, dy);
-    }
-}
-
-pub(super) fn attribute_length(element: &ElementData, name: &str) -> Option<f32> {
-    element
-        .attributes
-        .get(name)
-        .and_then(|value| value.parse::<f32>().ok())
 }
 
 #[cfg(test)]
