@@ -22,7 +22,9 @@
 // shapes whose boundary rule is "pixel centre ≤ radius / inside the rect",
 // and AA edge coverage flips those boundary pixels.
 
+mod blend;
 mod gradient;
+mod shadow;
 mod shapes;
 
 use cosmic_text::{
@@ -36,10 +38,12 @@ use tiny_skia::{
 use crate::css::Color;
 use crate::layout::Rect;
 
+use blend::{blend_pixel_bytes, paint_through};
 use gradient::fill_gradient;
+use shadow::fill_box_shadow;
 use shapes::{affine_to_ts, fill_rounded_rect, fill_solid_rect};
 
-use super::{Affine, DisplayCommand, ImageCommand, ShadowCommand, TextCommand};
+use super::{Affine, DisplayCommand, ImageCommand, TextCommand};
 
 // Measures the rendered width of `text` at `font_size`. Callers use this to
 // position UI elements that need to align with the *end* of a rendered string
@@ -205,95 +209,6 @@ fn rasterize_command(pixmap: &mut Pixmap, command: &DisplayCommand, transform: A
     }
 }
 
-fn fill_box_shadow(pixmap: &mut Pixmap, shadow: &ShadowCommand, transform: Affine) {
-    if shadow.color.a == 0 {
-        return;
-    }
-    if shadow.rect.width <= 0.0 || shadow.rect.height <= 0.0 {
-        return;
-    }
-    let blur = shadow.blur_radius.max(0.0);
-
-    if transform.is_identity() {
-        fill_box_shadow_aligned(pixmap, shadow, blur);
-    } else {
-        // The blur falloff lives outside the rect, so the logical bounds
-        // expand by `blur` on every side before we walk screen-space.
-        let bounds = Rect {
-            x: shadow.rect.x - blur,
-            y: shadow.rect.y - blur,
-            width: shadow.rect.width + 2.0 * blur,
-            height: shadow.rect.height + 2.0 * blur,
-        };
-        let color = shadow.color;
-        let rect = shadow.rect;
-        let inverse = transform.inverse();
-        paint_through(pixmap, bounds, transform, inverse, |lx, ly| {
-            let coverage = shadow_coverage(lx, ly, rect, blur);
-            if coverage <= 0.0 {
-                return None;
-            }
-            let alpha = ((color.a as f32) * coverage).clamp(0.0, 255.0) as u8;
-            Some(Color {
-                r: color.r,
-                g: color.g,
-                b: color.b,
-                a: alpha,
-            })
-        });
-    }
-}
-
-fn fill_box_shadow_aligned(pixmap: &mut Pixmap, shadow: &ShadowCommand, blur: f32) {
-    let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
-    // Affected region = shadow rect inflated by `blur` on every side. Anything
-    // farther than `blur` from the rect edge has zero coverage.
-    let x_start = (shadow.rect.x - blur).max(0.0).floor() as usize;
-    let y_start = (shadow.rect.y - blur).max(0.0).floor() as usize;
-    let x_end =
-        (((shadow.rect.x + shadow.rect.width + blur).ceil()).max(0.0) as usize).min(width);
-    let y_end =
-        (((shadow.rect.y + shadow.rect.height + blur).ceil()).max(0.0) as usize).min(height);
-
-    let left = shadow.rect.x;
-    let top = shadow.rect.y;
-    let right = shadow.rect.x + shadow.rect.width;
-    let bottom = shadow.rect.y + shadow.rect.height;
-
-    let data = pixmap.data_mut();
-    for y in y_start..y_end {
-        for x in x_start..x_end {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-            // Distance from this pixel to the *closest* point inside the
-            // shadow rect. Pixels inside the rect score zero distance and
-            // therefore full coverage — outside, the linear ramp falls off
-            // over `blur` distance and clamps to 0 beyond that.
-            let dx = (left - px).max(0.0).max(px - right);
-            let dy = (top - py).max(0.0).max(py - bottom);
-            let dist = (dx * dx + dy * dy).sqrt();
-            let coverage = if blur > 0.0 {
-                (1.0 - dist / blur).clamp(0.0, 1.0)
-            } else if dist == 0.0 {
-                1.0
-            } else {
-                0.0
-            };
-            let combined_alpha = ((shadow.color.a as f32) * coverage) as u8;
-            if combined_alpha == 0 {
-                continue;
-            }
-            let blended = Color {
-                r: shadow.color.r,
-                g: shadow.color.g,
-                b: shadow.color.b,
-                a: combined_alpha,
-            };
-            blend_pixel_bytes(data, (y * width + x) * 4, blended);
-        }
-    }
-}
-
 fn draw_image(pixmap: &mut Pixmap, image: &ImageCommand, transform: Affine) {
     if image.source_width == 0 || image.source_height == 0 {
         return;
@@ -365,109 +280,6 @@ fn draw_image(pixmap: &mut Pixmap, image: &ImageCommand, transform: Affine) {
         return;
     };
     pixmap.fill_rect(dest, &paint, affine_to_ts(transform), None);
-}
-
-fn paint_through<F>(
-    pixmap: &mut Pixmap,
-    logical_bounds: Rect,
-    transform: Affine,
-    inverse: Affine,
-    sample: F,
-) where
-    F: Fn(f32, f32) -> Option<Color>,
-{
-    if logical_bounds.width <= 0.0 || logical_bounds.height <= 0.0 {
-        return;
-    }
-    let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
-    // Project the four logical corners through the matrix to find the
-    // screen-space rectangle that needs to be scanned. For axis-aligned
-    // transforms the four corners collapse onto the original rect; for
-    // rotation they describe a rotated quad whose AABB is what we walk.
-    let corners = [
-        transform.apply_point(logical_bounds.x, logical_bounds.y),
-        transform.apply_point(logical_bounds.x + logical_bounds.width, logical_bounds.y),
-        transform.apply_point(
-            logical_bounds.x + logical_bounds.width,
-            logical_bounds.y + logical_bounds.height,
-        ),
-        transform.apply_point(logical_bounds.x, logical_bounds.y + logical_bounds.height),
-    ];
-    let mut min_x = f32::INFINITY;
-    let mut max_x = f32::NEG_INFINITY;
-    let mut min_y = f32::INFINITY;
-    let mut max_y = f32::NEG_INFINITY;
-    for (cx, cy) in corners {
-        min_x = min_x.min(cx);
-        max_x = max_x.max(cx);
-        min_y = min_y.min(cy);
-        max_y = max_y.max(cy);
-    }
-    let x_start = min_x.max(0.0).floor() as usize;
-    let y_start = min_y.max(0.0).floor() as usize;
-    let x_end = (max_x.ceil().max(0.0) as usize).min(width);
-    let y_end = (max_y.ceil().max(0.0) as usize).min(height);
-
-    let data = pixmap.data_mut();
-    for y in y_start..y_end {
-        let row = y * width;
-        for x in x_start..x_end {
-            let (lx, ly) = inverse.apply_point(x as f32 + 0.5, y as f32 + 0.5);
-            let Some(color) = sample(lx, ly) else {
-                continue;
-            };
-            if color.a == 0 {
-                continue;
-            }
-            blend_pixel_bytes(data, (row + x) * 4, color);
-        }
-    }
-}
-
-// Source-over blend a single pixel at byte offset `byte_idx` (premultiplied
-// RGBA layout). Fast paths the opaque case and assumes the destination
-// alpha is already 255 — true throughout this rasterizer because we start
-// with an opaque white pixmap and never use a non source-over blend mode.
-fn blend_pixel_bytes(data: &mut [u8], byte_idx: usize, color: Color) {
-    if color.a == 255 {
-        data[byte_idx] = color.r;
-        data[byte_idx + 1] = color.g;
-        data[byte_idx + 2] = color.b;
-        data[byte_idx + 3] = 255;
-        return;
-    }
-    let a = color.a as u32;
-    let inv = 255 - a;
-    let bg_r = data[byte_idx] as u32;
-    let bg_g = data[byte_idx + 1] as u32;
-    let bg_b = data[byte_idx + 2] as u32;
-    let r = (a * color.r as u32 + inv * bg_r) / 255;
-    let g = (a * color.g as u32 + inv * bg_g) / 255;
-    let b = (a * color.b as u32 + inv * bg_b) / 255;
-    data[byte_idx] = r as u8;
-    data[byte_idx + 1] = g as u8;
-    data[byte_idx + 2] = b as u8;
-    data[byte_idx + 3] = 255;
-}
-
-
-fn shadow_coverage(lx: f32, ly: f32, rect: Rect, blur: f32) -> f32 {
-    // Same linear falloff fill_box_shadow uses for the fast path: distance
-    // to the nearest point inside the rect, normalised by the blur radius.
-    let left = rect.x;
-    let top = rect.y;
-    let right = rect.x + rect.width;
-    let bottom = rect.y + rect.height;
-    let dx = (left - lx).max(0.0).max(lx - right);
-    let dy = (top - ly).max(0.0).max(ly - bottom);
-    let dist = (dx * dx + dy * dy).sqrt();
-    if blur > 0.0 {
-        (1.0 - dist / blur).clamp(0.0, 1.0)
-    } else if dist == 0.0 {
-        1.0
-    } else {
-        0.0
-    }
 }
 
 fn draw_text(pixmap: &mut Pixmap, text: &TextCommand, transform: Affine) {
