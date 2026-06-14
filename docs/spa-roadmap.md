@@ -1,6 +1,6 @@
 # SPA Rendering Roadmap
 
-> 상태: 계획 (2026-06-14 작성) · 선행: SPA bootstrap **Step 1** 완료 (`cb60964`)
+> 상태: 계획 (2026-06-14 작성, 코드 대조 2차 검토 반영) · 선행: SPA bootstrap **Step 1** 완료 (`cb60964`)
 
 이 문서는 mini-browser가 **SPA(React/Vue/Svelte 류 client-rendered 앱)를 화면에 그리기까지**의 단계별 로드맵이다. 각 Tier는 *눈에 보이는 산출물*을 하나씩 만들도록 쪼갰다. 무게중심은 "from-scratch"가 아니라 기존 글루(rquickjs 브릿지 + mutate→재렌더 루프) 위에 빠진 표면을 메우는 것.
 
@@ -10,7 +10,8 @@
 - 못 그리는 이유는 그 위 4개 층의 공백: ① `type=module` 미실행 ② wrapper가 prototype을 상속 안 함 ③ 읽기 API(`querySelectorAll`/`getBoundingClientRect`/`element.style` 등) 부재 ④ 실 history 라우팅/Observer 부재.
 - **권장 순서**: Tier 0(바닐라) → Tier 1 #5(prototype 상속, *키스톤*) → Tier 1 나머지 → Tier 2(모듈 로더) → Tier 3(폴리시).
 - **최고 레버리지 단일 작업**: prototype 상속(#5) — 모든 프레임워크를 한 번에 해금, Step 1이 프로토타입을 깔아둬서 이미 절반.
-- **가장 큰 신규 시스템**: ES module 로더(#8) — 진짜 빌드 산출물 실행의 관문.
+- **가장 큰 신규 시스템**: ES module 로더(#8) — 진짜 빌드 산출물 실행의 관문 (단 rquickjs `loader` feature 플래그가 선행, Tier 2 참조).
+- **숨은 함정**: 런타임 주입 CSS(#14) 미반영 — styled-components/emotion/MUI류가 "DOM은 맞는데 스타일 빠짐"으로 깨지는 주범. 위 4개 층과 별개인 CSS 파이프라인 갭.
 
 ---
 
@@ -24,6 +25,8 @@
 - `fetch`(동기 백킹) / `XMLHttpRequest` / `localStorage` / `sessionStorage`
 - DOM 변경 → `revision` 카운터 bump → view cache 무효화 → 재렌더 ([dom.rs](../crates/mb-dom/src/dom.rs) revision, [state/mod.rs](../crates/mb-runtime/src/state/mod.rs) cache key)
 
+**drain 깊이 (과소평가 주의)**: [`drain_pending_jobs`](../crates/mb-runtime/src/js/mod.rs)는 프레임당 job 하나가 아니라 **마이크로태스크 큐를 빌 때까지 비우고 → due 타이머 실행 → 둘 다 멈출 때까지 최대 1024회 교대**한다. 즉 `fetch().then(r=>r.json()).then(render)` 같은 Promise 체인이 **한 프레임 안에 끝까지 resolve**된다 → async 데이터 로딩 SPA가 starvation 없이 오늘도 동작한다. 이건 갭이 아니라 셀링 포인트.
+
 → "JS가 DOM을 만들고 화면에 반영"은 오늘도 된다. 로드맵은 그 위 4개 층을 메우는 일이다.
 
 ---
@@ -36,8 +39,8 @@
 |---|---|---|---|
 | 1 | `querySelectorAll` (현재 단수 `querySelector`만) | `__mb_doc_query_selector_all` / `__mb_elem_query_selector_all` → `Vec<u32>`. selectors crate가 이미 매칭하므로 전부 수집만. `js/document.rs`, `js/element.rs` | 쉬움 |
 | 2 | `element.style` 읽기/쓰기 | inline `style` 속성을 백킹하는 `CSSStyleDeclaration` shim. `el.style.display='none'` → style attr mutate → revision bump → 재렌더. `js/element.rs` | 쉬움~중 |
-| 3 | 실 `history.pushState`/`replaceState` + `popstate`/`hashchange` | **현재 stub** (`js/window.rs`, length=1·silent). pushState는 **document 재fetch 없이** `location`만 갱신 + JS history 엔트리 push, back/forward가 `popstate` 발화. same-document(pushState) vs cross-document(navigate)를 구분해야 함 — `state/lifecycle.rs`가 현재 전부 재fetch | 중 |
-| 4 | window/document 레벨 이벤트 (`DOMContentLoaded`/`load`/`popstate`/`hashchange`) | window/document 리스너 등록 + 프레임 루프/lifecycle에서 dispatch. `js/event.rs`, `js/window.rs`, `state/lifecycle.rs` | 중 |
+| 3 | 실 `history.pushState`/`replaceState` + `popstate`/`hashchange` | **현재 silent no-op stub** ([window.rs:195](../crates/mb-runtime/src/js/window.rs), length=1). 단 `location.pathname`/`search`/`hash` **읽기 게터는 이미 있음**(`install_url_getter`, [window.rs:106](../crates/mb-runtime/src/js/window.rs))이라 실제 잔여작업은 ① pushState가 **document 재fetch 없이** location 버퍼만 갱신 + JS history 엔트리 push ② back/forward가 `popstate` 발화 ③ same-document(pushState) vs cross-document(navigate) 분기 — `state/lifecycle.rs`가 현재 전부 재fetch | 중 (게터 재사용으로 체감 하향) |
+| 4 | window/document 레벨 이벤트 (`DOMContentLoaded`/`load`/`popstate`/`hashchange`) **+ `document.readyState` 전이** | window/document 리스너 등록 + 프레임 루프/lifecycle에서 dispatch. **`document.readyState`('loading'→'interactive'→'complete')도 함께** — 라우터/프레임워크가 `if (document.readyState === 'loading')`로 부팅을 게이트한다(현재 document엔 미정의, XHR에만 readyState 있음). `js/event.rs`, `js/window.rs`, `state/lifecycle.rs` | 중 |
 
 **산출물**: 라우팅되는 client-rendered 앱. 엔진이 SPA임을 증명.
 
@@ -70,7 +73,7 @@
 | 8 | ES module 로더 | rquickjs `Resolver`(importer 기준 상대경로 join) + `Loader`([net::load_script](../crates/mb-runtime/src/net.rs)로 fetch → `Module::declare`), `Runtime::set_loader(...)`. `type=module` 스크립트는 `Module::evaluate`로 실행(Promise 반환 → 기존 drain 루프가 처리). `is_classic_script_type` 게이트 해제 ([state/mod.rs](../crates/mb-runtime/src/state/mod.rs)). `js/mod.rs` + 신규 `js/modules.rs` | 높음 |
 | 9 | import maps + 동적 `import()` (선택) | bare specifier / CDN ESM 대응. 로더 확장 | 중 |
 
-**rquickjs 실현가능성 (확인됨)**: rquickjs 0.11이 `Module::declare`/`Module::evaluate`(Promise) + `Runtime::set_loader(Resolver, Loader)` 제공. `loader` feature가 컴파일됨(`rquickjs-core`의 `relative-path` 의존성으로 확인). QuickJS는 ES 모듈을 네이티브 지원.
+**rquickjs 실현가능성**: rquickjs 0.11이 `Module::declare`/`Module::evaluate`(Promise) + `Runtime::set_loader(Resolver, Loader)`를 제공하고 QuickJS는 ES 모듈을 네이티브 지원 → API는 존재. **단, `loader` feature가 현재 꺼져 있다** — `mod loader`/`set_loader`가 `#[cfg(feature = "loader")]`로 게이트되는데 [Cargo.toml:9](../crates/mb-runtime/Cargo.toml)가 `features = ["macro"]`만 켠다. (Cargo.lock에 `relative-path`가 보이는 건 proc-macro인 `rquickjs-macro`가 *호스트 쪽*에서 켠 것 — resolver v2가 런타임 의존성과 분리 해석하므로 facade로 안 샌다. `features=["macro"]`로 `use rquickjs::loader::*` 컴파일 시 `E0432: could not find loader` 확인.) → **고치는 건 한 줄**: `features = ["macro", "loader"]`. 즉 Tier 2는 실현 가능하지만 *이 플래그 추가가 선행조건*이다.
 
 **주의**: 빌드 산출물도 Tier 0~1의 API를 전부 쓴다. **모듈 로딩은 필요조건이지 충분조건이 아니다** — Tier 0/1을 건너뛰고 Tier 2만 하면 부팅은 되도 렌더가 안 된다.
 
@@ -103,11 +106,15 @@ Tier 0 (바닐라, 갭 최소, 막히는 곳 실측)
 
 ## 재검토 / 구현가능성 검증 (2026-06-14)
 
-로드맵 작성 후 핵심 가정을 rquickjs 문서 + 코드 + 웹 검색으로 재검증. **전체 결론: 구현 가능. 단 아래 1개 갭 추가 + Tier 1 항목 1개 정정.**
+로드맵 작성 후 핵심 가정을 rquickjs 문서 + 코드 + 웹 검색(1차) + 코드 대조(2차)로 재검증. **전체 결론: 구현 가능.** 단 (a) 갭 3건 추가 — #14 동적 style, #15 fragment, #16 readyState, (b) 정정 2건 — #7 node-level 구체화, Tier 2 loader feature 오류, (c) **Tier 2는 `loader` feature 플래그가 선행조건**(아래 ❌ 참조).
 
 ### ✅ 확정 (리스크 해소)
 
-- **Tier 2 모듈 로더 — sync Runtime으로 가능**. rquickjs 0.11 **sync** `Runtime::set_loader(Resolver, Loader)`가 존재(AsyncRuntime 전용 아님)하고, `Loader::load(&mut self, ctx, name) -> Result<Module>`가 **동기 시그니처**다. 즉 현재 sync `Runtime`/`Context` 구조([js/mod.rs](../crates/mb-runtime/src/js/mod.rs))를 async로 갈아엎지 않고, 모듈 인스턴스화 중 loader 안에서 기존 **동기 blocking** `net::load_script`로 fetch하면 된다. QuickJS의 모듈 로더 콜백 자체가 동기라 모델이 정확히 맞는다. → Tier 2 신뢰도 상향.
+- **Tier 2 모듈 로더 — sync Runtime으로 가능**. rquickjs 0.11 **sync** `Runtime::set_loader(Resolver, Loader)`가 존재(AsyncRuntime 전용 아님)하고, `Loader::load(&mut self, ctx, name) -> Result<Module>`가 **동기 시그니처**다. 즉 현재 sync `Runtime`/`Context` 구조([js/mod.rs](../crates/mb-runtime/src/js/mod.rs))를 async로 갈아엎지 않고, 모듈 인스턴스화 중 loader 안에서 기존 **동기 blocking** `net::load_script`로 fetch하면 된다. QuickJS의 모듈 로더 콜백 자체가 동기라 모델이 정확히 맞는다. → **async rewrite 리스크는 해소**(단 `loader` feature가 꺼져 있는 별개 이슈는 아래 ❌ 참조).
+
+### ❌ 정정 (1차 검토 오류 — loader feature)
+
+- **이전 판본의 "loader feature가 컴파일됨" 단정은 거짓이었다.** `mod loader`/`set_loader`는 `#[cfg(feature = "loader")]` 게이트인데 [Cargo.toml](../crates/mb-runtime/Cargo.toml)는 `features = ["macro"]`만 켠다. Cargo.lock의 `relative-path`는 proc-macro `rquickjs-macro`의 호스트측 활성화일 뿐(resolver v2 분리 해석 → facade 미노출). 컴파일 프로브(`features=["macro"]` + `use rquickjs::loader::*`)가 `E0432: could not find loader`로 확정. **→ Tier 2 선행조건: [Cargo.toml:9](../crates/mb-runtime/Cargo.toml)를 `features = ["macro", "loader"]`로 (한 줄). 그 후 신뢰도 상향이 유효.**
 
 ### ⚠️ 추가된 갭 (누락분, Tier 1 우선순위)
 
@@ -116,7 +123,12 @@ Tier 0 (바닐라, 갭 최소, 막히는 곳 실측)
 
 ### ✏️ 정정 (Tier 1 #7 구체화)
 
-- Preact/React differ는 **element-centric**가 아니라 **node-level DOM**에 의존한다: `parentNode` / `firstChild` / `nextSibling` / `childNodes` / `nodeType`, 텍스트노드 `.data`·`.nodeValue`, 직접 프로퍼티 대입(`el.value=`, `el.onclick=`), `removeAttribute`, (SVG 시) `createElementNS`. 현재 브릿지는 `parentElement`/`children`(element-centric) 위주라 **node-level이 빠졌을 가능성이 높다**(element.rs가 long-line이라 grep 미검출 — 구현 전 직접 확인 필요). Tier 1 #7을 "이벤트 완성도" → **"node-level DOM 트리 순회 API + 텍스트노드 + 직접 프로퍼티 대입"** 으로 교체.
+- Preact/React differ는 **element-centric**가 아니라 **node-level DOM**에 의존한다: `parentNode` / `firstChild` / `nextSibling` / `childNodes` / `nodeType`, 텍스트노드 `.data`·`.nodeValue`, 직접 프로퍼티 대입(`el.value=`, `el.onclick=`, **`el.className=`** — React DOM은 class를 classList가 아니라 className 직접 대입으로 쓴다), `removeAttribute`, (SVG 시) `createElementNS`. 현재 브릿지는 `parentElement`/`children`(element-centric) 위주라 **node-level이 빠졌을 가능성이 높다**(element.rs가 long-line이라 grep 미검출 — 구현 전 직접 확인 필요. `nodeType` *상수*(ELEMENT_NODE=1/TEXT_NODE=3/DOCUMENT_FRAGMENT_NODE=11)는 Step 1이 [dom_globals.rs](../crates/mb-runtime/src/js/dom_globals.rs)에 깔아둠 — 누락된 건 인스턴스 `.nodeType` 게터). Tier 1 #7을 "이벤트 완성도" → **"node-level DOM 트리 순회 API + 텍스트노드 + 직접 프로퍼티 대입(`className`/`value`/`on*`)"** 으로 교체.
+
+### ⚠️ 추가된 갭 (2차 코드 대조)
+
+- **#15 `document.createDocumentFragment()` 팩토리 부재** — `DocumentFragment` *생성자*와 `DOCUMENT_FRAGMENT_NODE=11`은 Step 1이 [dom_globals.rs:157](../crates/mb-runtime/src/js/dom_globals.rs)에 깔았지만, 정작 **만드는 팩토리 메서드가 document.rs에 없다**. 배치 삽입(`frag.appendChild ×N` → 1회 insert)·일부 innerHTML/template 라이브러리가 쓴다. 프로토타입만 있고 생성 경로가 빠진 상태. 손댈 곳: `js/document.rs`(`__mb_doc_create_document_fragment` + `__mb_make_node` 경로). 난이도 쉬움. (Preact 자체는 거의 안 쓰므로 Tier 0~1 마이너.)
+- **#16 `document.readyState` 부재** — `readyState`는 [xhr.rs](../crates/mb-runtime/src/js/xhr.rs)에만 있고 **document엔 없다**. 라우터/프레임워크가 `if (document.readyState === 'loading') defer else init()`로 부팅을 게이트하는 게 흔함. #4와 한 묶음으로 'loading'→'interactive'→'complete' 전이를 lifecycle에 얹는다. 손댈 곳: `js/document.rs` + `state/lifecycle.rs`. 난이도 쉬움~중.
 
 ### 🎯 타깃 권고
 
@@ -125,10 +137,10 @@ Tier 0 (바닐라, 갭 최소, 막히는 곳 실측)
 ### 의존성 정리
 
 ```
-Tier 0  : #1 qsa, #2 style, #3 history, #4 win/doc 이벤트       (갭 작음, 거의 됨)
-Tier 1  : #5 prototype(키스톤) → #14 동적 style → #6 rect → #7 node-level
-Tier 2  : #8 모듈 로더(sync set_loader 확정) → #9 import maps
-Tier 3  : #10~13 observer/CSSOM
+Tier 0  : #1 qsa, #2 style, #3 history, #4 win/doc 이벤트+#16 readyState, #15 fragment   (갭 작음, 거의 됨)
+Tier 1  : #5 prototype(키스톤) → #14 동적 style → #6 rect → #7 node-level(+className/value/on*)
+Tier 2  : (선행: Cargo.toml `loader` feature 추가) → #8 모듈 로더(sync set_loader) → #9 import maps
+Tier 3  : #10~13 observer/CSSOM (IntersectionObserver > ResizeObserver 우선순위)
 ```
 
 **Sources**: [rquickjs Runtime::set_loader](https://docs.rs/rquickjs/latest/rquickjs/runtime/struct.Runtime.html), [rquickjs Loader trait](https://docs.rs/rquickjs/latest/rquickjs/loader/trait.Loader.html), [rquickjs Module](https://docs.rs/rquickjs/latest/rquickjs/module/struct.Module.html), [preactjs/preact](https://github.com/preactjs/preact), [A mostly vanilla JS way to use Preact](https://gomakethings.com/a-mostly-vanilla-js-way-to-use-preact/).
