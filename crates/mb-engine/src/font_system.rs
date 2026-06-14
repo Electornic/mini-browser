@@ -133,4 +133,10 @@ fn install_shared_font_system(font_data: &[Vec<u8>], macos_fallbacks: &[Vec<u8>]
             let _ = SHARED_SWASH_CACHE.set(Mutex::new(SwashCache::new()));
         }
     }
+    // The text-measure cache stores `(width, line_count)` results indexed
+    // by (text, params). Those values were produced against the previous
+    // FontSystem; after a swap they're stale because the underlying font
+    // ids no longer match. Clear here so the cache repopulates from the
+    // new fonts on the next measure call.
+    crate::render::clear_measure_cache();
 }

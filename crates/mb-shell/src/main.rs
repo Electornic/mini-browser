@@ -5,6 +5,7 @@
 mod window;
 
 use mb_engine::render;
+use mb_runtime::profile;
 use mb_runtime::state::{install_fonts, load_initial_state};
 
 fn main() {
@@ -36,12 +37,17 @@ fn main() {
                 last_font_count = browser.font_data.len();
             }
 
-            let commands = browser.display_list(width, height, input);
+            let frame = profile::Span::start("frame::total");
+            let commands =
+                profile::time_block("frame::display_list", || browser.display_list(width, height, input));
             // Paint straight into the softbuffer surface to skip the
             // intermediate `Vec<u32>` allocation + memcpy that the
             // previous `rasterize` + caller-copy pattern produced
             // every frame.
-            render::rasterize_into(&commands, width, height, target);
+            profile::time_block("frame::rasterize_into", || {
+                render::rasterize_into(&commands, width, height, target);
+            });
+            frame.end();
             // Caret blink + live JS timers need follow-up frames even
             // with no input. Navigation completion no longer rides here
             // — the worker thread pokes the wake proxy directly when

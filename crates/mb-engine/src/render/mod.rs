@@ -14,8 +14,8 @@ mod raster;
 
 pub use display_list::{PaintContext, build_display_list, transform_for, translate};
 pub use raster::{
-    measure_text_width, measure_text_wrap, measure_text_wrap_with_family, rasterize,
-    rasterize_into,
+    clear_measure_cache, measure_text_width, measure_text_wrap, measure_text_wrap_with_family,
+    rasterize, rasterize_into,
 };
 
 /// 2-D affine transform stored as the six matrix entries of

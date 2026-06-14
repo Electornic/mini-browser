@@ -95,13 +95,15 @@ pub fn layout_tree(root: &StyledNode, viewport_width: f32) -> LayoutBox {
     // boundary handles every shape taffy itself doesn't understand). Only
     // a non-element root (e.g. a stand-alone text node — never produced by
     // current callers) falls back to the legacy block path.
-    let mut layout_box = match taffy_bridge::layout_via_taffy(root, viewport_width) {
-        Some(layout) => layout,
-        None => {
-            let mut cursor_y = 0.0;
-            layout_node(root, 0.0, &mut cursor_y, viewport_width)
+    let mut layout_box = mb_dom::profile::time_block("layout::via_taffy_or_legacy", || {
+        match taffy_bridge::layout_via_taffy(root, viewport_width) {
+            Some(layout) => layout,
+            None => {
+                let mut cursor_y = 0.0;
+                layout_node(root, 0.0, &mut cursor_y, viewport_width)
+            }
         }
-    };
+    });
     // Pass 2: walk the tree and move every `position: absolute` subtree to
     // its final spot relative to its containing block. The initial
     // containing block is the viewport; we only know its width, so we use
@@ -114,7 +116,9 @@ pub fn layout_tree(root: &StyledNode, viewport_width: f32) -> LayoutBox {
         width: viewport_width,
         height: initial_cb_height,
     };
-    reposition_absolutes(&mut layout_box, initial_cb, initial_cb);
+    mb_dom::profile::time_block("layout::reposition_absolutes", || {
+        reposition_absolutes(&mut layout_box, initial_cb, initial_cb);
+    });
     layout_box
 }
 

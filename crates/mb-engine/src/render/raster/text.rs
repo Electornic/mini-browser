@@ -11,6 +11,9 @@
 //     test surface, so pixel-pinned assertions don't depend on host
 //     fonts
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use cosmic_text::{
     Attrs, Buffer, Family, FontSystem, Metrics, PhysicalGlyph, Shaping, SwashContent, Weight,
 };
@@ -22,6 +25,57 @@ use crate::layout::Rect;
 use super::super::{Affine, TextCommand};
 use super::blend::{blend_pixel_bytes, paint_through};
 use super::shapes::fill_solid_rect;
+
+// ----- measure cache -----------------------------------------------------
+//
+// cosmic-text's `Buffer::set_text` + `shape_until_scroll` is the dominant
+// cost on text-heavy pages. The same `(text, font_size, wrap_width, family,
+// weight)` tuple recurs many times within a single layout (table cells
+// measured in Pass C and then laid out in Pass E; arrow glyphs / "hide" /
+// "NN comments" repeated per row on HN). Caching the `(width, line_count)`
+// return value skips the entire shape path on a hit — no FontSystem lock
+// either, since the cache lives in its own mutex.
+//
+// `install_fonts` swaps the FontSystem, which invalidates font ids that
+// downstream shape results would reference; we clear the cache there too
+// via `clear_measure_cache` so a font reload doesn't serve stale widths.
+
+#[derive(Hash, PartialEq, Eq, Clone)]
+struct MeasureKey {
+    text: String,
+    font_size_bits: u32,
+    // `Option::Some(0)` would mean "wrap at 0 px", which differs from
+    // "no wrap" — both must hash distinctly. Storing the option as-is
+    // is the clearest way to preserve that distinction in the key.
+    wrap_width_bits: Option<u32>,
+    family: Option<String>,
+    weight: u16,
+}
+
+// Coarse upper bound so an exotic page (e.g. a 10k-row debug dump) can't
+// pin memory. Hitting the limit clears the whole map rather than running
+// LRU eviction — simpler, and the per-call cost of a re-fill is a single
+// shape pass we'd otherwise be doing anyway.
+const MEASURE_CACHE_MAX: usize = 16_384;
+
+static MEASURE_CACHE: OnceLock<Mutex<HashMap<MeasureKey, (f32, u32)>>> = OnceLock::new();
+
+fn measure_cache() -> &'static Mutex<HashMap<MeasureKey, (f32, u32)>> {
+    MEASURE_CACHE.get_or_init(|| Mutex::new(HashMap::with_capacity(1024)))
+}
+
+/// Drop every cached `(text, params) → (width, lines)` entry. Called by
+/// `install_fonts` after it rebuilds the shared `FontSystem` — font ids
+/// inside shape results don't survive that swap, and reusing a width
+/// computed against the old database can subtly mis-place glyphs at the
+/// next paint.
+pub fn clear_measure_cache() {
+    if let Some(slot) = MEASURE_CACHE.get()
+        && let Ok(mut map) = slot.lock()
+    {
+        map.clear();
+    }
+}
 
 // Measures the rendered width of `text` at `font_size`. Callers use this to
 // position UI elements that need to align with the *end* of a rendered string
@@ -104,10 +158,28 @@ fn measure_with_cosmic(
     family_keyword: Option<&str>,
     font_weight: u16,
 ) -> Option<(f32, u32)> {
+    let size = font_size.max(8.0);
+    // Build the lookup key once. Constructing the key always allocates
+    // `text.to_string()` and (when set) `family_keyword.to_string()`,
+    // even on a cache hit — but a short string copy is orders of
+    // magnitude cheaper than the cosmic-text shape we save on hit, so
+    // the trade is firmly in our favour.
+    let key = MeasureKey {
+        text: text.to_string(),
+        font_size_bits: size.to_bits(),
+        wrap_width_bits: wrap_width.map(f32::to_bits),
+        family: family_keyword.map(str::to_string),
+        weight: font_weight,
+    };
+    if let Ok(map) = measure_cache().lock()
+        && let Some(hit) = map.get(&key)
+    {
+        return Some(*hit);
+    }
+
     let slot = crate::font_system::shared_font_system()?;
     let mut fs = slot.lock().ok()?;
 
-    let size = font_size.max(8.0);
     // Line height does not affect line_w, but cosmic-text requires a nonzero value.
     let metrics = Metrics::new(size, size * 1.2);
     let mut buffer = Buffer::new(&mut fs, metrics);
@@ -130,7 +202,20 @@ fn measure_with_cosmic(
         }
         lines += 1;
     }
-    Some((width, lines.max(1)))
+    let result = (width, lines.max(1));
+    // Drop the FontSystem lock before touching the cache to avoid pinning
+    // two locks (FontSystem + cache) at the same time; nobody else should
+    // be re-entering the measure path while we hold the cosmic-text lock
+    // either way, but releasing here makes the lock-order discipline
+    // explicit.
+    drop(fs);
+    if let Ok(mut map) = measure_cache().lock() {
+        if map.len() >= MEASURE_CACHE_MAX {
+            map.clear();
+        }
+        map.insert(key, result);
+    }
+    Some(result)
 }
 
 pub(super) fn draw_text(pixmap: &mut Pixmap, text: &TextCommand, transform: Affine) {

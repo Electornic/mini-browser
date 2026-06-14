@@ -415,7 +415,15 @@ pub(super) fn layout_via_taffy(node: &StyledNode, viewport_width: f32) -> Option
     // existing test suite (and so flex-shrink distributions like 66.67,
     // 66.67, 66.67 don't drift to 67, 66, 67).
     tree.disable_rounding();
-    let root_id = build_taffy_node(&mut tree, node)?;
+    // Reset the per-layout measure-callback accumulators before kicking
+    // off taffy. The OnceLock-gated print at the end reports how many
+    // times our `legacy_block_layout` boundary callback was invoked and
+    // how long it spent, so we can separate taffy's own solver cost from
+    // our text-shaping cost inside the measure path.
+    MEASURE_CALLS.with(|c| c.set(0));
+    MEASURE_NANOS.with(|n| n.set(0));
+    let root_id =
+        mb_dom::profile::time_block("taffy::build_tree", || build_taffy_node(&mut tree, node))?;
     // Wrapper for root `margin: auto` resolution against the viewport (taffy
     // does not auto-center the topmost node it lays out).
     let wrapper_style = Style {
@@ -427,18 +435,38 @@ pub(super) fn layout_via_taffy(node: &StyledNode, viewport_width: f32) -> Option
         ..Style::DEFAULT
     };
     let wrapper_id = tree.new_with_children(wrapper_style, &[root_id]).ok()?;
-    tree.compute_layout_with_measure(
-        wrapper_id,
-        Size {
-            width: AvailableSpace::Definite(viewport_width),
-            height: AvailableSpace::MaxContent,
-        },
-        |_known, avail, _id, ctx, _style| measure_boundary(avail, ctx),
-    )
-    .ok()?;
+    mb_dom::profile::time_block("taffy::compute_layout", || {
+        tree.compute_layout_with_measure(
+            wrapper_id,
+            Size {
+                width: AvailableSpace::Definite(viewport_width),
+                height: AvailableSpace::MaxContent,
+            },
+            |_known, avail, _id, ctx, _style| measure_boundary(avail, ctx),
+        )
+        .ok()
+    })?;
+    if mb_dom::profile::enabled() {
+        let calls = MEASURE_CALLS.with(|c| c.get());
+        let nanos = MEASURE_NANOS.with(|n| n.get());
+        eprintln!(
+            "[mb-profile] taffy::measure_callback: calls={calls} total={:.2}ms",
+            nanos as f64 / 1_000_000.0
+        );
+    }
     // wrapper sits at (0, 0) and has zero padding/border, so the root's
     // border-box origin in viewport coords is just root.location.
-    Some(walk(&tree, root_id, node, (0.0, 0.0)))
+    Some(mb_dom::profile::time_block("taffy::walk_result", || {
+        walk(&tree, root_id, node, (0.0, 0.0))
+    }))
+}
+
+// Per-layout measure-callback accumulators. thread_local because taffy
+// itself is single-threaded for one `compute_layout` invocation; making
+// them globals would conflate concurrent test runs.
+std::thread_local! {
+    static MEASURE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static MEASURE_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn measure_boundary(
@@ -448,6 +476,7 @@ fn measure_boundary(
     let Some(boundary) = ctx else {
         return Size::ZERO;
     };
+    let _measure_start = std::time::Instant::now();
     let parent_width = match avail.width {
         AvailableSpace::Definite(w) => w,
         // Boundary leaves only see MaxContent / MinContent inside flex / grid
@@ -464,6 +493,8 @@ fn measure_boundary(
     let margin_w = lb.dimensions.margin.left + lb.dimensions.margin.right;
     let margin_h = lb.dimensions.margin.top + lb.dimensions.margin.bottom;
     *boundary.cached.borrow_mut() = Some(lb);
+    MEASURE_CALLS.with(|c| c.set(c.get() + 1));
+    MEASURE_NANOS.with(|n| n.set(n.get() + _measure_start.elapsed().as_nanos() as u64));
     // Return the BORDER-box size; taffy applies the leaf's own margin (set in
     // `boundary_taffy_style`) on top so block-flow margin collapse with native
     // siblings still works.

@@ -14,7 +14,7 @@
 // `mb_runtime::*` namespace. Inside this crate they double as the
 // shorthand `crate::css::Color` / `crate::layout::Rect` paths the moved
 // files expect.
-pub use mb_dom::{css, dom, dom_select, html, style};
+pub use mb_dom::{css, dom, dom_select, html, profile, style};
 pub use mb_engine::{chrome, input, layout, render, view};
 
 pub mod async_runtime;

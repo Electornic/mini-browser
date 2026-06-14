@@ -50,7 +50,7 @@ use crate::{
     dom::{NodeId, NodeType},
     html, js, layout,
     navigation::{LoadedDocument, load_remote_document},
-    input, net, render, resource, style,
+    input, net, profile, render, resource, style,
 };
 
 #[derive(Debug)]
@@ -481,12 +481,14 @@ impl BrowserState {
             .hovered_link(input, &document_view.links)
             .map(|link| link.href.to_string());
         let hovered_action = self.hovered_chrome_action(input, viewport_width);
-        self.assemble_display_commands(
-            viewport_width,
-            &document_view,
-            hovered_href.as_deref(),
-            hovered_action,
-        )
+        profile::time_block("frame::assemble_display_commands", || {
+            self.assemble_display_commands(
+                viewport_width,
+                &document_view,
+                hovered_href.as_deref(),
+                hovered_action,
+            )
+        })
     }
 
     // A page-area click moves :focus to the just-hovered element; clicks
@@ -657,7 +659,7 @@ impl BrowserState {
         // Borrow scope keeps the document Ref out of the way of the
         // `set_status` mutation below in the error branch, and out of the
         // way of `self.cached_view = ...` on the success branch.
-        let layout_result = {
+        let layout_result = profile::time_block("frame::build_document_view", || {
             let document = self.parsed_document.borrow();
             build_document_view(
                 &document,
@@ -667,7 +669,7 @@ impl BrowserState {
                 &self.images,
                 interaction,
             )
-        };
+        });
         match layout_result {
             Ok(view) => {
                 let shared = Rc::new(view);

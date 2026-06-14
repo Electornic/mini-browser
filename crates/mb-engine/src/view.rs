@@ -12,6 +12,7 @@ use crate::{
     dom::{NodeId, NodeType},
     input, layout, render, resource, style, url,
 };
+use mb_dom::profile;
 
 #[derive(Debug, Clone)]
 pub struct LinkTarget {
@@ -63,20 +64,29 @@ pub fn build_document_view(
         .last()
         .copied()
         .ok_or_else(|| "document did not produce a root node".to_string())?;
-    let styled = style::style_tree_with_state(
-        parsed_document,
-        root,
-        std::slice::from_ref(parsed_stylesheet),
-        interaction,
-    );
-    let layout = layout::layout_tree(&styled, viewport_width as f32);
+    let styled = profile::time_block("view::style_tree", || {
+        style::style_tree_with_state(
+            parsed_document,
+            root,
+            std::slice::from_ref(parsed_stylesheet),
+            interaction,
+        )
+    });
+    let layout = profile::time_block("view::layout_tree", || {
+        layout::layout_tree(&styled, viewport_width as f32)
+    });
     let paint_ctx = render::PaintContext {
         base_url: current_url,
         images,
     };
-    let mut commands = render::build_display_list(&layout, &paint_ctx);
-    commands.extend(collect_image_commands(&layout, current_url, images));
-    let links = collect_link_targets(&layout, None, false, render::Affine::IDENTITY);
+    let mut commands =
+        profile::time_block("view::build_display_list", || render::build_display_list(&layout, &paint_ctx));
+    profile::time_block("view::collect_image_commands", || {
+        commands.extend(collect_image_commands(&layout, current_url, images));
+    });
+    let links = profile::time_block("view::collect_link_targets", || {
+        collect_link_targets(&layout, None, false, render::Affine::IDENTITY)
+    });
     Ok(DocumentView {
         commands,
         links,

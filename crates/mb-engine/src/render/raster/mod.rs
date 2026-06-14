@@ -40,7 +40,9 @@ use shadow::fill_box_shadow;
 use shapes::{fill_rounded_rect, fill_solid_rect};
 use text::draw_text;
 
-pub use text::{measure_text_width, measure_text_wrap, measure_text_wrap_with_family};
+pub use text::{
+    clear_measure_cache, measure_text_width, measure_text_wrap, measure_text_wrap_with_family,
+};
 
 use super::{Affine, DisplayCommand};
 

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use crate::{html, net, resource};
+use crate::{html, net, profile, resource};
 
 // Bundle of everything `load_remote_document` produces. `external_scripts`
 // holds external `<script src>` bodies keyed by the raw `src` attribute
@@ -27,8 +27,10 @@ pub struct LoadedDocument {
 pub fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
     // This function is the app-facing loader. It translates low-level fetch/content-type details
     // into "what document should the browser show?".
+    let total = profile::Span::start("navigation::load_remote_document");
     let url = net::Url::parse(raw_url).map_err(|error| format!("url error: {error:?}"))?;
-    let fetch_result = net::fetch(&url).map_err(|error| describe_network_error(&error))?;
+    let fetch_result = profile::time_block("navigation::fetch_html", || net::fetch(&url))
+        .map_err(|error| describe_network_error(&error))?;
     let response = fetch_result.response;
     let final_url = fetch_result.final_url;
 
@@ -44,6 +46,7 @@ pub fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
         let body = String::from_utf8(response.body)
             .map_err(|_| describe_network_error(&net::NetworkError::InvalidBodyEncoding))?;
         let (document_html, stylesheet) = text_document(&body, &final_url.to_string());
+        total.end();
         return Ok(LoadedDocument {
             document_html,
             stylesheet,
@@ -61,23 +64,34 @@ pub fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
 
     let html = String::from_utf8(response.body)
         .map_err(|_| describe_network_error(&net::NetworkError::InvalidBodyEncoding))?;
-    let document =
-        html::parse(&html).map_err(|error| format!("html parse error {}", error.position))?;
-    let stylesheets = resource::load_stylesheets(&document, &final_url)
-        .map_err(|error| describe_resource_error(&error))?;
-    let font_data = resource::load_fonts(&stylesheets, &final_url);
-    let images = resource::load_images(&document, &stylesheets, &final_url)
-        .map_err(|error| describe_resource_error(&error))?
-        .into_iter()
-        .map(|image| (image.url.to_string(), image))
-        .collect();
-    let external_scripts = resource::load_scripts(&document, &final_url)
-        .map_err(|error| describe_resource_error(&error))?;
+    let document = profile::time_block("navigation::parse_html", || html::parse(&html))
+        .map_err(|error| format!("html parse error {}", error.position))?;
+    let stylesheets = profile::time_block("navigation::load_stylesheets", || {
+        resource::load_stylesheets(&document, &final_url)
+    })
+    .map_err(|error| describe_resource_error(&error))?;
+    let font_data = profile::time_block("navigation::load_fonts", || {
+        resource::load_fonts(&stylesheets, &final_url)
+    });
+    let images = profile::time_block("navigation::load_images", || {
+        resource::load_images(&document, &stylesheets, &final_url)
+    })
+    .map_err(|error| describe_resource_error(&error))?
+    .into_iter()
+    .map(|image| (image.url.to_string(), image))
+    .collect();
+    let external_scripts = profile::time_block("navigation::load_scripts", || {
+        resource::load_scripts(&document, &final_url)
+    })
+    .map_err(|error| describe_resource_error(&error))?;
     // Favicon failures (no `<link rel="icon">`, broken URL, network 404,
     // unsupported codec) silently fall back to "no icon" — the rest of
     // the page is still useful, mirroring how broken stylesheets and
     // missing images degrade.
-    let favicon = resource::load_favicon(&document, &final_url);
+    let favicon = profile::time_block("navigation::load_favicon", || {
+        resource::load_favicon(&document, &final_url)
+    });
+    total.end();
     Ok(LoadedDocument {
         document_html: html,
         stylesheet: stylesheets.join("\n"),

@@ -25,6 +25,17 @@ use super::{
 use super::block::layout_node;
 use super::inline::layout_inline_block_node;
 
+// Per-table call counters/accumulators. thread_local because layout is
+// driven from a single thread; making them globals would conflate
+// concurrent test runs. Snapshot at the bottom of `layout_table_children`
+// when profiling is enabled so each table prints its own breakdown.
+std::thread_local! {
+    static MEASURE_CELL_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static MEASURE_CELL_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static LAYOUT_CELL_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static LAYOUT_CELL_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 // Probe width for max-content measurement. A bounded sentinel (rather than
 // f32::INFINITY) keeps any downstream multiplication / addition finite even
 // in pathological author CSS (e.g. percent margins on a probed cell).
@@ -59,6 +70,13 @@ pub(super) fn layout_table_children(
     content_y: f32,
     content_width: f32,
 ) -> (Vec<LayoutBox>, f32) {
+    let _pass_a = std::time::Instant::now();
+    // Reset per-table cell counters; printed at the bottom so each
+    // top-level `<table>` produces one self-contained breakdown.
+    MEASURE_CELL_CALLS.with(|c| c.set(0));
+    MEASURE_CELL_NANOS.with(|n| n.set(0));
+    LAYOUT_CELL_CALLS.with(|c| c.set(0));
+    LAYOUT_CELL_NANOS.with(|n| n.set(0));
     // Pass A: harvest rows, descending transparently through row-group
     // children (thead / tbody / tfoot) so any <tr> that lives under a group
     // becomes a sibling of <tr>s that sit directly under the table. Hidden
@@ -68,7 +86,9 @@ pub(super) fn layout_table_children(
     if rows.is_empty() {
         return (Vec::new(), 0.0);
     }
+    let pass_a_ms = _pass_a.elapsed().as_secs_f64() * 1000.0;
 
+    let _pass_b = std::time::Instant::now();
     // Pass B: each row's cell list, in document order. Non-cell children
     // (raw text whitespace, stray elements) are dropped so the row is
     // exactly its <td>/<th> sequence.
@@ -76,6 +96,7 @@ pub(super) fn layout_table_children(
         .iter()
         .map(|row| collect_cells(&row.children))
         .collect();
+    let pass_b_ms = _pass_b.elapsed().as_secs_f64() * 1000.0;
     // Column count is the widest row measured by *colspan sum*, not by
     // physical cell count. HN's subtext row is `<td colspan="2"></td>
     // <td>…</td>` (two cells but three columns); without honouring the
@@ -101,21 +122,47 @@ pub(super) fn layout_table_children(
     // whatever total the columns add up to. That undersizes a few cases
     // (a colspan cell wider than the columns combined) but matches the
     // common HN layout where multi-column cells are spacers/empty.
+    let _pass_c = std::time::Instant::now();
     let mut col_widths = vec![0.0_f32; column_count];
-    for cells in &row_cells {
-        let mut col_idx = 0usize;
-        for cell in cells {
-            let span = cell_colspan(cell).min(column_count.saturating_sub(col_idx));
-            if span == 1 {
-                let measured = measure_cell_max_width(cell);
-                if measured > col_widths[col_idx] {
-                    col_widths[col_idx] = measured;
+    // `available_for_cells` is computed after Pass D's border-spacing math
+    // moves into this scope, so we precompute it here too — needed for the
+    // 1-column shortcut below. It mirrors the math at the top of Pass D
+    // exactly; if Pass D's formula changes, this needs to follow.
+    let _bs_for_shortcut =
+        length_value(container, "border-spacing", content_width).unwrap_or(0.0);
+    let _gap_for_shortcut = (column_count as f32 + 1.0) * _bs_for_shortcut;
+    let _available_for_shortcut = (content_width - _gap_for_shortcut).max(0.0);
+    let table_has_explicit_width =
+        matches!(container.value("width"), Some(Value::Length(..)));
+    // Pass C shortcut: a 1-column table with an explicit `width` always
+    // resolves its single column to `available_for_cells` via Pass D's
+    // `must_shrink || want_grow` branch — the natural max-content from
+    // measure_cell_max_width is overwritten. Running a full recursive
+    // layout of every cell only to discard the result is the dominant
+    // cost on HN's `<table id="hnmain" width="85%">` wrapper (≈1.3s on
+    // an 800px viewport). Skipping it gives the same final col_widths
+    // and saves the layout pass entirely.
+    let skip_pass_c = column_count == 1 && table_has_explicit_width;
+    if skip_pass_c {
+        col_widths[0] = _available_for_shortcut;
+    } else {
+        for cells in &row_cells {
+            let mut col_idx = 0usize;
+            for cell in cells {
+                let span = cell_colspan(cell).min(column_count.saturating_sub(col_idx));
+                if span == 1 {
+                    let measured = measure_cell_max_width(cell);
+                    if measured > col_widths[col_idx] {
+                        col_widths[col_idx] = measured;
+                    }
                 }
+                col_idx += span.max(1);
             }
-            col_idx += span.max(1);
         }
     }
+    let pass_c_ms = _pass_c.elapsed().as_secs_f64() * 1000.0;
 
+    let _pass_d = std::time::Instant::now();
     // Pass D: scale column widths so the row strip fits the table's content
     // box. CSS table-layout spec is intricate (min-content vs max-content,
     // distributing leftover by various heuristics); the toy uses a flat
@@ -156,6 +203,9 @@ pub(super) fn layout_table_children(
         column_x_starts[column_count] = x;
     }
 
+    let pass_d_ms = _pass_d.elapsed().as_secs_f64() * 1000.0;
+
+    let _pass_e = std::time::Instant::now();
     // Pass E: lay out each row with the resolved column widths. Single-
     // column cells take their column's width; colspan cells span several
     // adjacent columns plus the (span - 1) border-spacings between them.
@@ -199,6 +249,24 @@ pub(super) fn layout_table_children(
             grow_cell_to_row_height(cell_box, row_outer_height);
         }
         cursor_y += row_outer_height + border_spacing;
+    }
+
+    let pass_e_ms = _pass_e.elapsed().as_secs_f64() * 1000.0;
+
+    if mb_dom::profile::enabled() {
+        let mc = MEASURE_CELL_CALLS.with(|c| c.get());
+        let mn = MEASURE_CELL_NANOS.with(|n| n.get());
+        let lc = LAYOUT_CELL_CALLS.with(|c| c.get());
+        let ln = LAYOUT_CELL_NANOS.with(|n| n.get());
+        eprintln!(
+            "[mb-profile] table::pass_a_collect_rows: {pass_a_ms:.2}ms  pass_b_collect_cells: {pass_b_ms:.2}ms  pass_c_measure: {pass_c_ms:.2}ms  pass_d_scale: {pass_d_ms:.2}ms  pass_e_layout: {pass_e_ms:.2}ms  rows={} cols={column_count}",
+            row_cells.len()
+        );
+        eprintln!(
+            "[mb-profile] table::measure_cell: calls={mc} total={:.2}ms  layout_cell: calls={lc} total={:.2}ms",
+            mn as f64 / 1_000_000.0,
+            ln as f64 / 1_000_000.0
+        );
     }
 
     let auto_height = (cursor_y - content_y).max(0.0);
@@ -255,11 +323,19 @@ fn measure_cell_max_width(cell: &StyledNode) -> f32 {
     // cell's contribution to the column's max-content width. The probe
     // box is thrown away; the real layout in Pass E builds a fresh box at
     // the resolved cell width.
+    let _t = std::time::Instant::now();
     let probe = layout_inline_block_node(cell, 0.0, 0.0, MAX_PROBE_WIDTH);
+    MEASURE_CELL_CALLS.with(|c| c.set(c.get() + 1));
+    MEASURE_CELL_NANOS.with(|n| n.set(n.get() + _t.elapsed().as_nanos() as u64));
     outer_rect(&probe).width
 }
 
 fn layout_table_cell(cell: &StyledNode, x: f32, y: f32, cell_outer_width: f32) -> LayoutBox {
+    let _t = std::time::Instant::now();
+    LAYOUT_CELL_CALLS.with(|c| c.set(c.get() + 1));
+    // Defer the NANOS update until the function returns; the early-return
+    // path doesn't exist today, but using a guard keeps the metric honest
+    // if one is added later. (We just sample at the bottom for now.)
     // The column has already decided this cell's outer width — author CSS
     // on the cell's `width` was a hint that fed column sizing in Pass C,
     // not a binding constraint here. Margins / borders / padding stay as
@@ -302,7 +378,7 @@ fn layout_table_cell(cell: &StyledNode, x: f32, y: f32, cell_outer_width: f32) -
     let content_height = length_value(cell, "height", cell_outer_width)
         .unwrap_or_else(|| auto_content_height.max(intrinsic_height(cell)));
 
-    LayoutBox {
+    let result = LayoutBox {
         box_type: container_box_type(cell),
         dimensions: Dimensions {
             content: Rect {
@@ -316,7 +392,9 @@ fn layout_table_cell(cell: &StyledNode, x: f32, y: f32, cell_outer_width: f32) -
             margin,
         },
         children,
-    }
+    };
+    LAYOUT_CELL_NANOS.with(|n| n.set(n.get() + _t.elapsed().as_nanos() as u64));
+    result
 }
 
 fn grow_cell_to_row_height(cell_box: &mut LayoutBox, row_outer_height: f32) {
