@@ -11,12 +11,13 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use rquickjs::{CatchResultExt, CaughtError, Context, Function, Runtime, Value};
+use rquickjs::{CatchResultExt, CaughtError, Context, Function, Runtime, Value, context::EvalOptions};
 
 use crate::dom::{Document, NodeId, NodeType};
 
 mod console;
 mod document;
+mod dom_globals;
 mod element;
 mod event;
 mod fetch;
@@ -73,6 +74,11 @@ impl JsRuntime {
             ctx.eval::<(), _>(DISPLAY_HELPER)
                 .expect("display helper should compile");
             console::register_console(&ctx).expect("console should register");
+            // DOM constructor ladder must land BEFORE element/document
+            // registration so the wrappers (and future per-instance
+            // prototype links) can reference the prototypes.
+            dom_globals::register_dom_globals(&ctx)
+                .expect("dom globals should register");
             window::register_window_aliases(&ctx, location_url.clone())
                 .expect("window aliases should register");
             element::register_element_hooks(&ctx, dom.clone())
@@ -146,13 +152,34 @@ impl JsRuntime {
     }
 
     pub fn execute_with_url(&mut self, source: &str, url: &str) -> Result<String, String> {
-        self.execute(source).map_err(|err| {
-            if url.is_empty() {
-                err
-            } else {
-                format!("{url}: {err}")
-            }
-        })
+        // When the caller knows the script's origin URL, hand it to rquickjs
+        // as `EvalOptions::filename`. QuickJS uses this string both as the
+        // source label on the compiled function and as the `Error.stack`
+        // frame name — so a polyfill that throws ten levels deep on a
+        // minified third-party bundle reports `polyfill.js:1:NNN` instead
+        // of the anonymous label `<eval>` we'd otherwise get. Diagnostic
+        // value only; runtime behaviour is unchanged.
+        if url.is_empty() {
+            return self.execute(source);
+        }
+        let result: Result<String, String> = self.context.with(|ctx| {
+            let mut options = EvalOptions::default();
+            options.filename = Some(url.to_string());
+            let value: Value = ctx
+                .eval_with_options::<Value, _>(source.as_bytes().to_vec(), options)
+                .catch(&ctx)
+                .map_err(format_caught_error)?;
+            let formatter: Function = ctx
+                .globals()
+                .get("__mb_display")
+                .map_err(|err| err.to_string())?;
+            formatter
+                .call::<_, String>((value,))
+                .catch(&ctx)
+                .map_err(format_caught_error)
+        });
+        self.drain_pending_jobs();
+        result.map_err(|err| format!("{url}: {err}"))
     }
 
     /// Drain microtasks (Promise jobs) and any due timers, alternating
@@ -338,10 +365,26 @@ fn format_caught_error(err: CaughtError) -> String {
             // for `missing.prop`). exc.message() is the bare error text;
             // we prefix it with a familiar label when present.
             let message = exc.message().unwrap_or_default();
-            if message.is_empty() {
+            let base = if message.is_empty() {
                 "exception".to_string()
             } else {
                 message
+            };
+            // When MB_JS_STACK is set, append the JS-side stack trace if
+            // rquickjs can produce one. Helps diagnose `cannot read
+            // property X of undefined` on minified third-party bundles
+            // where the message alone doesn't tell you which call site
+            // tripped. Off by default so production logs stay terse.
+            // (rquickjs 0.11's Exception doesn't expose file/line as
+            // separate accessors — those frames are baked into the
+            // stack string by QuickJS when EvalOptions::filename was
+            // supplied.)
+            if std::env::var_os("MB_JS_STACK").is_none() {
+                return base;
+            }
+            match exc.stack().filter(|s| !s.is_empty()) {
+                Some(stack) => format!("{base}\n{stack}"),
+                None => base,
             }
         }
         // A bare `throw 42;` — render the value through stringification.

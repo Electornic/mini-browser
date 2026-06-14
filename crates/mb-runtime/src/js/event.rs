@@ -20,6 +20,12 @@ pub(super) fn register_events(ctx: &Ctx<'_>) -> Result<()> {
 
 const EVENT_BOOT: &str = r#"
 (function () {
+    // Event / CustomEvent / MouseEvent / ... constructor globals now
+    // live in `dom_globals.rs`. They run before this boot because the
+    // listener registry below builds plain-object events for the
+    // bubble dispatcher — chain anchors are needed by polyfills, not
+    // by the dispatcher itself.
+
     // { nodeId: { type: [fn, ...] } }. Identity-based dedup via
     // Array.prototype.indexOf; same `(target, type, callback)` triple
     // registered twice counts as one listener (WHATWG spec).
