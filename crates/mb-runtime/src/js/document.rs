@@ -55,6 +55,29 @@ pub(super) fn register_document(ctx: &Ctx<'_>, dom: Rc<RefCell<Document>>) -> Re
 
     let dom_g = dom.clone();
     globals.set(
+        "__mb_doc_query_selector_all",
+        Func::from(
+            move |ctx: Ctx<'_>, selector_text: String| -> Result<Vec<u32>> {
+                let selector = css::parse_selector(&selector_text).map_err(|err| {
+                    Exception::throw_syntax(
+                        &ctx,
+                        &format!(
+                            "invalid selector `{selector_text}`: {} (at byte {})",
+                            err.message, err.position
+                        ),
+                    )
+                })?;
+                let document = dom_g.borrow();
+                Ok(find_all_matches(&document, &selector)
+                    .into_iter()
+                    .map(|n| n.raw())
+                    .collect())
+            },
+        ),
+    )?;
+
+    let dom_g = dom.clone();
+    globals.set(
         "__mb_doc_get_elements_by_class_name",
         Func::from(move |raw: String| -> Vec<u32> {
             let tokens: Vec<String> = raw.split_whitespace().map(String::from).collect();
@@ -127,6 +150,13 @@ const DOCUMENT_BOOT: &str = r#"
     doc.querySelector = function (selector) {
         var nid = globalThis.__mb_doc_query_selector(String(selector));
         return nid == null ? null : globalThis.__mb_make_element(nid);
+    };
+
+    doc.querySelectorAll = function (selector) {
+        var ids = globalThis.__mb_doc_query_selector_all(String(selector));
+        var out = [];
+        for (var i = 0; i < ids.length; i++) out.push(globalThis.__mb_make_element(ids[i]));
+        return out;
     };
 
     doc.getElementsByClassName = function (className) {
@@ -270,6 +300,46 @@ fn find_first_match(document: &Document, selector: &css::Selector) -> Option<Nod
         }
     }
     None
+}
+
+// Collect every element matching `selector`, in document order. Mirrors
+// `find_first_match` but never short-circuits.
+fn find_all_matches(document: &Document, selector: &css::Selector) -> Vec<NodeId> {
+    let state = MatchingState::default();
+    let mut caches = SelectorCaches::default();
+    let mut ctx = MatchingContext::<crate::css::MiniBrowserSelectorImpl>::new(
+        MatchingMode::Normal,
+        None,
+        &mut caches,
+        QuirksMode::NoQuirks,
+        NeedsSelectorFlags::No,
+        MatchingForInvalidation::No,
+    );
+    let mut hits: Vec<NodeId> = Vec::new();
+    for &root in document.roots() {
+        walk_collect_matches(document, root, selector, &state, &mut ctx, &mut hits);
+    }
+    hits
+}
+
+fn walk_collect_matches(
+    document: &Document,
+    node_id: NodeId,
+    selector: &css::Selector,
+    state: &MatchingState,
+    ctx: &mut MatchingContext<'_, crate::css::MiniBrowserSelectorImpl>,
+    hits: &mut Vec<NodeId>,
+) {
+    if matches_static_selector(document, node_id, selector, state, ctx) {
+        hits.push(node_id);
+    }
+    let children: Vec<NodeId> = match document.get(node_id) {
+        Some(node) => node.children.clone(),
+        None => return,
+    };
+    for child in &children {
+        walk_collect_matches(document, *child, selector, state, ctx, hits);
+    }
 }
 
 fn walk_for_match(

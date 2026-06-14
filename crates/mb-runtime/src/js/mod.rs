@@ -718,6 +718,111 @@ mod tests {
         assert_eq!(rt.execute("document.head.tagName").unwrap(), "\"HEAD\"");
     }
 
+    // -------- Tier 0 SPA: querySelectorAll + element.style --------
+
+    #[test]
+    fn document_query_selector_all_returns_all_matches_in_order() {
+        let mut rt = rt_with_html(r#"<p class="a">1</p><p class="a">2</p><span class="a">3</span>"#);
+        assert_eq!(
+            rt.execute("document.querySelectorAll('p.a').length").unwrap(),
+            "2"
+        );
+        assert_eq!(
+            rt.execute("document.querySelectorAll('.a').map(e => e.textContent).join(',')")
+                .unwrap(),
+            "\"1,2,3\""
+        );
+        assert_eq!(
+            rt.execute("document.querySelectorAll('.none').length").unwrap(),
+            "0"
+        );
+    }
+
+    #[test]
+    fn element_query_selector_all_scopes_to_descendants() {
+        let mut rt = rt_with_html(
+            r#"<div id="root"><p class="x">a</p><section><p class="x">b</p></section></div><p class="x">outside</p>"#,
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('root').querySelectorAll('.x').length")
+                .unwrap(),
+            "2"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('root').querySelector('.x').textContent")
+                .unwrap(),
+            "\"a\""
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('root').querySelector('.missing')")
+                .unwrap(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn element_style_property_round_trips_through_attribute() {
+        let mut rt = rt_with_html(r#"<div id="d"></div>"#);
+        rt.execute("document.getElementById('d').style.display = 'none'")
+            .unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('d').getAttribute('style')")
+                .unwrap(),
+            "\"display: none\""
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('d').style.display").unwrap(),
+            "\"none\""
+        );
+    }
+
+    #[test]
+    fn element_style_camel_case_maps_to_kebab() {
+        let mut rt = rt_with_html(r#"<div id="d" style="color: red"></div>"#);
+        rt.execute("document.getElementById('d').style.backgroundColor = 'blue'")
+            .unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('d').getAttribute('style')")
+                .unwrap(),
+            "\"color: red; background-color: blue\""
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('d').style.backgroundColor")
+                .unwrap(),
+            "\"blue\""
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('d').style.color").unwrap(),
+            "\"red\""
+        );
+    }
+
+    #[test]
+    fn element_style_css_text_set_get_and_remove_property() {
+        let mut rt = rt_with_html(r#"<div id="d"></div>"#);
+        rt.execute("document.getElementById('d').style.cssText = 'margin: 0; padding: 4px'")
+            .unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('d').style.getPropertyValue('padding')")
+                .unwrap(),
+            "\"4px\""
+        );
+        rt.execute("document.getElementById('d').style.removeProperty('margin')")
+            .unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('d').getAttribute('style')")
+                .unwrap(),
+            "\"padding: 4px\""
+        );
+        // Assigning '' deletes the declaration.
+        rt.execute("document.getElementById('d').style.padding = ''")
+            .unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('d').style.cssText").unwrap(),
+            "\"\""
+        );
+    }
+
     // -------- 4.8c storage / timers / event tests --------
 
     fn rt_clock(html: &str) -> (JsRuntime, FixedClock) {
