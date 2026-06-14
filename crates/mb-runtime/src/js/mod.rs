@@ -241,6 +241,32 @@ impl JsRuntime {
         self.drain_pending_jobs();
     }
 
+    /// Update `document.readyState`. The page lifecycle drives this
+    /// through 'loading' -> 'interactive' -> 'complete' as a document
+    /// finishes parsing, runs its scripts, and fully loads.
+    pub fn set_ready_state(&mut self, state: &str) {
+        let _ = self.execute(&format!("globalThis.__mb_ready_state = {state:?}"));
+    }
+
+    /// Fire a window- or document-level event (`DOMContentLoaded`,
+    /// `load`, `popstate`, `hashchange`, ...). `which` is "window" or
+    /// "document". Returns whether a listener called `preventDefault`.
+    pub fn dispatch_global_event(&mut self, which: &str, event_type: &str) -> bool {
+        let which = which.to_string();
+        let event_type = event_type.to_string();
+        let prevented = self.context.with(|ctx| {
+            let dispatcher: Function<'_> = match ctx.globals().get("__mb_dispatch_global") {
+                Ok(f) => f,
+                Err(_) => return false,
+            };
+            dispatcher
+                .call::<_, bool>((which, event_type))
+                .unwrap_or(false)
+        });
+        self.drain_pending_jobs();
+        prevented
+    }
+
     /// Synthesise a DOM event at `target` and bubble it through the
     /// parent chain. Text-node targets retarget to the nearest Element
     /// ancestor (matches what real browsers do — almost every author
@@ -505,12 +531,15 @@ mod tests {
     }
 
     #[test]
-    fn history_pushstate_is_silent_noop() {
+    fn history_push_then_replace_grows_then_swaps_the_stack() {
         let mut rt = fresh();
-        // Real router code does this at boot — just must not throw.
+        rt.set_location_url("https://example.com/");
+        // pushState grows the stack; replaceState swaps the current entry.
         rt.execute("history.pushState({a:1}, '', '/x'); history.replaceState(null, '', '/y')")
             .unwrap();
-        assert_eq!(rt.execute("history.length").unwrap(), "1");
+        assert_eq!(rt.execute("history.length").unwrap(), "2");
+        assert_eq!(rt.execute("location.pathname").unwrap(), "\"/y\"");
+        assert_eq!(rt.execute("history.state").unwrap(), "null");
     }
 
     #[test]
@@ -847,6 +876,71 @@ mod tests {
         // Fragment is emptied after the flush.
         assert_eq!(rt.execute("frag.childNodes.length").unwrap(), "0");
         assert_eq!(rt.execute("frag.nodeType").unwrap(), "11");
+    }
+
+    // -------- Tier 0 SPA: history + window/doc events + readyState --------
+
+    #[test]
+    fn history_push_state_updates_stack_and_location_without_refetch() {
+        let mut rt = fresh();
+        rt.set_location_url("https://example.com/home");
+        rt.execute("history.pushState({page: 1}, '', '/users/1')")
+            .unwrap();
+        assert_eq!(rt.execute("history.length").unwrap(), "2");
+        assert_eq!(rt.execute("location.pathname").unwrap(), "\"/users/1\"");
+        assert_eq!(rt.execute("location.href").unwrap(), "\"https://example.com/users/1\"");
+        assert_eq!(rt.execute("history.state.page").unwrap(), "1");
+        // replaceState swaps the current entry rather than growing the stack.
+        rt.execute("history.replaceState({page: 2}, '', '/users/2')")
+            .unwrap();
+        assert_eq!(rt.execute("history.length").unwrap(), "2");
+        assert_eq!(rt.execute("location.pathname").unwrap(), "\"/users/2\"");
+        assert_eq!(rt.execute("history.state.page").unwrap(), "2");
+    }
+
+    #[test]
+    fn history_back_and_forward_fire_popstate_and_restore_location() {
+        let mut rt = fresh();
+        rt.set_location_url("https://example.com/a");
+        rt.execute(
+            r#"var seenState = null; var seenPath = null;
+               window.addEventListener('popstate', function (e) {
+                   seenState = e.state ? e.state.n : null;
+                   seenPath = location.pathname;
+               });
+               history.pushState({n: 1}, '', '/b');
+               history.pushState({n: 2}, '', '/c');
+               history.back();"#,
+        )
+        .unwrap();
+        assert_eq!(rt.execute("location.pathname").unwrap(), "\"/b\"");
+        assert_eq!(rt.execute("seenState").unwrap(), "1");
+        assert_eq!(rt.execute("seenPath").unwrap(), "\"/b\"");
+        rt.execute("history.forward()").unwrap();
+        assert_eq!(rt.execute("location.pathname").unwrap(), "\"/c\"");
+        assert_eq!(rt.execute("seenState").unwrap(), "2");
+    }
+
+    #[test]
+    fn dispatch_global_event_fires_window_and_document_listeners() {
+        let mut rt = rt_with_html("");
+        rt.execute(
+            r#"var hits = [];
+               window.addEventListener('load', function () { hits.push('load'); });
+               document.addEventListener('DOMContentLoaded', function () { hits.push('dcl'); });"#,
+        )
+        .unwrap();
+        rt.dispatch_global_event("document", "DOMContentLoaded");
+        rt.dispatch_global_event("window", "load");
+        assert_eq!(rt.execute("hits.join(',')").unwrap(), "\"dcl,load\"");
+    }
+
+    #[test]
+    fn document_ready_state_defaults_loading_and_tracks_setter() {
+        let mut rt = rt_with_html("");
+        assert_eq!(rt.execute("document.readyState").unwrap(), "\"loading\"");
+        rt.set_ready_state("complete");
+        assert_eq!(rt.execute("document.readyState").unwrap(), "\"complete\"");
     }
 
     // -------- 4.8c storage / timers / event tests --------

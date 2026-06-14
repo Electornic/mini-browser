@@ -196,11 +196,30 @@ const DOCUMENT_BOOT: &str = r#"
         configurable: true, enumerable: true,
     });
 
-    // Document-level addEventListener / removeEventListener stubs (4.8c
-    // promotes these to real registrations on a synthetic document
-    // target).
-    doc.addEventListener = function () {};
-    doc.removeEventListener = function () {};
+    // Document-level addEventListener / removeEventListener register under
+    // the 'document' key in the shared event registry (event.rs); the
+    // lifecycle fires `DOMContentLoaded` here via `__mb_dispatch_global`.
+    doc.addEventListener = function (type, fn) {
+        if (typeof fn === 'function') {
+            globalThis.__mb_listener_add('document', String(type), fn);
+        }
+    };
+    doc.removeEventListener = function (type, fn) {
+        if (typeof fn === 'function') {
+            globalThis.__mb_listener_remove('document', String(type), fn);
+        }
+    };
+
+    // readyState: a string backed by a global the host's lifecycle drives
+    // ('loading' at parse time -> 'interactive' after scripts ->
+    // 'complete' after load). Defaults to 'loading' for a fresh runtime.
+    if (typeof globalThis.__mb_ready_state !== 'string') {
+        globalThis.__mb_ready_state = 'loading';
+    }
+    Object.defineProperty(doc, 'readyState', {
+        get: function () { return globalThis.__mb_ready_state; },
+        configurable: true, enumerable: true,
+    });
 
     globalThis.document = doc;
 })();

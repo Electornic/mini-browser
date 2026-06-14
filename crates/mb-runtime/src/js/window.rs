@@ -12,7 +12,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use rquickjs::{Ctx, Object, Result, Value, prelude::Func, prelude::Rest};
+use rquickjs::{Ctx, Object, Result, prelude::Func};
 
 use crate::net::Url;
 
@@ -26,20 +26,25 @@ pub(super) fn register_window_aliases(
                        globalThis.self = globalThis;"#;
     ctx.eval::<(), _>(alias_src)?;
 
-    let globals = ctx.globals();
-
-    // Window-level addEventListener / removeEventListener: silent stubs
-    // until 4.8c. Author scripts (React / jQuery boot) call these at
-    // module top level — without the shim every page would crash before
-    // any handler ran. `Rest<Value>` swallows whatever shape the caller
-    // hands in.
-    globals.set(
-        "addEventListener",
-        Func::from(|_args: Rest<Value<'_>>| {}),
-    )?;
-    globals.set(
-        "removeEventListener",
-        Func::from(|_args: Rest<Value<'_>>| {}),
+    // Window-level addEventListener / removeEventListener register real
+    // handlers under the 'window' key in the shared event registry
+    // (event.rs). The registry functions are resolved at call time, so it
+    // doesn't matter that event.rs registers after this module. `load`,
+    // `popstate`, and `hashchange` are dispatched here via
+    // `__mb_dispatch_global`.
+    ctx.eval::<(), _>(
+        r#"
+        globalThis.addEventListener = function (type, fn) {
+            if (typeof fn === 'function') {
+                globalThis.__mb_listener_add('window', String(type), fn);
+            }
+        };
+        globalThis.removeEventListener = function (type, fn) {
+            if (typeof fn === 'function') {
+                globalThis.__mb_listener_remove('window', String(type), fn);
+            }
+        };
+        "#,
     )?;
 
     // queueMicrotask(fn): equivalent to `Promise.resolve().then(fn)` per
@@ -58,8 +63,8 @@ pub(super) fn register_window_aliases(
     ctx.eval::<(), _>(qmt_src)?;
 
     register_navigator(ctx)?;
-    register_location(ctx, location_url)?;
-    register_history(ctx)?;
+    register_location(ctx, location_url.clone())?;
+    register_history(ctx, location_url)?;
 
     Ok(())
 }
@@ -182,24 +187,85 @@ fn install_url_getter(
     )
 }
 
-// `history` global. The toy already keeps a back/forward stack on
-// `BrowserState`; routing it into JS land is bigger than the rest of
-// the stub work, so for now `length` is fixed at 1, `state` is null,
-// and the mutators silently accept their args. Plenty of client-side
-// routers call `pushState` during initialisation; without the shim
-// they'd throw "history.pushState is not a function".
-fn register_history(ctx: &Ctx<'_>) -> Result<()> {
-    let history = Object::new(ctx.clone())?;
-    history.set("length", 1)?;
-    history.set("state", Value::new_null(ctx.clone()))?;
-    history.set("pushState", Func::from(|_args: Rest<Value<'_>>| {}))?;
-    history.set("replaceState", Func::from(|_args: Rest<Value<'_>>| {}))?;
-    history.set("back", Func::from(|_args: Rest<Value<'_>>| {}))?;
-    history.set("forward", Func::from(|_args: Rest<Value<'_>>| {}))?;
-    history.set("go", Func::from(|_args: Rest<Value<'_>>| {}))?;
-    ctx.globals().set("history", history)?;
+// `history` global — a real same-document history stack living JS-side.
+// `pushState` / `replaceState` update `location.*` *without* re-fetching
+// (they only rewrite the shared URL buffer via `__mb_loc_set`), push/
+// replace the entry stack, and `back` / `forward` / `go` move the index
+// and fire a `popstate` event on `window`. This is the same-document
+// half of routing; cross-document navigation (a real load) is still the
+// chrome's job via `BrowserState`.
+//
+// `__mb_loc_set(url)` resolves `url` against the current buffer, writes
+// it back, and returns the resolved absolute href so the stack can store
+// it (and replay it on back/forward).
+fn register_history(ctx: &Ctx<'_>, location_url: Rc<RefCell<String>>) -> Result<()> {
+    let buf = location_url;
+    ctx.globals().set(
+        "__mb_loc_set",
+        Func::from(move |next: String| -> String {
+            let current = buf.borrow().clone();
+            let resolved = resolve_location(&current, &next);
+            *buf.borrow_mut() = resolved.clone();
+            resolved
+        }),
+    )?;
+    ctx.eval::<(), _>(HISTORY_BOOT)?;
     Ok(())
 }
+
+const HISTORY_BOOT: &str = r#"
+(function () {
+    // entries[index] is the current entry. Each: { state, url }.
+    var entries = [{ state: null, url: null }];
+    var index = 0;
+
+    var history = {};
+    Object.defineProperty(history, 'length', {
+        get: function () { return entries.length; },
+        configurable: true, enumerable: true,
+    });
+    Object.defineProperty(history, 'state', {
+        get: function () { return entries[index].state; },
+        configurable: true, enumerable: true,
+    });
+    Object.defineProperty(history, 'scrollRestoration', {
+        value: 'auto', writable: true, configurable: true, enumerable: true,
+    });
+
+    function normState(s) { return s === undefined ? null : s; }
+
+    history.pushState = function (state, title, url) {
+        // Drop any forward entries, then append.
+        entries.length = index + 1;
+        var resolved = (url == null) ? globalThis.location.href
+                                     : globalThis.__mb_loc_set(String(url));
+        entries.push({ state: normState(state), url: resolved });
+        index = entries.length - 1;
+    };
+
+    history.replaceState = function (state, title, url) {
+        var resolved = (url == null) ? globalThis.location.href
+                                     : globalThis.__mb_loc_set(String(url));
+        entries[index] = { state: normState(state), url: resolved };
+    };
+
+    function go(delta) {
+        delta = delta | 0;
+        if (delta === 0) return;
+        var target = index + delta;
+        if (target < 0 || target >= entries.length) return;
+        index = target;
+        var entry = entries[index];
+        if (entry.url != null) globalThis.__mb_loc_set(entry.url);
+        globalThis.__mb_dispatch_global('window', 'popstate', { state: entry.state });
+    }
+    history.go = go;
+    history.back = function () { go(-1); };
+    history.forward = function () { go(1); };
+
+    globalThis.history = history;
+})();
+"#;
 
 // Default-port-aware host serialisation: an http:80 / https:443 URL
 // drops the port, anything else keeps it. Matches the WHATWG URL spec's
@@ -231,4 +297,45 @@ fn split_path_search_hash(raw_path: &str) -> (String, String, String) {
         None => (head, String::new()),
     };
     (pathname, search, hash)
+}
+
+// Resolve a `pushState`/`replaceState` URL argument against the current
+// location href, returning a new absolute href. Pure string surgery (no
+// port-default guessing) so it round-trips losslessly through the
+// location getters.
+fn resolve_location(current: &str, next: &str) -> String {
+    if next.contains("://") {
+        return next.to_string();
+    }
+    let Some(origin) = origin_of(current) else {
+        // No base URL bound yet — best effort, store as-is.
+        return next.to_string();
+    };
+    let rest = &current[origin.len()..]; // "/path?q#h" or ""
+    let (cur_path, cur_search, _cur_hash) = split_path_search_hash(rest);
+    if next.starts_with('/') {
+        format!("{origin}{next}")
+    } else if next.starts_with('?') {
+        format!("{origin}{cur_path}{next}")
+    } else if next.starts_with('#') {
+        format!("{origin}{cur_path}{cur_search}{next}")
+    } else {
+        // Relative to the current directory.
+        let dir = match cur_path.rfind('/') {
+            Some(i) => &cur_path[..=i],
+            None => "/",
+        };
+        format!("{origin}{dir}{next}")
+    }
+}
+
+// The `scheme://authority` prefix of an href, or None if there's no
+// scheme. Everything from the first '/' after the authority is the
+// path/search/hash.
+fn origin_of(href: &str) -> Option<&str> {
+    let after_scheme = href.find("://")? + 3;
+    match href[after_scheme..].find('/') {
+        Some(i) => Some(&href[..after_scheme + i]),
+        None => Some(href),
+    }
 }

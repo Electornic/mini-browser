@@ -107,5 +107,38 @@ const EVENT_BOOT: &str = r#"
         }
         return event.defaultPrevented;
     };
+
+    // Direct (non-bubbling) dispatch for the window / document targets,
+    // which live in the registry under the string keys 'window' and
+    // 'document' rather than numeric nodeIds. Used by the lifecycle
+    // (`DOMContentLoaded` / `load`) and history (`popstate` /
+    // `hashchange`). `detail` shallow-copies onto the event (e.g.
+    // `{ state }` for popstate). Returns `defaultPrevented`.
+    globalThis.__mb_dispatch_global = function (which, type, detail) {
+        var event = {
+            type: type,
+            target: (which === 'window') ? globalThis : globalThis.document,
+            currentTarget: (which === 'window') ? globalThis : globalThis.document,
+            defaultPrevented: false,
+            preventDefault: function () { this.defaultPrevented = true; },
+            stopPropagation: function () {},
+            stopImmediatePropagation: function () {},
+        };
+        if (detail) {
+            for (var k in detail) {
+                if (Object.prototype.hasOwnProperty.call(detail, k)) event[k] = detail[k];
+            }
+        }
+        var byNode = registry[which];
+        if (!byNode) return false;
+        var arr = byNode[type];
+        if (!arr || arr.length === 0) return false;
+        var snapshot = arr.slice();
+        for (var j = 0; j < snapshot.length; j++) {
+            try { snapshot[j].call(event.currentTarget, event); }
+            catch (err) { /* swallow handler errors — match dispatch_chain */ }
+        }
+        return event.defaultPrevented;
+    };
 })();
 "#;

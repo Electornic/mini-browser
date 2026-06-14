@@ -381,6 +381,13 @@ impl BrowserState {
                 eprintln!("script error: {err}");
             }
         }
+        // Document lifecycle: scripts have run against the parsed tree, so
+        // advance readyState and fire the boot events SPA bootstraps wait
+        // on. `DOMContentLoaded` fires on document, `load` on window.
+        self.js.set_ready_state("interactive");
+        self.js.dispatch_global_event("document", "DOMContentLoaded");
+        self.js.set_ready_state("complete");
+        self.js.dispatch_global_event("window", "load");
     }
 
     pub fn display_list(
