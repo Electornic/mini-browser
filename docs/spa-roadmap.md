@@ -98,3 +98,37 @@ Tier 0 (바닐라, 갭 최소, 막히는 곳 실측)
 ```
 
 첫 발 추천: **Tier 0** — 작은 바닐라 SPA 데모 HTML을 만들어 *현재 무엇이 깨지는지 실측* → 깨지는 순서대로 #1~#4를 메운다. 이미 있는 mutate→재렌더 루프가 SPA 엔진임을 눈으로 확인하면서, 정확한 공백을 데이터로 확보하는 게 목적.
+
+---
+
+## 재검토 / 구현가능성 검증 (2026-06-14)
+
+로드맵 작성 후 핵심 가정을 rquickjs 문서 + 코드 + 웹 검색으로 재검증. **전체 결론: 구현 가능. 단 아래 1개 갭 추가 + Tier 1 항목 1개 정정.**
+
+### ✅ 확정 (리스크 해소)
+
+- **Tier 2 모듈 로더 — sync Runtime으로 가능**. rquickjs 0.11 **sync** `Runtime::set_loader(Resolver, Loader)`가 존재(AsyncRuntime 전용 아님)하고, `Loader::load(&mut self, ctx, name) -> Result<Module>`가 **동기 시그니처**다. 즉 현재 sync `Runtime`/`Context` 구조([js/mod.rs](../crates/mb-runtime/src/js/mod.rs))를 async로 갈아엎지 않고, 모듈 인스턴스화 중 loader 안에서 기존 **동기 blocking** `net::load_script`로 fetch하면 된다. QuickJS의 모듈 로더 콜백 자체가 동기라 모델이 정확히 맞는다. → Tier 2 신뢰도 상향.
+
+### ⚠️ 추가된 갭 (누락분, Tier 1 우선순위)
+
+- **#14 동적 `<style>`/`<link>` 미반영** — stylesheet는 `install_document`에서 **고정 문자열로 1회만 파싱**된다(`self.parsed_stylesheet = css::parse(&stylesheet)`, [state/mod.rs:313](../crates/mb-runtime/src/state/mod.rs)). 매 프레임 살아있는 DOM의 `<style>`에서 재수집하지 않으므로, **JS가 런타임에 주입한 CSS(styled-components / emotion / MUI / Tailwind-runtime / `el=createElement('style')`)가 적용되지 않는다.** 대부분의 styled 프레임워크 앱이 여기서 "DOM은 맞는데 스타일이 빠진" 상태가 된다.
+  - 해결: revision이 바뀌면 live DOM에서 `<style>` 텍스트 + 동적 `<link rel=stylesheet>`를 다시 모아 `parsed_stylesheet`를 재구성. revision 카운터에 얹으면 자연스럽다. 난이도 중.
+
+### ✏️ 정정 (Tier 1 #7 구체화)
+
+- Preact/React differ는 **element-centric**가 아니라 **node-level DOM**에 의존한다: `parentNode` / `firstChild` / `nextSibling` / `childNodes` / `nodeType`, 텍스트노드 `.data`·`.nodeValue`, 직접 프로퍼티 대입(`el.value=`, `el.onclick=`), `removeAttribute`, (SVG 시) `createElementNS`. 현재 브릿지는 `parentElement`/`children`(element-centric) 위주라 **node-level이 빠졌을 가능성이 높다**(element.rs가 long-line이라 grep 미검출 — 구현 전 직접 확인 필요). Tier 1 #7을 "이벤트 완성도" → **"node-level DOM 트리 순회 API + 텍스트노드 + 직접 프로퍼티 대입"** 으로 교체.
+
+### 🎯 타깃 권고
+
+- **Tier 1 = Preact + htm(UMD) 우선**. React 18은 스케줄러가 `MessageChannel`에 의존(미구현 가능성 → `setTimeout` fallback은 있으나 동작 보장 약함)하고 합성이벤트 시스템이 무겁다. Preact는 스케줄러 없고 코어 DOM 요구가 작아 임베디드 엔진에서 검증된 선택 (웹 검색 confirm). React는 Tier 1 통과 후 stretch.
+
+### 의존성 정리
+
+```
+Tier 0  : #1 qsa, #2 style, #3 history, #4 win/doc 이벤트       (갭 작음, 거의 됨)
+Tier 1  : #5 prototype(키스톤) → #14 동적 style → #6 rect → #7 node-level
+Tier 2  : #8 모듈 로더(sync set_loader 확정) → #9 import maps
+Tier 3  : #10~13 observer/CSSOM
+```
+
+**Sources**: [rquickjs Runtime::set_loader](https://docs.rs/rquickjs/latest/rquickjs/runtime/struct.Runtime.html), [rquickjs Loader trait](https://docs.rs/rquickjs/latest/rquickjs/loader/trait.Loader.html), [rquickjs Module](https://docs.rs/rquickjs/latest/rquickjs/module/struct.Module.html), [preactjs/preact](https://github.com/preactjs/preact), [A mostly vanilla JS way to use Preact](https://gomakethings.com/a-mostly-vanilla-js-way-to-use-preact/).
