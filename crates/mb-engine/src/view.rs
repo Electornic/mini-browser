@@ -44,7 +44,7 @@ pub struct HoverHit {
 
 pub fn build_document_view(
     parsed_document: &dom::Document,
-    parsed_stylesheet: &css::Stylesheet,
+    stylesheets: &[css::Stylesheet],
     viewport_width: usize,
     current_url: Option<&url::Url>,
     images: &HashMap<String, resource::LoadedImage>,
@@ -65,12 +65,7 @@ pub fn build_document_view(
         .copied()
         .ok_or_else(|| "document did not produce a root node".to_string())?;
     let styled = profile::time_block("view::style_tree", || {
-        style::style_tree_with_state(
-            parsed_document,
-            root,
-            std::slice::from_ref(parsed_stylesheet),
-            interaction,
-        )
+        style::style_tree_with_state(parsed_document, root, stylesheets, interaction)
     });
     let layout = profile::time_block("view::layout_tree", || {
         layout::layout_tree(&styled, viewport_width as f32)

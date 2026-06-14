@@ -51,7 +51,7 @@ fn render_fixture(fixture_name: &str) -> Vec<u32> {
 
     let view = build_document_view(
         &document,
-        &stylesheet,
+        std::slice::from_ref(&stylesheet),
         VIEWPORT_W,
         None,
         &images,

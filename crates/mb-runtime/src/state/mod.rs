@@ -75,7 +75,21 @@ pub struct BrowserState {
     // up the new tree without a re-parse. BrowserState owns the canonical Rc
     // and the runtime gets a clone in `install_document`.
     pub parsed_document: Rc<RefCell<dom::Document>>,
-    pub parsed_stylesheet: css::Stylesheet,
+    // Author stylesheets fed to the cascade, in cascade order:
+    //   [0] = external `<link rel=stylesheet>` bodies, parsed once at
+    //         install time from `self.stylesheet`.
+    //   [1] = inline `<style>` element text re-collected from the LIVE DOM
+    //         (so JS-injected CSS — styled-components / emotion / MUI — is
+    //         picked up). Refreshed by `refresh_inline_stylesheet` whenever
+    //         the document revision moves; see `inline_style_revision`.
+    // UA defaults are applied separately in the cascade code, not here.
+    pub parsed_stylesheets: Vec<css::Stylesheet>,
+    // Document revision the inline `<style>` sheet ([1] above) was last
+    // collected at. A memo so hover/focus-only view rebuilds (which leave
+    // the revision untouched) don't re-walk the tree and re-parse CSS;
+    // only a real DOM mutation re-collects. `None` forces a collect on the
+    // next build (set at construction and on every `install_document`).
+    inline_style_revision: Option<u64>,
     pub images: HashMap<String, resource::LoadedImage>,
     pub font_data: Vec<Vec<u8>>,
     pub current_url: Option<net::Url>,
@@ -242,7 +256,10 @@ impl BrowserState {
         let parsed_document = Rc::new(RefCell::new(
             html::parse(&document_html).unwrap_or_default(),
         ));
-        let parsed_stylesheet = css::parse(&stylesheet).unwrap_or_default();
+        // Slot [0] = external linked CSS; the inline `<style>` slot [1] is
+        // collected lazily on the first `build_or_reuse_view` (driven by
+        // `inline_style_revision == None` below).
+        let parsed_stylesheets = vec![css::parse(&stylesheet).unwrap_or_default()];
         // The runtime shares the document handle so JS-side mutations land
         // in the same arena BrowserState reads for layout.
         let js = js::JsRuntime::new(parsed_document.clone());
@@ -261,7 +278,8 @@ impl BrowserState {
             document_html,
             stylesheet,
             parsed_document,
-            parsed_stylesheet,
+            parsed_stylesheets,
+            inline_style_revision: None,
             images,
             font_data,
             current_url,
@@ -310,7 +328,11 @@ impl BrowserState {
         // and any future caller that holds on to the handle observe the new
         // tree without re-fetching the Rc.
         *self.parsed_document.borrow_mut() = html::parse(&document_html).unwrap_or_default();
-        self.parsed_stylesheet = css::parse(&stylesheet).unwrap_or_default();
+        // Reset to just the external sheet; the inline `<style>` slot is
+        // re-collected on the first build of the new document (forced by
+        // clearing the revision memo below).
+        self.parsed_stylesheets = vec![css::parse(&stylesheet).unwrap_or_default()];
+        self.inline_style_revision = None;
         self.document_html = document_html;
         self.stylesheet = stylesheet;
         self.external_scripts = external_scripts;
@@ -633,10 +655,14 @@ impl BrowserState {
     //     state that style_tree_with_state cascades into the styled tree;
     //     a hover transition or a press flips one of them and forces a
     //     rebuild on that frame only.
-    //   - `parsed_stylesheet`, `current_url`, `images`, and `font_data` all
-    //     change exclusively at install time, so `cached_view = None` in
-    //     `install_document` covers them implicitly without a per-field
-    //     comparison.
+    //   - The external sheet (`parsed_stylesheets[0]`), `current_url`,
+    //     `images`, and `font_data` all change exclusively at install time,
+    //     so `cached_view = None` in `install_document` covers them
+    //     implicitly without a per-field comparison.
+    //   - The inline `<style>` sheet (`parsed_stylesheets[1]`) DOES change
+    //     at runtime (JS injecting CSS), but it lives in the DOM, so any
+    //     such change bumps `revision` and invalidates the key anyway;
+    //     `refresh_inline_stylesheet` re-collects it on that same miss.
     //
     // Render failures don't get cached — we want the next frame to retry
     // a fresh build (the failure may have been transient).
@@ -651,6 +677,10 @@ impl BrowserState {
         {
             return Rc::clone(&cached.view);
         }
+        // Cache miss: the DOM (revision), viewport, or interaction state
+        // moved. Re-collect inline `<style>` CSS if the DOM changed since we
+        // last did (no-op on a hover/focus-only miss — revision unchanged).
+        self.refresh_inline_stylesheet(revision);
         let interaction = style::InteractionState {
             hover: self.hovered_dom_path.as_deref(),
             focus: self.focused_dom_path.as_deref(),
@@ -670,7 +700,7 @@ impl BrowserState {
             let document = self.parsed_document.borrow();
             build_document_view(
                 &document,
-                &self.parsed_stylesheet,
+                &self.parsed_stylesheets,
                 viewport_width,
                 self.current_url.as_ref(),
                 &self.images,
@@ -716,6 +746,30 @@ impl BrowserState {
                 })
             }
         }
+    }
+
+    // Re-collect the inline `<style>` element text from the live DOM into
+    // `parsed_stylesheets[1]`, parsed as CSS. Memoised on the document
+    // revision: a hover/focus/viewport-only rebuild leaves the revision
+    // alone and short-circuits here, so the tree walk + CSS parse only run
+    // when the DOM actually changed (which is the only thing that can add,
+    // remove, or edit a `<style>`). This is what makes JS-injected CSS
+    // (styled-components / emotion / MUI / `el = createElement('style')`)
+    // apply on the very next frame after injection.
+    fn refresh_inline_stylesheet(&mut self, revision: u64) {
+        if self.inline_style_revision == Some(revision) {
+            return;
+        }
+        let css_text = {
+            let document = self.parsed_document.borrow();
+            collect_inline_style_css(&document)
+        };
+        let inline = css::parse(&css_text).unwrap_or_default();
+        match self.parsed_stylesheets.get_mut(1) {
+            Some(slot) => *slot = inline,
+            None => self.parsed_stylesheets.push(inline),
+        }
+        self.inline_style_revision = Some(revision);
     }
 
     /// Reports whether the browser has *time-driven* visual changes
@@ -836,6 +890,41 @@ fn collect_script_sources(
     }
     for child in &node.children {
         collect_script_sources(document, *child, externals, page_url, inline_counter, out);
+    }
+}
+
+// Concatenate the CSS text of every `<style>` element in the live document,
+// in tree order. Each `<style>`'s contribution is the text of its direct
+// Text-node children (how `el.textContent = '...'` / `appendChild(textNode)`
+// land CSS in the arena). Blocks are newline-separated so a missing trailing
+// `;`/`}` in one doesn't fuse into the next. Used by
+// `refresh_inline_stylesheet` to feed `parsed_stylesheets[1]`.
+fn collect_inline_style_css(document: &dom::Document) -> String {
+    let mut buf = String::new();
+    for &root in document.roots() {
+        collect_style_text(document, root, &mut buf);
+    }
+    buf
+}
+
+fn collect_style_text(document: &dom::Document, node_id: NodeId, buf: &mut String) {
+    let Some(node) = document.get(node_id) else {
+        return;
+    };
+    if let NodeType::Element(elem) = &node.node_type
+        && elem.tag_name.eq_ignore_ascii_case("style")
+    {
+        for child_id in &node.children {
+            if let Some(NodeType::Text(text)) = document.get(*child_id).map(|n| &n.node_type) {
+                buf.push_str(text);
+            }
+        }
+        buf.push('\n');
+        // A `<style>`'s only meaningful content is its text; don't descend.
+        return;
+    }
+    for child in &node.children {
+        collect_style_text(document, *child, buf);
     }
 }
 
@@ -1421,6 +1510,59 @@ mod tests {
             None,
             "",
         )
+    }
+
+    // Scan a display list for a SolidRect painted in exactly (r,g,b).
+    // A `background-color` declaration lands as one of these.
+    fn has_solid_rect_rgb(cmds: &[render::DisplayCommand], r: u8, g: u8, b: u8) -> bool {
+        cmds.iter().any(|c| {
+            matches!(
+                c,
+                render::DisplayCommand::SolidRect(color, _)
+                    if color.r == r && color.g == g && color.b == b
+            )
+        })
+    }
+
+    #[test]
+    fn inline_style_element_css_applies_to_render() {
+        // Tier 1 #14: a `<style>` block in the document must feed the
+        // cascade. Before this gap was closed, only external `<link>` CSS
+        // reached the styled tree, so even a static `<style>` was ignored.
+        let mut state = make_state(
+            "<style>#t { background-color: #010203; }</style><div id=\"t\">x</div>",
+        );
+        let input = input::WindowInput::default();
+        let cmds = state.display_list(800, 600, &input);
+        assert!(
+            has_solid_rect_rgb(&cmds, 1, 2, 3),
+            "inline <style> background-color should paint a SolidRect"
+        );
+        // The collected inline sheet occupies slot [1] alongside the
+        // (empty) external sheet at [0].
+        assert_eq!(state.parsed_stylesheets.len(), 2);
+    }
+
+    #[test]
+    fn js_injected_style_element_applies_on_next_frame() {
+        // The styled-components / emotion / MUI pattern: a script builds a
+        // <style> at runtime and appends it. The DOM mutation bumps the
+        // revision, so the next frame's build re-collects the inline CSS
+        // and the injected rule paints.
+        let mut state = make_state(
+            "<body><div id=\"t\">x</div>\
+             <script>\
+               var s = document.createElement('style');\
+               s.textContent = '#t { background-color: #040506; }';\
+               document.body.appendChild(s);\
+             </script></body>",
+        );
+        let input = input::WindowInput::default();
+        let cmds = state.display_list(800, 600, &input);
+        assert!(
+            has_solid_rect_rgb(&cmds, 4, 5, 6),
+            "JS-injected <style> should apply on the next frame"
+        );
     }
 
     #[test]

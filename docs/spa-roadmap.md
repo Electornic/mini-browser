@@ -52,6 +52,8 @@
 
 ## Tier 1 — 프레임워크 (classic/UMD 번들, 모듈 불필요) ⭐ 키스톤
 
+> **진행중.** #5 prototype 상속(키스톤) ✅ `6ec3c59` — wrapper = `Object.create(HTMLElement/Text/DocumentFragment.prototype)`, 접근자/메서드를 프로토타입에 1회 정의(`this._nodeId`), `instanceof` + polyfill `Element.prototype.*=fn` 패칭 작동(+5 테스트). #14 동적 `<style>` ✅ — live DOM `<style>` 재수집(아래 ⚠️ 참조). **다음 = #6 getBoundingClientRect.**
+
 **목표**: Preact + htm UMD (초소형, JSX/빌드 불필요) `render(html` `<App/>` `, root)`. stretch: React UMD (`react.production.min.js` + `react-dom`).
 
 | # | 갭 | 손댈 곳 | 난이도 |
@@ -120,8 +122,8 @@ Tier 0 (바닐라, 갭 최소, 막히는 곳 실측)
 
 ### ⚠️ 추가된 갭 (누락분, Tier 1 우선순위)
 
-- **#14 동적 `<style>`/`<link>` 미반영** — stylesheet는 `install_document`에서 **고정 문자열로 1회만 파싱**된다(`self.parsed_stylesheet = css::parse(&stylesheet)`, [state/mod.rs:313](../crates/mb-runtime/src/state/mod.rs)). 매 프레임 살아있는 DOM의 `<style>`에서 재수집하지 않으므로, **JS가 런타임에 주입한 CSS(styled-components / emotion / MUI / Tailwind-runtime / `el=createElement('style')`)가 적용되지 않는다.** 대부분의 styled 프레임워크 앱이 여기서 "DOM은 맞는데 스타일이 빠진" 상태가 된다.
-  - 해결: revision이 바뀌면 live DOM에서 `<style>` 텍스트 + 동적 `<link rel=stylesheet>`를 다시 모아 `parsed_stylesheet`를 재구성. revision 카운터에 얹으면 자연스럽다. 난이도 중.
+- **#14 동적 `<style>` 미반영 — ✅ DONE.** 진단보다 갭이 더 컸다: 인라인 `<style>`은 **정적이든 동적이든 애초에 한 번도 수집된 적이 없었다** — `load_stylesheets`는 외부 `<link>`만 fetch하고(`stylesheets.join("\n")` → `parsed_stylesheet`), `build_document_view`는 그 외부 시트만 cascade에 넣었다. 인라인 `<style>` 엘리먼트 텍스트를 모으는 경로가 어디에도 없었음.
+  - 해결(구현): `parsed_stylesheet: Stylesheet` → `parsed_stylesheets: Vec<Stylesheet>`로 바꿔 `[0]`=외부 링크 CSS(install 시 1회), `[1]`=live DOM `<style>` 텍스트 재수집(`collect_inline_style_css`). `build_or_reuse_view`가 cache miss마다 `refresh_inline_stylesheet(revision)` 호출 — **revision 메모**로 hover/focus-only 리빌드에선 재파싱 skip, DOM 변경(=`<style>` 주입/편집, revision bump) 시에만 재수집. `build_document_view`는 `&[Stylesheet]` 슬라이스를 받아 그대로 `style_tree_with_state`로 전달. styled-components/emotion/MUI의 `createElement('style')`+`textContent` 패턴이 다음 프레임에 적용됨(+2 테스트). **scope 외**: 동적 `<link rel=stylesheet>` fetch(async resource 배관 필요), CSSOM `sheet.insertRule`(Tier 3 CSSOM) — emotion "speedy" 모드는 insertRule이라 미적용, textContent 경로만 지원.
 
 ### ✏️ 정정 (Tier 1 #7 구체화)
 
@@ -140,7 +142,7 @@ Tier 0 (바닐라, 갭 최소, 막히는 곳 실측)
 
 ```
 Tier 0  : ✅ DONE — #1 qsa, #2 style, #3 history, #4 win/doc 이벤트+#16 readyState, #15 fragment
-Tier 1  : #5 prototype(키스톤) → #14 동적 style → #6 rect → #7 node-level(+className/value/on*)   ← 다음
+Tier 1  : ✅ #5 prototype(키스톤, 6ec3c59) → ✅ #14 동적 style → #6 rect → #7 node-level(+className/value/on*)   ← 다음=#6
 Tier 2  : (선행: Cargo.toml `loader` feature 추가) → #8 모듈 로더(sync set_loader) → #9 import maps
 Tier 3  : #10~13 observer/CSSOM (IntersectionObserver > ResizeObserver 우선순위)
 ```
