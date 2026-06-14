@@ -1000,6 +1000,92 @@ mod tests {
         );
     }
 
+    // -------- Tier 1 #5: prototype inheritance (keystone) --------
+
+    #[test]
+    fn element_wrapper_inherits_html_element_prototype_chain() {
+        let mut rt = rt_with_html(r#"<div id="d"></div>"#);
+        assert_eq!(
+            rt.execute("document.getElementById('d') instanceof HTMLElement").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('d') instanceof Element").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('d') instanceof Node").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            rt.execute(
+                "Object.getPrototypeOf(document.getElementById('d')) === HTMLElement.prototype"
+            )
+            .unwrap(),
+            "true"
+        );
+    }
+
+    #[test]
+    fn element_members_live_on_prototype_with_only_node_id_own() {
+        let mut rt = rt_with_html(r#"<div id="d"></div>"#);
+        // Accessors/methods moved off the instance onto the shared proto.
+        assert_eq!(
+            rt.execute("document.getElementById('d').hasOwnProperty('tagName')").unwrap(),
+            "false"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('d').hasOwnProperty('getAttribute')").unwrap(),
+            "false"
+        );
+        // `_nodeId` is the lone (non-enumerable) own slot each wrapper carries.
+        assert_eq!(
+            rt.execute("Object.getOwnPropertyNames(document.getElementById('d')).join(',')")
+                .unwrap(),
+            "\"_nodeId\""
+        );
+        // ...and the inherited accessor still resolves through the chain.
+        assert_eq!(
+            rt.execute("document.getElementById('d').tagName").unwrap(),
+            "\"DIV\""
+        );
+    }
+
+    #[test]
+    fn polyfill_patch_on_element_prototype_is_visible_to_wrapper() {
+        let mut rt = rt_with_html(r#"<section id="s"></section>"#);
+        // A polyfill adds a method to Element.prototype (one we don't
+        // define ourselves). The wrapper must pick it up via the chain,
+        // with `this` bound to the wrapper. This is the whole point of the
+        // keystone: the OLD per-instance model could never see this patch.
+        rt.execute("Element.prototype.describe = function () { return 'I am ' + this.tagName; };")
+            .unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('s').describe()").unwrap(),
+            "\"I am SECTION\""
+        );
+    }
+
+    #[test]
+    fn text_wrapper_inherits_text_prototype_chain() {
+        let mut rt = rt_with_html("");
+        rt.execute("var t = document.createTextNode('hi')").unwrap();
+        assert_eq!(rt.execute("t instanceof Text").unwrap(), "true");
+        assert_eq!(rt.execute("t instanceof CharacterData").unwrap(), "true");
+        assert_eq!(rt.execute("t instanceof Node").unwrap(), "true");
+        assert_eq!(rt.execute("t.nodeType").unwrap(), "3");
+        assert_eq!(rt.execute("t.textContent").unwrap(), "\"hi\"");
+    }
+
+    #[test]
+    fn fragment_wrapper_inherits_document_fragment_prototype() {
+        let mut rt = rt_with_html("");
+        rt.execute("var f = document.createDocumentFragment()").unwrap();
+        assert_eq!(rt.execute("f instanceof DocumentFragment").unwrap(), "true");
+        assert_eq!(rt.execute("f instanceof Node").unwrap(), "true");
+        assert_eq!(rt.execute("f.nodeType").unwrap(), "11");
+    }
+
     // -------- 4.8c storage / timers / event tests --------
 
     fn rt_clock(html: &str) -> (JsRuntime, FixedClock) {

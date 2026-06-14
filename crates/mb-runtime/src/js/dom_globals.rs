@@ -8,14 +8,7 @@
 // initialisation throws `ReferenceError: X is not defined` and the rest
 // of the page never gets a chance to render.
 //
-// What this module does NOT do (yet):
-//   - Make our element wrappers *inherit* from these prototypes. Today
-//     wrappers are plain JS objects with per-instance `defineProperty`
-//     accessors (`element.rs`). A polyfill that patches
-//     `Element.prototype.closest = fn` will install the method on this
-//     module's empty prototype, but our wrappers won't see it because
-//     they're not on that prototype chain. Fixing that is Step 2 of the
-//     SPA push (`element` factory refactor).
+// What this module does NOT do:
 //   - Provide spec-correct constructor semantics (`new Element()` doesn't
 //     actually create anything meaningful here). The constructors are
 //     chain anchors, not factories.
@@ -27,6 +20,13 @@
 //     → `EventTarget`, etc.) so any polyfill that walks the chain (e.g.
 //     `Object.getPrototypeOf(Text.prototype) === CharacterData.prototype`)
 //     observes the right relationships.
+//   - Anchors the prototypes our wrappers actually inherit from: as of
+//     SPA Tier 1 #5, `element.rs` builds wrappers via
+//     `Object.create(HTMLElement.prototype)` / `Text.prototype` /
+//     `DocumentFragment.prototype` and installs the real accessors on
+//     those prototypes. So a polyfill that patches `Element.prototype.foo
+//     = fn` IS now visible to our wrappers through the chain, and
+//     `el instanceof HTMLElement` holds.
 //   - Owns `Event` / `CustomEvent` too — they used to live in `event.rs`,
 //     but they belong with the rest of the constructor zoo.
 
