@@ -1174,6 +1174,134 @@ mod tests {
         assert_eq!(rt.execute("document.getElementById('d').clientHeight").unwrap(), "0");
     }
 
+    // -------- Tier 1 #7: node-level DOM + reflected props + on* --------
+
+    #[test]
+    fn node_level_traversal_includes_text_nodes() {
+        let mut rt = rt_with_html(r#"<p id="p">a<b>x</b>c</p>"#);
+        // childNodes sees all three (text, <b>, text); children only the <b>.
+        assert_eq!(rt.execute("document.getElementById('p').childNodes.length").unwrap(), "3");
+        assert_eq!(rt.execute("document.getElementById('p').children.length").unwrap(), "1");
+        assert_eq!(rt.execute("document.getElementById('p').firstChild.nodeType").unwrap(), "3");
+        assert_eq!(rt.execute("document.getElementById('p').firstChild.data").unwrap(), "\"a\"");
+        assert_eq!(rt.execute("document.getElementById('p').lastChild.data").unwrap(), "\"c\"");
+        // text "a" -> <b> -> text "c" via nextSibling.
+        assert_eq!(
+            rt.execute("document.getElementById('p').firstChild.nextSibling.tagName").unwrap(),
+            "\"B\""
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('p').firstChild.nextSibling.nextSibling.data")
+                .unwrap(),
+            "\"c\""
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('p').lastChild.previousSibling.tagName").unwrap(),
+            "\"B\""
+        );
+    }
+
+    #[test]
+    fn parent_node_resolves_for_text_and_element() {
+        let mut rt = rt_with_html(r#"<div id="d"><span id="s">hi</span></div>"#);
+        assert_eq!(rt.execute("document.getElementById('s').parentNode.id").unwrap(), "\"d\"");
+        // The text node "hi" climbs back to its <span> parent.
+        assert_eq!(
+            rt.execute("document.getElementById('s').firstChild.parentNode.id").unwrap(),
+            "\"s\""
+        );
+    }
+
+    #[test]
+    fn text_node_data_and_node_value_round_trip() {
+        let mut rt = rt_with_html(r#"<p id="p">old</p>"#);
+        assert_eq!(rt.execute("document.getElementById('p').firstChild.data").unwrap(), "\"old\"");
+        assert_eq!(
+            rt.execute("document.getElementById('p').firstChild.nodeValue").unwrap(),
+            "\"old\""
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('p').firstChild.nodeName").unwrap(),
+            "\"#text\""
+        );
+        rt.execute("document.getElementById('p').firstChild.data = 'mid'").unwrap();
+        assert_eq!(rt.execute("document.getElementById('p').textContent").unwrap(), "\"mid\"");
+        rt.execute("document.getElementById('p').firstChild.nodeValue = 'new'").unwrap();
+        assert_eq!(rt.execute("document.getElementById('p').textContent").unwrap(), "\"new\"");
+    }
+
+    #[test]
+    fn class_name_property_reflects_class_attribute() {
+        let mut rt = rt_with_html(r#"<div id="d" class="a b"></div>"#);
+        assert_eq!(rt.execute("document.getElementById('d').className").unwrap(), "\"a b\"");
+        rt.execute("document.getElementById('d').className = 'x y z'").unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('d').getAttribute('class')").unwrap(),
+            "\"x y z\""
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('d').classList.contains('y')").unwrap(),
+            "true"
+        );
+        // nodeName uppercase; nodeValue null for elements.
+        assert_eq!(rt.execute("document.getElementById('d').nodeName").unwrap(), "\"DIV\"");
+        assert_eq!(rt.execute("document.getElementById('d').nodeValue").unwrap(), "null");
+    }
+
+    #[test]
+    fn id_property_reflects_id_attribute() {
+        let mut rt = rt_with_html(r#"<div id="orig"></div>"#);
+        rt.execute("var d = document.getElementById('orig'); d.id = 'renamed';").unwrap();
+        assert_eq!(rt.execute("d.id").unwrap(), "\"renamed\"");
+        assert_eq!(rt.execute("document.getElementById('renamed') !== null").unwrap(), "true");
+    }
+
+    #[test]
+    fn remove_attribute_drops_the_attribute() {
+        let mut rt = rt_with_html(r#"<input id="i" name="q">"#);
+        assert_eq!(rt.execute("document.getElementById('i').getAttribute('name')").unwrap(), "\"q\"");
+        rt.execute("document.getElementById('i').removeAttribute('name')").unwrap();
+        assert_eq!(rt.execute("document.getElementById('i').getAttribute('name')").unwrap(), "null");
+    }
+
+    #[test]
+    fn on_event_handler_property_registers_replaces_and_clears() {
+        let mut rt = rt_with_html(r#"<button id="b">x</button>"#);
+        rt.execute(
+            "var log = []; var b = document.getElementById('b');\
+             b.onclick = function () { log.push('first'); };",
+        )
+        .unwrap();
+        let nid = id_to_node(&rt, "b");
+        rt.dispatch_event(nid, "click");
+        assert_eq!(rt.execute("log.join(',')").unwrap(), "\"first\"");
+        // Reassigning replaces rather than stacking a second listener.
+        rt.execute("b.onclick = function () { log.push('second'); };").unwrap();
+        rt.dispatch_event(nid, "click");
+        assert_eq!(rt.execute("log.join(',')").unwrap(), "\"first,second\"");
+        assert_eq!(rt.execute("typeof b.onclick").unwrap(), "\"function\"");
+        // Null clears it.
+        rt.execute("b.onclick = null;").unwrap();
+        rt.dispatch_event(nid, "click");
+        assert_eq!(rt.execute("log.join(',')").unwrap(), "\"first,second\"");
+        assert_eq!(rt.execute("b.onclick").unwrap(), "null");
+    }
+
+    #[test]
+    fn create_element_ns_creates_a_plain_element() {
+        let mut rt = rt_with_html(r#"<div id="r"></div>"#);
+        rt.execute(
+            "var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');\
+             document.getElementById('r').appendChild(svg);",
+        )
+        .unwrap();
+        assert_eq!(rt.execute("document.getElementById('r').children.length").unwrap(), "1");
+        assert_eq!(
+            rt.execute("document.getElementById('r').firstChild.tagName").unwrap(),
+            "\"SVG\""
+        );
+    }
+
     // -------- 4.8c storage / timers / event tests --------
 
     fn rt_clock(html: &str) -> (JsRuntime, FixedClock) {

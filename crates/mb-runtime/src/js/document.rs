@@ -171,6 +171,15 @@ const DOCUMENT_BOOT: &str = r#"
         return globalThis.__mb_make_element(nid);
     };
 
+    // createElementNS — frameworks call this for SVG (`http://www.w3.org/
+    // 2000/svg`). We don't render SVG, but the call must not throw or the
+    // whole render aborts; the namespace is dropped and a plain element is
+    // created so the DOM tree still builds.
+    doc.createElementNS = function (_ns, tag) {
+        var nid = globalThis.__mb_doc_create_element(String(tag));
+        return globalThis.__mb_make_element(nid);
+    };
+
     doc.createTextNode = function (text) {
         var nid = globalThis.__mb_doc_create_text_node(String(text));
         return globalThis.__mb_make_text(nid);
