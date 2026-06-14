@@ -224,7 +224,18 @@ fn agent() -> &'static Agent {
     static AGENT: OnceLock<Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         Config::builder()
-            .user_agent("mini-browser/0.1")
+            // Identify as a stock desktop Chrome on macOS. Some sites
+            // (Coupang, Naver subdomains, Cloudflare-fronted endpoints)
+            // 403 anything that doesn't look like a known browser; using
+            // a generic mini-browser/0.1 string trips that filter. The
+            // exact Chrome major version drifts in the wild — pin to a
+            // recent stable so the string stays plausible without
+            // chasing the upstream every release.
+            .user_agent(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+                 AppleWebKit/537.36 (KHTML, like Gecko) \
+                 Chrome/126.0.0.0 Safari/537.36",
+            )
             .max_redirects(10)
             // 4xx/5xx must surface as a Response (not an Error) so the high
             // level loaders can read the body / headers and turn the status
