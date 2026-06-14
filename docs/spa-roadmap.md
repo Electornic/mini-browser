@@ -52,7 +52,7 @@
 
 ## Tier 1 — 프레임워크 (classic/UMD 번들, 모듈 불필요) ⭐ 키스톤
 
-> **진행중.** #5 prototype 상속(키스톤) ✅ `6ec3c59` — wrapper = `Object.create(HTMLElement/Text/DocumentFragment.prototype)`, 접근자/메서드를 프로토타입에 1회 정의(`this._nodeId`), `instanceof` + polyfill `Element.prototype.*=fn` 패칭 작동(+5 테스트). #14 동적 `<style>` ✅ — live DOM `<style>` 재수집(아래 ⚠️ 참조). **다음 = #6 getBoundingClientRect.**
+> **진행중.** #5 prototype 상속(키스톤) ✅ `6ec3c59` — wrapper = `Object.create(HTMLElement/Text/DocumentFragment.prototype)`, 접근자/메서드를 프로토타입에 1회 정의(`this._nodeId`), `instanceof` + polyfill `Element.prototype.*=fn` 패칭 작동(+5 테스트). #14 동적 `<style>` ✅ — live DOM `<style>` 재수집(아래 ⚠️ 참조). #6 getBoundingClientRect / offset*·client* ✅ — `JsRuntime`가 `Rc<RefCell<HashMap<NodeId,ElementRect>>>` 보유, `BrowserState`가 layout pass마다 `collect_layout_rects`로 채워 push(`set_layout_rects`), `__mb_elem_box_metrics` 훅이 읽음. border-box=getBoundingClientRect/offset*, padding-box=client*, 좌표는 content-viewport 상대(scroll 차감), **1프레임 stale**(+3 테스트). **다음 = #7 node-level DOM 순회.**
 
 **목표**: Preact + htm UMD (초소형, JSX/빌드 불필요) `render(html` `<App/>` `, root)`. stretch: React UMD (`react.production.min.js` + `react-dom`).
 
@@ -142,7 +142,7 @@ Tier 0 (바닐라, 갭 최소, 막히는 곳 실측)
 
 ```
 Tier 0  : ✅ DONE — #1 qsa, #2 style, #3 history, #4 win/doc 이벤트+#16 readyState, #15 fragment
-Tier 1  : ✅ #5 prototype(키스톤, 6ec3c59) → ✅ #14 동적 style → #6 rect → #7 node-level(+className/value/on*)   ← 다음=#6
+Tier 1  : ✅ #5 prototype(키스톤, 6ec3c59) → ✅ #14 동적 style → ✅ #6 rect/offset/client → #7 node-level(+className/value/on*)   ← 다음=#7
 Tier 2  : (선행: Cargo.toml `loader` feature 추가) → #8 모듈 로더(sync set_loader) → #9 import maps
 Tier 3  : #10~13 observer/CSSOM (IntersectionObserver > ResizeObserver 우선순위)
 ```

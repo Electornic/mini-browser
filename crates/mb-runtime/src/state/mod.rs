@@ -710,6 +710,15 @@ impl BrowserState {
         match layout_result {
             Ok(view) => {
                 let shared = Rc::new(view);
+                // Refresh the layout-geometry map the JS bridge serves to
+                // getBoundingClientRect / offset* / client*. Built only here
+                // (on a real build, i.e. layout changed) and folded against
+                // the current scroll so coordinates are content-viewport
+                // relative. JS reads it next frame — the accepted one-frame
+                // lag (SPA Tier 1 #6).
+                let mut rects = HashMap::new();
+                collect_layout_rects(&shared.layout_root, self.scroll_offset, &mut rects);
+                self.js.set_layout_rects(rects);
                 self.cached_view = Some(CachedView {
                     revision,
                     viewport_width,
@@ -925,6 +934,51 @@ fn collect_style_text(document: &dom::Document, node_id: NodeId, buf: &mut Strin
     }
     for child in &node.children {
         collect_style_text(document, *child, buf);
+    }
+}
+
+// Walk the laid-out box tree and record each element's geometry into a
+// `NodeId -> ElementRect` map for the JS bridge (getBoundingClientRect &
+// co.). Anonymous boxes carry no NodeId and are skipped (their children are
+// still visited). `scroll` is the current page scroll, subtracted from `y`
+// so the rects are content-viewport relative rather than document absolute.
+// Rects are border-box for x/y/width/height and padding-box for client_*.
+fn collect_layout_rects(
+    layout_box: &layout::LayoutBox,
+    scroll: f32,
+    out: &mut HashMap<NodeId, js::ElementRect>,
+) {
+    let node_id = match &layout_box.box_type {
+        layout::BoxType::BlockNode(n)
+        | layout::BoxType::FlexNode(n)
+        | layout::BoxType::GridNode(n)
+        | layout::BoxType::TableNode(n) => Some(n.node_id),
+        layout::BoxType::AnonymousBlock => None,
+    };
+    if let Some(node_id) = node_id {
+        let d = &layout_box.dimensions;
+        out.insert(
+            node_id,
+            js::ElementRect {
+                x: d.content.x - d.padding.left - d.border.left,
+                y: d.content.y - d.padding.top - d.border.top - scroll,
+                width: d.border.left
+                    + d.padding.left
+                    + d.content.width
+                    + d.padding.right
+                    + d.border.right,
+                height: d.border.top
+                    + d.padding.top
+                    + d.content.height
+                    + d.padding.bottom
+                    + d.border.bottom,
+                client_width: d.padding.left + d.content.width + d.padding.right,
+                client_height: d.padding.top + d.content.height + d.padding.bottom,
+            },
+        );
+    }
+    for child in &layout_box.children {
+        collect_layout_rects(child, scroll, out);
     }
 }
 
@@ -1563,6 +1617,31 @@ mod tests {
             has_solid_rect_rgb(&cmds, 4, 5, 6),
             "JS-injected <style> should apply on the next frame"
         );
+    }
+
+    #[test]
+    fn element_geometry_reflects_layout_after_a_frame() {
+        // Full pipeline for Tier 1 #6: layout -> collect_layout_rects ->
+        // set_layout_rects -> __mb_elem_box_metrics -> JS getter. A block
+        // <div> fills the content width, so offsetWidth must be a real,
+        // large number after one frame — not the zero stub it'd be before.
+        let mut state = make_state("<div id=\"d\">x</div>");
+        let input = input::WindowInput::default();
+        let _ = state.display_list(800, 600, &input);
+        let w: f64 = state
+            .js
+            .execute("document.getElementById('d').offsetWidth")
+            .unwrap()
+            .parse()
+            .expect("offsetWidth should be numeric");
+        assert!(w > 100.0, "block div should fill most of the width, got {w}");
+        let h: f64 = state
+            .js
+            .execute("document.getElementById('d').getBoundingClientRect().height")
+            .unwrap()
+            .parse()
+            .expect("rect height should be numeric");
+        assert!(h > 0.0, "a line of text gives the box height, got {h}");
     }
 
     #[test]

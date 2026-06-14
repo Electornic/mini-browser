@@ -9,11 +9,31 @@
 // shared location buffer) — same pattern boa used.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use rquickjs::{CatchResultExt, CaughtError, Context, Function, Runtime, Value, context::EvalOptions};
 
 use crate::dom::{Document, NodeId, NodeType};
+
+/// Per-element layout geometry the JS bridge exposes through
+/// `getBoundingClientRect` / `offsetWidth` / `clientWidth` and friends.
+/// Coordinates are content-viewport relative (document position minus the
+/// page scroll offset), border-box for `x/y/width/height`, padding-box for
+/// `client_*`. Populated by `BrowserState` after each layout pass via
+/// `set_layout_rects`; layout runs *after* JS in the frame, so the values a
+/// script reads are from the previous layout (the accepted one-frame lag —
+/// see SPA roadmap Tier 1 #6). Pure scrolling without a relayout leaves
+/// `x/y` stale by the scroll delta until the next rebuild.
+#[derive(Debug, Clone, Copy)]
+pub struct ElementRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub client_width: f32,
+    pub client_height: f32,
+}
 
 mod console;
 mod document;
@@ -38,6 +58,10 @@ pub struct JsRuntime {
     context: Context,
     dom: Rc<RefCell<Document>>,
     location_url: Rc<RefCell<String>>,
+    // Layout geometry for `getBoundingClientRect` & co., keyed by NodeId.
+    // The element hooks read it; `BrowserState::set_layout_rects` refreshes
+    // it after each layout. Shared via Rc so both sides see the same map.
+    layout_rects: Rc<RefCell<HashMap<NodeId, ElementRect>>>,
     clock: ClockSource,
     // Live count of `queue.length + rafQueue.length` inside the JS timer
     // module. Mirrored from JS via `__mb_set_pending` at every queue
@@ -68,6 +92,8 @@ impl JsRuntime {
         let runtime = Runtime::new().expect("rquickjs Runtime should construct");
         let context = Context::full(&runtime).expect("rquickjs Context should construct");
         let location_url: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+        let layout_rects: Rc<RefCell<HashMap<NodeId, ElementRect>>> =
+            Rc::new(RefCell::new(HashMap::new()));
         let pending_jobs: Rc<Cell<u32>> = Rc::new(Cell::new(0));
 
         context.with(|ctx| {
@@ -81,7 +107,7 @@ impl JsRuntime {
                 .expect("dom globals should register");
             window::register_window_aliases(&ctx, location_url.clone())
                 .expect("window aliases should register");
-            element::register_element_hooks(&ctx, dom.clone())
+            element::register_element_hooks(&ctx, dom.clone(), layout_rects.clone())
                 .expect("element hooks should register");
             element::run_dom_bootstrap(&ctx).expect("dom bootstrap should run");
             document::register_document(&ctx, dom.clone())
@@ -99,6 +125,7 @@ impl JsRuntime {
             context,
             dom,
             location_url,
+            layout_rects,
             clock,
             pending_jobs,
         }
@@ -119,6 +146,15 @@ impl JsRuntime {
     /// property descriptors.
     pub fn set_location_url(&self, url: impl Into<String>) {
         *self.location_url.borrow_mut() = url.into();
+    }
+
+    /// Replace the layout-geometry map the element hooks serve to
+    /// `getBoundingClientRect` / `offsetWidth` / `clientWidth` and friends.
+    /// `BrowserState` calls this once per layout with a `NodeId -> rect`
+    /// map walked off the freshly built layout tree. Reads in JS between
+    /// updates observe the last-pushed geometry (the one-frame lag).
+    pub fn set_layout_rects(&self, rects: HashMap<NodeId, ElementRect>) {
+        *self.layout_rects.borrow_mut() = rects;
     }
 
     /// Returns a clone of the shared DOM handle. Mainly useful in tests
@@ -1084,6 +1120,58 @@ mod tests {
         assert_eq!(rt.execute("f instanceof DocumentFragment").unwrap(), "true");
         assert_eq!(rt.execute("f instanceof Node").unwrap(), "true");
         assert_eq!(rt.execute("f.nodeType").unwrap(), "11");
+    }
+
+    // -------- Tier 1 #6: getBoundingClientRect / offset* / client* --------
+
+    #[test]
+    fn get_bounding_client_rect_reads_pushed_layout_rects() {
+        let mut rt = rt_with_html(r#"<div id="d"></div>"#);
+        let nid = id_to_node(&rt, "d");
+        let mut rects = HashMap::new();
+        rects.insert(
+            nid,
+            ElementRect {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 40.0,
+                client_width: 96.0,
+                client_height: 36.0,
+            },
+        );
+        rt.set_layout_rects(rects);
+        // DOMRect-shaped object: x/y/width/height plus derived edges.
+        assert_eq!(
+            rt.execute(
+                "var r = document.getElementById('d').getBoundingClientRect();\
+                 [r.x, r.y, r.width, r.height, r.left, r.top, r.right, r.bottom].join(',')"
+            )
+            .unwrap(),
+            "\"10,20,100,40,10,20,110,60\""
+        );
+        // Border-box offset*, padding-box client*, integer-rounded.
+        assert_eq!(rt.execute("document.getElementById('d').offsetWidth").unwrap(), "100");
+        assert_eq!(rt.execute("document.getElementById('d').offsetHeight").unwrap(), "40");
+        assert_eq!(rt.execute("document.getElementById('d').clientWidth").unwrap(), "96");
+        assert_eq!(rt.execute("document.getElementById('d').clientHeight").unwrap(), "36");
+    }
+
+    #[test]
+    fn get_bounding_client_rect_is_zero_without_layout() {
+        // No `set_layout_rects` call → the element has no box yet, so reads
+        // collapse to zero (matches a browser pre-layout / display:none).
+        let mut rt = rt_with_html(r#"<div id="d"></div>"#);
+        assert_eq!(
+            rt.execute(
+                "var r = document.getElementById('d').getBoundingClientRect();\
+                 [r.width, r.height, r.top, r.left].join(',')"
+            )
+            .unwrap(),
+            "\"0,0,0,0\""
+        );
+        assert_eq!(rt.execute("document.getElementById('d').offsetWidth").unwrap(), "0");
+        assert_eq!(rt.execute("document.getElementById('d').clientHeight").unwrap(), "0");
     }
 
     // -------- 4.8c storage / timers / event tests --------
