@@ -31,7 +31,9 @@
 
 ---
 
-## Tier 0 — 바닐라 JS SPA (proof of life)
+## Tier 0 — 바닐라 JS SPA (proof of life) ✅ 완료 (575 green)
+
+> **상태: 완주.** #1 qsa + #2 style (`cf49167`), #15 fragment (`b36b787`), #3 history + #4 win/doc 이벤트 + #16 readyState (`e31bee7`), 데모+capstone (`974d435`). 데모: [examples/spa-demo.html](../examples/spa-demo.html) — `python3 -m http.server` 로 로드.
 
 **목표**: 직접 짠 client router + 동적 뷰 + fetch 데이터. 프레임워크/빌드 없이 classic `<script>`. 갭이 가장 작고, 막히는 지점을 실측으로 드러낸다.
 
@@ -137,8 +139,8 @@ Tier 0 (바닐라, 갭 최소, 막히는 곳 실측)
 ### 의존성 정리
 
 ```
-Tier 0  : #1 qsa, #2 style, #3 history, #4 win/doc 이벤트+#16 readyState, #15 fragment   (갭 작음, 거의 됨)
-Tier 1  : #5 prototype(키스톤) → #14 동적 style → #6 rect → #7 node-level(+className/value/on*)
+Tier 0  : ✅ DONE — #1 qsa, #2 style, #3 history, #4 win/doc 이벤트+#16 readyState, #15 fragment
+Tier 1  : #5 prototype(키스톤) → #14 동적 style → #6 rect → #7 node-level(+className/value/on*)   ← 다음
 Tier 2  : (선행: Cargo.toml `loader` feature 추가) → #8 모듈 로더(sync set_loader) → #9 import maps
 Tier 3  : #10~13 observer/CSSOM (IntersectionObserver > ResizeObserver 우선순위)
 ```
