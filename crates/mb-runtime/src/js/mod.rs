@@ -823,6 +823,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn create_document_fragment_flushes_children_on_append() {
+        let mut rt = rt_with_html(r#"<div id="root"></div>"#);
+        rt.execute(
+            r#"var frag = document.createDocumentFragment();
+               var a = document.createElement('span'); a.textContent = 'a';
+               var b = document.createElement('span'); b.textContent = 'b';
+               frag.appendChild(a); frag.appendChild(b);
+               document.getElementById('root').appendChild(frag);"#,
+        )
+        .unwrap();
+        // Both spans land in the parent; the fragment itself leaves no node.
+        assert_eq!(
+            rt.execute("document.getElementById('root').children.length")
+                .unwrap(),
+            "2"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('root').innerHTML").unwrap(),
+            "\"<span>a</span><span>b</span>\""
+        );
+        // Fragment is emptied after the flush.
+        assert_eq!(rt.execute("frag.childNodes.length").unwrap(), "0");
+        assert_eq!(rt.execute("frag.nodeType").unwrap(), "11");
+    }
+
     // -------- 4.8c storage / timers / event tests --------
 
     fn rt_clock(html: &str) -> (JsRuntime, FixedClock) {

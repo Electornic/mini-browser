@@ -176,6 +176,10 @@ const DOCUMENT_BOOT: &str = r#"
         return globalThis.__mb_make_text(nid);
     };
 
+    doc.createDocumentFragment = function () {
+        return globalThis.__mb_make_fragment();
+    };
+
     Object.defineProperty(doc, 'body', {
         get: function () {
             var nid = globalThis.__mb_doc_body();
