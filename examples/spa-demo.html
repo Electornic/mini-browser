@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>mini-browser SPA demo</title>
+  <style>
+    body { font-family: sans-serif; margin: 0; color: #1a1a1a; background: #fafafa; }
+    header { background: #2d2d3a; color: #fff; padding: 12px 20px; }
+    header strong { margin-right: 24px; }
+    nav a { color: #aacbee; margin-right: 16px; text-decoration: none; cursor: pointer; }
+    nav a.active { color: #fff; font-weight: bold; }
+    main { padding: 20px; }
+    h1 { margin-top: 0; }
+    .card { border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-bottom: 10px; background: #fff; }
+    .muted { color: #888; }
+    button { background: #4a4ae0; color: #fff; border: none; padding: 8px 14px; border-radius: 4px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>mini-browser SPA</strong>
+    <nav id="nav">
+      <a data-route="/">Home</a>
+      <a data-route="/users">Users</a>
+      <a data-route="/about">About</a>
+    </nav>
+  </header>
+  <main id="app"></main>
+
+  <!--
+    A framework-free client-rendered SPA. It exercises exactly the Tier 0
+    surface the engine now supports:
+      - history.pushState + popstate  (client routing, no full reload)
+      - location.pathname             (route source of truth)
+      - createElement / createDocumentFragment / appendChild / innerHTML
+      - querySelectorAll + classList  (active-link highlighting)
+      - element.style (camelCase)     (per-row accent)
+      - addEventListener on element / window / document
+      - DOMContentLoaded + document.readyState
+
+    Serve it (file:// is unsupported) and open the printed URL:
+      python3 -m http.server 8000
+      -> http://localhost:8000/examples/spa-demo.html
+  -->
+  <script>
+  (function () {
+    var app = document.getElementById('app');
+    var counter = 0;
+
+    // ---- tiny client router -------------------------------------------
+    function navigate(path) {
+      history.pushState({ path: path }, '', path);
+      render();
+    }
+    window.addEventListener('popstate', render);
+
+    document.getElementById('nav').addEventListener('click', function (e) {
+      var route = e.target.getAttribute('data-route');
+      if (route) { e.preventDefault(); navigate(route); }
+    });
+
+    // ---- views (return DocumentFragments) -----------------------------
+    function viewHome() {
+      var frag = document.createDocumentFragment();
+      var h = document.createElement('h1'); h.textContent = 'Home';
+      frag.appendChild(h);
+      var p = document.createElement('p');
+      p.textContent = 'Client-rendered. Boot readyState was: ' + window.__bootReadyState;
+      frag.appendChild(p);
+      var card = document.createElement('div'); card.className = 'card';
+      var btn = document.createElement('button');
+      btn.textContent = 'Clicked ' + counter + ' times';
+      btn.addEventListener('click', function () { counter++; render(); });
+      card.appendChild(btn);
+      frag.appendChild(card);
+      return frag;
+    }
+
+    function viewUsers() {
+      var users = ['Ada', 'Alan', 'Grace', 'Linus'];
+      var frag = document.createDocumentFragment();
+      var h = document.createElement('h1');
+      h.textContent = 'Users (' + users.length + ')';
+      frag.appendChild(h);
+      for (var i = 0; i < users.length; i++) {
+        var card = document.createElement('div');
+        card.className = 'card';
+        card.textContent = users[i];
+        card.style.borderLeft = '4px solid #4a4ae0';
+        frag.appendChild(card);
+      }
+      return frag;
+    }
+
+    function viewAbout() {
+      var frag = document.createDocumentFragment();
+      var h = document.createElement('h1'); h.textContent = 'About';
+      frag.appendChild(h);
+      var p = document.createElement('p'); p.className = 'muted';
+      p.textContent = 'Routing, dynamic DOM, fragments, inline style, events — no framework.';
+      frag.appendChild(p);
+      return frag;
+    }
+
+    // ---- render the current route -------------------------------------
+    function render() {
+      var path = location.pathname || '/';
+      app.innerHTML = '';
+      var view;
+      if (path === '/users') view = viewUsers();
+      else if (path === '/about') view = viewAbout();
+      else view = viewHome();
+      app.appendChild(view);
+
+      var links = document.querySelectorAll('#nav a');
+      for (var i = 0; i < links.length; i++) {
+        var match = links[i].getAttribute('data-route') === path;
+        links[i].classList.toggle('active', match);
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+      window.__bootReadyState = document.readyState;
+      render();
+    });
+  })();
+  </script>
+</body>
+</html>

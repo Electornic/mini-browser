@@ -943,6 +943,63 @@ mod tests {
         assert_eq!(rt.execute("document.readyState").unwrap(), "\"complete\"");
     }
 
+    // Capstone: the combined Tier 0 surface drives a real (tiny) SPA —
+    // router + dynamic render via fragments + querySelectorAll/classList +
+    // history/popstate. Mirrors examples/spa-demo.html.
+    #[test]
+    fn end_to_end_mini_spa_routes_and_renders() {
+        let mut rt = rt_with_html(
+            r#"<body><nav id="nav"><a data-route="/">H</a><a data-route="/users">U</a></nav><main id="app"></main></body>"#,
+        );
+        rt.set_location_url("https://example.com/");
+        rt.execute(
+            r#"var app = document.getElementById('app');
+               function render() {
+                   app.innerHTML = '';
+                   var frag = document.createDocumentFragment();
+                   var h = document.createElement('h1');
+                   h.textContent = (location.pathname === '/users') ? 'Users' : 'Home';
+                   frag.appendChild(h);
+                   app.appendChild(frag);
+                   var links = document.querySelectorAll('#nav a');
+                   for (var i = 0; i < links.length; i++) {
+                       links[i].classList.toggle(
+                           'active', links[i].getAttribute('data-route') === location.pathname
+                       );
+                   }
+               }
+               function go(p) { history.pushState({}, '', p); render(); }
+               window.addEventListener('popstate', render);
+               document.addEventListener('DOMContentLoaded', render);"#,
+        )
+        .unwrap();
+        // Lifecycle boot renders Home.
+        rt.dispatch_global_event("document", "DOMContentLoaded");
+        assert_eq!(
+            rt.execute("document.getElementById('app').innerHTML").unwrap(),
+            "\"<h1>Home</h1>\""
+        );
+        // Route to /users without reload.
+        rt.execute("go('/users')").unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('app').querySelector('h1').textContent")
+                .unwrap(),
+            "\"Users\""
+        );
+        assert_eq!(rt.execute("location.pathname").unwrap(), "\"/users\"");
+        assert_eq!(
+            rt.execute("document.querySelectorAll('#nav a.active').length").unwrap(),
+            "1"
+        );
+        // Back fires popstate and re-renders Home.
+        rt.execute("history.back()").unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('app').querySelector('h1').textContent")
+                .unwrap(),
+            "\"Home\""
+        );
+    }
+
     // -------- 4.8c storage / timers / event tests --------
 
     fn rt_clock(html: &str) -> (JsRuntime, FixedClock) {

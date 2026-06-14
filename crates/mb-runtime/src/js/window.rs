@@ -235,6 +235,11 @@ const HISTORY_BOOT: &str = r#"
     function normState(s) { return s === undefined ? null : s; }
 
     history.pushState = function (state, title, url) {
+        // The first entry's URL is bound after this module boots (the host
+        // calls set_location_url post-construction), so capture the live
+        // href onto the current entry before leaving it — otherwise
+        // back() to entry 0 would have no URL to restore.
+        if (entries[index].url == null) entries[index].url = globalThis.location.href;
         // Drop any forward entries, then append.
         entries.length = index + 1;
         var resolved = (url == null) ? globalThis.location.href
