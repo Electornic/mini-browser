@@ -107,7 +107,9 @@ cargo fmt --all
 
 ## Roadmap
 
-SPA(Preact/React/vite 빌드) 렌더링 로드맵: [docs/spa-roadmap.md](docs/spa-roadmap.md). Tier 0(바닐라)·Tier 1(프레임워크용 DOM 표면) 완료, 다음은 Preact 실증 → `<script type=module>` 로더.
+**다음 방향: 에이전트용 브라우저** — AI 에이전트가 MCP 로 이 브라우저를 조작하고, 사람은 관전·승인·넘겨받기를 한다. 설계: [docs/concept.md](docs/concept.md).
+
+SPA(Preact/React/vite 빌드) 렌더링은 호환성 트랙으로 계속: [docs/spa-roadmap.md](docs/spa-roadmap.md). Tier 0(바닐라)·Tier 1(프레임워크용 DOM 표면) 완료.
 
 ## Out of Scope (for now)
 

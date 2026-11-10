@@ -146,7 +146,19 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
 ## Roadmap
 
-현재 진행 중인 로드맵은 [docs/spa-roadmap.md](docs/spa-roadmap.md) (SPA 렌더링 Tier 0~3). 상단 상태 줄이 "지금 어디까지"를 나타낸다 — Tier 를 끝내면 상태 줄 + 해당 Tier 헤더 + "권장 실행 순서" 블록을 같이 갱신.
+- **메인**: [docs/concept.md](docs/concept.md) — 에이전트용 브라우저 (MCP). 로드맵 G0~G5, 결정 기록, 열린 결정이 여기 있다. Phase 를 끝내면 상단 상태 줄 + 로드맵 표 + 결정 기록을 같이 갱신.
+- **호환성 트랙**: [docs/spa-roadmap.md](docs/spa-roadmap.md) — SPA 렌더링 Tier 0~3. 에이전트 데모가 깨지는 지점이 나올 때 우선순위를 올린다.
+
+## Agent-track Rules
+
+[concept.md](docs/concept.md) 설계에서 코드 규칙으로 승격된 것들. 어기면 보안·프로토콜이 깨진다.
+
+- **stdout 금지**: stdio MCP 에서 stdout 은 JSON-RPC 전용. crate 의 lib·bin 코드에서 `println!`/`print!` 쓰지 말고 `eprintln!` 사용 (examples·tests 는 예외). `mb-agent`/`mb-mcp` 는 `#![deny(clippy::print_stdout)]`.
+- **이동은 반드시 정책 게이트를 지난다**: 새 이동 경로(`location.href =`, `window.open`, meta refresh 등)를 추가할 때 `navigate` / `navigate_to_href` / `try_submit_form` 과 같은 `policy::check` 를 통과시킨다. 우회 경로를 만들지 말 것.
+- **에이전트 전용 DOM 조작 API 금지**: 에이전트 행동은 합성 `WindowInput` 으로만. 편의를 위해 DOM 을 직접 바꾸는 단축로를 만들지 않는다.
+- **비밀번호 값은 어디에도 남기지 않는다**: 관찰(길이만)·로그(`<redacted>`)·화면(마스킹).
+- **`panic = "abort"` 로 바꾸지 말 것**: 엔진 패닉 복구가 unwind 에 의존한다.
+- **브라우저는 결정적이어야 한다**: 관찰·행동·정책 출력에 `HashMap` 순회 순서, 벽시계, 비시드 난수가 새어 나가면 안 된다. 시간은 엔진 시계(`ClockSource`)만, 순서는 문서 순서로. 비결정성은 LLM 판단에만 허용 ([concept.md#결정성](docs/concept.md#결정성)).
 
 ## Tooling Notes
 
