@@ -131,7 +131,7 @@ fn matching_specificity(
     // the list ourselves with `matches_selector` instead.
     let mut best: Option<u32> = None;
     for selector in selectors.list().slice() {
-        if selectors::matching::matches_selector(selector, 0, None, element, ctx) {
+        if selectors::matching::matches_selector(selector, 0, None, *element, ctx) {
             let spec = selector.specificity();
             best = Some(best.map_or(spec, |prev| prev.max(spec)));
         }

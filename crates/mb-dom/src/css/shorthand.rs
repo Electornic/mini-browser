@@ -14,9 +14,9 @@ use super::{Declaration, ParseError, Unit, Value};
 // border-radius
 // -----------------------------------------------------------------------------
 
-pub(super) fn parse_border_radius_shorthand<'i, 't>(
+pub(super) fn parse_border_radius_shorthand<'i>(
     name: &str,
-    input: &mut CssParser<'i, 't>,
+    input: &mut CssParser<'i>,
 ) -> Result<Vec<Declaration>, ParseError> {
     let _ = name; // shorthand always expands to fixed longhand names
     let mut lengths = Vec::new();
@@ -80,9 +80,9 @@ pub(super) fn parse_border_radius_shorthand<'i, 't>(
 /// `margin` accepts the same value grammar; `auto` is also legal there
 /// per spec (used for horizontal centering) and folds through as a
 /// `Keyword("auto")` so layout's existing auto-margin path picks it up.
-pub(super) fn parse_box_edge_shorthand<'i, 't>(
+pub(super) fn parse_box_edge_shorthand<'i>(
     name: &str,
-    input: &mut CssParser<'i, 't>,
+    input: &mut CssParser<'i>,
 ) -> Result<Vec<Declaration>, ParseError> {
     let mut values: Vec<Value> = Vec::new();
     let allow_auto = name == "margin";
@@ -116,7 +116,7 @@ pub(super) fn parse_box_edge_shorthand<'i, 't>(
         // not a Number — `lpa_or_zero` would silently treat any other
         // unitless number as zero, which would mask malformed input.
         let value = match parse_length_or_number(input)? {
-            Value::Number(n) if n == 0.0 => Value::Length(0.0, Unit::Px),
+            Value::Number(0.0) => Value::Length(0.0, Unit::Px),
             other => other,
         };
         values.push(value);
@@ -164,8 +164,8 @@ pub(super) fn parse_box_edge_shorthand<'i, 't>(
 // flex
 // -----------------------------------------------------------------------------
 
-pub(super) fn parse_flex_shorthand<'i, 't>(
-    input: &mut CssParser<'i, 't>,
+pub(super) fn parse_flex_shorthand<'i>(
+    input: &mut CssParser<'i>,
 ) -> Result<Vec<Declaration>, ParseError> {
     // Same grammar as the original parser — see the long comment in the prior
     // implementation. We greedily consume up to three numeric tokens and stop
@@ -241,8 +241,8 @@ pub(super) fn parse_flex_shorthand<'i, 't>(
 /// url(grayarrow.gif) no-repeat; }` silently dropped because cssparser
 /// errored on the trailing tokens after the URL, which left the painter
 /// with no image to draw.
-pub(super) fn parse_background_shorthand<'i, 't>(
-    input: &mut CssParser<'i, 't>,
+pub(super) fn parse_background_shorthand<'i>(
+    input: &mut CssParser<'i>,
 ) -> Result<Vec<Declaration>, ParseError> {
     let mut color: Option<Value> = None;
     let mut image: Option<Value> = None;
@@ -303,8 +303,8 @@ pub(super) fn parse_background_shorthand<'i, 't>(
 /// vote arrow uses `background-position: 0 -10px` to slice a vertical
 /// sprite strip, which the longhands let `background_image_command`
 /// pick up at paint time.
-pub(super) fn parse_background_position<'i, 't>(
-    input: &mut CssParser<'i, 't>,
+pub(super) fn parse_background_position<'i>(
+    input: &mut CssParser<'i>,
 ) -> Result<Vec<Declaration>, ParseError> {
     input.skip_whitespace();
     let x = parse_position_axis(input)?;
@@ -329,7 +329,7 @@ pub(super) fn parse_background_position<'i, 't>(
     ])
 }
 
-fn parse_position_axis<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, ParseError> {
+fn parse_position_axis<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     let probe = input.state();
     let position = input.position();
     let token = input

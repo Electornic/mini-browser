@@ -35,7 +35,11 @@ impl BrowserState {
         // very first script execution rather than the stale previous
         // page (or empty buffer on the bootstrap path).
         self.current_url = entry.current_url;
-        self.install_document(entry.document_html, entry.stylesheet, entry.external_scripts);
+        self.install_document(
+            entry.document_html,
+            entry.stylesheet,
+            entry.external_scripts,
+        );
         self.images = entry.images;
         self.font_data = entry.font_data;
         self.status_text = entry.status_text;

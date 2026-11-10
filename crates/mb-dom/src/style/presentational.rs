@@ -78,9 +78,7 @@ pub(super) fn presentational_hints(element: &ElementData) -> PropertyMap {
     // doesn't honor that automatically for floats).
     if let Some(raw_align) = element.attributes.get("align") {
         let align = raw_align.trim().to_ascii_lowercase();
-        if matches!(tag, "img" | "table" | "figure")
-            && matches!(align.as_str(), "left" | "right")
-        {
+        if matches!(tag, "img" | "table" | "figure") && matches!(align.as_str(), "left" | "right") {
             hints.insert("float".into(), Value::Keyword(align));
         } else if matches!(
             tag,
@@ -161,7 +159,11 @@ fn parse_html_length(raw: &str) -> Option<Value> {
         return None;
     }
     if let Some(rest) = trimmed.strip_suffix('%') {
-        return rest.trim().parse::<f32>().ok().map(|n| Value::Length(n, crate::css::Unit::Percent));
+        return rest
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|n| Value::Length(n, crate::css::Unit::Percent));
     }
     // HTML legacy length: optional trailing "px" but commonly bare digits
     // like `width="200"`. We only accept finite, non-negative numbers; a

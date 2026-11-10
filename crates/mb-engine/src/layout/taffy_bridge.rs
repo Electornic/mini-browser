@@ -26,6 +26,8 @@
 // listed above — the legacy algorithms own the semantics taffy doesn't
 // support natively.
 
+use taffy::NodeId;
+use taffy::geometry::{Line, MinMax, Rect as TaffyRect, Size};
 use taffy::prelude::{
     Dimension, LengthPercentage, LengthPercentageAuto, TaffyGridLine, TaffyGridSpan, TaffyTree,
 };
@@ -35,21 +37,19 @@ use taffy::style::{
     JustifyContent, MaxTrackSizingFunction, MinTrackSizingFunction, Overflow, Position, Style,
     TrackSizingFunction,
 };
-use taffy::geometry::{Line, MinMax, Rect as TaffyRect, Size};
-use taffy::NodeId;
 
 use crate::css::{GridLine, TrackSize, Unit, Value};
 use crate::dom::NodeType;
 use crate::style::StyledNode;
 
+use super::block::layout_node as legacy_block_layout;
+use super::inline::uses_inline_flow;
+use super::table::is_table_container;
 use super::{
     Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, has_float, intrinsic_height,
     intrinsic_width, is_display_none, is_layout_whitespace_text, is_out_of_flow, outer_rect,
     shift_layout_subtree,
 };
-use super::block::layout_node as legacy_block_layout;
-use super::inline::uses_inline_flow;
-use super::table::is_table_container;
 
 use std::cell::RefCell;
 
@@ -69,12 +69,12 @@ pub fn to_taffy_style(node: &StyledNode) -> Style {
         height: dimension_with_intrinsic(node.value("height"), intrinsic_height_opt(node)),
     };
     style.min_size = Size {
-        width: dimension(node.value("min-width")),
-        height: dimension(node.value("min-height")),
+        width: lpa_or_auto(node.value("min-width")),
+        height: lpa_or_auto(node.value("min-height")),
     };
     style.max_size = Size {
-        width: dimension(node.value("max-width")),
-        height: dimension(node.value("max-height")),
+        width: lpa_or_auto(node.value("max-width")),
+        height: lpa_or_auto(node.value("max-height")),
     };
 
     style.margin = edge_lpa(node, "margin");
@@ -93,10 +93,10 @@ pub fn to_taffy_style(node: &StyledNode) -> Style {
     style.flex_shrink = number_value(node.value("flex-shrink")).unwrap_or(1.0);
     style.flex_basis = dimension(node.value("flex-basis"));
 
-    style.align_items = align_items_value(node);
+    style.align_items = align_items_value(node).unwrap_or(AlignItems::NORMAL);
     style.align_self = align_self_value(node);
-    style.align_content = align_content_value(node);
-    style.justify_content = justify_content_value(node);
+    style.align_content = align_content_value(node).unwrap_or(AlignContent::NORMAL);
+    style.justify_content = justify_content_value(node).unwrap_or(JustifyContent::NORMAL);
 
     style.gap = Size {
         width: lp(node.value("column-gap").or_else(|| node.value("gap"))),
@@ -183,36 +183,36 @@ fn align_self_value(node: &StyledNode) -> Option<AlignSelf> {
 
 fn parse_align_items(kw: &str) -> Option<AlignItems> {
     match kw {
-        "flex-start" | "start" => Some(AlignItems::FlexStart),
-        "flex-end" | "end" => Some(AlignItems::FlexEnd),
-        "center" => Some(AlignItems::Center),
-        "baseline" => Some(AlignItems::Baseline),
-        "stretch" => Some(AlignItems::Stretch),
+        "flex-start" | "start" => Some(AlignItems::FLEX_START),
+        "flex-end" | "end" => Some(AlignItems::FLEX_END),
+        "center" => Some(AlignItems::CENTER),
+        "baseline" => Some(AlignItems::BASELINE),
+        "stretch" => Some(AlignItems::STRETCH),
         _ => None,
     }
 }
 
 fn align_content_value(node: &StyledNode) -> Option<AlignContent> {
     match keyword(node.value("align-content"))? {
-        "flex-start" | "start" => Some(AlignContent::FlexStart),
-        "flex-end" | "end" => Some(AlignContent::FlexEnd),
-        "center" => Some(AlignContent::Center),
-        "stretch" => Some(AlignContent::Stretch),
-        "space-between" => Some(AlignContent::SpaceBetween),
-        "space-around" => Some(AlignContent::SpaceAround),
-        "space-evenly" => Some(AlignContent::SpaceEvenly),
+        "flex-start" | "start" => Some(AlignContent::FLEX_START),
+        "flex-end" | "end" => Some(AlignContent::FLEX_END),
+        "center" => Some(AlignContent::CENTER),
+        "stretch" => Some(AlignContent::STRETCH),
+        "space-between" => Some(AlignContent::SPACE_BETWEEN),
+        "space-around" => Some(AlignContent::SPACE_AROUND),
+        "space-evenly" => Some(AlignContent::SPACE_EVENLY),
         _ => None,
     }
 }
 
 fn justify_content_value(node: &StyledNode) -> Option<JustifyContent> {
     match keyword(node.value("justify-content"))? {
-        "flex-start" | "start" => Some(JustifyContent::FlexStart),
-        "flex-end" | "end" => Some(JustifyContent::FlexEnd),
-        "center" => Some(JustifyContent::Center),
-        "space-between" => Some(JustifyContent::SpaceBetween),
-        "space-around" => Some(JustifyContent::SpaceAround),
-        "space-evenly" => Some(JustifyContent::SpaceEvenly),
+        "flex-start" | "start" => Some(JustifyContent::FLEX_START),
+        "flex-end" | "end" => Some(JustifyContent::FLEX_END),
+        "center" => Some(JustifyContent::CENTER),
+        "space-between" => Some(JustifyContent::SPACE_BETWEEN),
+        "space-around" => Some(JustifyContent::SPACE_AROUND),
+        "space-evenly" => Some(JustifyContent::SPACE_EVENLY),
         _ => None,
     }
 }
@@ -442,7 +442,14 @@ pub(super) fn layout_via_taffy(node: &StyledNode, viewport_width: f32) -> Option
                 width: AvailableSpace::Definite(viewport_width),
                 height: AvailableSpace::MaxContent,
             },
-            |_known, avail, _id, ctx, _style| measure_boundary(avail, ctx),
+            |inputs, _id, ctx, style| {
+                taffy::compute_leaf_layout(
+                    inputs,
+                    style,
+                    |_, _| 0.0,
+                    |_known, avail| measure_boundary(avail, ctx),
+                )
+            },
         )
         .ok()
     })?;
@@ -469,10 +476,7 @@ std::thread_local! {
     static MEASURE_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-fn measure_boundary(
-    avail: Size<AvailableSpace>,
-    ctx: Option<&mut NodeBoundary>,
-) -> Size<f32> {
+fn measure_boundary(avail: Size<AvailableSpace>, ctx: Option<&mut NodeBoundary>) -> Size<f32> {
     let Some(boundary) = ctx else {
         return Size::ZERO;
     };
@@ -504,10 +508,7 @@ fn measure_boundary(
     }
 }
 
-fn build_taffy_node(
-    tree: &mut TaffyTree<NodeBoundary>,
-    node: &StyledNode,
-) -> Option<NodeId> {
+fn build_taffy_node(tree: &mut TaffyTree<NodeBoundary>, node: &StyledNode) -> Option<NodeId> {
     if is_native_block(node) {
         let style = to_taffy_style(node);
         let mut children = Vec::new();
@@ -553,12 +554,12 @@ fn boundary_taffy_style(node: &StyledNode) -> Style {
         height: Dimension::auto(),
     };
     style.min_size = Size {
-        width: dimension(node.value("min-width")),
-        height: Dimension::auto(),
+        width: lpa_or_auto(node.value("min-width")),
+        height: LengthPercentageAuto::auto(),
     };
     style.max_size = Size {
-        width: dimension(node.value("max-width")),
-        height: Dimension::auto(),
+        width: lpa_or_auto(node.value("max-width")),
+        height: LengthPercentageAuto::auto(),
     };
     style
 }
@@ -622,20 +623,18 @@ fn uses_grid_template_areas(node: &StyledNode) -> bool {
     // which our css crate stores as a keyword on the item — but the container
     // is the real source of the name table, so detecting it on the container
     // alone is sufficient.
-    matches!(node.value("grid-template-areas"), Some(Value::TemplateAreas(_)))
+    matches!(
+        node.value("grid-template-areas"),
+        Some(Value::TemplateAreas(_))
+    )
 }
 
 fn has_percent_inset_or_padding(node: &StyledNode) -> bool {
-    let percent = |key: &str| {
-        matches!(node.value(key), Some(Value::Length(_, Unit::Percent)))
-    };
+    let percent = |key: &str| matches!(node.value(key), Some(Value::Length(_, Unit::Percent)));
     // Legacy resolves percent vertical padding/inset against parent_width;
     // taffy follows the spec. Stay on legacy by treating any such node as a
     // boundary leaf so the quirk is preserved.
-    percent("padding-top")
-        || percent("padding-bottom")
-        || percent("top")
-        || percent("bottom")
+    percent("padding-top") || percent("padding-bottom") || percent("top") || percent("bottom")
 }
 
 fn walk(
@@ -705,17 +704,13 @@ fn walk(
         let ctx = tree
             .get_node_context(id)
             .expect("boundary leaves carry a NodeBoundary context");
-        let mut cached = ctx
-            .cached
-            .borrow_mut()
-            .take()
-            .unwrap_or_else(|| {
-                // Defensive: if the measure callback never fired (taffy may
-                // skip when known dimensions are already definite), run
-                // legacy here using taffy's resolved leaf size as the width.
-                let mut cursor_y = 0.0;
-                legacy_block_layout(&ctx.node, 0.0, &mut cursor_y, layout.size.width)
-            });
+        let mut cached = ctx.cached.borrow_mut().take().unwrap_or_else(|| {
+            // Defensive: if the measure callback never fired (taffy may
+            // skip when known dimensions are already definite), run
+            // legacy here using taffy's resolved leaf size as the width.
+            let mut cursor_y = 0.0;
+            legacy_block_layout(&ctx.node, 0.0, &mut cursor_y, layout.size.width)
+        });
         shift_layout_subtree(&mut cached, abs_outer_x, abs_outer_y);
         cached
     }
@@ -761,8 +756,8 @@ mod tests {
         );
 
         let legacy = layout_tree(&styled, 800.0);
-        let bridged = layout_via_taffy(&styled, 800.0)
-            .expect("leaf block must be supported in 4.3b");
+        let bridged =
+            layout_via_taffy(&styled, 800.0).expect("leaf block must be supported in 4.3b");
 
         assert_eq!(legacy.dimensions.content, bridged.dimensions.content);
         assert_eq!(legacy.dimensions.padding, bridged.dimensions.padding);
@@ -784,7 +779,10 @@ mod tests {
             .expect("element root always routes through taffy after 4.3.1");
         assert_eq!(legacy.dimensions.content, bridged.dimensions.content);
         assert_eq!(legacy.children.len(), bridged.children.len());
-        assert_eq!(legacy.children[0].dimensions.content, bridged.children[0].dimensions.content);
+        assert_eq!(
+            legacy.children[0].dimensions.content,
+            bridged.children[0].dimensions.content
+        );
     }
 
     #[test]
@@ -804,8 +802,8 @@ mod tests {
             "#,
         );
         let legacy = layout_tree(&styled, 800.0);
-        let bridged = layout_via_taffy(&styled, 800.0)
-            .expect("element root always routes through taffy");
+        let bridged =
+            layout_via_taffy(&styled, 800.0).expect("element root always routes through taffy");
         assert_eq!(legacy.dimensions.content, bridged.dimensions.content);
         assert_eq!(legacy.children.len(), bridged.children.len());
     }
@@ -825,7 +823,10 @@ mod tests {
         let legacy = layout_tree(&styled, 800.0);
         let bridged = layout_via_taffy(&styled, 800.0)
             .expect("relative + px inset must be supported in 4.3e");
-        assert_eq!(legacy.children[0].dimensions.content, bridged.children[0].dimensions.content);
+        assert_eq!(
+            legacy.children[0].dimensions.content,
+            bridged.children[0].dimensions.content
+        );
     }
 
     #[test]

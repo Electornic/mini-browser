@@ -43,15 +43,11 @@ pub(super) fn register_fetch(ctx: &Ctx<'_>) -> Result<()> {
                     Exception::throw_type(&ctx, &format!("fetch: invalid URL: {err:?}"))
                 })?;
                 let headers = pair_up(&headers_flat);
-                let result = net::fetch_with_request(
-                    &parsed_url,
-                    &method,
-                    &headers,
-                    body.as_bytes(),
-                )
-                .map_err(|err| {
-                    Exception::throw_type(&ctx, &format!("fetch: network error: {err:?}"))
-                })?;
+                let result =
+                    net::fetch_with_request(&parsed_url, &method, &headers, body.as_bytes())
+                        .map_err(|err| {
+                            Exception::throw_type(&ctx, &format!("fetch: network error: {err:?}"))
+                        })?;
                 let ok = (200..300).contains(&result.response.status_code);
                 let status_text = result.response.reason_phrase.clone();
                 let response_text = String::from_utf8_lossy(&result.response.body).into_owned();

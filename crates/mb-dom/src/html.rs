@@ -56,9 +56,7 @@ pub fn parse(source: &str) -> Result<Document, ParseError> {
                         "body" => saw_body,
                         _ => true,
                     };
-                    if include
-                        && let Some(id) = build_into_arena(&mut document, child)
-                    {
+                    if include && let Some(id) = build_into_arena(&mut document, child) {
                         document.append_root(id);
                     }
                 }
@@ -79,17 +77,13 @@ pub fn parse(source: &str) -> Result<Document, ParseError> {
 /// can splice them under any existing element via `append_child`. Used by
 /// the JS `innerHTML` setter to swap an element's children without
 /// destroying the rest of the tree.
-pub fn parse_fragment(
-    source: &str,
-    document: &mut Document,
-) -> Result<Vec<NodeId>, ParseError> {
+pub fn parse_fragment(source: &str, document: &mut Document) -> Result<Vec<NodeId>, ParseError> {
     let context = QualName::new(None, ns!(html), LocalName::from("body"));
     // Last arg = scripting_enabled. We run scripts ourselves on top of the
     // arena (`BrowserState::run_scripts`), so the parser must leave inline
     // <script> textContent intact rather than swallowing it the way it would
     // for a host that runs scripts itself.
-    let dom = h5e_fragment(RcDom::default(), parser_opts(), context, Vec::new(), false)
-        .one(source);
+    let dom = h5e_fragment(RcDom::default(), parser_opts(), context, Vec::new(), false).one(source);
 
     // `parse_fragment` builds:
     //   #Document → <html> (synthetic context wrapper) → ...real siblings...
@@ -120,7 +114,7 @@ fn first_element_named<'a>(handles: &'a [Handle], local: &str) -> Option<&'a Han
     handles.iter().find(|h| {
         matches!(
             &h.data,
-            NodeData::Element { name, .. } if name.local.as_ref() == local
+            NodeData::Element { name, .. } if &*name.local == local
         )
     })
 }
@@ -170,9 +164,7 @@ fn build_into_arena(document: &mut Document, handle: &Handle) -> Option<NodeId> 
             }
             Some(id)
         }
-        NodeData::Text { contents } => {
-            Some(document.create_text(contents.borrow().to_string()))
-        }
+        NodeData::Text { contents } => Some(document.create_text(contents.borrow().to_string())),
         _ => None,
     }
 }

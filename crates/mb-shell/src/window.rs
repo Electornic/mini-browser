@@ -345,10 +345,7 @@ where
 
     fn redraw(&mut self) -> Result<()> {
         let window = self.window.as_ref().ok_or_else(|| anyhow!("no window"))?;
-        let surface = self
-            .surface
-            .as_mut()
-            .ok_or_else(|| anyhow!("no surface"))?;
+        let surface = self.surface.as_mut().ok_or_else(|| anyhow!("no surface"))?;
         let size = window.inner_size();
         let (Some(width_nz), Some(height_nz)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))

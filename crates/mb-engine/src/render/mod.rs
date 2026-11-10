@@ -7,7 +7,10 @@
 // halves live in sibling submodules so each stage can grow without crowding
 // the other.
 
-use crate::{css::{Color, GradientKind}, layout::Rect};
+use crate::{
+    css::{Color, GradientKind},
+    layout::Rect,
+};
 
 mod display_list;
 mod raster;
@@ -141,7 +144,6 @@ impl Affine {
         Self { a, b, c, d, e, f }
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisplayCommand {
@@ -576,8 +578,7 @@ mod tests {
         // CSS `background-position: -10px -20px` flips sign in the
         // pipeline (positive `source_x`/`y` = clip from the left/top of
         // the source).
-        let document =
-            html::parse(r##"<a class="vote"></a>"##).unwrap();
+        let document = html::parse(r##"<a class="vote"></a>"##).unwrap();
         let root = document.roots()[0];
         let stylesheet = css::parse(
             r#"
@@ -772,10 +773,7 @@ mod tests {
         // one per line — stacked top-to-bottom from the content origin.
         // The y deltas equal the cascaded font-size (16px UA default),
         // and each command's text is the line in source order.
-        let commands = display_list(
-            "<textarea value=\"a\nb\nc\"></textarea>",
-            "",
-        );
+        let commands = display_list("<textarea value=\"a\nb\nc\"></textarea>", "");
 
         let texts: Vec<_> = commands
             .iter()
@@ -784,7 +782,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(texts.len(), 3, "three lines should produce three Text commands");
+        assert_eq!(
+            texts.len(),
+            3,
+            "three lines should produce three Text commands"
+        );
         assert_eq!(texts[0].text, "a");
         assert_eq!(texts[1].text, "b");
         assert_eq!(texts[2].text, "c");
@@ -802,10 +804,7 @@ mod tests {
         // empty entry — there's nothing to paint — but the following
         // line still sits two rows below the first because the caret
         // path counts blank rows separately.
-        let commands = display_list(
-            "<textarea value=\"a\n\nb\"></textarea>",
-            "",
-        );
+        let commands = display_list("<textarea value=\"a\n\nb\"></textarea>", "");
 
         let texts: Vec<_> = commands
             .iter()

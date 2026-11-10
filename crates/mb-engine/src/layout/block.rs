@@ -1,21 +1,18 @@
 // Block flow layout — the default layout mode for any element that isn't
 // explicitly inline / inline-block / flex / grid.
 
-use crate::{
-    css::Value,
-    style::StyledNode,
-};
+use crate::{css::Value, style::StyledNode};
 
+use super::flex::{is_flex_container, layout_flex_children};
+use super::grid::{is_grid_container, layout_grid_children};
+use super::inline::{inline_align_for, layout_inline_children, uses_inline_flow};
+use super::table::{is_table_container, layout_table_children};
 use super::{
     Dimensions, EdgeSizes, LayoutBox, Rect, apply_relative_offset, child_height,
     container_box_type, edge_sizes, intrinsic_height, intrinsic_width, is_auto, is_display_none,
     is_float_left, is_float_right, is_layout_whitespace_text, is_out_of_flow, length_value,
     outer_rect, shift_layout_subtree,
 };
-use super::flex::{is_flex_container, layout_flex_children};
-use super::grid::{is_grid_container, layout_grid_children};
-use super::inline::{inline_align_for, layout_inline_children, uses_inline_flow};
-use super::table::{is_table_container, layout_table_children};
 
 pub(super) fn layout_node(
     node: &StyledNode,
@@ -216,7 +213,6 @@ pub(super) fn layout_node(
     apply_relative_offset(&mut layout_box, node, parent_width);
     layout_box
 }
-
 
 fn collapse_margins(prev: f32, next: f32) -> f32 {
     // CSS adjacent-margin collapse rules:

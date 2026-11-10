@@ -10,9 +10,7 @@ use super::error::{convert_basic_error_at, token_error};
 use super::parse::parse_value;
 use super::{ColorStop, Gradient, GradientDirection, GradientKind, ParseError, Value};
 
-pub(super) fn parse_linear_gradient<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<Value, ParseError> {
+pub(super) fn parse_linear_gradient<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     input.skip_whitespace();
 
     // Look for an optional `to <side>` direction prefix. We commit to the
@@ -43,7 +41,11 @@ pub(super) fn parse_linear_gradient<'i, 't>(
                         }
                     },
                     other => {
-                        return Err(token_error(input, &other, "expected gradient direction side"));
+                        return Err(token_error(
+                            input,
+                            &other,
+                            "expected gradient direction side",
+                        ));
                     }
                 };
                 input.skip_whitespace();
@@ -67,9 +69,7 @@ pub(super) fn parse_linear_gradient<'i, 't>(
     }))
 }
 
-pub(super) fn parse_radial_gradient<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<Value, ParseError> {
+pub(super) fn parse_radial_gradient<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     input.skip_whitespace();
     let stops = parse_gradient_stops(input, "radial-gradient")?;
     Ok(Value::Gradient(Gradient {
@@ -78,8 +78,8 @@ pub(super) fn parse_radial_gradient<'i, 't>(
     }))
 }
 
-fn parse_gradient_stops<'i, 't>(
-    input: &mut CssParser<'i, 't>,
+fn parse_gradient_stops<'i>(
+    input: &mut CssParser<'i>,
     label: &str,
 ) -> Result<Vec<ColorStop>, ParseError> {
     let mut stops = Vec::new();
@@ -95,7 +95,11 @@ fn parse_gradient_stops<'i, 't>(
             Ok(Token::Comma) => continue,
             Ok(other) => {
                 let other = other.clone();
-                return Err(token_error(input, &other, &format!("expected ',' or ')' in {label}")));
+                return Err(token_error(
+                    input,
+                    &other,
+                    &format!("expected ',' or ')' in {label}"),
+                ));
             }
             Err(_) => {
                 input.reset(&probe);
@@ -112,7 +116,7 @@ fn parse_gradient_stops<'i, 't>(
     Ok(stops)
 }
 
-fn parse_color_stop<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<ColorStop, ParseError> {
+fn parse_color_stop<'i>(input: &mut CssParser<'i>) -> Result<ColorStop, ParseError> {
     let color = match parse_value(input)? {
         Value::Color(color) => color,
         other => {

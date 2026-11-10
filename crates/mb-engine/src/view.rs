@@ -74,8 +74,9 @@ pub fn build_document_view(
         base_url: current_url,
         images,
     };
-    let mut commands =
-        profile::time_block("view::build_display_list", || render::build_display_list(&layout, &paint_ctx));
+    let mut commands = profile::time_block("view::build_display_list", || {
+        render::build_display_list(&layout, &paint_ctx)
+    });
     profile::time_block("view::collect_image_commands", || {
         commands.extend(collect_image_commands(&layout, current_url, images));
     });
@@ -698,8 +699,7 @@ mod tests {
         // That's the contract that lets a freshly-typed Enter park the
         // caret on a blank trailing row, and a typed char after that
         // appear on the new line rather than the previous one.
-        let (layout_root, textarea_id) =
-            setup_textarea("<textarea value=\"ab\ncd\"></textarea>");
+        let (layout_root, textarea_id) = setup_textarea("<textarea value=\"ab\ncd\"></textarea>");
         let commands = caret_commands_for_focused_input(&layout_root, Some(textarea_id), 0);
 
         assert_eq!(commands.len(), 1);
@@ -725,10 +725,8 @@ mod tests {
         // font-size each time. This is the property that makes the
         // `caret rides the trailing line` rule observable independently
         // of any specific content-origin math.
-        let (one_line_root, one_line_id) =
-            setup_textarea("<textarea value=\"hi\"></textarea>");
-        let (two_line_root, two_line_id) =
-            setup_textarea("<textarea value=\"hi\n\"></textarea>");
+        let (one_line_root, one_line_id) = setup_textarea("<textarea value=\"hi\"></textarea>");
+        let (two_line_root, two_line_id) = setup_textarea("<textarea value=\"hi\n\"></textarea>");
 
         let one_caret = caret_commands_for_focused_input(&one_line_root, Some(one_line_id), 0);
         let two_caret = caret_commands_for_focused_input(&two_line_root, Some(two_line_id), 0);

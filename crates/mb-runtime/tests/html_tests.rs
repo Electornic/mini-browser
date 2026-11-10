@@ -194,10 +194,8 @@ fn implicitly_closes_table_cells_and_rows_when_closer_missing() {
 fn decodes_named_and_numeric_entities_in_text() {
     // The big five plus typography (`&hellip;`) plus decimal (`&#39;`) and
     // hex (`&#x27;`) numeric forms.
-    let document = html::parse(
-        "<p>&amp;&lt;&gt;&quot;&#39;&#x27;&hellip;&nbsp;&copy;</p>",
-    )
-    .unwrap();
+    let document =
+        html::parse("<p>&amp;&lt;&gt;&quot;&#39;&#x27;&hellip;&nbsp;&copy;</p>").unwrap();
     let p = document.roots()[0];
     let text_id = document.get(p).unwrap().children[0];
     assert_eq!(

@@ -107,9 +107,7 @@ pub(super) fn register_document(ctx: &Ctx<'_>, dom: Rc<RefCell<Document>>) -> Re
     let dom_g = dom.clone();
     globals.set(
         "__mb_doc_create_text_node",
-        Func::from(move |text: String| -> u32 {
-            dom_g.borrow_mut().create_text(text).raw()
-        }),
+        Func::from(move |text: String| -> u32 { dom_g.borrow_mut().create_text(text).raw() }),
     )?;
 
     let dom_g = dom.clone();

@@ -18,9 +18,9 @@
 // `crate::css::Color` / `crate::dom::NodeType` import paths without rewriting
 // every file. mb-engine does NOT re-export these to its public API surface
 // — consumers go through mb-dom directly.
-pub(crate) use mb_dom::{css, dom, resource, style, url};
 #[cfg(test)]
 pub(crate) use mb_dom::html;
+pub(crate) use mb_dom::{css, dom, resource, style, url};
 
 pub mod chrome;
 pub mod font_system;

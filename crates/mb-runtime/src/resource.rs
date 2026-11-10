@@ -16,7 +16,9 @@ pub fn load_stylesheets(document: &Document, base_url: &Url) -> Result<Vec<Strin
     let stylesheet_urls = stylesheet_urls(document, base_url)?;
     // Fetch all stylesheets in parallel; per-resource failures are silently
     // dropped so one broken link does not kill the whole page.
-    Ok(parallel_fetch(&stylesheet_urls, |url| net::load_css(url).ok()))
+    Ok(parallel_fetch(&stylesheet_urls, |url| {
+        net::load_css(url).ok()
+    }))
 }
 
 // Fetches every `<script src="…">` body referenced by `document` in parallel
@@ -165,7 +167,11 @@ fn first_favicon_link(document: &Document, id: NodeId, base_url: &Url) -> Option
     if let NodeType::Element(element) = &node.node_type
         && element.tag_name.eq_ignore_ascii_case("link")
     {
-        let rel = element.attributes.get("rel").map(|s| s.as_str()).unwrap_or("");
+        let rel = element
+            .attributes
+            .get("rel")
+            .map(|s| s.as_str())
+            .unwrap_or("");
         let is_icon = rel
             .split_ascii_whitespace()
             .any(|token| token.eq_ignore_ascii_case("icon"));
@@ -409,10 +415,8 @@ mod tests {
         // The first matching `<link rel="icon">` in document order wins.
         // The href can be a relative path; resolution uses the page's
         // base URL the same way stylesheets and images do.
-        let document = html::parse(
-            r#"<head><link rel="icon" href="/static/icon.png"/></head>"#,
-        )
-        .unwrap();
+        let document =
+            html::parse(r#"<head><link rel="icon" href="/static/icon.png"/></head>"#).unwrap();
         let base = Url::parse("https://example.com/page").unwrap();
         let resolved = favicon_url(&document, &base).expect("favicon URL");
         assert_eq!(resolved.to_string(), "https://example.com/static/icon.png");
@@ -424,10 +428,8 @@ mod tests {
         // separated tokens). The matcher tokenises on whitespace and
         // accepts any token equal-ignore-case to "icon", so this still
         // resolves.
-        let document = html::parse(
-            r#"<head><link rel="shortcut icon" href="favicon.png"/></head>"#,
-        )
-        .unwrap();
+        let document =
+            html::parse(r#"<head><link rel="shortcut icon" href="favicon.png"/></head>"#).unwrap();
         let base = Url::parse("https://example.com/").unwrap();
         let resolved = favicon_url(&document, &base).expect("favicon URL");
         assert_eq!(resolved.to_string(), "https://example.com/favicon.png");
@@ -438,10 +440,8 @@ mod tests {
         // No `<link rel="icon">` and no fallback to `/favicon.ico` (yet)
         // — the loader must report `None` so the chrome can skip the
         // favicon area entirely.
-        let document = html::parse(
-            r#"<head><link rel="stylesheet" href="/base.css"/></head>"#,
-        )
-        .unwrap();
+        let document =
+            html::parse(r#"<head><link rel="stylesheet" href="/base.css"/></head>"#).unwrap();
         let base = Url::parse("https://example.com/").unwrap();
         assert!(favicon_url(&document, &base).is_none());
     }
@@ -534,13 +534,15 @@ mod tests {
             }
         });
 
-        let base_url =
-            Url::parse(&format!("http://127.0.0.1:{port}/pages/index.html")).unwrap();
+        let base_url = Url::parse(&format!("http://127.0.0.1:{port}/pages/index.html")).unwrap();
         let scripts = load_scripts(&document, &base_url).unwrap();
 
         server.join().unwrap();
         assert_eq!(scripts.len(), 2);
-        assert_eq!(scripts.get("/lib.js").map(String::as_str), Some("var lib = 1;"));
+        assert_eq!(
+            scripts.get("/lib.js").map(String::as_str),
+            Some("var lib = 1;")
+        );
         assert_eq!(
             scripts.get("nested/page.js").map(String::as_str),
             Some("var page = 2;"),
@@ -551,7 +553,8 @@ mod tests {
     fn load_scripts_returns_empty_map_when_document_has_no_external_scripts() {
         // Inline `<script>` (no `src`) must not appear in the externals map —
         // those are handled by the DOM walker reading text-child contents.
-        let document = html::parse("<html><body><script>var x = 1;</script></body></html>").unwrap();
+        let document =
+            html::parse("<html><body><script>var x = 1;</script></body></html>").unwrap();
         let base = Url::parse("http://example.com/").unwrap();
         let scripts = load_scripts(&document, &base).unwrap();
         assert!(scripts.is_empty());

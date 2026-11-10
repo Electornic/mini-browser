@@ -12,9 +12,8 @@ use crate::{
         CHROME_HEIGHT, ChromeAction, address_bar_rect, back_button_rect, forward_button_rect,
         menu_button_rect, refresh_button_rect,
     },
-    css,
+    css, input,
     view::{LinkTarget, point_in_rect},
-    input,
 };
 
 use super::{
@@ -145,8 +144,7 @@ impl BrowserState {
         if input.typed.is_empty() && !input.backspace_pressed && !input.enter_pressed {
             return;
         }
-        let Some(focused_id) =
-            node_id_for_dom_path(&self.parsed_document.borrow(), focused_path)
+        let Some(focused_id) = node_id_for_dom_path(&self.parsed_document.borrow(), focused_path)
         else {
             return;
         };
@@ -182,7 +180,8 @@ impl BrowserState {
                 self.focused_input_dirty = true;
                 self.js.dispatch_event(focused_id, "input");
             }
-            self.js.dispatch_keyboard_event(focused_id, "keyup", "Backspace");
+            self.js
+                .dispatch_keyboard_event(focused_id, "keyup", "Backspace");
         }
 
         if input.enter_pressed {
@@ -212,14 +211,14 @@ impl BrowserState {
                         self.js.dispatch_event(focused_id, "input");
                     }
                 } else {
-                    let form_id =
-                        find_enclosing_form(&self.parsed_document.borrow(), focused_id);
+                    let form_id = find_enclosing_form(&self.parsed_document.borrow(), focused_id);
                     if let Some(form_id) = form_id {
                         self.try_submit_form(form_id);
                     }
                 }
             }
-            self.js.dispatch_keyboard_event(focused_id, "keyup", "Enter");
+            self.js
+                .dispatch_keyboard_event(focused_id, "keyup", "Enter");
         }
     }
 

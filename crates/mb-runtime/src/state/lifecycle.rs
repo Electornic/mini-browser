@@ -7,11 +7,12 @@
 
 use std::sync::mpsc;
 
-use crate::{
-    async_runtime, css, net,
-    navigation::{LoadedDocument, load_remote_document},
-};
 use crate::dom::NodeId;
+use crate::{
+    async_runtime, css,
+    navigation::{LoadedDocument, load_remote_document},
+    net,
+};
 
 use super::{
     BrowserState, HistoryEntry, PendingKind, PendingNavigation, build_form_submit_url,
@@ -309,7 +310,11 @@ impl BrowserState {
                 // `location` global picks up the reloaded URL instead
                 // of the previous page's.
                 self.current_url = Some(loaded.final_url);
-                self.install_document(loaded.document_html, loaded.stylesheet, loaded.external_scripts);
+                self.install_document(
+                    loaded.document_html,
+                    loaded.stylesheet,
+                    loaded.external_scripts,
+                );
                 self.images = loaded.images;
                 self.font_data = loaded.font_data;
                 self.favicon = loaded.favicon;

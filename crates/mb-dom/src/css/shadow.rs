@@ -13,9 +13,7 @@ use cssparser::Parser as CssParser;
 use super::parse::{parse_length_token, parse_value, peek_starts_length};
 use super::{BoxShadow, Color, ParseError, TextShadow, Value};
 
-pub(super) fn parse_box_shadow_value<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<Value, ParseError> {
+pub(super) fn parse_box_shadow_value<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     let offset_x = parse_length_token(input)?;
     input.skip_whitespace();
     let offset_y = parse_length_token(input)?;
@@ -64,9 +62,7 @@ pub(super) fn parse_box_shadow_value<'i, 't>(
     }))
 }
 
-pub(super) fn parse_text_shadow_value<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<Value, ParseError> {
+pub(super) fn parse_text_shadow_value<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     let offset_x = parse_length_token(input)?;
     input.skip_whitespace();
     let offset_y = parse_length_token(input)?;

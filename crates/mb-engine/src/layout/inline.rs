@@ -8,14 +8,14 @@ use crate::{
     style::StyledNode,
 };
 
-use super::{
-    BoxType, Dimensions, LayoutBox, Rect, apply_relative_offset, child_height, collapsed_text,
-    container_box_type, edge_sizes, has_float, intrinsic_height, intrinsic_width,
-    is_display_none, is_float_right, is_out_of_flow, length_value, outer_rect,
-};
 use super::block::layout_node;
 use super::flex::{is_flex_container, layout_flex_children};
 use super::grid::{is_grid_container, layout_grid_children};
+use super::{
+    BoxType, Dimensions, LayoutBox, Rect, apply_relative_offset, child_height, collapsed_text,
+    container_box_type, edge_sizes, has_float, intrinsic_height, intrinsic_width, is_display_none,
+    is_float_right, is_out_of_flow, length_value, outer_rect,
+};
 
 pub(super) fn layout_inline_children(
     children: &[StyledNode],
@@ -88,8 +88,7 @@ pub(super) fn layout_inline_children(
         let mut line_height = 0.0f32;
         for &child_idx in line_children {
             let child = &children[child_idx];
-            let mut child_box =
-                layout_inline_or_inline_block(child, line_x, line_y, content_width);
+            let mut child_box = layout_inline_or_inline_block(child, line_x, line_y, content_width);
             let outer = outer_rect(&child_box);
             line_x += outer.width;
             line_height = line_height.max(outer.height);
@@ -131,7 +130,10 @@ pub(super) fn layout_inline_children(
     // to escape the parent's content box anyway, which sidesteps the
     // overlap entirely; getting them onto the right Y is the actual fix.
     let mut max_float_bottom = content_y;
-    for child in children.iter().filter(|child| has_float(child) && !is_display_none(child)) {
+    for child in children
+        .iter()
+        .filter(|child| has_float(child) && !is_display_none(child))
+    {
         let mut throwaway = content_y;
         let mut float_box = layout_node(child, content_x, &mut throwaway, content_width);
         if is_float_right(child) {
@@ -165,7 +167,6 @@ pub(super) fn layout_inline_or_inline_block(
         layout_inline_node(node, x, y, available_width)
     }
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InlineAlign {
@@ -433,7 +434,12 @@ fn inline_block_shrink_to_fit_width(node: &StyledNode, available_width: f32) -> 
     natural.min(available_width)
 }
 
-pub(super) fn layout_inline_block_node(node: &StyledNode, x: f32, y: f32, available_width: f32) -> LayoutBox {
+pub(super) fn layout_inline_block_node(
+    node: &StyledNode,
+    x: f32,
+    y: f32,
+    available_width: f32,
+) -> LayoutBox {
     // Inline-block ignores `margin: auto` (auto only collapses for in-flow
     // blocks), so we just take the raw declared margins here.
     let margin = edge_sizes(node, "margin", available_width);
@@ -499,8 +505,9 @@ fn inline_content_width(node: &StyledNode, parent_width: f32) -> f32 {
     length_value(node, "width", parent_width)
         .or_else(|| intrinsic_width(node))
         .unwrap_or_else(|| match &node.node_type {
-            NodeType::Text(text) => measure_inline_text(node, &collapsed_text(node, text))
-                .min(parent_width),
+            NodeType::Text(text) => {
+                measure_inline_text(node, &collapsed_text(node, text)).min(parent_width)
+            }
             NodeType::Element(element) if element.tag_name == "img" => 200.0,
             NodeType::Element(_) => node
                 .children

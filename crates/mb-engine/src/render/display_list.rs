@@ -101,7 +101,13 @@ fn paint_stacking_context(
     let effective_transform = inherited_transform.compose(transform_for(layout_box));
 
     // 1. Paint this stacking-context-creator's own bg/border/text.
-    paint_self(layout_box, commands, effective_alpha, effective_transform, ctx);
+    paint_self(
+        layout_box,
+        commands,
+        effective_alpha,
+        effective_transform,
+        ctx,
+    );
 
     // Walk descendants and pluck out the positioned subtrees — each becomes
     // its own atomic z-layer. Non-positioned content is painted between the
@@ -165,12 +171,17 @@ fn paint_non_positioned(
     }
     let effective_alpha = inherited_alpha * opacity_of(layout_box);
     let effective_transform = inherited_transform.compose(transform_for(layout_box));
-    paint_self(layout_box, commands, effective_alpha, effective_transform, ctx);
+    paint_self(
+        layout_box,
+        commands,
+        effective_alpha,
+        effective_transform,
+        ctx,
+    );
     for child in &layout_box.children {
         paint_non_positioned(child, commands, effective_alpha, effective_transform, ctx);
     }
 }
-
 
 fn paint_self(
     layout_box: &LayoutBox,
@@ -217,7 +228,6 @@ fn paint_self(
     finalize_box_transform(commands, start, transform);
 }
 
-
 fn collect_positioned_into<'a>(
     layout_box: &'a LayoutBox,
     out: &mut Vec<(&'a LayoutBox, f32, Affine)>,
@@ -239,7 +249,6 @@ fn collect_positioned_into<'a>(
         collect_positioned_into(child, out, effective_alpha, effective_transform);
     }
 }
-
 
 pub fn transform_for(layout_box: &LayoutBox) -> Affine {
     // Compose every `transform: ...` op of *this* box into a single affine.
@@ -274,7 +283,6 @@ pub fn transform_for(layout_box: &LayoutBox) -> Affine {
         .compose(Affine::translate(-cx, -cy))
 }
 
-
 fn finalize_box_transform(commands: &mut Vec<DisplayCommand>, start: usize, transform: Affine) {
     // Skipping the work when there is nothing to do keeps the painted output
     // bit-identical for pages that do not use `transform`.
@@ -294,7 +302,6 @@ fn finalize_box_transform(commands: &mut Vec<DisplayCommand>, start: usize, tran
     let inner: Vec<DisplayCommand> = commands.drain(start..).collect();
     commands.push(DisplayCommand::TransformGroup(transform, inner));
 }
-
 
 fn bake_axis_aligned(commands: &mut [DisplayCommand], transform: Affine) {
     for command in commands {
@@ -336,14 +343,12 @@ fn bake_axis_aligned(commands: &mut [DisplayCommand], transform: Affine) {
     }
 }
 
-
 fn scalar_scale(transform: Affine) -> f32 {
     // The matrix is axis-aligned for translate+scale (b == c == 0), so the
     // average of the two diagonal entries is the obvious "scalar" scale to
     // apply to inherently 1-dimensional things like font-size and blur.
     (transform.a + transform.d) * 0.5
 }
-
 
 fn transform_rect_in_place(rect: &mut Rect, transform: Affine) {
     // Translate+scale transforms keep an axis-aligned rect axis-aligned,
@@ -367,7 +372,6 @@ fn transform_rect_in_place(rect: &mut Rect, transform: Affine) {
         rect.height = -rect.height;
     }
 }
-
 
 fn is_positioned_box(layout_box: &LayoutBox) -> bool {
     let node = match layout_box.styled_node() {
@@ -459,10 +463,7 @@ fn background_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayComma
     }
 }
 
-fn background_image_command(
-    layout_box: &LayoutBox,
-    ctx: &PaintContext,
-) -> Option<DisplayCommand> {
+fn background_image_command(layout_box: &LayoutBox, ctx: &PaintContext) -> Option<DisplayCommand> {
     // `background-image: url(...)` parallels `<img>` rendering but anchored
     // to the padding box rather than the content box, matching CSS spec
     // behaviour for backgrounds. Resolution mirrors the `<img>` path so a
@@ -855,13 +856,11 @@ fn font_family_keyword(node: &crate::style::StyledNode) -> Option<String> {
 /// face.
 pub(crate) fn font_weight_value(node: &crate::style::StyledNode) -> u16 {
     match node.value("font-weight") {
-        Some(Value::Keyword(keyword)) => {
-            match keyword.to_ascii_lowercase().as_str() {
-                "bold" => 700,
-                "normal" => 400,
-                _ => 400,
-            }
-        }
+        Some(Value::Keyword(keyword)) => match keyword.to_ascii_lowercase().as_str() {
+            "bold" => 700,
+            "normal" => 400,
+            _ => 400,
+        },
         Some(Value::Number(n)) => (n.round() as i32).clamp(1, 1000) as u16,
         _ => 400,
     }

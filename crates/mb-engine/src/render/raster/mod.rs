@@ -93,19 +93,14 @@ pub fn rasterize_into(
 fn write_pixmap_into(pixmap: &Pixmap, target: &mut [u32]) {
     let data = pixmap.data();
     let pixel_count = (data.len() / 4).min(target.len());
-    for (slot, chunk) in target[..pixel_count]
-        .iter_mut()
-        .zip(data.chunks_exact(4))
-    {
+    for (slot, chunk) in target[..pixel_count].iter_mut().zip(data.chunks_exact(4)) {
         *slot = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
     }
 }
 
 fn rasterize_command(pixmap: &mut Pixmap, command: &DisplayCommand, transform: Affine) {
     match command {
-        DisplayCommand::SolidRect(color, rect) => {
-            fill_solid_rect(pixmap, *color, *rect, transform)
-        }
+        DisplayCommand::SolidRect(color, rect) => fill_solid_rect(pixmap, *color, *rect, transform),
         DisplayCommand::RoundedRect(color, rect, radii) => {
             fill_rounded_rect(pixmap, *color, *rect, *radii, transform)
         }

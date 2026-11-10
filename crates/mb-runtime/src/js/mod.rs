@@ -12,7 +12,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use rquickjs::{CatchResultExt, CaughtError, Context, Function, Runtime, Value, context::EvalOptions};
+use rquickjs::{
+    CatchResultExt, CaughtError, Context, Function, Runtime, Value, context::EvalOptions,
+};
 
 use crate::dom::{Document, NodeId, NodeType};
 
@@ -47,8 +49,8 @@ mod util;
 mod window;
 mod xhr;
 
-pub use timers::FixedClock;
 use timers::ClockSource;
+pub use timers::FixedClock;
 
 pub struct JsRuntime {
     // Both handles are refcounted internally; we keep the `Runtime` even
@@ -103,15 +105,13 @@ impl JsRuntime {
             // DOM constructor ladder must land BEFORE element/document
             // registration so the wrappers (and future per-instance
             // prototype links) can reference the prototypes.
-            dom_globals::register_dom_globals(&ctx)
-                .expect("dom globals should register");
+            dom_globals::register_dom_globals(&ctx).expect("dom globals should register");
             window::register_window_aliases(&ctx, location_url.clone())
                 .expect("window aliases should register");
             element::register_element_hooks(&ctx, dom.clone(), layout_rects.clone())
                 .expect("element hooks should register");
             element::run_dom_bootstrap(&ctx).expect("dom bootstrap should run");
-            document::register_document(&ctx, dom.clone())
-                .expect("document should register");
+            document::register_document(&ctx, dom.clone()).expect("document should register");
             event::register_events(&ctx).expect("events should register");
             storage::register_storage(&ctx).expect("storage should register");
             timers::register_timers(&ctx, clock.clone(), pending_jobs.clone())
@@ -320,12 +320,7 @@ impl JsRuntime {
 
     /// Bubbling dispatch with a `key` payload exposed on the Event
     /// object. Used by BrowserState for `keydown` / `keyup`.
-    pub fn dispatch_keyboard_event(
-        &mut self,
-        target: NodeId,
-        event_type: &str,
-        key: &str,
-    ) -> bool {
+    pub fn dispatch_keyboard_event(&mut self, target: NodeId, event_type: &str, key: &str) -> bool {
         self.dispatch_event_inner(target, event_type, Some(key), true)
     }
 
@@ -451,7 +446,9 @@ fn format_caught_error(err: CaughtError) -> String {
         }
         // A bare `throw 42;` — render the value through stringification.
         CaughtError::Value(v) => match v.as_string() {
-            Some(js_str) => js_str.to_string().unwrap_or_else(|_| "thrown value".to_string()),
+            Some(js_str) => js_str
+                .to_string()
+                .unwrap_or_else(|_| "thrown value".to_string()),
             None => format!("{v:?}"),
         },
         CaughtError::Error(e) => e.to_string(),
@@ -497,7 +494,10 @@ mod tests {
         let err = rt
             .execute_with_url("missing.prop", "https://example.com/app.js")
             .unwrap_err();
-        assert!(err.starts_with("https://example.com/app.js: "), "got: {err}");
+        assert!(
+            err.starts_with("https://example.com/app.js: "),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -529,7 +529,8 @@ mod tests {
     #[test]
     fn console_log_does_not_throw() {
         let mut rt = fresh();
-        rt.execute("console.log('a', 1, true, null, undefined)").unwrap();
+        rt.execute("console.log('a', 1, true, null, undefined)")
+            .unwrap();
         rt.execute("console.warn('w'); console.error('e')").unwrap();
     }
 
@@ -633,10 +634,8 @@ mod tests {
     fn document_get_elements_by_class_name_returns_array() {
         let mut rt = rt_with_html(r#"<p class="hit">a</p><p class="hit">b</p><p>skip</p>"#);
         assert_eq!(
-            rt.execute(
-                "document.getElementsByClassName('hit').map(e => e.textContent).join(',')"
-            )
-            .unwrap(),
+            rt.execute("document.getElementsByClassName('hit').map(e => e.textContent).join(',')")
+                .unwrap(),
             "\"a,b\""
         );
     }
@@ -666,7 +665,9 @@ mod tests {
         // doesn't trip pattern-matching on the literal markup.
         let assign_src = "var raw='<b>new</b>'; document.getElementById('r').innerHTML=raw;";
         rt.execute(assign_src).unwrap();
-        let after = rt.execute("document.getElementById('r').innerHTML").unwrap();
+        let after = rt
+            .execute("document.getElementById('r').innerHTML")
+            .unwrap();
         assert_eq!(after, "\"<b>new</b>\"");
     }
 
@@ -709,9 +710,7 @@ mod tests {
     fn element_remove_child_throws_when_argument_isnt_a_child() {
         let mut rt = rt_with_html(r#"<div id="a"></div><div id="b"></div>"#);
         let err = rt
-            .execute(
-                "document.getElementById('a').removeChild(document.getElementById('b'))",
-            )
+            .execute("document.getElementById('a').removeChild(document.getElementById('b'))")
             .unwrap_err();
         assert!(err.contains("not a child"), "got: {err}");
     }
@@ -720,7 +719,8 @@ mod tests {
     fn element_matches_runs_against_selectors_crate() {
         let mut rt = rt_with_html(r#"<p id="p" class="a b"></p>"#);
         assert_eq!(
-            rt.execute("document.getElementById('p').matches('p.a')").unwrap(),
+            rt.execute("document.getElementById('p').matches('p.a')")
+                .unwrap(),
             "true"
         );
         assert_eq!(
@@ -732,7 +732,8 @@ mod tests {
 
     #[test]
     fn element_closest_walks_ancestors() {
-        let mut rt = rt_with_html(r#"<div class="outer"><div class="inner"><span id="s"/></div></div>"#);
+        let mut rt =
+            rt_with_html(r#"<div class="outer"><div class="inner"><span id="s"/></div></div>"#);
         assert_eq!(
             rt.execute("document.getElementById('s').closest('.outer').getAttribute('class')")
                 .unwrap(),
@@ -749,13 +750,15 @@ mod tests {
     fn element_text_content_set_and_get() {
         let mut rt = rt_with_html(r#"<p id="p">old</p>"#);
         assert_eq!(
-            rt.execute("document.getElementById('p').textContent").unwrap(),
+            rt.execute("document.getElementById('p').textContent")
+                .unwrap(),
             "\"old\""
         );
         rt.execute("document.getElementById('p').textContent = 'new'")
             .unwrap();
         assert_eq!(
-            rt.execute("document.getElementById('p').textContent").unwrap(),
+            rt.execute("document.getElementById('p').textContent")
+                .unwrap(),
             "\"new\""
         );
     }
@@ -778,7 +781,8 @@ mod tests {
 
     #[test]
     fn document_body_and_head_accessors_resolve() {
-        let mut rt = rt_with_html(r#"<html><head><title>t</title></head><body><p>b</p></body></html>"#);
+        let mut rt =
+            rt_with_html(r#"<html><head><title>t</title></head><body><p>b</p></body></html>"#);
         assert_eq!(rt.execute("document.body.tagName").unwrap(), "\"BODY\"");
         assert_eq!(rt.execute("document.head.tagName").unwrap(), "\"HEAD\"");
     }
@@ -787,9 +791,11 @@ mod tests {
 
     #[test]
     fn document_query_selector_all_returns_all_matches_in_order() {
-        let mut rt = rt_with_html(r#"<p class="a">1</p><p class="a">2</p><span class="a">3</span>"#);
+        let mut rt =
+            rt_with_html(r#"<p class="a">1</p><p class="a">2</p><span class="a">3</span>"#);
         assert_eq!(
-            rt.execute("document.querySelectorAll('p.a').length").unwrap(),
+            rt.execute("document.querySelectorAll('p.a').length")
+                .unwrap(),
             "2"
         );
         assert_eq!(
@@ -798,7 +804,8 @@ mod tests {
             "\"1,2,3\""
         );
         assert_eq!(
-            rt.execute("document.querySelectorAll('.none').length").unwrap(),
+            rt.execute("document.querySelectorAll('.none').length")
+                .unwrap(),
             "0"
         );
     }
@@ -836,7 +843,8 @@ mod tests {
             "\"display: none\""
         );
         assert_eq!(
-            rt.execute("document.getElementById('d').style.display").unwrap(),
+            rt.execute("document.getElementById('d').style.display")
+                .unwrap(),
             "\"none\""
         );
     }
@@ -857,7 +865,8 @@ mod tests {
             "\"blue\""
         );
         assert_eq!(
-            rt.execute("document.getElementById('d').style.color").unwrap(),
+            rt.execute("document.getElementById('d').style.color")
+                .unwrap(),
             "\"red\""
         );
     }
@@ -883,7 +892,8 @@ mod tests {
         rt.execute("document.getElementById('d').style.padding = ''")
             .unwrap();
         assert_eq!(
-            rt.execute("document.getElementById('d').style.cssText").unwrap(),
+            rt.execute("document.getElementById('d').style.cssText")
+                .unwrap(),
             "\"\""
         );
     }
@@ -906,7 +916,8 @@ mod tests {
             "2"
         );
         assert_eq!(
-            rt.execute("document.getElementById('root').innerHTML").unwrap(),
+            rt.execute("document.getElementById('root').innerHTML")
+                .unwrap(),
             "\"<span>a</span><span>b</span>\""
         );
         // Fragment is emptied after the flush.
@@ -924,7 +935,10 @@ mod tests {
             .unwrap();
         assert_eq!(rt.execute("history.length").unwrap(), "2");
         assert_eq!(rt.execute("location.pathname").unwrap(), "\"/users/1\"");
-        assert_eq!(rt.execute("location.href").unwrap(), "\"https://example.com/users/1\"");
+        assert_eq!(
+            rt.execute("location.href").unwrap(),
+            "\"https://example.com/users/1\""
+        );
         assert_eq!(rt.execute("history.state.page").unwrap(), "1");
         // replaceState swaps the current entry rather than growing the stack.
         rt.execute("history.replaceState({page: 2}, '', '/users/2')")
@@ -1012,7 +1026,8 @@ mod tests {
         // Lifecycle boot renders Home.
         rt.dispatch_global_event("document", "DOMContentLoaded");
         assert_eq!(
-            rt.execute("document.getElementById('app').innerHTML").unwrap(),
+            rt.execute("document.getElementById('app').innerHTML")
+                .unwrap(),
             "\"<h1>Home</h1>\""
         );
         // Route to /users without reload.
@@ -1024,7 +1039,8 @@ mod tests {
         );
         assert_eq!(rt.execute("location.pathname").unwrap(), "\"/users\"");
         assert_eq!(
-            rt.execute("document.querySelectorAll('#nav a.active').length").unwrap(),
+            rt.execute("document.querySelectorAll('#nav a.active').length")
+                .unwrap(),
             "1"
         );
         // Back fires popstate and re-renders Home.
@@ -1042,15 +1058,18 @@ mod tests {
     fn element_wrapper_inherits_html_element_prototype_chain() {
         let mut rt = rt_with_html(r#"<div id="d"></div>"#);
         assert_eq!(
-            rt.execute("document.getElementById('d') instanceof HTMLElement").unwrap(),
+            rt.execute("document.getElementById('d') instanceof HTMLElement")
+                .unwrap(),
             "true"
         );
         assert_eq!(
-            rt.execute("document.getElementById('d') instanceof Element").unwrap(),
+            rt.execute("document.getElementById('d') instanceof Element")
+                .unwrap(),
             "true"
         );
         assert_eq!(
-            rt.execute("document.getElementById('d') instanceof Node").unwrap(),
+            rt.execute("document.getElementById('d') instanceof Node")
+                .unwrap(),
             "true"
         );
         assert_eq!(
@@ -1067,11 +1086,13 @@ mod tests {
         let mut rt = rt_with_html(r#"<div id="d"></div>"#);
         // Accessors/methods moved off the instance onto the shared proto.
         assert_eq!(
-            rt.execute("document.getElementById('d').hasOwnProperty('tagName')").unwrap(),
+            rt.execute("document.getElementById('d').hasOwnProperty('tagName')")
+                .unwrap(),
             "false"
         );
         assert_eq!(
-            rt.execute("document.getElementById('d').hasOwnProperty('getAttribute')").unwrap(),
+            rt.execute("document.getElementById('d').hasOwnProperty('getAttribute')")
+                .unwrap(),
             "false"
         );
         // `_nodeId` is the lone (non-enumerable) own slot each wrapper carries.
@@ -1097,7 +1118,8 @@ mod tests {
         rt.execute("Element.prototype.describe = function () { return 'I am ' + this.tagName; };")
             .unwrap();
         assert_eq!(
-            rt.execute("document.getElementById('s').describe()").unwrap(),
+            rt.execute("document.getElementById('s').describe()")
+                .unwrap(),
             "\"I am SECTION\""
         );
     }
@@ -1116,7 +1138,8 @@ mod tests {
     #[test]
     fn fragment_wrapper_inherits_document_fragment_prototype() {
         let mut rt = rt_with_html("");
-        rt.execute("var f = document.createDocumentFragment()").unwrap();
+        rt.execute("var f = document.createDocumentFragment()")
+            .unwrap();
         assert_eq!(rt.execute("f instanceof DocumentFragment").unwrap(), "true");
         assert_eq!(rt.execute("f instanceof Node").unwrap(), "true");
         assert_eq!(rt.execute("f.nodeType").unwrap(), "11");
@@ -1151,10 +1174,26 @@ mod tests {
             "\"10,20,100,40,10,20,110,60\""
         );
         // Border-box offset*, padding-box client*, integer-rounded.
-        assert_eq!(rt.execute("document.getElementById('d').offsetWidth").unwrap(), "100");
-        assert_eq!(rt.execute("document.getElementById('d').offsetHeight").unwrap(), "40");
-        assert_eq!(rt.execute("document.getElementById('d').clientWidth").unwrap(), "96");
-        assert_eq!(rt.execute("document.getElementById('d').clientHeight").unwrap(), "36");
+        assert_eq!(
+            rt.execute("document.getElementById('d').offsetWidth")
+                .unwrap(),
+            "100"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('d').offsetHeight")
+                .unwrap(),
+            "40"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('d').clientWidth")
+                .unwrap(),
+            "96"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('d').clientHeight")
+                .unwrap(),
+            "36"
+        );
     }
 
     #[test]
@@ -1170,8 +1209,16 @@ mod tests {
             .unwrap(),
             "\"0,0,0,0\""
         );
-        assert_eq!(rt.execute("document.getElementById('d').offsetWidth").unwrap(), "0");
-        assert_eq!(rt.execute("document.getElementById('d').clientHeight").unwrap(), "0");
+        assert_eq!(
+            rt.execute("document.getElementById('d').offsetWidth")
+                .unwrap(),
+            "0"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('d').clientHeight")
+                .unwrap(),
+            "0"
+        );
     }
 
     // -------- Tier 1 #7: node-level DOM + reflected props + on* --------
@@ -1180,14 +1227,35 @@ mod tests {
     fn node_level_traversal_includes_text_nodes() {
         let mut rt = rt_with_html(r#"<p id="p">a<b>x</b>c</p>"#);
         // childNodes sees all three (text, <b>, text); children only the <b>.
-        assert_eq!(rt.execute("document.getElementById('p').childNodes.length").unwrap(), "3");
-        assert_eq!(rt.execute("document.getElementById('p').children.length").unwrap(), "1");
-        assert_eq!(rt.execute("document.getElementById('p').firstChild.nodeType").unwrap(), "3");
-        assert_eq!(rt.execute("document.getElementById('p').firstChild.data").unwrap(), "\"a\"");
-        assert_eq!(rt.execute("document.getElementById('p').lastChild.data").unwrap(), "\"c\"");
+        assert_eq!(
+            rt.execute("document.getElementById('p').childNodes.length")
+                .unwrap(),
+            "3"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('p').children.length")
+                .unwrap(),
+            "1"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('p').firstChild.nodeType")
+                .unwrap(),
+            "3"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('p').firstChild.data")
+                .unwrap(),
+            "\"a\""
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('p').lastChild.data")
+                .unwrap(),
+            "\"c\""
+        );
         // text "a" -> <b> -> text "c" via nextSibling.
         assert_eq!(
-            rt.execute("document.getElementById('p').firstChild.nextSibling.tagName").unwrap(),
+            rt.execute("document.getElementById('p').firstChild.nextSibling.tagName")
+                .unwrap(),
             "\"B\""
         );
         assert_eq!(
@@ -1196,7 +1264,8 @@ mod tests {
             "\"c\""
         );
         assert_eq!(
-            rt.execute("document.getElementById('p').lastChild.previousSibling.tagName").unwrap(),
+            rt.execute("document.getElementById('p').lastChild.previousSibling.tagName")
+                .unwrap(),
             "\"B\""
         );
     }
@@ -1204,10 +1273,15 @@ mod tests {
     #[test]
     fn parent_node_resolves_for_text_and_element() {
         let mut rt = rt_with_html(r#"<div id="d"><span id="s">hi</span></div>"#);
-        assert_eq!(rt.execute("document.getElementById('s').parentNode.id").unwrap(), "\"d\"");
+        assert_eq!(
+            rt.execute("document.getElementById('s').parentNode.id")
+                .unwrap(),
+            "\"d\""
+        );
         // The text node "hi" climbs back to its <span> parent.
         assert_eq!(
-            rt.execute("document.getElementById('s').firstChild.parentNode.id").unwrap(),
+            rt.execute("document.getElementById('s').firstChild.parentNode.id")
+                .unwrap(),
             "\"s\""
         );
     }
@@ -1215,53 +1289,97 @@ mod tests {
     #[test]
     fn text_node_data_and_node_value_round_trip() {
         let mut rt = rt_with_html(r#"<p id="p">old</p>"#);
-        assert_eq!(rt.execute("document.getElementById('p').firstChild.data").unwrap(), "\"old\"");
         assert_eq!(
-            rt.execute("document.getElementById('p').firstChild.nodeValue").unwrap(),
+            rt.execute("document.getElementById('p').firstChild.data")
+                .unwrap(),
             "\"old\""
         );
         assert_eq!(
-            rt.execute("document.getElementById('p').firstChild.nodeName").unwrap(),
+            rt.execute("document.getElementById('p').firstChild.nodeValue")
+                .unwrap(),
+            "\"old\""
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('p').firstChild.nodeName")
+                .unwrap(),
             "\"#text\""
         );
-        rt.execute("document.getElementById('p').firstChild.data = 'mid'").unwrap();
-        assert_eq!(rt.execute("document.getElementById('p').textContent").unwrap(), "\"mid\"");
-        rt.execute("document.getElementById('p').firstChild.nodeValue = 'new'").unwrap();
-        assert_eq!(rt.execute("document.getElementById('p').textContent").unwrap(), "\"new\"");
+        rt.execute("document.getElementById('p').firstChild.data = 'mid'")
+            .unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('p').textContent")
+                .unwrap(),
+            "\"mid\""
+        );
+        rt.execute("document.getElementById('p').firstChild.nodeValue = 'new'")
+            .unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('p').textContent")
+                .unwrap(),
+            "\"new\""
+        );
     }
 
     #[test]
     fn class_name_property_reflects_class_attribute() {
         let mut rt = rt_with_html(r#"<div id="d" class="a b"></div>"#);
-        assert_eq!(rt.execute("document.getElementById('d').className").unwrap(), "\"a b\"");
-        rt.execute("document.getElementById('d').className = 'x y z'").unwrap();
         assert_eq!(
-            rt.execute("document.getElementById('d').getAttribute('class')").unwrap(),
+            rt.execute("document.getElementById('d').className")
+                .unwrap(),
+            "\"a b\""
+        );
+        rt.execute("document.getElementById('d').className = 'x y z'")
+            .unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('d').getAttribute('class')")
+                .unwrap(),
             "\"x y z\""
         );
         assert_eq!(
-            rt.execute("document.getElementById('d').classList.contains('y')").unwrap(),
+            rt.execute("document.getElementById('d').classList.contains('y')")
+                .unwrap(),
             "true"
         );
         // nodeName uppercase; nodeValue null for elements.
-        assert_eq!(rt.execute("document.getElementById('d').nodeName").unwrap(), "\"DIV\"");
-        assert_eq!(rt.execute("document.getElementById('d').nodeValue").unwrap(), "null");
+        assert_eq!(
+            rt.execute("document.getElementById('d').nodeName").unwrap(),
+            "\"DIV\""
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('d').nodeValue")
+                .unwrap(),
+            "null"
+        );
     }
 
     #[test]
     fn id_property_reflects_id_attribute() {
         let mut rt = rt_with_html(r#"<div id="orig"></div>"#);
-        rt.execute("var d = document.getElementById('orig'); d.id = 'renamed';").unwrap();
+        rt.execute("var d = document.getElementById('orig'); d.id = 'renamed';")
+            .unwrap();
         assert_eq!(rt.execute("d.id").unwrap(), "\"renamed\"");
-        assert_eq!(rt.execute("document.getElementById('renamed') !== null").unwrap(), "true");
+        assert_eq!(
+            rt.execute("document.getElementById('renamed') !== null")
+                .unwrap(),
+            "true"
+        );
     }
 
     #[test]
     fn remove_attribute_drops_the_attribute() {
         let mut rt = rt_with_html(r#"<input id="i" name="q">"#);
-        assert_eq!(rt.execute("document.getElementById('i').getAttribute('name')").unwrap(), "\"q\"");
-        rt.execute("document.getElementById('i').removeAttribute('name')").unwrap();
-        assert_eq!(rt.execute("document.getElementById('i').getAttribute('name')").unwrap(), "null");
+        assert_eq!(
+            rt.execute("document.getElementById('i').getAttribute('name')")
+                .unwrap(),
+            "\"q\""
+        );
+        rt.execute("document.getElementById('i').removeAttribute('name')")
+            .unwrap();
+        assert_eq!(
+            rt.execute("document.getElementById('i').getAttribute('name')")
+                .unwrap(),
+            "null"
+        );
     }
 
     #[test]
@@ -1276,7 +1394,8 @@ mod tests {
         rt.dispatch_event(nid, "click");
         assert_eq!(rt.execute("log.join(',')").unwrap(), "\"first\"");
         // Reassigning replaces rather than stacking a second listener.
-        rt.execute("b.onclick = function () { log.push('second'); };").unwrap();
+        rt.execute("b.onclick = function () { log.push('second'); };")
+            .unwrap();
         rt.dispatch_event(nid, "click");
         assert_eq!(rt.execute("log.join(',')").unwrap(), "\"first,second\"");
         assert_eq!(rt.execute("typeof b.onclick").unwrap(), "\"function\"");
@@ -1295,9 +1414,14 @@ mod tests {
              document.getElementById('r').appendChild(svg);",
         )
         .unwrap();
-        assert_eq!(rt.execute("document.getElementById('r').children.length").unwrap(), "1");
         assert_eq!(
-            rt.execute("document.getElementById('r').firstChild.tagName").unwrap(),
+            rt.execute("document.getElementById('r').children.length")
+                .unwrap(),
+            "1"
+        );
+        assert_eq!(
+            rt.execute("document.getElementById('r').firstChild.tagName")
+                .unwrap(),
             "\"SVG\""
         );
     }
@@ -1373,10 +1497,8 @@ mod tests {
     #[test]
     fn set_timeout_fires_after_clock_advance_and_drain() {
         let (mut rt, clock) = rt_clock("");
-        rt.execute(
-            "var fired = false; setTimeout(function(){ fired = true; }, 50)",
-        )
-        .unwrap();
+        rt.execute("var fired = false; setTimeout(function(){ fired = true; }, 50)")
+            .unwrap();
         // Not yet — clock at 0, deadline at 50.
         assert_eq!(rt.execute("fired").unwrap(), "false");
         clock.advance(50);
@@ -1417,10 +1539,8 @@ mod tests {
     #[test]
     fn request_animation_frame_fires_on_run_animation_frame_callbacks() {
         let mut rt = rt_with_html("");
-        rt.execute(
-            "var ts = -1; requestAnimationFrame(function(t){ ts = t; })",
-        )
-        .unwrap();
+        rt.execute("var ts = -1; requestAnimationFrame(function(t){ ts = t; })")
+            .unwrap();
         rt.run_animation_frame_callbacks();
         // Default ClockSource::System, so the timestamp is real wall-clock.
         // Just confirm the handler ran (ts !== -1) and got a positive number.
@@ -1460,7 +1580,8 @@ mod tests {
 
     #[test]
     fn dispatch_event_bubbles_to_ancestors() {
-        let mut rt = rt_with_html(r#"<div id="outer"><div id="mid"><span id="inner"></span></div></div>"#);
+        let mut rt =
+            rt_with_html(r#"<div id="outer"><div id="mid"><span id="inner"></span></div></div>"#);
         rt.execute(
             r#"var trail = [];
                document.getElementById('outer').addEventListener('x', function(){ trail.push('outer'); });
@@ -1578,7 +1699,9 @@ mod tests {
                fetch('foo://bad').catch(function(err){ caught = String(err); });"#,
         )
         .unwrap();
-        let observed = rt.execute("typeof caught === 'string' && caught.length > 0").unwrap();
+        let observed = rt
+            .execute("typeof caught === 'string' && caught.length > 0")
+            .unwrap();
         assert_eq!(observed, "true");
     }
 
@@ -1607,10 +1730,8 @@ mod tests {
     #[test]
     fn xhr_open_transitions_to_opened_state() {
         let mut rt = fresh();
-        rt.execute(
-            "var xhr = new XMLHttpRequest(); xhr.open('GET', 'foo://bad')",
-        )
-        .unwrap();
+        rt.execute("var xhr = new XMLHttpRequest(); xhr.open('GET', 'foo://bad')")
+            .unwrap();
         assert_eq!(rt.execute("xhr.readyState").unwrap(), "1");
     }
 
@@ -1618,9 +1739,7 @@ mod tests {
     fn xhr_set_request_header_requires_opened_state() {
         let mut rt = fresh();
         let err = rt
-            .execute(
-                "var xhr = new XMLHttpRequest(); xhr.setRequestHeader('X', 'y')",
-            )
+            .execute("var xhr = new XMLHttpRequest(); xhr.setRequestHeader('X', 'y')")
             .unwrap_err();
         assert!(err.to_lowercase().contains("opened"), "got: {err}");
     }
@@ -1638,9 +1757,7 @@ mod tests {
     fn xhr_open_with_invalid_url_throws_synchronously() {
         let mut rt = fresh();
         let err = rt
-            .execute(
-                "var xhr = new XMLHttpRequest(); xhr.open('GET', 'foo://bad'); xhr.send()",
-            )
+            .execute("var xhr = new XMLHttpRequest(); xhr.open('GET', 'foo://bad'); xhr.send()")
             .unwrap_err();
         assert!(err.to_lowercase().contains("invalid url"), "got: {err}");
     }

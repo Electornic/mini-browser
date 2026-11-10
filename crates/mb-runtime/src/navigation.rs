@@ -267,10 +267,7 @@ mod tests {
         // phrase is intentionally dropped: most servers send terse or
         // marketing-flavoured reasons that confuse rather than help.
         assert_eq!(
-            describe_network_error(&net::NetworkError::HttpStatus(
-                404,
-                "Not Found".to_string()
-            )),
+            describe_network_error(&net::NetworkError::HttpStatus(404, "Not Found".to_string())),
             "http status 404"
         );
         assert_eq!(
@@ -328,8 +325,7 @@ mod tests {
         // would be parsed as markup and either render as garbage or
         // (worse) execute unintended elements. The wrapper has to
         // neutralise every meta char before injection.
-        let (html, _) =
-            text_document("<script>alert(1)</script>", "https://example.com/file.txt");
+        let (html, _) = text_document("<script>alert(1)</script>", "https://example.com/file.txt");
         assert!(html.contains("&lt;script&gt;"));
         assert!(html.contains("&lt;/script&gt;"));
         assert!(!html.contains("<script>"));
@@ -351,8 +347,7 @@ mod tests {
         // exotic ones can include `<` / `>` via percent-decoded smuggled
         // values. The display paragraph must escape them so the URL
         // shows as text, not as HTML.
-        let (html, _) =
-            text_document("body", "https://example.com/?a=1&b=<x>");
+        let (html, _) = text_document("body", "https://example.com/?a=1&b=<x>");
         assert!(html.contains("a=1&amp;b=&lt;x&gt;"));
     }
 
@@ -363,11 +358,7 @@ mod tests {
         // the wrapper failed to escape, a crafted server message could
         // inject DOM into the user's error page — a low-impact but
         // real XSS-shaped bug.
-        let (html, _) = error_document(
-            "<bad>",
-            "value & \"more\"",
-            "javascript:alert('x')",
-        );
+        let (html, _) = error_document("<bad>", "value & \"more\"", "javascript:alert('x')");
         assert!(html.contains("&lt;bad&gt;"));
         assert!(html.contains("value &amp; &quot;more&quot;"));
         assert!(html.contains("javascript:alert(&#39;x&#39;)"));

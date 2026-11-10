@@ -87,8 +87,7 @@ fn install_shared_font_system(font_data: &[Vec<u8>], macos_fallbacks: &[Vec<u8>]
     // visible glyph through swash again on the first frame after the
     // swap — a multi-hundred-ms first-paint cost on text-heavy pages.
     let new_hash = compute_font_hash(font_data, macos_fallbacks);
-    let last_hash_slot =
-        LAST_FONT_HASH.get_or_init(|| Mutex::new(None));
+    let last_hash_slot = LAST_FONT_HASH.get_or_init(|| Mutex::new(None));
     if let Ok(guard) = last_hash_slot.lock()
         && *guard == Some(new_hash)
         && SHARED_FONT_SYSTEM.get().is_some()

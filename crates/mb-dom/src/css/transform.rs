@@ -9,9 +9,7 @@ use super::error::{convert_basic_error_at, convert_error, token_error};
 use super::parse::parse_length_token;
 use super::{ParseError, TransformOp, Value};
 
-pub(super) fn parse_transform_value<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<Value, ParseError> {
+pub(super) fn parse_transform_value<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     let mut ops = Vec::new();
     loop {
         input.skip_whitespace();
@@ -32,9 +30,9 @@ pub(super) fn parse_transform_value<'i, 't>(
         let op = input
             .parse_nested_block(|inner| {
                 let result: Result<TransformOp, ParseError> = parse_transform_op(&func, inner);
-                result.map_err(|err| inner.new_custom_error(err))
+                result.map_err(cssparser::ParseError::custom)
             })
-            .map_err(|err| convert_error(err))?;
+            .map_err(convert_error)?;
         ops.push(op);
     }
     if ops.is_empty() {
@@ -46,9 +44,9 @@ pub(super) fn parse_transform_value<'i, 't>(
     Ok(Value::TransformList(ops))
 }
 
-fn parse_transform_op<'i, 't>(
+fn parse_transform_op<'i>(
     name: &str,
-    input: &mut CssParser<'i, 't>,
+    input: &mut CssParser<'i>,
 ) -> Result<TransformOp, ParseError> {
     match name {
         "translate" => {
@@ -116,7 +114,7 @@ fn parse_transform_op<'i, 't>(
     }
 }
 
-fn parse_angle_token<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<f32, ParseError> {
+fn parse_angle_token<'i>(input: &mut CssParser<'i>) -> Result<f32, ParseError> {
     input.skip_whitespace();
     let pos = input.position().byte_index();
     let token = input

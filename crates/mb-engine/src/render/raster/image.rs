@@ -37,7 +37,12 @@ pub(super) fn draw_image(pixmap: &mut Pixmap, image: &ImageCommand, transform: A
     };
     {
         let dst = tile.data_mut();
-        for (i, &pixel) in image.pixels.iter().take(image.source_width * image.source_height).enumerate() {
+        for (i, &pixel) in image
+            .pixels
+            .iter()
+            .take(image.source_width * image.source_height)
+            .enumerate()
+        {
             let off = i * 4;
             dst[off] = ((pixel >> 16) & 0xFF) as u8;
             dst[off + 1] = ((pixel >> 8) & 0xFF) as u8;

@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-cssparser = "0.36"
-html5ever = "0.38"
+cssparser = "0.38"
+html5ever = "0.40"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png"] }
-markup5ever_rcdom = "0.38"
+markup5ever_rcdom = "0.40"
 precomputed-hash = "0.1"
-resvg = { version = "0.47", default-features = false }
-selectors = "0.37"
+resvg = { version = "0.49", default-features = false }
+selectors = "0.42"
 url = "2"

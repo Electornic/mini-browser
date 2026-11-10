@@ -282,12 +282,7 @@ impl Document {
     /// direct child of `parent`. `new_child` is detached from its current
     /// location first, so the same node can be moved (including reordered
     /// among existing siblings) without ending up in two places.
-    pub fn insert_before(
-        &mut self,
-        parent: NodeId,
-        new_child: NodeId,
-        ref_child: NodeId,
-    ) -> bool {
+    pub fn insert_before(&mut self, parent: NodeId, new_child: NodeId, ref_child: NodeId) -> bool {
         if self.get(parent).is_none() || self.get(new_child).is_none() {
             return false;
         }
@@ -318,12 +313,7 @@ impl Document {
     /// On success `old_child`'s subtree is tombstoned; `new_child` is
     /// detached from its current location first. Returns `false` for stale
     /// ids or when `old_child` isn't a direct child of `parent`.
-    pub fn replace_child(
-        &mut self,
-        parent: NodeId,
-        new_child: NodeId,
-        old_child: NodeId,
-    ) -> bool {
+    pub fn replace_child(&mut self, parent: NodeId, new_child: NodeId, old_child: NodeId) -> bool {
         if self.get(parent).is_none() || self.get(new_child).is_none() {
             return false;
         }
@@ -607,7 +597,10 @@ mod tests {
         // Same tag + attributes, but no children and parent=None.
         let dup_data = doc.element_data(dup).unwrap();
         assert_eq!(dup_data.tag_name, "div");
-        assert_eq!(dup_data.attributes.get("id").map(|s| s.as_str()), Some("src"));
+        assert_eq!(
+            dup_data.attributes.get("id").map(|s| s.as_str()),
+            Some("src")
+        );
         let dup_node = doc.get(dup).unwrap();
         assert!(dup_node.children.is_empty());
         assert_eq!(dup_node.parent, None);

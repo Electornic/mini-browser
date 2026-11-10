@@ -20,8 +20,8 @@ fn main() {
 
     if let Err(error) = window::run(
         "mini-browser",
-         800,
-         600,
+        800,
+        600,
         |width, height, input, target, wake| {
             if !wake_registered {
                 browser.set_navigation_wake(wake.as_arc());
@@ -38,8 +38,9 @@ fn main() {
             }
 
             let frame = profile::Span::start("frame::total");
-            let commands =
-                profile::time_block("frame::display_list", || browser.display_list(width, height, input));
+            let commands = profile::time_block("frame::display_list", || {
+                browser.display_list(width, height, input)
+            });
             // Paint straight into the softbuffer surface to skip the
             // intermediate `Vec<u32>` allocation + memcpy that the
             // previous `rasterize` + caller-copy pattern produced

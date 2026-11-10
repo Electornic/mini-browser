@@ -7,12 +7,12 @@
 
 use cssparser::{Parser as CssParser, Token};
 
+use super::color::named_color;
 use super::error::{convert_basic_error_at, convert_error, token_error};
 use super::gradient::{parse_linear_gradient, parse_radial_gradient};
-use super::color::named_color;
 use super::{Color, ParseError, Unit, Value};
 
-pub(super) fn parse_value<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, ParseError> {
+pub(super) fn parse_value<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     input.skip_whitespace();
     let position = input.position();
     let token = input
@@ -60,10 +60,7 @@ pub(super) fn length_with_unit(value: f32, unit: &str) -> Value {
     }
 }
 
-fn parse_hex_color_str<'i, 't>(
-    hex: &str,
-    input: &CssParser<'i, 't>,
-) -> Result<Value, ParseError> {
+fn parse_hex_color_str<'i>(hex: &str, input: &CssParser<'i>) -> Result<Value, ParseError> {
     let (r, g, b) = match hex.len() {
         3 => {
             let chars: Vec<char> = hex.chars().collect();
@@ -103,10 +100,7 @@ fn expand_hex(ch: char) -> Result<u8, ParseError> {
 /// Drive a function-call value (`rgb()`, `linear-gradient()`, etc). The caller
 /// has already consumed the leading `Function(name)` token, so we open a nested
 /// block and route by name.
-fn parse_function<'i, 't>(
-    name: &str,
-    input: &mut CssParser<'i, 't>,
-) -> Result<Value, ParseError> {
+fn parse_function<'i>(name: &str, input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     let lower = name.to_ascii_lowercase();
     input
         .parse_nested_block(|inner| {
@@ -122,15 +116,12 @@ fn parse_function<'i, 't>(
                     format!("unsupported function '{other}'"),
                 )),
             };
-            result.map_err(|err| inner.new_custom_error(err))
+            result.map_err(cssparser::ParseError::custom)
         })
-        .map_err(|err| convert_error(err))
+        .map_err(convert_error)
 }
 
-fn parse_rgb_function<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-    has_alpha: bool,
-) -> Result<Value, ParseError> {
+fn parse_rgb_function<'i>(input: &mut CssParser<'i>, has_alpha: bool) -> Result<Value, ParseError> {
     let r = parse_color_byte(input)?;
     expect_token_comma(input)?;
     let g = parse_color_byte(input)?;
@@ -147,12 +138,12 @@ fn parse_rgb_function<'i, 't>(
     Ok(Value::Color(Color { r, g, b, a }))
 }
 
-fn parse_color_byte<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<u8, ParseError> {
+fn parse_color_byte<'i>(input: &mut CssParser<'i>) -> Result<u8, ParseError> {
     let value = parse_unsigned_number(input)?;
     Ok(value.clamp(0.0, 255.0).round() as u8)
 }
 
-fn parse_unsigned_number<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<f32, ParseError> {
+fn parse_unsigned_number<'i>(input: &mut CssParser<'i>) -> Result<f32, ParseError> {
     input.skip_whitespace();
     let pos = input.position().byte_index();
     let token = input
@@ -165,7 +156,7 @@ fn parse_unsigned_number<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<f32, P
     }
 }
 
-fn expect_token_comma<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<(), ParseError> {
+fn expect_token_comma<'i>(input: &mut CssParser<'i>) -> Result<(), ParseError> {
     input.skip_whitespace();
     let pos = input.position().byte_index();
     input
@@ -173,7 +164,7 @@ fn expect_token_comma<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<(), Parse
         .map_err(|err| convert_basic_error_at(pos, err))
 }
 
-fn parse_url_function<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, ParseError> {
+fn parse_url_function<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     // Inside the nested block opened by `Function("url")`. The token for the URL
     // is either an `UnquotedUrl` (cssparser already trimmed surrounding
     // whitespace) or a `QuotedString`. Anything else is a parse error.
@@ -202,7 +193,7 @@ fn parse_url_function<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, Pa
 /// lengths, keywords, even a nested `var()`). The value returned here is
 /// substituted later in `style::resolve_var` once cascade has gathered the
 /// `--*` declarations in scope.
-fn parse_var_function<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, ParseError> {
+fn parse_var_function<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     input.skip_whitespace();
     let pos = input.position().byte_index();
     let token = input
@@ -224,10 +215,7 @@ fn parse_var_function<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, Pa
     // Optional fallback after a comma. `try_parse` only commits on success so
     // we either consume the comma + parse the fallback, or leave the parser
     // positioned at the closing `)`.
-    let fallback = if input
-        .try_parse(|p| p.expect_comma())
-        .is_ok()
-    {
+    let fallback = if input.try_parse(|p| p.expect_comma()).is_ok() {
         Some(Box::new(parse_value(input)?))
     } else {
         None
@@ -240,9 +228,7 @@ fn parse_var_function<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<Value, Pa
 /// Parse a single number-or-length token where a leading sign is allowed. Used
 /// by transform / shadow / flex / border-radius — anywhere we want to accept
 /// `-10px` or `1.5` without the generic `parse_value` machinery.
-pub(super) fn parse_length_or_number<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<Value, ParseError> {
+pub(super) fn parse_length_or_number<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     input.skip_whitespace();
     let pos = input.position().byte_index();
     let token = input
@@ -251,13 +237,15 @@ pub(super) fn parse_length_or_number<'i, 't>(
         .clone();
     match token {
         Token::Number { value, .. } => Ok(Value::Number(value)),
-        Token::Percentage { unit_value, .. } => Ok(Value::Length(unit_value * 100.0, Unit::Percent)),
+        Token::Percentage { unit_value, .. } => {
+            Ok(Value::Length(unit_value * 100.0, Unit::Percent))
+        }
         Token::Dimension { value, unit, .. } => Ok(length_with_unit(value, unit.as_ref())),
         other => Err(token_error(input, &other, "expected a length or number")),
     }
 }
 
-pub(super) fn parse_length_token<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<f32, ParseError> {
+pub(super) fn parse_length_token<'i>(input: &mut CssParser<'i>) -> Result<f32, ParseError> {
     match parse_length_or_number(input)? {
         Value::Length(v, _) => Ok(v),
         Value::Number(v) => Ok(v),
@@ -271,7 +259,7 @@ pub(super) fn parse_length_token<'i, 't>(input: &mut CssParser<'i, 't>) -> Resul
 /// `true` if the next token can begin a numeric value (number, dimension,
 /// percentage). Used by shadow / flex parsers that greedily consume a variable
 /// number of leading lengths.
-pub(super) fn peek_starts_length<'i, 't>(input: &mut CssParser<'i, 't>) -> bool {
+pub(super) fn peek_starts_length<'i>(input: &mut CssParser<'i>) -> bool {
     let saved = input.state();
     let result = matches!(
         input.next(),

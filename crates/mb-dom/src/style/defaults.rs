@@ -85,7 +85,10 @@ pub(super) fn default_values(document: &Document, node_id: NodeId) -> PropertyMa
         // no explicit color is set, which lands at the dark text color
         // here for typical pages.
         "hr" => {
-            values.insert("border-top".into(), Value::Length(1.0, crate::css::Unit::Px));
+            values.insert(
+                "border-top".into(),
+                Value::Length(1.0, crate::css::Unit::Px),
+            );
             values.insert(
                 "border-color".into(),
                 Value::Color(crate::css::Color {
@@ -181,10 +184,7 @@ pub(super) fn default_values(document: &Document, node_id: NodeId) -> PropertyMa
             values.insert("text-align".into(), Value::Keyword("left".into()));
         }
         "thead" | "tbody" | "tfoot" => {
-            values.insert(
-                "display".into(),
-                Value::Keyword("table-row-group".into()),
-            );
+            values.insert("display".into(), Value::Keyword("table-row-group".into()));
         }
         "tr" => {
             values.insert("display".into(), Value::Keyword("table-row".into()));
@@ -306,14 +306,8 @@ pub(super) fn default_values(document: &Document, node_id: NodeId) -> PropertyMa
             values.insert("font-family".into(), Value::Keyword("monospace".into()));
         }
         "input" | "textarea" => {
-            values.insert(
-                "display".into(),
-                Value::Keyword("inline-block".into()),
-            );
-            values.insert(
-                "width".into(),
-                Value::Length(200.0, crate::css::Unit::Px),
-            );
+            values.insert("display".into(), Value::Keyword("inline-block".into()));
+            values.insert("width".into(), Value::Length(200.0, crate::css::Unit::Px));
             values.insert(
                 "background-color".into(),
                 Value::Color(crate::css::Color {
@@ -382,9 +376,7 @@ fn has_pre_ancestor(document: &Document, node_id: NodeId) -> bool {
     let mut current = document.get(node_id).and_then(|n| n.parent);
     while let Some(parent_id) = current {
         match document.get(parent_id).map(|n| &n.node_type) {
-            Some(NodeType::Element(element))
-                if element.tag_name.eq_ignore_ascii_case("pre") =>
-            {
+            Some(NodeType::Element(element)) if element.tag_name.eq_ignore_ascii_case("pre") => {
                 return true;
             }
             _ => {}

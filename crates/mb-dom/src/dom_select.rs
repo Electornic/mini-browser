@@ -295,13 +295,13 @@ impl<'a> selectors::Element for MatchingElement<'a> {
         let Some(node) = self.doc.get(self.id) else {
             return true;
         };
-        node.children.iter().all(|child| {
-            match self.doc.get(*child).map(|n| &n.node_type) {
+        node.children
+            .iter()
+            .all(|child| match self.doc.get(*child).map(|n| &n.node_type) {
                 Some(NodeType::Element(_)) => false,
                 Some(NodeType::Text(s)) => s.is_empty(),
                 None => true,
-            }
-        })
+            })
     }
 
     fn is_root(&self) -> bool {

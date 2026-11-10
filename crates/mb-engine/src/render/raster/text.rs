@@ -476,14 +476,7 @@ fn draw_text_bitmap(pixmap: &mut Pixmap, text: &TextCommand) {
     }
 }
 
-fn draw_bitmap_char(
-    pixmap: &mut Pixmap,
-    ch: char,
-    x: f32,
-    y: f32,
-    color: Color,
-    font_size: f32,
-) {
+fn draw_bitmap_char(pixmap: &mut Pixmap, ch: char, x: f32, y: f32, color: Color, font_size: f32) {
     let scale = (font_size / 8.0).max(1.0).round() as usize;
     let cursor_x = x.round() as i32;
     let baseline_y = y.round() as i32;

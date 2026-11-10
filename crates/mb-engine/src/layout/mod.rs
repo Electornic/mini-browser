@@ -6,11 +6,7 @@
 // types, `layout_tree` (the public entry) and the cross-cutting helpers every
 // algorithm needs (containing-block math, edge sizes, intrinsic sizes, …).
 
-use crate::{
-    css::Value,
-    dom::NodeType,
-    style::StyledNode,
-};
+use crate::{css::Value, dom::NodeType, style::StyledNode};
 
 mod absolute;
 mod block;
@@ -122,7 +118,6 @@ pub fn layout_tree(root: &StyledNode, viewport_width: f32) -> LayoutBox {
     layout_box
 }
 
-
 pub(super) fn box_styled_node(layout_box: &LayoutBox) -> Option<&StyledNode> {
     match &layout_box.box_type {
         BoxType::BlockNode(node)
@@ -188,7 +183,6 @@ pub(super) fn container_box_type(node: &StyledNode) -> BoxType {
         BoxType::BlockNode(node.clone())
     }
 }
-
 
 pub(super) fn child_height(node: &StyledNode, content_y: f32, child_cursor_y: f32) -> f32 {
     if matches!(node.node_type, NodeType::Text(_)) {
@@ -1526,10 +1520,7 @@ mod tests {
         // identity that left HN body looking 17% tighter than Chrome.
         // Tested via two equivalent declarations to lock both code paths
         // (explicit `normal` keyword and missing declaration).
-        let unset = styled_root(
-            r#"<p>Hello</p>"#,
-            r#"p { font-size: 20px; }"#,
-        );
+        let unset = styled_root(r#"<p>Hello</p>"#, r#"p { font-size: 20px; }"#);
         let normal = styled_root(
             r#"<p>Hello</p>"#,
             r#"p { font-size: 20px; line-height: normal; }"#,
@@ -2745,9 +2736,18 @@ mod tests {
         let c = &layout.children[3];
 
         assert_eq!((a.dimensions.content.x, a.dimensions.content.y), (0.0, 0.0));
-        assert_eq!((b.dimensions.content.x, b.dimensions.content.y), (50.0, 0.0));
-        assert_eq!((first.dimensions.content.x, first.dimensions.content.y), (0.0, 30.0));
-        assert_eq!((c.dimensions.content.x, c.dimensions.content.y), (50.0, 30.0));
+        assert_eq!(
+            (b.dimensions.content.x, b.dimensions.content.y),
+            (50.0, 0.0)
+        );
+        assert_eq!(
+            (first.dimensions.content.x, first.dimensions.content.y),
+            (0.0, 30.0)
+        );
+        assert_eq!(
+            (c.dimensions.content.x, c.dimensions.content.y),
+            (50.0, 30.0)
+        );
     }
 
     #[test]
@@ -2911,10 +2911,7 @@ mod tests {
         // `white-space: pre` opts out of the collapse — newlines, tabs,
         // and runs of spaces stay verbatim, so `<pre>` source can carry
         // ASCII art / code samples without the renderer eating gaps.
-        let styled = styled_root(
-            r#"<pre>x</pre>"#,
-            r#"pre { white-space: pre; }"#,
-        );
+        let styled = styled_root(r#"<pre>x</pre>"#, r#"pre { white-space: pre; }"#);
         assert_eq!(
             super::collapsed_text(&styled, "Hello\n  world"),
             "Hello\n  world"

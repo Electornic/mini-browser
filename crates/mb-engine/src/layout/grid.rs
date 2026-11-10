@@ -6,11 +6,11 @@ use crate::{
     style::StyledNode,
 };
 
+use super::inline::{layout_inline_block_node, layout_inline_or_inline_block};
 use super::{
     LayoutBox, is_display_none, is_layout_whitespace_text, is_out_of_flow, length_value,
     outer_rect, shift_layout_subtree,
 };
-use super::inline::{layout_inline_block_node, layout_inline_or_inline_block};
 
 pub(super) fn is_grid_container(node: &StyledNode) -> bool {
     matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "grid")
@@ -23,7 +23,6 @@ struct GridArea {
     col_start: usize,
     col_end: usize, // exclusive
 }
-
 
 #[derive(Debug, Clone, Copy)]
 struct AxisHint {
@@ -146,8 +145,7 @@ pub(super) fn layout_grid_children<'a>(
             let span_width: f32 = columns[area.col_start..area.col_end.min(columns.len())]
                 .iter()
                 .sum();
-            let edges =
-                outer_rect(&boxes[box_idx]).width - boxes[box_idx].dimensions.content.width;
+            let edges = outer_rect(&boxes[box_idx]).width - boxes[box_idx].dimensions.content.width;
             let target = (span_width - edges).max(0.0);
             if boxes[box_idx].dimensions.content.width < target {
                 boxes[box_idx].dimensions.content.width = target;
@@ -202,8 +200,8 @@ pub(super) fn layout_grid_children<'a>(
             let span_height: f32 = row_heights[area.row_start..area.row_end.min(row_heights.len())]
                 .iter()
                 .sum();
-            let edges = outer_rect(&boxes[box_idx]).height
-                - boxes[box_idx].dimensions.content.height;
+            let edges =
+                outer_rect(&boxes[box_idx]).height - boxes[box_idx].dimensions.content.height;
             let target = (span_height - edges).max(0.0);
             if boxes[box_idx].dimensions.content.height < target {
                 boxes[box_idx].dimensions.content.height = target;
@@ -294,13 +292,11 @@ fn axis_hint_from(value: Option<&Value>) -> AxisHint {
     }
 }
 
-
 #[derive(Debug)]
 struct Occupancy {
     cells: Vec<Vec<bool>>,
     n_cols: usize,
 }
-
 
 impl Occupancy {
     fn new(n_cols: usize) -> Self {

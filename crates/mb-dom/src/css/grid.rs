@@ -9,8 +9,8 @@ use cssparser::{Parser as CssParser, Token};
 use super::error::{convert_basic_error_at, token_error};
 use super::{GridLine, GridPlacement, ParseError, TrackSize, Unit, Value};
 
-pub(super) fn parse_grid_template_areas<'i, 't>(
-    input: &mut CssParser<'i, 't>,
+pub(super) fn parse_grid_template_areas<'i>(
+    input: &mut CssParser<'i>,
 ) -> Result<Value, ParseError> {
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
     loop {
@@ -46,9 +46,7 @@ pub(super) fn parse_grid_template_areas<'i, 't>(
     Ok(Value::TemplateAreas(rows))
 }
 
-pub(super) fn parse_grid_placement<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<Value, ParseError> {
+pub(super) fn parse_grid_placement<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     input.skip_whitespace();
     let start = parse_grid_line(input)?;
     input.skip_whitespace();
@@ -61,7 +59,7 @@ pub(super) fn parse_grid_placement<'i, 't>(
     Ok(Value::GridPlacement(GridPlacement { start, end }))
 }
 
-fn parse_grid_line<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<GridLine, ParseError> {
+fn parse_grid_line<'i>(input: &mut CssParser<'i>) -> Result<GridLine, ParseError> {
     let pos = input.position().byte_index();
     let token = input
         .next()
@@ -104,9 +102,7 @@ fn parse_grid_line<'i, 't>(input: &mut CssParser<'i, 't>) -> Result<GridLine, Pa
     }
 }
 
-fn parse_grid_line_integer<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<u32, ParseError> {
+fn parse_grid_line_integer<'i>(input: &mut CssParser<'i>) -> Result<u32, ParseError> {
     let pos = input.position().byte_index();
     let token = input
         .next()
@@ -114,17 +110,14 @@ fn parse_grid_line_integer<'i, 't>(
         .clone();
     match token {
         Token::Number {
-            int_value: Some(n),
-            ..
+            int_value: Some(n), ..
         } if n >= 0 => Ok(n as u32),
         Token::Number { value, .. } if value >= 0.0 => Ok(value as u32),
         other => Err(token_error(input, &other, "invalid grid line integer")),
     }
 }
 
-pub(super) fn parse_grid_track_list<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<Value, ParseError> {
+pub(super) fn parse_grid_track_list<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     let mut tracks = Vec::new();
     loop {
         input.skip_whitespace();
@@ -143,9 +136,7 @@ pub(super) fn parse_grid_track_list<'i, 't>(
     Ok(Value::TrackList(tracks))
 }
 
-fn parse_grid_track_size<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<TrackSize, ParseError> {
+fn parse_grid_track_size<'i>(input: &mut CssParser<'i>) -> Result<TrackSize, ParseError> {
     let pos = input.position().byte_index();
     let token = input
         .next()

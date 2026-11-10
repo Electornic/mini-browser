@@ -60,8 +60,7 @@ fn fill_box_shadow_aligned(pixmap: &mut Pixmap, shadow: &ShadowCommand, blur: f3
     // farther than `blur` from the rect edge has zero coverage.
     let x_start = (shadow.rect.x - blur).max(0.0).floor() as usize;
     let y_start = (shadow.rect.y - blur).max(0.0).floor() as usize;
-    let x_end =
-        (((shadow.rect.x + shadow.rect.width + blur).ceil()).max(0.0) as usize).min(width);
+    let x_end = (((shadow.rect.x + shadow.rect.width + blur).ceil()).max(0.0) as usize).min(width);
     let y_end =
         (((shadow.rect.y + shadow.rect.height + blur).ceil()).max(0.0) as usize).min(height);
 

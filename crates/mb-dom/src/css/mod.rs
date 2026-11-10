@@ -17,9 +17,7 @@ mod transform;
 use grid::{parse_grid_placement, parse_grid_template_areas, parse_grid_track_list};
 use parse::parse_value;
 use selector::SelectorParserImpl;
-pub use selector::{
-    CssString, MiniBrowserSelectorImpl, NonTSPseudoClass, PseudoElement, Selector,
-};
+pub use selector::{CssString, MiniBrowserSelectorImpl, NonTSPseudoClass, PseudoElement, Selector};
 use shadow::{parse_box_shadow_value, parse_text_shadow_value};
 use shorthand::{
     parse_background_position, parse_background_shorthand, parse_border_radius_shorthand,
@@ -29,7 +27,7 @@ use transform::parse_transform_value;
 
 use cssparser::{
     AtRuleParser as CssAtRuleParser, CowRcStr, ParseError as CssParseError, Parser as CssParser,
-    ParserInput, ParserState, QualifiedRuleParser as CssQualifiedRuleParser, StyleSheetParser,
+    ParserState, QualifiedRuleParser as CssQualifiedRuleParser, StyleSheetParser,
 };
 use selectors::parser::{ParseRelative, SelectorList as SelectorsSelectorList};
 
@@ -271,8 +269,7 @@ impl ParseError {
 }
 
 pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
-    let mut input = ParserInput::new(source);
-    let mut parser = CssParser::new(&mut input);
+    let mut parser = CssParser::new(source);
     let mut handler = StylesheetHandler;
     let iter = StyleSheetParser::new(&mut parser, &mut handler);
     let mut rules = Vec::new();
@@ -295,8 +292,7 @@ pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
 /// tolerated; the offending entry is dropped and the rest continue,
 /// matching the stylesheet parser's recovery behaviour.
 pub fn parse_inline_style(source: &str) -> Vec<Declaration> {
-    let mut input = ParserInput::new(source);
-    let mut parser = CssParser::new(&mut input);
+    let mut parser = CssParser::new(source);
     parse_declaration_block(&mut parser).unwrap_or_default()
 }
 
@@ -306,13 +302,12 @@ pub fn parse_inline_style(source: &str) -> Vec<Declaration> {
 /// Trailing input after the selector is rejected so callers can't smuggle
 /// declarations through the same entry point.
 pub fn parse_selector(input: &str) -> Result<Selector, ParseError> {
-    let mut parser_input = ParserInput::new(input);
-    let mut parser = CssParser::new(&mut parser_input);
+    let mut parser = CssParser::new(input);
     let parsed = parser
         .parse_entirely(|input| {
             SelectorsSelectorList::parse(&SelectorParserImpl, input, ParseRelative::No)
         })
-        .map_err(|err| convert_selector_error(err))?;
+        .map_err(convert_selector_error)?;
     Ok(Selector(parsed))
 }
 
@@ -321,10 +316,10 @@ pub fn parse_selector(input: &str) -> Result<Selector, ParseError> {
 /// it carries `Token<'_>` borrows, but the message string is enough for
 /// the JS bridge's `SyntaxError` payload and the legacy stylesheet
 /// recovery path drops parse failures wholesale anyway.
-fn convert_selector_error<'i>(
-    err: CssParseError<'i, selectors::parser::SelectorParseErrorKind<'i>>,
+fn convert_selector_error(
+    err: CssParseError<selectors::parser::SelectorParseErrorKind>,
 ) -> ParseError {
-    let position = err.location.line as usize;
+    let position = 0; // cssparser 0.38 errors no longer carry a location
     let message = format!("{:?}", err.kind);
     ParseError::new(position, message)
 }
@@ -354,8 +349,8 @@ impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler {
 
     fn parse_prelude<'t>(
         &mut self,
-        input: &mut CssParser<'i, 't>,
-    ) -> Result<Self::Prelude, CssParseError<'i, Self::Error>> {
+        input: &mut CssParser<'i>,
+    ) -> Result<Self::Prelude, CssParseError<Self::Error>> {
         // Delegate the whole comma-separated selector grammar to the
         // selectors crate — it handles compound selectors, attribute
         // selectors, the descendant/child/sibling combinators,
@@ -365,7 +360,7 @@ impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler {
         // matching machinery for them yet.
         match SelectorsSelectorList::parse(&SelectorParserImpl, input, ParseRelative::No) {
             Ok(list) => Ok(RulePrelude(Selector(list))),
-            Err(err) => Err(input.new_custom_error(convert_selector_error(err))),
+            Err(err) => Err(CssParseError::custom(convert_selector_error(err))),
         }
     }
 
@@ -373,10 +368,9 @@ impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler {
         &mut self,
         prelude: Self::Prelude,
         _start: &ParserState,
-        input: &mut CssParser<'i, 't>,
-    ) -> Result<Self::QualifiedRule, CssParseError<'i, Self::Error>> {
-        let declarations =
-            parse_declaration_block(input).map_err(|err| input.new_custom_error(err))?;
+        input: &mut CssParser<'i>,
+    ) -> Result<Self::QualifiedRule, CssParseError<Self::Error>> {
+        let declarations = parse_declaration_block(input).map_err(CssParseError::custom)?;
         Ok(vec![Rule {
             selectors: prelude.0,
             declarations,
@@ -403,8 +397,8 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
     fn parse_prelude<'t>(
         &mut self,
         name: cssparser::CowRcStr<'i>,
-        input: &mut CssParser<'i, 't>,
-    ) -> Result<Self::Prelude, CssParseError<'i, Self::Error>> {
+        input: &mut CssParser<'i>,
+    ) -> Result<Self::Prelude, CssParseError<Self::Error>> {
         // `@media` rules: drop the condition (we always match) and let
         // `parse_block` recurse into the body. Real evaluation of
         // `(min-width: 768px)` etc. against the viewport is a follow-up;
@@ -428,8 +422,8 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
         &mut self,
         prelude: Self::Prelude,
         _start: &ParserState,
-        input: &mut CssParser<'i, 't>,
-    ) -> Result<Self::AtRule, CssParseError<'i, Self::Error>> {
+        input: &mut CssParser<'i>,
+    ) -> Result<Self::AtRule, CssParseError<Self::Error>> {
         match prelude {
             AtRulePrelude::Media => {
                 // Recurse into the @media body using the same handler.
@@ -467,9 +461,7 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
 /// declarations are tolerated: the offending entry is dropped and the next one
 /// continues. `RuleBodyParser` already scans past the next semicolon on error
 /// so the tolerant behaviour matches the original parser.
-fn parse_declaration_block<'i, 't>(
-    input: &mut CssParser<'i, 't>,
-) -> Result<Vec<Declaration>, ParseError> {
+fn parse_declaration_block<'i>(input: &mut CssParser<'i>) -> Result<Vec<Declaration>, ParseError> {
     let mut declarations = Vec::new();
     let mut handler = DeclHandler;
     let iter = cssparser::RuleBodyParser::new(input, &mut handler);
@@ -488,9 +480,9 @@ impl<'i> cssparser::DeclarationParser<'i> for DeclHandler {
     fn parse_value<'t>(
         &mut self,
         name: CowRcStr<'i>,
-        input: &mut CssParser<'i, 't>,
+        input: &mut CssParser<'i>,
         _decl_start: &ParserState,
-    ) -> Result<Self::Declaration, CssParseError<'i, Self::Error>> {
+    ) -> Result<Self::Declaration, CssParseError<Self::Error>> {
         // Dispatch by property name to mirror the old `parse_declaration`. The
         // value-shape helpers each consume their delimited slice end-to-end so
         // `parse_value` itself just routes by name.
@@ -498,7 +490,7 @@ impl<'i> cssparser::DeclarationParser<'i> for DeclHandler {
         let result = parse_declaration_value(&name, input);
         match result {
             Ok(decls) => Ok(decls),
-            Err(err) => Err(input.new_custom_error(err)),
+            Err(err) => Err(CssParseError::custom(err)),
         }
     }
 }
@@ -528,9 +520,9 @@ impl<'i> cssparser::RuleBodyItemParser<'i, Vec<Declaration>, CssError> for DeclH
 /// Per-property dispatch: returns the longhand declarations contributed by
 /// a single source declaration. Shorthands like `border-radius` and `flex`
 /// expand to several entries.
-fn parse_declaration_value<'i, 't>(
+fn parse_declaration_value<'i>(
     name: &str,
-    input: &mut CssParser<'i, 't>,
+    input: &mut CssParser<'i>,
 ) -> Result<Vec<Declaration>, ParseError> {
     if name == "border-radius" {
         return parse_border_radius_shorthand(name, input);
@@ -687,10 +679,7 @@ mod tests {
             element_unit + class_unit
         );
         // .btn:active = 1 class + 1 pseudo-class.
-        assert_eq!(
-            stylesheet.rules[1].selectors.specificity(),
-            2 * class_unit
-        );
+        assert_eq!(stylesheet.rules[1].selectors.specificity(), 2 * class_unit);
     }
 
     #[test]
@@ -745,7 +734,10 @@ mod tests {
         assert_eq!(stylesheet.rules.len(), 1);
         // Three tag selectors → 3 element units of specificity.
         let element_unit = parse("a { }").unwrap().rules[0].selectors.specificity();
-        assert_eq!(stylesheet.rules[0].selectors.specificity(), 3 * element_unit);
+        assert_eq!(
+            stylesheet.rules[0].selectors.specificity(),
+            3 * element_unit
+        );
     }
 
     #[test]
@@ -953,19 +945,13 @@ mod tests {
         };
         assert_eq!(by_name("width").value, Value::Length(50.0, Unit::Percent));
         assert_eq!(by_name("padding-top").value, Value::Length(1.5, Unit::Em));
-        assert_eq!(
-            by_name("padding-right").value,
-            Value::Length(1.5, Unit::Em)
-        );
+        assert_eq!(by_name("padding-right").value, Value::Length(1.5, Unit::Em));
         assert_eq!(
             by_name("padding-bottom").value,
             Value::Length(1.5, Unit::Em)
         );
         assert_eq!(by_name("padding-left").value, Value::Length(1.5, Unit::Em));
-        assert_eq!(
-            by_name("font-size").value,
-            Value::Length(0.875, Unit::Rem)
-        );
+        assert_eq!(by_name("font-size").value, Value::Length(0.875, Unit::Rem));
     }
 
     #[test]
@@ -1338,14 +1324,22 @@ mod tests {
 
     #[test]
     fn grid_template_areas_parses_quoted_rows_into_cell_map() {
-        let stylesheet =
-            parse(r#".g { grid-template-areas: "h h h" "s m m" "f f f"; }"#).unwrap();
+        let stylesheet = parse(r#".g { grid-template-areas: "h h h" "s m m" "f f f"; }"#).unwrap();
         match &stylesheet.rules[0].declarations[0].value {
             Value::TemplateAreas(rows) => {
                 assert_eq!(rows.len(), 3);
-                assert_eq!(rows[0], vec![Some("h".into()), Some("h".into()), Some("h".into())]);
-                assert_eq!(rows[1], vec![Some("s".into()), Some("m".into()), Some("m".into())]);
-                assert_eq!(rows[2], vec![Some("f".into()), Some("f".into()), Some("f".into())]);
+                assert_eq!(
+                    rows[0],
+                    vec![Some("h".into()), Some("h".into()), Some("h".into())]
+                );
+                assert_eq!(
+                    rows[1],
+                    vec![Some("s".into()), Some("m".into()), Some("m".into())]
+                );
+                assert_eq!(
+                    rows[2],
+                    vec![Some("f".into()), Some("f".into()), Some("f".into())]
+                );
             }
             other => panic!("expected TemplateAreas, got {other:?}"),
         }
@@ -1431,17 +1425,13 @@ mod tests {
         // got dropped, which in turn meant the resource fetcher and the
         // painter never saw the URL. The longhand expansion is what
         // lands the value where the rest of the pipeline expects it.
-        let stylesheet =
-            parse(r#".vote { background: url("grayarrow.gif") no-repeat; }"#).unwrap();
+        let stylesheet = parse(r#".vote { background: url("grayarrow.gif") no-repeat; }"#).unwrap();
         let decls = &stylesheet.rules[0].declarations;
         let image = decls
             .iter()
             .find(|d| d.name == "background-image")
             .expect("image longhand missing");
-        assert_eq!(
-            image.value,
-            Value::ImageUrl("grayarrow.gif".to_string()),
-        );
+        assert_eq!(image.value, Value::ImageUrl("grayarrow.gif".to_string()),);
         // The trailing `no-repeat` keyword is silently discarded — the
         // toy renderer only paints non-tiled bg images today, so
         // splitting it into its own longhand would be dead plumbing
@@ -1513,8 +1503,14 @@ mod tests {
         // time without reparsing the shorthand.
         let stylesheet = parse(".vote { background-position: -10px -20px; }").unwrap();
         let decls = &stylesheet.rules[0].declarations;
-        let x = decls.iter().find(|d| d.name == "background-position-x").expect("x longhand");
-        let y = decls.iter().find(|d| d.name == "background-position-y").expect("y longhand");
+        let x = decls
+            .iter()
+            .find(|d| d.name == "background-position-x")
+            .expect("x longhand");
+        let y = decls
+            .iter()
+            .find(|d| d.name == "background-position-y")
+            .expect("y longhand");
         assert_eq!(x.value, Value::Length(-10.0, Unit::Px));
         assert_eq!(y.value, Value::Length(-20.0, Unit::Px));
     }
@@ -1526,8 +1522,14 @@ mod tests {
         // `background-position: 50%` shouldn't error out the cascade.
         let stylesheet = parse(".vote { background-position: 5px; }").unwrap();
         let decls = &stylesheet.rules[0].declarations;
-        let x = decls.iter().find(|d| d.name == "background-position-x").expect("x longhand");
-        let y = decls.iter().find(|d| d.name == "background-position-y").expect("y longhand");
+        let x = decls
+            .iter()
+            .find(|d| d.name == "background-position-x")
+            .expect("x longhand");
+        let y = decls
+            .iter()
+            .find(|d| d.name == "background-position-y")
+            .expect("y longhand");
         assert_eq!(x.value, Value::Length(5.0, Unit::Px));
         assert_eq!(y.value, Value::Length(0.0, Unit::Px));
     }

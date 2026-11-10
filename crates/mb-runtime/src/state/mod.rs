@@ -41,16 +41,15 @@ impl std::fmt::Debug for NavigationWake {
 
 use crate::{
     chrome::{CHROME_HEIGHT, ChromeAction, ChromeState, chrome_commands},
-    css,
+    css, dom,
+    dom::{NodeId, NodeType},
+    html, input, js, layout,
+    navigation::{LoadedDocument, load_remote_document},
+    net, profile, render, resource, style,
     view::{
         DocumentView, build_document_view, caret_commands_for_focused_input, compute_hovered_hit,
         document_height, link_decoration_commands,
     },
-    dom,
-    dom::{NodeId, NodeType},
-    html, js, layout,
-    navigation::{LoadedDocument, load_remote_document},
-    input, net, profile, render, resource, style,
 };
 
 #[derive(Debug)]
@@ -204,7 +203,9 @@ enum PendingKind {
     /// so the user can `back` out of a broken navigation. The string
     /// is the title shown on the error page when the load fails —
     /// "load failed" for URL-bar entries, "link failed" for clicks.
-    Navigate { error_title: &'static str },
+    Navigate {
+        error_title: &'static str,
+    },
 }
 
 // Snapshot of the inputs `build_document_view` was last called with, paired
@@ -407,7 +408,8 @@ impl BrowserState {
         // advance readyState and fire the boot events SPA bootstraps wait
         // on. `DOMContentLoaded` fires on document, `load` on window.
         self.js.set_ready_state("interactive");
-        self.js.dispatch_global_event("document", "DOMContentLoaded");
+        self.js
+            .dispatch_global_event("document", "DOMContentLoaded");
         self.js.set_ready_state("complete");
         self.js.dispatch_global_event("window", "load");
     }
@@ -450,19 +452,18 @@ impl BrowserState {
         // below. Doing it before `clicked_link` matters because link
         // navigation rebuilds the JS runtime — handlers must run against
         // the page they were registered on, not the next one.
-        let hover_hit =
-            compute_hovered_hit(input, &document_view.layout_root, self.scroll_offset);
+        let hover_hit = compute_hovered_hit(input, &document_view.layout_root, self.scroll_offset);
 
         // Page-area clicks fire JS click handlers on the live page first,
         // then fall through to link navigation unless a handler called
         // `event.preventDefault()`. Dispatch returns true in that case;
         // the toy's first "JS suppresses a default browser action" path.
         let click_in_page = input.left_mouse_pressed
-            && input.mouse_position.is_some_and(|(_, y)| y >= CHROME_HEIGHT);
+            && input
+                .mouse_position
+                .is_some_and(|(_, y)| y >= CHROME_HEIGHT);
         let click_node_id = hover_hit.as_ref().and_then(|hit| hit.node_id);
-        let click_default_prevented = if click_in_page
-            && let Some(node_id) = click_node_id
-        {
+        let click_default_prevented = if click_in_page && let Some(node_id) = click_node_id {
             self.js.dispatch_event(node_id, "click")
         } else {
             false
@@ -473,9 +474,7 @@ impl BrowserState {
         // default action below can submit it. We do the resolution
         // here (before the borrow-mut path of navigation) but defer
         // the actual submit until we know preventDefault wasn't called.
-        let submit_form_id = if click_in_page
-            && let Some(id) = click_node_id
-        {
+        let submit_form_id = if click_in_page && let Some(id) = click_node_id {
             let document = self.parsed_document.borrow();
             find_default_submit_button(&document, id)
                 .and_then(|btn_id| find_enclosing_form(&document, btn_id))
@@ -491,9 +490,7 @@ impl BrowserState {
         if !click_default_prevented {
             if let Some(form_id) = submit_form_id {
                 self.try_submit_form(form_id);
-            } else if let Some(link_target) =
-                self.clicked_link(input, &document_view.links)
-            {
+            } else if let Some(link_target) = self.clicked_link(input, &document_view.links) {
                 let href = link_target.href.clone();
                 self.navigate_to_href(&href);
             }
@@ -832,9 +829,10 @@ impl BrowserState {
         {
             return cache.node_id;
         }
-        let resolved = self.focused_dom_path.as_deref().and_then(|path| {
-            node_id_for_dom_path(&self.parsed_document.borrow(), path)
-        });
+        let resolved = self
+            .focused_dom_path
+            .as_deref()
+            .and_then(|path| node_id_for_dom_path(&self.parsed_document.borrow(), path));
         *self.focused_node_cache.borrow_mut() = Some(FocusCache {
             path: self.focused_dom_path.clone(),
             revision,
@@ -1113,10 +1111,7 @@ fn find_default_submit_button(document: &dom::Document, start: NodeId) -> Option
         if let NodeType::Element(elem) = &node.node_type
             && elem.tag_name == "button"
         {
-            let button_type = elem
-                .attributes
-                .get("type")
-                .map(|s| s.to_ascii_lowercase());
+            let button_type = elem.attributes.get("type").map(|s| s.to_ascii_lowercase());
             return match button_type.as_deref() {
                 Some("button") | Some("reset") => None,
                 _ => Some(id),
@@ -1156,11 +1151,7 @@ fn collect_form_data(document: &dom::Document, form_id: NodeId) -> Vec<(String, 
     out
 }
 
-fn walk_form_subtree(
-    document: &dom::Document,
-    node_id: NodeId,
-    out: &mut Vec<(String, String)>,
-) {
+fn walk_form_subtree(document: &dom::Document, node_id: NodeId, out: &mut Vec<(String, String)>) {
     let Some(node) = document.get(node_id) else {
         return;
     };
@@ -1583,9 +1574,8 @@ mod tests {
         // Tier 1 #14: a `<style>` block in the document must feed the
         // cascade. Before this gap was closed, only external `<link>` CSS
         // reached the styled tree, so even a static `<style>` was ignored.
-        let mut state = make_state(
-            "<style>#t { background-color: #010203; }</style><div id=\"t\">x</div>",
-        );
+        let mut state =
+            make_state("<style>#t { background-color: #010203; }</style><div id=\"t\">x</div>");
         let input = input::WindowInput::default();
         let cmds = state.display_list(800, 600, &input);
         assert!(
@@ -1634,7 +1624,10 @@ mod tests {
             .unwrap()
             .parse()
             .expect("offsetWidth should be numeric");
-        assert!(w > 100.0, "block div should fill most of the width, got {w}");
+        assert!(
+            w > 100.0,
+            "block div should fill most of the width, got {w}"
+        );
         let h: f64 = state
             .js
             .execute("document.getElementById('d').getBoundingClientRect().height")
@@ -1711,11 +1704,7 @@ mod tests {
         let input = input::WindowInput::default();
         let _ = state.display_list(800, 600, &input);
         assert!(state.cached_view.is_some());
-        state.install_document(
-            "<p>new</p>".to_string(),
-            String::new(),
-            HashMap::new(),
-        );
+        state.install_document("<p>new</p>".to_string(), String::new(), HashMap::new());
         assert!(state.cached_view.is_none());
     }
 

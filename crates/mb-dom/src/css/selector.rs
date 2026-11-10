@@ -10,7 +10,7 @@
 use std::borrow::Borrow;
 use std::fmt;
 
-use cssparser::{CowRcStr, ParseError as CssParseError, ToCss};
+use cssparser::{ParseError as CssParseError, ToCss};
 use precomputed_hash::PrecomputedHash;
 use selectors::parser::SelectorList as SelectorsSelectorList;
 
@@ -109,8 +109,6 @@ impl ToCss for NonTSPseudoClass {
 }
 
 impl selectors::parser::NonTSPseudoClass for NonTSPseudoClass {
-    type Impl = MiniBrowserSelectorImpl;
-
     fn is_active_or_hover(&self) -> bool {
         matches!(self, NonTSPseudoClass::Active | NonTSPseudoClass::Hover)
     }
@@ -137,9 +135,7 @@ impl ToCss for PseudoElement {
     }
 }
 
-impl selectors::parser::PseudoElement for PseudoElement {
-    type Impl = MiniBrowserSelectorImpl;
-}
+impl selectors::parser::PseudoElement for PseudoElement {}
 
 impl selectors::SelectorImpl for MiniBrowserSelectorImpl {
     type ExtraMatchingData<'a> = ();
@@ -200,26 +196,25 @@ pub(super) struct SelectorParserImpl;
 
 impl<'i> selectors::parser::Parser<'i> for SelectorParserImpl {
     type Impl = MiniBrowserSelectorImpl;
-    type Error = selectors::parser::SelectorParseErrorKind<'i>;
+    type Error = selectors::parser::SelectorParseErrorKind;
 
     fn parse_non_ts_pseudo_class(
         &self,
-        location: cssparser::SourceLocation,
-        name: CowRcStr<'i>,
-    ) -> Result<NonTSPseudoClass, CssParseError<'i, Self::Error>> {
+        name: &str,
+    ) -> Result<NonTSPseudoClass, CssParseError<Self::Error>> {
         // Case-insensitive dispatch over the five non-tree-structural
         // pseudo-classes we wire through to `MatchingElement`. Anything
         // else parses to an unsupported-pseudo error which the surrounding
         // rule iterator (in `parse`) catches by skipping the rule.
-        let lc = name.as_ref().to_ascii_lowercase();
+        let lc = name.to_ascii_lowercase();
         match lc.as_str() {
             "hover" => Ok(NonTSPseudoClass::Hover),
             "focus" => Ok(NonTSPseudoClass::Focus),
             "active" => Ok(NonTSPseudoClass::Active),
             "link" => Ok(NonTSPseudoClass::Link),
             "visited" => Ok(NonTSPseudoClass::Visited),
-            _ => Err(location.new_custom_error(
-                selectors::parser::SelectorParseErrorKind::UnsupportedPseudoClassOrElement(name),
+            _ => Err(CssParseError::custom(
+                selectors::parser::SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
             )),
         }
     }

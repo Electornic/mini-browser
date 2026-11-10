@@ -18,12 +18,12 @@
 
 use crate::{css::Value, dom::NodeType, style::StyledNode};
 
-use super::{
-    Dimensions, LayoutBox, Rect, container_box_type, edge_sizes, intrinsic_height,
-    is_display_none, is_layout_whitespace_text, length_value, outer_rect,
-};
 use super::block::layout_node;
 use super::inline::layout_inline_block_node;
+use super::{
+    Dimensions, LayoutBox, Rect, container_box_type, edge_sizes, intrinsic_height, is_display_none,
+    is_layout_whitespace_text, length_value, outer_rect,
+};
 
 // Per-table call counters/accumulators. thread_local because layout is
 // driven from a single thread; making them globals would conflate
@@ -128,12 +128,10 @@ pub(super) fn layout_table_children(
     // moves into this scope, so we precompute it here too — needed for the
     // 1-column shortcut below. It mirrors the math at the top of Pass D
     // exactly; if Pass D's formula changes, this needs to follow.
-    let _bs_for_shortcut =
-        length_value(container, "border-spacing", content_width).unwrap_or(0.0);
+    let _bs_for_shortcut = length_value(container, "border-spacing", content_width).unwrap_or(0.0);
     let _gap_for_shortcut = (column_count as f32 + 1.0) * _bs_for_shortcut;
     let _available_for_shortcut = (content_width - _gap_for_shortcut).max(0.0);
-    let table_has_explicit_width =
-        matches!(container.value("width"), Some(Value::Length(..)));
+    let table_has_explicit_width = matches!(container.value("width"), Some(Value::Length(..)));
     // Pass C shortcut: a 1-column table with an explicit `width` always
     // resolves its single column to `available_for_cells` via Pass D's
     // `must_shrink || want_grow` branch — the natural max-content from
@@ -232,12 +230,8 @@ pub(super) fn layout_table_children(
             let cell_outer_width =
                 (column_x_starts[col_idx + span] - column_x_starts[col_idx] - border_spacing)
                     .max(0.0);
-            let cell_box = layout_table_cell(
-                cell,
-                column_x_starts[col_idx],
-                cursor_y,
-                cell_outer_width,
-            );
+            let cell_box =
+                layout_table_cell(cell, column_x_starts[col_idx], cursor_y, cell_outer_width);
             let outer_h = outer_rect(&cell_box).height;
             if outer_h > row_outer_height {
                 row_outer_height = outer_h;
@@ -345,12 +339,8 @@ fn layout_table_cell(cell: &StyledNode, x: f32, y: f32, cell_outer_width: f32) -
     let margin = edge_sizes(cell, "margin", cell_outer_width);
     let padding = edge_sizes(cell, "padding", cell_outer_width);
     let border = edge_sizes(cell, "border", cell_outer_width);
-    let horizontal_non_content = margin.left
-        + margin.right
-        + border.left
-        + border.right
-        + padding.left
-        + padding.right;
+    let horizontal_non_content =
+        margin.left + margin.right + border.left + border.right + padding.left + padding.right;
     let content_width = (cell_outer_width - horizontal_non_content).max(0.0);
     let content_x = x + margin.left + border.left + padding.left;
     let content_y = y + margin.top + border.top + padding.top;
@@ -372,7 +362,12 @@ fn layout_table_cell(cell: &StyledNode, x: f32, y: f32, cell_outer_width: f32) -
         if is_layout_whitespace_text(child) {
             continue;
         }
-        children.push(layout_node(child, content_x, &mut child_cursor_y, content_width));
+        children.push(layout_node(
+            child,
+            content_x,
+            &mut child_cursor_y,
+            content_width,
+        ));
     }
     let auto_content_height = (child_cursor_y - content_y).max(0.0);
     let content_height = length_value(cell, "height", cell_outer_width)
@@ -618,8 +613,7 @@ mod tests {
         let row1_subtext = &layout.children[4];
         // Title and subtext share the same column-2 x-coordinate.
         assert_eq!(
-            row1_subtext.dimensions.content.x,
-            row0_col2.dimensions.content.x,
+            row1_subtext.dimensions.content.x, row0_col2.dimensions.content.x,
             "subtext must align with title column under its colspan-2 placeholder"
         );
         assert_eq!(row1_subtext.dimensions.content.width, 80.0);
@@ -666,4 +660,3 @@ mod tests {
         }
     }
 }
-

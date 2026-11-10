@@ -5,18 +5,17 @@ use crate::{
     style::StyledNode,
 };
 
+use super::inline::{layout_inline_block_node, layout_inline_or_inline_block};
 use super::{
     LayoutBox, is_display_none, is_layout_whitespace_text, is_out_of_flow, length_value,
     outer_rect, shift_layout_subtree,
 };
-use super::inline::{layout_inline_block_node, layout_inline_or_inline_block};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FlexDirection {
     Row,
     Column,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JustifyContent {
@@ -25,7 +24,6 @@ enum JustifyContent {
     FlexEnd,
     SpaceBetween,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AlignItems {
@@ -343,7 +341,12 @@ fn cross_axis_outer(layout_box: &LayoutBox, direction: FlexDirection) -> f32 {
     }
 }
 
-pub(super) fn layout_flex_item(node: &StyledNode, x: f32, y: f32, available_width: f32) -> LayoutBox {
+pub(super) fn layout_flex_item(
+    node: &StyledNode,
+    x: f32,
+    y: f32,
+    available_width: f32,
+) -> LayoutBox {
     // Flex items are block-level boxes from the inside (their own children
     // still lay out as block/inline/flex), but on the outside they get
     // shrink-to-fit sizing rather than stretching to fill the parent. The
@@ -367,9 +370,7 @@ fn justify_content(node: &StyledNode) -> JustifyContent {
     match node.value("justify-content") {
         Some(Value::Keyword(keyword)) if keyword == "center" => JustifyContent::Center,
         Some(Value::Keyword(keyword)) if keyword == "flex-end" => JustifyContent::FlexEnd,
-        Some(Value::Keyword(keyword)) if keyword == "space-between" => {
-            JustifyContent::SpaceBetween
-        }
+        Some(Value::Keyword(keyword)) if keyword == "space-between" => JustifyContent::SpaceBetween,
         _ => JustifyContent::FlexStart,
     }
 }

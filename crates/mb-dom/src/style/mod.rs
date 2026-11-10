@@ -98,9 +98,15 @@ pub fn style_tree_with_state(
     // its old meaning rather than the document-roots interpretation
     // `Document::resolve_path` exposes.
     let matching_state = MatchingState {
-        hover: state.hover.and_then(|p| resolve_relative_path(document, root, p)),
-        focus: state.focus.and_then(|p| resolve_relative_path(document, root, p)),
-        active: state.active.and_then(|p| resolve_relative_path(document, root, p)),
+        hover: state
+            .hover
+            .and_then(|p| resolve_relative_path(document, root, p)),
+        focus: state
+            .focus
+            .and_then(|p| resolve_relative_path(document, root, p)),
+        active: state
+            .active
+            .and_then(|p| resolve_relative_path(document, root, p)),
     };
     // The root font-size feeds rem resolution for every descendant. Compute it up front
     // by treating the root as if it lived inside the user-agent default font-size.
@@ -478,8 +484,7 @@ mod tests {
         // gray border, and small horizontal padding. This is what makes an
         // unstyled <input> render as a recognizable text field rather than
         // collapsing to a zero-sized text node.
-        let (document, root) =
-            parse_html(r#"<div><input type="text" value="hello"/></div>"#);
+        let (document, root) = parse_html(r#"<div><input type="text" value="hello"/></div>"#);
         let styled = style::style_tree(&document, root, &[]);
         let input = &styled.children[0];
 
@@ -487,10 +492,7 @@ mod tests {
             input.value("display"),
             Some(&Value::Keyword("inline-block".into()))
         );
-        assert_eq!(
-            input.value("width"),
-            Some(&Value::Length(200.0, Unit::Px))
-        );
+        assert_eq!(input.value("width"), Some(&Value::Length(200.0, Unit::Px)));
         assert_eq!(
             input.value("background-color"),
             Some(&Value::Color(Color {
@@ -535,10 +537,7 @@ mod tests {
             "#,
         );
         let styled = style::style_tree(&document, root, &[stylesheet]);
-        assert_eq!(
-            styled.value("width"),
-            Some(&Value::Length(320.0, Unit::Px))
-        );
+        assert_eq!(styled.value("width"), Some(&Value::Length(320.0, Unit::Px)));
         assert_eq!(
             styled.value("border-color"),
             Some(&Value::Color(Color {
@@ -1153,7 +1152,10 @@ mod tests {
         let (document, img) = parse_html(r#"<img src="x.png" width="200" height="100"/>"#);
         let styled = style::style_tree(&document, img, &[]);
         assert_eq!(styled.value("width"), Some(&Value::Length(200.0, Unit::Px)));
-        assert_eq!(styled.value("height"), Some(&Value::Length(100.0, Unit::Px)));
+        assert_eq!(
+            styled.value("height"),
+            Some(&Value::Length(100.0, Unit::Px))
+        );
 
         let (document, table) = parse_html(r#"<table width="50%"></table>"#);
         let styled = style::style_tree(&document, table, &[]);
@@ -1177,10 +1179,7 @@ mod tests {
 
         let (document, img) = parse_html(r#"<img src="x.png" align="right"/>"#);
         let styled = style::style_tree(&document, img, &[]);
-        assert_eq!(
-            styled.value("float"),
-            Some(&Value::Keyword("right".into()))
-        );
+        assert_eq!(styled.value("float"), Some(&Value::Keyword("right".into())));
 
         // align="center" on an <img> isn't translated — modern equivalent
         // is `margin: auto`, which our layout doesn't honor for floats.
@@ -1337,8 +1336,7 @@ mod tests {
         // `margin-left/right: auto` injection on direct children of a
         // `<center>` parent — the existing block layout already centers
         // explicit-width boxes when both margins are auto.
-        let (document, root) =
-            parse_html(r#"<center><table><tr><td>x</td></tr></table></center>"#);
+        let (document, root) = parse_html(r#"<center><table><tr><td>x</td></tr></table></center>"#);
         let stylesheet = parse_css(r#""#);
         let styled = style::style_tree(&document, root, &[stylesheet]);
         let table = &styled.children[0];
@@ -1386,9 +1384,8 @@ mod tests {
         // inheritance: it puts an explicit value on the table so the
         // cells beneath it inherit "left" instead of the ancestor's
         // "center".
-        let (document, root) = parse_html(
-            r#"<center><table><tr><td>cell</td></tr></table></center>"#,
-        );
+        let (document, root) =
+            parse_html(r#"<center><table><tr><td>cell</td></tr></table></center>"#);
         let stylesheet = parse_css(r#""#);
         let styled = style::style_tree(&document, root, &[stylesheet]);
         // Walk: <center> → <table> → <tr> → <td>.
@@ -1415,9 +1412,7 @@ mod tests {
         // sit inside `.subtext`. The descendant selector has higher
         // specificity (one class + one tag) than the bare tag selector,
         // so its colour wins regardless of source order.
-        let (document, root) = parse_html(
-            r#"<div class="subtext"><a href="/x">child</a></div>"#,
-        );
+        let (document, root) = parse_html(r#"<div class="subtext"><a href="/x">child</a></div>"#);
         let stylesheet = parse_css(
             r#"
                 a:link { color: #000000; }
@@ -1582,8 +1577,7 @@ mod tests {
         // `vertical-align: super` from the UA stylesheet so footnote
         // markers (Haskell blog `<sup>1</sup>`) shrink + raise instead
         // of squatting at full size in the middle of the line.
-        let (document, root) =
-            parse_html(r#"<p class="copy">Body<sup>1</sup></p>"#);
+        let (document, root) = parse_html(r#"<p class="copy">Body<sup>1</sup></p>"#);
         let stylesheet = parse_css(r#".copy { font-size: 18px; }"#);
 
         let styled = style::style_tree(&document, root, &[stylesheet]);
@@ -1607,8 +1601,7 @@ mod tests {
     fn sub_cascades_smaller_font_and_sub_alignment() {
         // Mirror of the sup test — `<sub>` gets the same shrink with the
         // opposite vertical-align, used by chemistry/equation pages.
-        let (document, root) =
-            parse_html(r#"<p class="copy">H<sub>2</sub>O</p>"#);
+        let (document, root) = parse_html(r#"<p class="copy">H<sub>2</sub>O</p>"#);
         let stylesheet = parse_css(r#".copy { font-size: 20px; }"#);
 
         let styled = style::style_tree(&document, root, &[stylesheet]);
@@ -1640,10 +1633,7 @@ mod tests {
         let styled = style::style_tree(&document, root, &[stylesheet]);
 
         // Inline width wins over the .card class rule.
-        assert_eq!(
-            styled.value("width"),
-            Some(&Value::Length(60.0, Unit::Px))
-        );
+        assert_eq!(styled.value("width"), Some(&Value::Length(60.0, Unit::Px)));
         // Inline color wins for the same reason.
         assert_eq!(
             styled.value("color"),
@@ -1753,10 +1743,7 @@ mod tests {
                 a: 255,
             }))
         );
-        assert_eq!(
-            styled.value("height"),
-            Some(&Value::Length(0.0, Unit::Px))
-        );
+        assert_eq!(styled.value("height"), Some(&Value::Length(0.0, Unit::Px)));
     }
 
     #[test]

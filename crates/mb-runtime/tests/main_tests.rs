@@ -8,16 +8,15 @@ mod tests {
             ChromeAction, MENU_BUTTON_GAP, MENU_BUTTON_RIGHT_PAD, MENU_BUTTON_WIDTH, NAV_BUTTON_Y,
             address_bar_rect, back_button_rect, menu_button_rect, refresh_button_rect,
         },
-        css,
+        css, html, input, layout,
+        navigation::{describe_network_error, error_document, text_document},
+        net, render, resource,
+        state::{BrowserState, HistoryEntry, page_step},
+        style,
         view::{
             LinkTarget, collect_image_commands, collect_link_targets, compute_hovered_dom_path,
             document_height, link_decoration_commands, point_in_rect,
         },
-        html, layout,
-        navigation::{describe_network_error, error_document, text_document},
-        net, render, resource,
-        state::{BrowserState, HistoryEntry, page_step},
-        input, style,
     };
 
     #[test]
@@ -119,9 +118,8 @@ mod tests {
         assert_eq!(rect.y, ADDRESS_BOX_Y);
         assert_eq!(rect.height, ADDRESS_BOX_HEIGHT);
         // Address bar reserves space for the menu button on the right edge.
-        let expected_width = 800.0
-            - ADDRESS_BOX_X
-            - (MENU_BUTTON_RIGHT_PAD + MENU_BUTTON_WIDTH + MENU_BUTTON_GAP);
+        let expected_width =
+            800.0 - ADDRESS_BOX_X - (MENU_BUTTON_RIGHT_PAD + MENU_BUTTON_WIDTH + MENU_BUTTON_GAP);
         assert_eq!(rect.width, expected_width);
     }
 
@@ -646,9 +644,8 @@ mod tests {
 
     #[test]
     fn inline_scripts_execute_in_document_order() {
-        let mut browser = browser_with_html(
-            "<script>var n = 1;</script><div><script>n = n + 5;</script></div>",
-        );
+        let mut browser =
+            browser_with_html("<script>var n = 1;</script><div><script>n = n + 5;</script></div>");
         assert_eq!(browser.js.execute("n").unwrap(), "6");
     }
 
@@ -724,10 +721,7 @@ mod tests {
             HashMap::new(),
         );
         assert_eq!(
-            browser
-                .js
-                .execute("document.getElementById('x')")
-                .unwrap(),
+            browser.js.execute("document.getElementById('x')").unwrap(),
             "null"
         );
         assert_eq!(
@@ -920,10 +914,7 @@ mod tests {
                 ..input::WindowInput::default()
             },
         );
-        assert_eq!(
-            browser.js.execute("trace").unwrap(),
-            "\"inner:outer:\""
-        );
+        assert_eq!(browser.js.execute("trace").unwrap(), "\"inner:outer:\"");
     }
 
     #[test]
@@ -1130,7 +1121,10 @@ mod tests {
         let document = browser.parsed_document.borrow();
         let input_id = document.get(document.roots()[0]).unwrap().children[0];
         let elem = document.element_data(input_id).unwrap();
-        assert_eq!(elem.attributes.get("value").map(String::as_str), Some("abcd"));
+        assert_eq!(
+            elem.attributes.get("value").map(String::as_str),
+            Some("abcd")
+        );
     }
 
     #[test]
@@ -1151,7 +1145,10 @@ mod tests {
         let document = browser.parsed_document.borrow();
         let input_id = document.get(document.roots()[0]).unwrap().children[0];
         let elem = document.element_data(input_id).unwrap();
-        assert_eq!(elem.attributes.get("value").map(String::as_str), Some("hell"));
+        assert_eq!(
+            elem.attributes.get("value").map(String::as_str),
+            Some("hell")
+        );
     }
 
     #[test]
@@ -1236,10 +1233,7 @@ mod tests {
         let document = browser.parsed_document.borrow();
         let input_id = document.get(document.roots()[0]).unwrap().children[0];
         let elem = document.element_data(input_id).unwrap();
-        assert_eq!(
-            elem.attributes.get("value").map(String::as_str),
-            Some("")
-        );
+        assert_eq!(elem.attributes.get("value").map(String::as_str), Some(""));
     }
 
     // ---- Step 6 integration: typing ↔ JS round-trip ----
@@ -1322,10 +1316,7 @@ mod tests {
             600,
         );
 
-        assert_eq!(
-            browser.js.execute("trace").unwrap(),
-            "\"down:x;up:x;\""
-        );
+        assert_eq!(browser.js.execute("trace").unwrap(), "\"down:x;up:x;\"");
     }
 
     #[test]
@@ -1408,10 +1399,7 @@ mod tests {
         let document = browser.parsed_document.borrow();
         let input_id = document.roots()[1];
         let elem = document.element_data(input_id).unwrap();
-        assert_eq!(
-            elem.attributes.get("value").map(String::as_str),
-            Some("")
-        );
+        assert_eq!(elem.attributes.get("value").map(String::as_str), Some(""));
     }
 
     #[test]
@@ -1474,10 +1462,7 @@ mod tests {
             600,
         );
 
-        assert_eq!(
-            browser.js.execute("trace").unwrap(),
-            "\"inner;outer;\""
-        );
+        assert_eq!(browser.js.execute("trace").unwrap(), "\"inner;outer;\"");
     }
 
     #[test]
@@ -2082,7 +2067,10 @@ mod tests {
         );
 
         assert_eq!(
-            browser.js.execute("document.getElementById('t').value").unwrap(),
+            browser
+                .js
+                .execute("document.getElementById('t').value")
+                .unwrap(),
             "\"hi!\""
         );
     }
@@ -2120,7 +2108,10 @@ mod tests {
         // Value gained a trailing newline so the next typed char will
         // land on a new line.
         assert_eq!(
-            browser.js.execute("document.getElementById('t').value").unwrap(),
+            browser
+                .js
+                .execute("document.getElementById('t').value")
+                .unwrap(),
             "\"line1\\n\""
         );
     }
@@ -2545,7 +2536,10 @@ mod tests {
             })
             .count();
         // body (RoundedRect) + 3 shackle bars (SolidRect) — see lock_icon_commands.
-        assert_eq!(lock_paints, 4, "expected the padlock's 4 paints, got {lock_paints}");
+        assert_eq!(
+            lock_paints, 4,
+            "expected the padlock's 4 paints, got {lock_paints}"
+        );
 
         let address_text = commands
             .iter()
