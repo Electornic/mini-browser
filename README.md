@@ -1,13 +1,13 @@
 # mini-browser
 
 [![Rust](https://img.shields.io/badge/Rust-1.94.1-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![html5ever](https://img.shields.io/badge/html5ever-0.38-8a2be2)](https://crates.io/crates/html5ever)
-[![cssparser](https://img.shields.io/badge/cssparser-0.36-2ea44f)](https://crates.io/crates/cssparser)
-[![taffy](https://img.shields.io/badge/taffy-0.10-1f6feb)](https://crates.io/crates/taffy)
+[![html5ever](https://img.shields.io/badge/html5ever-0.40-8a2be2)](https://crates.io/crates/html5ever)
+[![cssparser](https://img.shields.io/badge/cssparser-0.38-2ea44f)](https://crates.io/crates/cssparser)
+[![taffy](https://img.shields.io/badge/taffy-0.15-1f6feb)](https://crates.io/crates/taffy)
 [![cosmic-text](https://img.shields.io/badge/cosmic--text-0.19-c79e00)](https://crates.io/crates/cosmic-text)
 [![tiny-skia](https://img.shields.io/badge/tiny--skia-0.12-9e9e9e)](https://crates.io/crates/tiny-skia)
 [![winit](https://img.shields.io/badge/winit-0.30-3478f6)](https://crates.io/crates/winit)
-[![rquickjs](https://img.shields.io/badge/rquickjs-0.11-ad24a8)](https://crates.io/crates/rquickjs)
+[![rquickjs](https://img.shields.io/badge/rquickjs-0.14-ad24a8)](https://crates.io/crates/rquickjs)
 
 브라우저 내부를 직접 짜보는 학습용 토이 프로젝트. URL 또는 정적 입력에서 HTML/CSS/JS 를 읽어 DOM/스타일/레이아웃을 거쳐 화면에 그리고, JS 가 DOM 을 mutate 하면 같은 프레임에서 재반영한다.
 
@@ -90,15 +90,24 @@ cargo fmt --all
 - 키보드 / 마우스 / 휠 (winit)
 
 ### JavaScript (rquickjs)
-- `document.getElementById` / `querySelector` / `getElementsByClassName` / `createElement` / `createTextNode` / `body` / `head`
-- Element: `tagName` / `textContent` / `children` / `parentElement` / `classList` / `value` / `innerHTML` / `getAttribute` / `setAttribute` / `appendChild` / `removeChild` / `insertBefore` / `replaceChild` / `cloneNode` / `matches` / `closest`
+- DOM wrapper 는 `Object.create(HTMLElement/Text/DocumentFragment.prototype)` — `instanceof` + `Element.prototype.* = fn` polyfill 패칭 동작
+- `document.getElementById` / `querySelector(All)` / `getElementsByClassName` / `createElement(NS)` / `createTextNode` / `createDocumentFragment` / `readyState` / `body` / `head`
+- Element: `tagName` / `id` / `className` / `textContent` / `children` / `parentElement` / `classList` / `style` / `value` / `innerHTML` / `get·set·removeAttribute` / `appendChild` / `removeChild` / `insertBefore` / `replaceChild` / `cloneNode` / `matches` / `closest` / `on*` 핸들러
+- Node-level 순회: `parentNode` / `firstChild` / `lastChild` / `next·previousSibling` / `childNodes` (텍스트노드 포함), 텍스트노드 `.data` / `.nodeValue`
+- Geometry: `getBoundingClientRect` / `offset*` / `client*` (직전 프레임 layout 기준)
+- JS 로 주입한 `<style>` (styled-components/emotion `textContent` 패턴) 다음 프레임 반영
 - 이벤트: `addEventListener` + bubble dispatch + `preventDefault` / `stopPropagation` / `currentTarget` / 키보드 이벤트
 - `setTimeout` / `setInterval` / `clearTimeout` / `clearInterval` / `requestAnimationFrame` / `cancelAnimationFrame` / `Date.now`
 - Promise microtask + `queueMicrotask`
 - `fetch` (network error 시 `Promise.reject`) + `XMLHttpRequest` (status=0 + 'error' event)
 - `localStorage` / `sessionStorage` (in-memory)
 - `console.log/warn/error` (variadic stringification)
-- `window` / `self` / `globalThis` aliases, `navigator.userAgent`, `history.{length,state,pushState,replaceState,back,forward,go}`, `location.{href,protocol,host,...}`
+- `window` / `self` / `globalThis` aliases, `navigator.userAgent`, `location.{href,protocol,host,...}`
+- 실 `history.pushState` / `replaceState` + `popstate` / `hashchange`, `DOMContentLoaded` / `load` — 바닐라 SPA 라우팅 동작 ([examples/spa-demo.html](examples/spa-demo.html))
+
+## Roadmap
+
+SPA(Preact/React/vite 빌드) 렌더링 로드맵: [docs/spa-roadmap.md](docs/spa-roadmap.md). Tier 0(바닐라)·Tier 1(프레임워크용 DOM 표면) 완료, 다음은 Preact 실증 → `<script type=module>` 로더.
 
 ## Out of Scope (for now)
 

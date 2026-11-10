@@ -10,10 +10,10 @@ APP_DIR="${DIST_DIR}/${APP_BUNDLE}"
 STAGING_DIR="${DIST_DIR}/dmg-root"
 DMG_PATH="${DIST_DIR}/${APP_NAME}.dmg"
 PLIST_SOURCE="${ROOT_DIR}/packaging/macos/Info.plist"
-RELEASE_BINARY="${ROOT_DIR}/target/release/${APP_NAME}"
+RELEASE_BINARY="${ROOT_DIR}/target/release/mb-shell"
 
 echo "Building release binary..."
-cargo build --release --manifest-path "${ROOT_DIR}/Cargo.toml"
+cargo build --release -p mb-shell --manifest-path "${ROOT_DIR}/Cargo.toml"
 
 echo "Preparing app bundle..."
 rm -rf "${APP_DIR}" "${STAGING_DIR}" "${DMG_PATH}"

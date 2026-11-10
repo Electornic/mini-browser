@@ -1,4 +1,4 @@
-use mini_browser::css;
+use mb_dom::css;
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: css_diag <path>");

@@ -63,7 +63,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 564 (workspace 합계). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 593 (workspace 합계, 2026-06-14 Tier 1 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -71,12 +71,13 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
 | File | Lines | 역할 |
 |---|---:|---|
-| `crates/mb-runtime/src/state/mod.rs` | ~2090 | BrowserState 본체 — 프레임 루프, 입력 디스패치, 캐럿/포커스, view cache 캐싱 |
+| `crates/mb-runtime/src/state/mod.rs` | ~2320 | BrowserState 본체 — 프레임 루프, 입력 디스패치, 캐럿/포커스, view cache 캐싱 |
 | `crates/mb-engine/src/layout/mod.rs` | ~2920 | 박스 모델 + boundary 알고리즘 진입점 (`layout/absolute.rs`, `layout/properties.rs` 추출) |
 | `crates/mb-engine/src/render/mod.rs` | ~2090 | DisplayCommand 정의 + 페인트 파이프라인 (rasterizer 본체는 `render/raster/` 로 분할) |
 | `crates/mb-dom/src/style/mod.rs` | ~1910 | cascade + 상속 + computed values (`style/cascade.rs`, `style/variables.rs` 추출) |
 | `crates/mb-dom/src/css/mod.rs` | ~1710 | CSS 토큰 파서 + value 파서 (`css/color.rs`, `css/selector.rs` 추출) |
-| `crates/mb-runtime/src/js/mod.rs` | ~1040 | rquickjs runtime 부트스트랩 + 글로벌 등록 |
+| `crates/mb-runtime/src/js/mod.rs` | ~1670 | rquickjs runtime 부트스트랩 + 글로벌 등록 |
+| `crates/mb-runtime/src/js/element.rs` | ~1640 | Element/Node prototype 접근자 + DOM mutate 훅 |
 
 각 모듈은 `dir/mod.rs` 진입점 + 같은 디렉터리의 sibling 파일로 분할되어 있다. grep 시 옛 flat 경로 (`state.rs`, `css.rs`, `style.rs`) 는 더 이상 존재하지 않음.
 
@@ -115,6 +116,17 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - closure 에서 `Ctx<'js>` + 다른 lifetime-bearing arg 를 같이 받으면 HRTB 통합 불가. 해결: **flat-hook 패턴** — 모든 Rust 콜백은 primitive (u32/String/bool/Vec) 만 받고 wrapper instance 는 JS bootstrap 이 `Object.defineProperty` 로 조립.
 - `IntoJs` 가 plain tuple 미지원 — `convert::List<(...)>` wrapper 필요.
 
+### cssparser 0.38 / selectors 0.42
+- `Parser<'i, 't>` → `Parser<'i>`, `ParserInput` 제거 (`Parser::new(&str)` 직접). `ParseError`/`BasicParseError` 에서 lifetime 과 `location` 이 빠졌고, `UnexpectedToken`/`AtRuleInvalid` 는 payload 없는 unit variant → 우리 `css::ParseError.position` 은 basic 에러에서 0.
+- `input.new_custom_error(e)` → `cssparser::ParseError::custom(e)`.
+- selectors: `NonTSPseudoClass`/`PseudoElement` 의 `type Impl` 제거, `parse_non_ts_pseudo_class(&self, name: &str)` (location 인자 없음), `matches_selector` 는 element 를 by-value 로 받음 (`MatchingElement` 는 Copy).
+- 둘은 버전이 묶여 있다 (selectors 가 cssparser 를 re-export 타입으로 노출) — 항상 같이 올릴 것.
+
+### taffy 0.15
+- `AlignItems`/`AlignContent`/`JustifyContent` 가 enum → struct + 상수 (`AlignItems::FLEX_START`). `align_items`/`align_content`/`justify_content` 필드는 `Option` 아님 (미지정 = `NORMAL`).
+- `min_size`/`max_size` 는 `Size<LengthPercentageAuto>` (`size` 는 여전히 `Dimension`).
+- `compute_layout_with_measure` 콜백이 `(LayoutInput, NodeId, ctx, &Style) -> LayoutOutput` — leaf 는 `taffy::compute_leaf_layout(inputs, style, |_, _| 0.0, measure)` 로 감싼다.
+
 ### tiny-skia
 - `Paint::default()` 의 `anti_alias = true` (docs 와 다름). 픽셀 핀 테스트가 partial coverage 로 깨지므로 `paint.anti_alias = false` 명시 필요.
 - `gradient_transform` 은 `local → canvas` 방향.
@@ -132,8 +144,11 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - `font_system::shared_font_system()` 가 `None` 이면 unit test 환경 — `font_size * 0.75` fallback 으로 토이 측정.
 - `install_fonts()` 가 SwashCache 도 같이 재생성 — 글리프 캐시 키가 FontSystem 의 font id 에 의존하므로.
 
-## Stale / Known Issues
+## Roadmap
 
-- `examples/css_diag.rs` — `mini_browser::css` import 라 더 이상 컴파일 안 됨. 4-crate 분할에 맞게 위치 이동 + `mb_dom::css` 로 import 갱신 필요.
-- `scripts/package-macos.sh` — `APP_NAME=mini-browser`, `target/release/${APP_NAME}` 가정. 현재 바이너리는 `mb-shell`. 패키징 시 갱신 필요.
-- `packaging/macos/Info.plist` — 마찬가지로 `mini-browser` 가정 가능성.
+현재 진행 중인 로드맵은 [docs/spa-roadmap.md](docs/spa-roadmap.md) (SPA 렌더링 Tier 0~3). 상단 상태 줄이 "지금 어디까지"를 나타낸다 — Tier 를 끝내면 상태 줄 + 해당 Tier 헤더 + "권장 실행 순서" 블록을 같이 갱신.
+
+## Tooling Notes
+
+- `crates/mb-dom/examples/css_diag.rs` — CSS 파서 진단 (`cargo run -p mb-dom --example css_diag -- <file.css>`).
+- `scripts/package-macos.sh` — `mb-shell` release 빌드를 `dist/mini-browser.app` + `.dmg` 로 패키징.

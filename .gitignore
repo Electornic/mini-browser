@@ -1,7 +1,5 @@
 /target
-.omx
 .idea
 dist
 .DS_Store
-.omc
 .claude/worktrees
