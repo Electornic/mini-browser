@@ -155,6 +155,30 @@ pub fn fetch_with_request(
     extra_headers: &[(String, String)],
     body: &[u8],
 ) -> Result<FetchResult, NetworkError> {
+    fetch_with_agent(agent(), url, method, extra_headers, body)
+}
+
+/// Like `fetch_with_request`, but a 3xx comes back as the response instead
+/// of being followed. Navigations use this so every redirect hop can be
+/// checked by the agent policy gate before it is fetched — following them
+/// inside ureq would let a same-origin URL bounce the agent (and a 307/308
+/// POST body) to any origin.
+pub fn fetch_without_redirects(
+    url: &Url,
+    method: &str,
+    extra_headers: &[(String, String)],
+    body: &[u8],
+) -> Result<FetchResult, NetworkError> {
+    fetch_with_agent(agent_without_redirects(), url, method, extra_headers, body)
+}
+
+fn fetch_with_agent(
+    agent: &Agent,
+    url: &Url,
+    method: &str,
+    extra_headers: &[(String, String)],
+    body: &[u8],
+) -> Result<FetchResult, NetworkError> {
     let url_str = url.to_string();
     let parsed_method = Method::from_bytes(method.as_bytes())
         .map_err(|error| NetworkError::InvalidUrl(format!("invalid http method: {error}")))?;
@@ -169,7 +193,7 @@ pub fn fetch_with_request(
         .body(body.to_vec())
         .map_err(|error| NetworkError::InvalidUrl(error.to_string()))?;
 
-    let mut response = agent().run(request).map_err(map_ureq_error)?;
+    let mut response = agent.run(request).map_err(map_ureq_error)?;
 
     let status = response.status();
     let status_code = status.as_u16();
@@ -222,28 +246,35 @@ pub fn http_get(url: &Url) -> Result<HttpResponse, NetworkError> {
 // hand-rolled `ConnectionPool` did.
 fn agent() -> &'static Agent {
     static AGENT: OnceLock<Agent> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        Config::builder()
-            // Identify as a stock desktop Chrome on macOS. Some sites
-            // (Coupang, Naver subdomains, Cloudflare-fronted endpoints)
-            // 403 anything that doesn't look like a known browser; using
-            // a generic mini-browser/0.1 string trips that filter. The
-            // exact Chrome major version drifts in the wild — pin to a
-            // recent stable so the string stays plausible without
-            // chasing the upstream every release.
-            .user_agent(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+    AGENT.get_or_init(|| build_agent(10))
+}
+
+fn agent_without_redirects() -> &'static Agent {
+    static AGENT: OnceLock<Agent> = OnceLock::new();
+    AGENT.get_or_init(|| build_agent(0))
+}
+
+fn build_agent(max_redirects: u32) -> Agent {
+    Config::builder()
+        // Identify as a stock desktop Chrome on macOS. Some sites
+        // (Coupang, Naver subdomains, Cloudflare-fronted endpoints)
+        // 403 anything that doesn't look like a known browser; using
+        // a generic mini-browser/0.1 string trips that filter. The
+        // exact Chrome major version drifts in the wild — pin to a
+        // recent stable so the string stays plausible without
+        // chasing the upstream every release.
+        .user_agent(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
                  AppleWebKit/537.36 (KHTML, like Gecko) \
                  Chrome/126.0.0.0 Safari/537.36",
-            )
-            .max_redirects(10)
-            // 4xx/5xx must surface as a Response (not an Error) so the high
-            // level loaders can read the body / headers and turn the status
-            // into our own `NetworkError::HttpStatus`.
-            .http_status_as_error(false)
-            .build()
-            .into()
-    })
+        )
+        .max_redirects(max_redirects)
+        // 4xx/5xx must surface as a Response (not an Error) so the high
+        // level loaders can read the body / headers and turn the status
+        // into our own `NetworkError::HttpStatus`.
+        .http_status_as_error(false)
+        .build()
+        .into()
 }
 
 // Maps `ureq::Error` to the toy's pre-existing `NetworkError` variants. The

@@ -10,11 +10,11 @@ use std::sync::mpsc;
 use crate::dom::NodeId;
 use crate::{
     async_runtime, css,
-    navigation::{LoadedDocument, NavigationRequest, load_remote_document_request},
+    navigation::{LoadOutcome, LoadedDocument, NavigationRequest, load_remote_document_guarded},
     net,
 };
 
-use super::policy::GatedKind;
+use super::policy::{GatedKind, HopGuard, PolicyDecision};
 use super::{
     BrowserState, HistoryEntry, PendingKind, PendingNavigation, build_form_submit_url,
     collect_form_data, encode_form_body,
@@ -172,8 +172,9 @@ impl BrowserState {
         // on a later frame.
         let (sender, receiver) = mpsc::channel();
         let wake = self.navigation_wake.clone();
+        let guard = self.hop_guard();
         async_runtime::handle().spawn_blocking(move || {
-            let _ = sender.send(load_remote_document_request(&request));
+            let _ = sender.send(run_guarded_load(&request, guard));
             // Poke the shell's `EventLoopProxy` so the next frame fires
             // immediately. Without this the main thread would have to
             // poll `pending_navigation.is_some()` via
@@ -247,13 +248,12 @@ impl BrowserState {
         let (sender, receiver) = mpsc::channel();
         let target = url.to_string();
         let wake = self.navigation_wake.clone();
+        let guard = self.hop_guard();
         async_runtime::handle().spawn_blocking(move || {
             // The worker thread owns the blocking `load_remote_document` call.
             // Send may fail if the BrowserState was dropped while the load
             // was in flight (e.g. window close mid-fetch); ignore that case.
-            let _ = sender.send(load_remote_document_request(&NavigationRequest::get(
-                target,
-            )));
+            let _ = sender.send(run_guarded_load(&NavigationRequest::get(target), guard));
             // Wake the main thread so the next frame fires immediately;
             // same rationale as `spawn_navigation`.
             if let Some(hook) = wake {
@@ -296,9 +296,44 @@ impl BrowserState {
         };
         let kind = pending.kind;
         self.pending_navigation = None;
+        // Redirect-hop decisions made on the worker join the session's
+        // record; refusals also join its memory.
+        for event in result.hop_events {
+            if matches!(event.decision, PolicyDecision::Denied { .. }) {
+                self.agent_policy.record_denial(&event.action);
+            }
+            self.policy_events.push(event);
+        }
+        let result = match result.outcome {
+            LoadOutcome::Loaded(result) => *result,
+            // A refused hop leaves the page exactly as it was: no error
+            // page, no history entry.
+            LoadOutcome::Refused => {
+                self.set_status(
+                    "blocked by policy",
+                    css::Color {
+                        r: 170,
+                        g: 60,
+                        b: 40,
+                        a: 255,
+                    },
+                );
+                return;
+            }
+        };
         match kind {
             PendingKind::Refresh => self.commit_refresh(result),
             PendingKind::Navigate { error_title } => self.commit_navigate(result, error_title),
+        }
+    }
+
+    // Snapshot of the gate for a navigation worker (see `HopGuard`).
+    fn hop_guard(&self) -> HopGuard {
+        HopGuard {
+            policy: self.agent_policy.clone(),
+            from_agent: self.input_from_agent,
+            origin_page: self.current_url.clone(),
+            events: Vec::new(),
         }
     }
 
@@ -388,5 +423,19 @@ impl BrowserState {
     /// the private channel directly.
     pub fn has_pending_navigation(&self) -> bool {
         self.pending_navigation.is_some()
+    }
+}
+
+// Worker-side load: follow redirects hop by hop, asking the guard first.
+fn run_guarded_load(request: &NavigationRequest, mut guard: HopGuard) -> super::WorkerResult {
+    let outcome =
+        load_remote_document_guarded(request, &mut |hop| match net::Url::parse(&hop.url) {
+            Ok(url) => guard.allow(&hop.method, url),
+            // Unparseable hop: let the loader report it as a load error.
+            Err(_) => true,
+        });
+    super::WorkerResult {
+        outcome,
+        hop_events: guard.events,
     }
 }

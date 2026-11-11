@@ -249,6 +249,7 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 ### 정책 게이트
 
 - **위치**: `BrowserState` 의 이동 진입점 세 곳 — `navigate` (주소창), `navigate_to_href` (링크 클릭), `try_submit_form` (폼 제출). 지금은 `location.href =` setter·`window.open` 이 없어서 이 세 곳이 전부다. **앞으로 JS 이동 경로를 추가할 때도 반드시 같은 `policy::check` 를 통과**시킨다 (AGENTS.md 규칙으로 승격).
+- **리다이렉트 hop 도 같은 게이트**: 네비게이션 fetch 는 ureq 의 자동 리다이렉트를 끄고(`net::fetch_without_redirects`) 3xx 를 한 hop 씩 따라가며(`navigation::load_remote_document_guarded`), 매 hop 을 워커 스레드의 `HopGuard`(정책 사본)로 판정한다. cross-origin 여부는 **이동을 시작한 페이지** 기준. 303 → GET, 301/302 의 POST → GET, 307/308 은 method·body 유지(= Submit 으로 판정). 거절된 hop 은 **요청 자체를 하지 않고** 페이지·히스토리도 그대로 둔다 (에러 페이지 없음). 워커의 판정은 메인 스레드에서 `policy_events` 와 거절 기억에 합쳐진다. — 이전엔 첫 URL 만 판정해서, 같은 origin 링크/POST 가 302/307 로 다른 origin 에 튀면 allow-list·승인을 통째로 우회했고 307 이면 POST body 까지 넘어갔다 (G1 직후 자동 보안 리뷰로 발견).
 - **판정 대상**: 입력 출처가 Agent 인 행동만. 사람이 창에서 직접 한 행동은 게이트를 통과한다. 출처는 합성 `WindowInput` 에 붙은 태그가 이벤트 디스패치 → 이동 진입점까지 전파된다 (같은 프레임의 클릭이 일으킨 이동이면 Agent 출처). 에이전트 클릭이 일으킨 페이지 JS 가 이동을 시키는 경우도 그 프레임 안이면 Agent 출처로 본다.
 - **위험 행동**:
 
@@ -572,7 +573,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | Phase | 산출물 | 엔진 보강 (선행/포함) | 눈에 보이는 결과 |
 |---|---|---|---|
 | **G0** 관찰 ✅ | `mb-agent::observe` — Observation (trusted/untrusted 분리, `e{NodeId}` ID, viewport scope, 상한·cursor, 문서 순서 고정, `field=` 힌트) | 불필요했음 (인라인 rect 이미 존재) | L2 골든 5개 + 결정성·위조 방지·비밀번호 은닉 테스트 (609 green) |
-| **G1** 행동 ✅ | `AgentBrowser` ([browser.rs](../crates/mb-agent/src/browser.rs)): `navigate`/`click`/`type_text`/`press`/`scroll`/`back`/`forward`, settle, `changed:` 요약, 에러 코드([error.rs](../crates/mb-agent/src/error.rs)), 문서 세대별 ID 검증, 리스너 기반 clickable. 정책 게이트 [policy.rs](../crates/mb-runtime/src/state/policy.rs)(`Auto`/`Deny`, allow-list, 거절 기억) | POST 폼, 컨트롤 인라인화, password 마스킹, checkbox/radio 토글·`<label>`, Tab·Escape, 타이머 마감 API, 대화상자 shim, console 버퍼, 가상 시계·시드 난수 연결, **인라인 `on*` 핸들러**, **hover/포커스 경로 버그 수정**. 보류: ←→/Home/End/Delete(캐럿 모델), `<select>` 고르기, `new Date()`/`performance.now` | L3 10개 (fixture 서버 POST 회원가입·303 리다이렉트, Deny/거절 기억, 비밀번호 넘겨받기, allow-list, settle, 대화상자, 스크롤, stale, Tab, 결정성) — 639 green |
+| **G1** 행동 ✅ | `AgentBrowser` ([browser.rs](../crates/mb-agent/src/browser.rs)): `navigate`/`click`/`type_text`/`press`/`scroll`/`back`/`forward`, settle, `changed:` 요약, 에러 코드([error.rs](../crates/mb-agent/src/error.rs)), 문서 세대별 ID 검증, 리스너 기반 clickable. 정책 게이트 [policy.rs](../crates/mb-runtime/src/state/policy.rs)(`Auto`/`Deny`, allow-list, 거절 기억) | POST 폼, 컨트롤 인라인화, password 마스킹, checkbox/radio 토글·`<label>`, Tab·Escape, 타이머 마감 API, 대화상자 shim, console 버퍼, 가상 시계·시드 난수 연결, **인라인 `on*` 핸들러**, **hover/포커스 경로 버그 수정**. 보류: ←→/Home/End/Delete(캐럿 모델), `<select>` 고르기, `new Date()`/`performance.now` | L3 12개 (fixture 서버 POST 회원가입·303 리다이렉트, Deny/거절 기억, 비밀번호 넘겨받기, allow-list, **리다이렉트 hop 게이트·307 body**, settle, 대화상자, 스크롤, stale, Tab, 결정성) |
 | **G2** MCP | `mb-mcp` (stdio, headless), tools·에러 코드, `prompts.rs`(서버 instructions·tool 설명·에러 힌트), `repeat_count`, 추천 skill 예시 | — | **Claude Code 가 이 브라우저로 로컬 페이지를 조작** ← 첫 데모. L4 e2e |
 | **G3** 관전 UI | `mb-mcp --window`: ID 배지 오버레이·에이전트 패널·액션 타임라인. `mb-shell --mcp-http` (토큰·Host·Origin 검사) | `mb-shell` lib 화 | 창에서 에이전트가 누르는 걸 실시간으로 봄 |
 | **G4** 안전장치 | `policy.rs` 게이트 + 승인 카드 + 넘겨받기(`handoff_required`), elicitation, `--allow-origin`, 거절 기억(같은 대상 즉시 거절) | — | POST 제출 직전 멈춤 → 승인 후 진행. L5 |
@@ -590,6 +591,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-10 | 연결 = MCP 서버 (rmcp, stdio 먼저) | 앱에 API 키 불필요, Claude Code 를 에이전트로 재사용. 앱 내장 LLM 루프는 하지 않음 |
 | 2026-11-11 | G0: 관찰은 layout 트리에서 rect 를 직접 수집, `LinkTarget` 미사용 | 모든 노드가 LayoutBox 를 가져서 별도 인라인 수집 불필요 (검토 때 오판 정정) |
 | 2026-11-11 | G0: `text:` 에 링크 텍스트 포함, 폼 크롬 제외, 이름 없는 컨트롤은 `field=` | 링크를 빼면 문장이 끊김 ("or read the ."). 라벨·버튼은 요소 목록과 중복. 이름 없는 `select` 는 `name=""` 만으론 용도를 알 수 없음 |
+| 2026-11-12 | 리다이렉트는 hop 마다 게이트, 거절 hop 은 요청하지 않음 | ureq 자동 리다이렉트로는 게이트가 첫 URL 만 봄 → allow-list·승인 우회, 307 POST body 유출 |
 | 2026-11-12 | G1: 엔진 기본 승인 모드 = `Deny` | 아무도 설정 안 한 에이전트는 안전한 쪽. 사람 입력엔 영향 없음 |
 | 2026-11-12 | G1: `stale_element` 를 "현재 문서 관찰에서 내준 ID 집합"으로 판정 | NodeId 가 문서마다 재사용됨 — 세대 카운터만으론 "새 페이지를 본 뒤 옛 ID 사용"을 못 잡음 |
 | 2026-11-12 | G1: ←→/Home/End/Delete 보류, Tab·Escape 만 | 입력값에 캐럿 위치가 없어 의미 있게 구현 불가. 캐럿 모델은 별도 작업 |

@@ -75,7 +75,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 639 (workspace 합계, 2026-11-12 G1 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 642 (workspace 합계, 2026-11-12 G1 + 리다이렉트 게이트). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -175,6 +175,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 [concept.md](docs/concept.md) 설계에서 코드 규칙으로 승격된 것들. 어기면 보안·프로토콜이 깨진다.
 
 - **stdout 금지**: stdio MCP 에서 stdout 은 JSON-RPC 전용. crate 의 lib·bin 코드에서 `println!`/`print!` 쓰지 말고 `eprintln!` 사용 (examples·tests 는 예외). `mb-agent`/`mb-mcp` 는 `#![deny(clippy::print_stdout)]`.
+- **네비게이션 fetch 는 리다이렉트를 직접 따라간다**: 문서 로드는 `navigation::load_remote_document_guarded`(내부적으로 `net::fetch_without_redirects`)를 쓰고 hop 마다 게이트를 묻는다. 네비게이션에 자동 리다이렉트 fetch(`net::fetch` / `fetch_with_request`)를 쓰면 게이트가 첫 URL 만 보게 된다. (서브리소스 — CSS/이미지/스크립트 — 는 이동이 아니라 해당 없음.)
 - **이동은 반드시 정책 게이트를 지난다**: 새 이동 경로(`location.href =`, `window.open`, meta refresh 등)를 추가할 때 `navigate` / `navigate_to_href` / `try_submit_form` 과 같은 `policy::check` 를 통과시킨다. 우회 경로를 만들지 말 것.
 - **에이전트 전용 DOM 조작 API 금지**: 에이전트 행동은 합성 `WindowInput` 으로만. 편의를 위해 DOM 을 직접 바꾸는 단축로를 만들지 않는다.
 - **`WindowInput::from_agent` 는 mb-agent 만 켠다**: 셸(사람 입력)은 항상 false. 정책 게이트는 이 플래그로 판정 대상을 가른다.

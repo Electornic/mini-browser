@@ -92,6 +92,60 @@ pub fn origin_of(url: &Url) -> String {
     }
 }
 
+// Remember by what was attempted, not by which element tried it: submits
+// by method + exact target, navigations by target origin.
+fn denial_key(action: &GatedAction) -> String {
+    match action.kind {
+        GatedKind::Submit => format!("submit {} {}", action.method, action.target),
+        GatedKind::Navigate => format!("navigate {}", origin_of(&action.target)),
+    }
+}
+
+impl AgentPolicy {
+    /// Fold a refusal made elsewhere (a redirect hop judged on the loader
+    /// thread against a copy of this policy) back into the session memory.
+    pub fn record_denial(&mut self, action: &GatedAction) {
+        self.denied.insert(denial_key(action));
+    }
+}
+
+/// Gate state a navigation worker carries so it can judge redirect hops
+/// with the same rules, without touching `BrowserState` across threads.
+#[derive(Debug, Clone)]
+pub struct HopGuard {
+    pub policy: AgentPolicy,
+    pub from_agent: bool,
+    /// The page the navigation started from; "cross-origin" is measured
+    /// against it, not against the previous hop.
+    pub origin_page: Option<Url>,
+    pub events: Vec<PolicyEvent>,
+}
+
+impl HopGuard {
+    pub fn allow(&mut self, method: &str, target: Url) -> bool {
+        let action = GatedAction {
+            kind: if method == "GET" {
+                GatedKind::Navigate
+            } else {
+                GatedKind::Submit
+            },
+            method: method.to_string(),
+            target,
+        };
+        let decision = decide(
+            &mut self.policy,
+            self.from_agent,
+            self.origin_page.as_ref(),
+            &action,
+        );
+        let allowed = matches!(decision, PolicyDecision::Allowed | PolicyDecision::Approved);
+        if decision != PolicyDecision::Allowed {
+            self.events.push(PolicyEvent { action, decision });
+        }
+        allowed
+    }
+}
+
 /// The decision table. Pure, so it's unit-tested on its own.
 pub fn decide(
     policy: &mut AgentPolicy,
@@ -113,12 +167,7 @@ pub fn decide(
     if !risky {
         return PolicyDecision::Allowed;
     }
-    // Remember by what was attempted, not by which element tried it:
-    // submits by method + exact target, navigations by target origin.
-    let key = match action.kind {
-        GatedKind::Submit => format!("submit {} {}", action.method, action.target),
-        GatedKind::Navigate => format!("navigate {target_origin}"),
-    };
+    let key = denial_key(action);
     if policy.denied.contains(&key) {
         return PolicyDecision::Denied { remembered: true };
     }
@@ -230,6 +279,23 @@ mod tests {
             ),
             PolicyDecision::Approved
         );
+    }
+
+    #[test]
+    fn hop_guard_judges_redirects_against_the_starting_page() {
+        let mut guard = HopGuard {
+            policy: AgentPolicy::new(ApproveMode::Deny, vec![]),
+            from_agent: true,
+            origin_page: Some(url("http://a.test/start")),
+            events: Vec::new(),
+        };
+        // Same origin hop: fine. Hop to another origin: refused and recorded.
+        assert!(guard.allow("GET", url("http://a.test/next")));
+        assert!(!guard.allow("GET", url("http://evil.test/grab")));
+        // A 307 keeps the POST: judged as a submit.
+        assert!(!guard.allow("POST", url("http://a.test/other")));
+        assert_eq!(guard.events.len(), 2);
+        assert_eq!(guard.events[1].action.kind, GatedKind::Submit);
     }
 
     #[test]

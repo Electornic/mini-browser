@@ -45,7 +45,7 @@ use crate::{
     css, dom,
     dom::{NodeId, NodeType},
     html, input, js, layout,
-    navigation::{LoadedDocument, load_remote_document},
+    navigation::load_remote_document,
     net, profile, render, resource, style,
     view::{
         DocumentView, build_document_view, caret_commands_for_focused_input, compute_hovered_hit,
@@ -207,7 +207,15 @@ struct FocusCache {
 #[derive(Debug)]
 struct PendingNavigation {
     kind: PendingKind,
-    receiver: mpsc::Receiver<Result<LoadedDocument, String>>,
+    receiver: mpsc::Receiver<WorkerResult>,
+}
+
+// What a navigation worker sends back: the load outcome plus the policy
+// decisions it made on redirect hops.
+#[derive(Debug)]
+struct WorkerResult {
+    outcome: crate::navigation::LoadOutcome,
+    hop_events: Vec<policy::PolicyEvent>,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -50,6 +50,15 @@ impl Server {
         format!("{}{}", self.base, path)
     }
 
+    fn paths(&self) -> Vec<String> {
+        self.received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| format!("{} {}", r.method, r.path))
+            .collect()
+    }
+
     fn posts(&self) -> Vec<Received> {
         self.received
             .lock()
@@ -122,6 +131,18 @@ fn route(
             "<html><head><title>Welcome</title></head><body><h1>Account created</h1><a href=\"/signup\">Back</a></body></html>".into(),
         ),
         ("GET", "/timers") => ("200 OK", String::new(), TIMERS_PAGE.into()),
+        // Same-origin URLs that bounce somewhere else: the redirect hop
+        // must go through the policy gate too.
+        ("GET", "/bounce") => (
+            "302 Found",
+            format!("Location: {other_origin}/elsewhere\r\n"),
+            String::new(),
+        ),
+        ("POST", "/bounce-post") => (
+            "307 Temporary Redirect",
+            format!("Location: {other_origin}/collect\r\n"),
+            String::new(),
+        ),
         ("GET", "/long") => ("200 OK", String::new(), long_page()),
         _ => {
             let _ = body;
@@ -141,7 +162,8 @@ fn signup_page(other_origin: &str) -> String {
   <select name="plan"><option value="free">Free</option><option value="pro" selected>Pro</option></select>
   <button type="submit">Sign up</button>
 </form>
-<p><a href="{other_origin}/elsewhere">Other origin</a></p>
+<p><a href="{other_origin}/elsewhere">Other origin</a> <a href="/bounce">Bounce</a></p>
+<form action="/bounce-post" method="post"><input name="secret" value="s3cret"><button>Send</button></form>
 </body></html>"#
     )
 }
@@ -408,4 +430,52 @@ fn same_actions_give_identical_observations() {
         a.contains("r="),
         "seeded Math.random output is part of the page"
     );
+}
+
+#[test]
+fn a_redirect_to_another_origin_is_gated_like_a_direct_link() {
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/signup")).unwrap();
+    let bounce = find(&page, Role::Link, "Bounce");
+    match b.click(bounce) {
+        Err(AgentError::ApprovalDenied { observation, .. }) => {
+            // Refused hop: the page stays put, no error page.
+            assert_eq!(path_of(&observation), "/signup");
+            assert_eq!(observation.title.as_deref(), Some("Sign up"));
+        }
+        other => panic!("expected approval_denied, got {other:?}"),
+    }
+    let paths = server.paths();
+    assert!(paths.contains(&"GET /bounce".to_string()));
+    assert!(
+        !paths.contains(&"GET /elsewhere".to_string()),
+        "the refused hop must never be fetched: {paths:?}"
+    );
+}
+
+#[test]
+fn allow_list_also_blocks_redirect_hops_and_keeps_post_bodies_home() {
+    let server = Server::start();
+    let mut b = AgentBrowser::new(AgentConfig {
+        viewport_width: 800,
+        viewport_height: 600,
+        approve: ApproveMode::Auto,
+        allow_origins: vec![server.base.clone()],
+        ..AgentConfig::default()
+    });
+    let page = b.navigate(&server.url("/signup")).unwrap();
+
+    let bounce = find(&page, Role::Link, "Bounce");
+    assert_eq!(b.click(bounce).unwrap_err().code(), "navigation_blocked");
+
+    // POST to a same-origin URL is approved (auto), but its 307 would
+    // carry the body to another origin: that hop is blocked.
+    let page = b.observe(&ObserveOptions::default());
+    let send = find(&page, Role::Button, "Send");
+    assert_eq!(b.click(send).unwrap_err().code(), "navigation_blocked");
+    let posts = server.posts();
+    assert_eq!(posts.len(), 1, "{posts:?}");
+    assert_eq!(posts[0].path, "/bounce-post");
+    assert!(!server.paths().contains(&"POST /collect".to_string()));
 }

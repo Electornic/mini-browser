@@ -63,17 +63,89 @@ pub fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
 }
 
 pub fn load_remote_document_request(request: &NavigationRequest) -> Result<LoadedDocument, String> {
+    match load_remote_document_guarded(request, &mut |_| true) {
+        LoadOutcome::Loaded(result) => *result,
+        LoadOutcome::Refused => Err("navigation refused".into()),
+    }
+}
+
+/// Result of a guarded load: either the page (or a load error to show), or
+/// a redirect hop the guard refused — in which case nothing should change.
+#[derive(Debug)]
+pub enum LoadOutcome {
+    // Boxed: a LoadedDocument is large and the Refused arm is empty.
+    Loaded(Box<Result<LoadedDocument, String>>),
+    Refused,
+}
+
+const MAX_REDIRECTS: usize = 10;
+
+/// Load a document, following redirects one hop at a time and asking
+/// `allow_hop` before each one. This is what keeps the agent policy gate in
+/// charge of redirects: ureq following them internally would let a
+/// same-origin link or POST bounce to any origin unseen.
+///
+/// Hop rules match browsers: 303 always becomes a GET without body, 301/302
+/// turn a POST into a GET, 307/308 keep method and body.
+pub fn load_remote_document_guarded(
+    request: &NavigationRequest,
+    allow_hop: &mut dyn FnMut(&NavigationRequest) -> bool,
+) -> LoadOutcome {
+    let mut current = request.clone();
+    for _ in 0..=MAX_REDIRECTS {
+        let url = match net::Url::parse(&current.url) {
+            Ok(url) => url,
+            Err(error) => {
+                return LoadOutcome::Loaded(Box::new(Err(format!("url error: {error:?}"))));
+            }
+        };
+        let fetched = profile::time_block("navigation::fetch_html", || {
+            net::fetch_without_redirects(&url, &current.method, &current.headers, &current.body)
+        });
+        let fetch_result = match fetched {
+            Ok(result) => result,
+            Err(error) => {
+                return LoadOutcome::Loaded(Box::new(Err(describe_network_error(&error))));
+            }
+        };
+        let status = fetch_result.response.status_code;
+        if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+            return LoadOutcome::Loaded(Box::new(document_from_response(fetch_result)));
+        }
+        let Some(location) = fetch_result.response.header("location") else {
+            return LoadOutcome::Loaded(Box::new(Err(describe_network_error(
+                &net::NetworkError::MissingLocationHeader,
+            ))));
+        };
+        let next_url = match url.resolve(location) {
+            Ok(next) => next,
+            Err(error) => {
+                return LoadOutcome::Loaded(Box::new(Err(describe_network_error(&error))));
+            }
+        };
+        let keeps_body = matches!(status, 307 | 308)
+            || (matches!(status, 301 | 302) && current.method != "POST");
+        current = if keeps_body {
+            NavigationRequest {
+                url: next_url.to_string(),
+                ..current
+            }
+        } else {
+            NavigationRequest::get(next_url.to_string())
+        };
+        if !allow_hop(&current) {
+            return LoadOutcome::Refused;
+        }
+    }
+    LoadOutcome::Loaded(Box::new(Err(describe_network_error(
+        &net::NetworkError::RedirectLimitExceeded,
+    ))))
+}
+
+fn document_from_response(fetch_result: net::FetchResult) -> Result<LoadedDocument, String> {
     // This function is the app-facing loader. It translates low-level fetch/content-type details
     // into "what document should the browser show?".
     let total = profile::Span::start("navigation::load_remote_document");
-    let url = net::Url::parse(&request.url).map_err(|error| format!("url error: {error:?}"))?;
-    // A POST answered with 303 (the usual post/redirect/get) comes back as
-    // the redirected GET's response: ureq downgrades the method and drops
-    // the body on 301/302/303.
-    let fetch_result = profile::time_block("navigation::fetch_html", || {
-        net::fetch_with_request(&url, &request.method, &request.headers, &request.body)
-    })
-    .map_err(|error| describe_network_error(&error))?;
     let response = fetch_result.response;
     let final_url = fetch_result.final_url;
 
