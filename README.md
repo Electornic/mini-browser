@@ -11,7 +11,7 @@
 
 브라우저 내부를 직접 짜보는 학습용 토이 프로젝트. URL 또는 정적 입력에서 HTML/CSS/JS 를 읽어 DOM/스타일/레이아웃을 거쳐 화면에 그리고, JS 가 DOM 을 mutate 하면 같은 프레임에서 재반영한다.
 
-핵심 의존성: `html5ever` / `cssparser` + `selectors` / `taffy` / `cosmic-text` / `tiny-skia` / `winit` + `softbuffer` / `ureq` + `url` / `rquickjs`. 코드는 4-crate Cargo workspace.
+핵심 의존성: `html5ever` / `cssparser` + `selectors` / `taffy` / `cosmic-text` / `tiny-skia` / `winit` + `softbuffer` / `ureq` + `url` / `rquickjs`. 코드는 5-crate Cargo workspace.
 
 ## Workspace Layout
 
@@ -23,6 +23,8 @@
 │                        taffy / cosmic-text / tiny-skia
 ├── crates/mb-runtime  → 오케스트레이터 + JS + IO (mb-engine 위)
 │                        rquickjs / ureq / tokio / state/
+├── crates/mb-agent    → 에이전트 인터페이스 (mb-runtime 위)
+│                        observe: 요소 목록 + 페이지 텍스트 (docs/concept.md)
 └── crates/mb-shell    → 바이너리 (mb-runtime 위)
                          winit / softbuffer
 ```

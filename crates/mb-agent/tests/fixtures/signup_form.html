@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head>
+  <title>Create account</title>
+  <style>body { font-family: sans-serif; }</style>
+  <script>window.analytics = true;</script>
+</head>
+<body>
+  <h1>Create your account</h1>
+  <p>Welcome. Fill in the form below to get started.</p>
+  <form action="/signup" method="post">
+    <label for="email">Email</label>
+    <input id="email" type="email" placeholder="you@example.test" value="dev@example.test">
+    <label for="pw">Password</label>
+    <input id="pw" type="password" value="hunter22">
+    <input type="hidden" name="csrf" value="abc123">
+    <label><input type="checkbox" name="terms"> I agree to the terms</label>
+    <label><input type="radio" name="plan" value="free" checked> Free plan</label>
+    <select name="country"><option>Korea</option><option selected>Japan</option></select>
+    <textarea name="bio">Hello there</textarea>
+    <button type="submit">Sign up</button>
+    <button type="button" disabled>Help</button>
+  </form>
+  <form action="/search"><input name="q" aria-label="Search"><input type="submit" value="Go"></form>
+  <p>Already have an account? <a href="/login">Log in</a> or read the <a href="https://other.example/terms">external terms</a>.</p>
+</body>
+</html>

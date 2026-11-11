@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/mb-agent",
     "crates/mb-dom",
     "crates/mb-engine",
     "crates/mb-runtime",

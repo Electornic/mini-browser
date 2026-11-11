@@ -1,6 +1,6 @@
 # Concept — 에이전트용 브라우저
 
-> 상태: 초안 v4 (2026-11-11, 코드 대조 검토 + 결정성 + LLM 오류 다루기 반영) · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
+> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ 완료 (2026-11-11, `crates/mb-agent`)** · 다음 = G1 행동 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
 
 ## 한 줄
 
@@ -22,7 +22,8 @@
 | 필요한 것 | 지금 있는 것 | 부족한 것 |
 |---|---|---|
 | 창 없이 렌더 (headless) | `build_document_view` → raster → `Vec<u32>` ([snapshot_tests.rs](../crates/mb-runtime/tests/snapshot_tests.rs)) | — |
-| 요소 위치 | `NodeId → ElementRect` 맵 ([state/mod.rs](../crates/mb-runtime/src/state/mod.rs) `collect_layout_rects`) — **block/flex/grid/table 박스만** | 인라인 요소(`<a>`, `<span>`, 인라인 `<button>`) rect 없음. 링크는 `DocumentView.links` (`LinkTarget`) 에 따로 있음 |
+| 요소 위치 | **텍스트 노드를 포함한 모든 DOM 노드가 자기 LayoutBox 를 가진다** (인라인 요소도 `BoxType::BlockNode(StyledNode)` 로, 인라인 흐름 안에서 제 위치에 배치됨). `mb-agent` 는 layout 트리를 직접 돌며 `NodeId → border-box rect` 를 만든다 | 2026-11-11 검토에서 "인라인 요소 rect 없음"이라 적었던 건 **오판** — G0 구현 중 레이아웃 덤프로 확인. 여러 줄로 감기는 인라인 요소는 bounding rect 하나 |
+| 인라인 판정 | `layout/inline.rs` `is_inline_node` — phrasing content 태그 목록 | **`<button>`·`<input>`(text 등)·`<select>`·`<textarea>` 가 목록에 없음** → 버튼이 섞인 문단이 인라인 흐름을 못 타고 세로로 쌓인다 (G1 엔진 보강) |
 | 안정적인 요소 핸들 | `NodeId` arena — 트리 재배치 후에도 같은 노드, 삭제는 tombstone | — |
 | 행동 주입 | `WindowInput` (mouse position/press/held, typed text, Enter, Backspace, ↑↓, PageUp/Down, scroll, back/forward) | Tab·Escape·←→·Home/End·Delete·수식키 없음. **입력 출처(사람/에이전트) 구분 없음** |
 | 폼 | `try_submit_form` ([lifecycle.rs](../crates/mb-runtime/src/state/lifecycle.rs)) — **GET 만**. POST 는 로그 남기고 skip | POST 제출. 네트워크 배관은 `net::fetch_with_request(url, method, headers, body)` 로 이미 있음 |
@@ -153,28 +154,43 @@
 
 ### 포맷 (초안)
 
+G0 실제 출력 ([signup_form.observation.txt](../crates/mb-agent/tests/fixtures/signup_form.observation.txt) 골든):
+
 ```text
 # browser (trusted)
-url: http://localhost:8000/signup   settled: true   scroll: 0/1240   viewport: 1280x800
-changed: url /signup (same) · value e12 · +0 / -0 elements      (행동 직후 관찰에만)
-elements: 5 shown / 5 in viewport / 23 total   cursor: -
+url: http://localhost:8000/signup_form   scroll: 0/422   viewport: 800x600
+elements: 12 shown / 12 in viewport / 12 total   next_cursor: -
 
 # page content (untrusted, origin=http://localhost:8000)
 title: "Create account"
-[e12] textbox   name="Email"            value="dev@example.test"
-[e15] textbox   name="Password"         value=(hidden, 8 chars)        ⚠ password
-[e18] checkbox  name="I agree to terms" checked=false
-[e21] button    name="Sign up"                                          ⚠ submits POST /signup
-[e24] link      name="Already have an account?" → /login
+[e24] textbox   name="Email" value="dev@example.test"
+[e29] textbox   name="Password" value=(hidden, 8 chars)  ⚠ password
+[e34] checkbox  name="I agree to the terms" checked=false
+[e38] radio     name="Free plan" checked=true
+[e41] combobox  name="" field="country" value="Japan"
+[e47] textbox   name="" field="bio" value="Hello there"
+[e50] button    name="Sign up"  ⚠ submits POST /signup
+[e53] button    name="Help"  (disabled)
+[e58] textbox   name="Search" value=""
+[e59] button    name="Go"  submits GET /search
+[e63] link      name="Log in" → /login
+[e66] link      name="external terms" → https://other.example/terms  ⚠ other origin
 text:
+  "Create your account"
   "Welcome. Fill in the form below to get started."
-console: 1 warning  ("[console.warn] deprecated api")
+  "Already have an account? Log in or read the external terms."
 ```
+
+G1 이후 추가될 줄: `# browser` 블록의 `settled: true`(settle 루프가 채움), 행동 직후 관찰의 `changed: url /signup → /welcome · +3 / -5 elements`, 페이지 블록 끝의 `console: 1 warning (...)`.
 
 - **ID**: `e` + `NodeId`. 노드가 살아 있는 동안 관찰이 바뀌어도 같은 ID (재번호 없음). 삭제되면 `stale_element`.
 - **trusted / untrusted 분리**: `# browser` 블록은 브라우저가 계산한 사실. `# page content` 블록 안의 모든 문자열(이름·값·텍스트·제목)은 페이지 출처. role(`textbox`/`button`…)과 `⚠` 플래그는 브라우저가 계산하지만 페이지 블록 안에서 해당 요소 옆에 붙인다. MCP 응답에서도 두 블록을 별도 content item 으로 나눈다.
 - **role/name 계산**: 태그·`type`·`aria-label`·`<label for>`·감싼 `<label>`·`alt`·`placeholder`·텍스트 순. ARIA 전체 스펙 아님, 필요한 만큼.
 - **비밀번호 값**은 길이만. 다른 입력값은 그대로 (페이지 문자열이므로 untrusted).
+- **`field=`**: 접근 가능한 이름이 비었을 때만 컨트롤의 `name` 속성을 보조로 보여준다 (에이전트가 칸의 용도를 알 마지막 단서).
+- **⚠ 플래그 규칙**: `⚠ password`, `⚠ other origin`, 그리고 같은 origin GET 이 아닌 모든 제출 `⚠ submits METHOD target`. 같은 origin GET 제출은 `⚠` 없이 `submits GET /search` (정책 게이트의 판정과 일치).
+- **따옴표 규칙**: 페이지가 쓴 문자열(이름·값·제목·텍스트, 해석 안 되는 href)은 항상 큰따옴표 한 줄 리터럴. 제어문자·줄바꿈은 공백으로, `"`·`\` 는 이스케이프 → 페이지가 `\n# browser (trusted)` 같은 줄을 위조할 수 없다 (L5 성격의 테스트 `page_strings_cannot_forge_browser_lines`). 해석된 URL 은 따옴표 없이 나가므로 남은 공백·제어문자를 퍼센트 인코딩(`unquoted_url_text`)하고, 폼 `method` 는 원문 대신 허용 목록(`GET`/`POST`/`DIALOG`, 그 외는 스펙대로 GET)으로만 출력한다 — 따옴표 없이 나가는 페이지 유래 값은 이 둘뿐.
+- **`text:` 블록**: 화면에 보이는 텍스트를 블록 태그(`p`, `div`, `li`, `h1`…) 단위로 한 줄씩. 링크·clickable 텍스트는 문장 일부라 **포함**("Already have an account? Log in …"), 폼 컨트롤·라벨·버튼 텍스트는 요소 목록에 이미 있으므로 **제외**. 텍스트 노드 사이엔 단어끼리 붙을 때만 공백을 넣는다 (`push_text_piece` — 알려진 오차: `<b>Hel</b>lo` → "Hel lo").
 - **rect 는 기본 출력에서 뺀다** (토큰 절약, 에이전트는 ID 로 행동). 디버그·오버레이용으로 내부에는 들고 있고 `observe(verbose)` 에서만 노출.
 
 ### 크기 제한
@@ -185,10 +201,13 @@ console: 1 warning  ("[console.warn] deprecated api")
 
 ### 요소 수집 경로
 
-1. **block-level** 박스: `collect_layout_rects` 의 `NodeId → ElementRect`.
-2. **인라인 링크**: `DocumentView.links` 의 `LinkTarget`.
-3. **인라인 요소 일반** (인라인 `<button>`, `<span role=button>` 등): G0 에서 인라인 fragment rect 수집을 추가한다 (해당 노드의 line fragment 들의 합집합 rect).
-4. 위 셋을 NodeId 로 합치고, interactive 판정(태그·role·`on*`/리스너 유무·`tabindex`) 을 통과한 것만 목록에 올린다.
+G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](../crates/mb-agent/src/role.rs)):
+
+1. **DOM 한 바퀴** (pre-order DFS) → 문서 순서 목록, `id` 속성 → 노드, `<label for>` → 라벨.
+2. **layout 트리 한 바퀴** → 노드마다 border-box rect (문서 좌표). 한 노드가 박스를 여러 개 가지면 합집합. 모든 맵은 `BTreeMap` (결정성).
+3. 문서 순서대로 interactive 판정: `role` 속성 → 태그(`a[href]`, `button`, `input`(type 별), `textarea`, `select`) → `onclick`/`tabindex>=0`. `input[type=hidden]`, rect 없음·크기 0, `<head>`/`<template>`/`[hidden]` 안은 제외.
+4. `DocumentView.links` 는 쓰지 않는다 (NodeId 가 없고, 2번으로 충분).
+5. **아직 못 잡는 것**: `addEventListener` 로만 클릭 핸들러를 단 요소 — DOM 속성이 아니라 JS 런타임 리스너 레지스트리에 있다 (G1 에서 연결).
 
 ### 좌표계
 
@@ -546,8 +565,8 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 
 | Phase | 산출물 | 엔진 보강 (선행/포함) | 눈에 보이는 결과 |
 |---|---|---|---|
-| **G0** 관찰 | `mb-agent::observe` — Observation (trusted/untrusted 분리, `e{NodeId}` ID, viewport scope, 상한·cursor, 문서 순서 고정) | 인라인 fragment rect 수집 | L2 골든: fixture 페이지의 요소 목록 |
-| **G1** 행동 | `click`/`type`/`press`/`scroll`/`navigate`/`back`/`forward`, settle, 입력 출처 태그 | **POST 폼 제출**, `type=password` 마스킹, checkbox/radio, Tab·Escape·←→·Home/End·Delete, 다음 타이머 마감 API, `alert`/`confirm`/`prompt`/`window.open` shim, `console` 버퍼, **headless 가상 시계 연결(`FixedClock`) + 시드 `Math.random`** | L3: headless 로 회원가입 폼 POST 제출 통합 테스트 |
+| **G0** 관찰 ✅ | `mb-agent::observe` — Observation (trusted/untrusted 분리, `e{NodeId}` ID, viewport scope, 상한·cursor, 문서 순서 고정, `field=` 힌트) | 불필요했음 (인라인 rect 이미 존재) | L2 골든 5개 + 결정성·위조 방지·비밀번호 은닉 테스트 (609 green) |
+| **G1** 행동 | `click`/`type`/`press`/`scroll`/`navigate`/`back`/`forward`, settle, 입력 출처 태그, `addEventListener` 리스너를 interactive 판정에 연결 | **POST 폼 제출**, `button`/`input`/`select`/`textarea` 를 인라인 레벨로, `type=password` 마스킹, checkbox/radio, Tab·Escape·←→·Home/End·Delete, 다음 타이머 마감 API, `alert`/`confirm`/`prompt`/`window.open` shim, `console` 버퍼, **headless 가상 시계 연결(`FixedClock`) + 시드 `Math.random`** | L3: headless 로 회원가입 폼 POST 제출 통합 테스트 |
 | **G2** MCP | `mb-mcp` (stdio, headless), tools·에러 코드, `prompts.rs`(서버 instructions·tool 설명·에러 힌트), `repeat_count`, 추천 skill 예시 | — | **Claude Code 가 이 브라우저로 로컬 페이지를 조작** ← 첫 데모. L4 e2e |
 | **G3** 관전 UI | `mb-mcp --window`: ID 배지 오버레이·에이전트 패널·액션 타임라인. `mb-shell --mcp-http` (토큰·Host·Origin 검사) | `mb-shell` lib 화 | 창에서 에이전트가 누르는 걸 실시간으로 봄 |
 | **G4** 안전장치 | `policy.rs` 게이트 + 승인 카드 + 넘겨받기(`handoff_required`), elicitation, `--allow-origin`, 거절 기억(같은 대상 즉시 거절) | — | POST 제출 직전 멈춤 → 승인 후 진행. L5 |
@@ -563,6 +582,8 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 |---|---|---|
 | 2026-11-10 | 컨셉 = 에이전트용 브라우저 | 후보 A~J 중 선택. 다른 프로젝트(AI 지식 검색 에이전트)와 접점, 엔진 내부 설계라는 차별점 |
 | 2026-11-10 | 연결 = MCP 서버 (rmcp, stdio 먼저) | 앱에 API 키 불필요, Claude Code 를 에이전트로 재사용. 앱 내장 LLM 루프는 하지 않음 |
+| 2026-11-11 | G0: 관찰은 layout 트리에서 rect 를 직접 수집, `LinkTarget` 미사용 | 모든 노드가 LayoutBox 를 가져서 별도 인라인 수집 불필요 (검토 때 오판 정정) |
+| 2026-11-11 | G0: `text:` 에 링크 텍스트 포함, 폼 크롬 제외, 이름 없는 컨트롤은 `field=` | 링크를 빼면 문장이 끊김 ("or read the ."). 라벨·버튼은 요소 목록과 중복. 이름 없는 `select` 는 `name=""` 만으론 용도를 알 수 없음 |
 | 2026-11-11 | 요소 ID = `e{NodeId}` (재번호 없음) | 관찰 사이에 ID 가 안 바뀌어 에이전트가 덜 헷갈림. arena 가 이미 안정 ID |
 | 2026-11-11 | 페이지 문자열 전부 untrusted, 두 블록 분리 | 요소 이름·값도 페이지가 정함 (인젝션 경로) |
 | 2026-11-11 | 정책 게이트 = BrowserState 이동 진입점, 출처 태그로 판정 | 에이전트가 사람과 같은 입력 경로를 타므로 tool 레이어에선 못 막음 |

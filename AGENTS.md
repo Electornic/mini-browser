@@ -4,7 +4,7 @@
 
 ## Project Goal
 
-학습용 토이 브라우저. 4-crate Cargo workspace (mb-dom / mb-engine / mb-runtime / mb-shell) 위에 mature crate 들 (html5ever, taffy, cosmic-text, tiny-skia, rquickjs, ...) 을 글루로 엮는다. 작업의 무게중심은 "from-scratch 구현" 이 아니라 **글루 + 기능 보강**.
+학습용 토이 브라우저 → **에이전트용 브라우저** ([docs/concept.md](docs/concept.md)). 5-crate Cargo workspace (mb-dom / mb-engine / mb-runtime / mb-agent / mb-shell) 위에 mature crate 들 (html5ever, taffy, cosmic-text, tiny-skia, rquickjs, ...) 을 글루로 엮는다. 작업의 무게중심은 "from-scratch 구현" 이 아니라 **글루 + 기능 보강**.
 
 ## Workspace Layout
 
@@ -38,6 +38,12 @@
 │   - async_runtime    OnceLock<tokio::Runtime> — blocking I/O 를 spawn_blocking 으로 위임
 │   - pub use mb_dom::{...} + mb_engine::{...} 으로 외부에 단일 namespace 노출
 │
+├── crates/mb-agent    (agent interface)    mb-runtime 만
+│   - index            DOM·layout 한 바퀴 → 문서 순서 / id·label 맵 / NodeId→rect
+│   - role             role 판정 + accessible name (accname 축약판)
+│   - observation      observe() → Observation → to_text() (trusted/untrusted 블록)
+│   - text             페이지 문자열 정규화·따옴표 (위조 방지)
+│
 └── crates/mb-shell    (binary [[bin]] mb-shell)  anyhow, softbuffer, winit
     - main.rs          진입점 — install_fonts → window::run(closure)
     - window.rs        winit 이벤트 루프 + softbuffer 프레임 출력
@@ -54,6 +60,10 @@ cargo build --workspace 2>&1 | tail -10
 # 테스트
 cargo test --workspace 2>&1 | grep "test result"
 
+# mb-agent 관찰 골든 (의도한 변경이면 UPDATE_GOLDEN=1 로 갱신 후 diff 를 눈으로 확인)
+cargo test -p mb-agent --test golden
+UPDATE_GOLDEN=1 cargo test -p mb-agent --test golden
+
 # 통합 테스트만
 cargo test --test main_tests -p mb-runtime
 cargo test --test html_tests -p mb-runtime
@@ -63,7 +73,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 593 (workspace 합계, 2026-06-14 Tier 1 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 609 (workspace 합계, 2026-11-11 G0 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -86,7 +96,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 ### 코드 스타일
 - 작은 함수 + 좋은 이름 우선, 주석은 *왜* 만 (무엇은 코드가 말함).
 - 모든 변경은 cargo fmt 통과. clippy clean.
-- 새 dep 추가는 의식적으로 — 4-crate 분할의 dep 그래프를 깨지 말 것 (mb-dom 에 IO 금지, mb-engine 에 네트워크 금지 등).
+- 새 dep 추가는 의식적으로 — crate 분할의 dep 그래프를 깨지 말 것 (mb-dom 에 IO 금지, mb-engine 에 네트워크 금지, mb-agent 는 mb-runtime 만 등).
 - 한 crate 안에서 다른 crate 의 데이터 타입을 참조할 때:
   - mb-engine 내부에서는 `crate::css::Color` 처럼 짧게 (`pub(crate) use mb_dom::*` 덕분).
   - mb-runtime 도 동일.

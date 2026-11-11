@@ -1133,6 +1133,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mb-agent"
+version = "0.1.0"
+dependencies = [
+ "mb-runtime",
+]
+
+[[package]]
 name = "mb-dom"
 version = "0.1.0"
 dependencies = [

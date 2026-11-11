@@ -1,0 +1,59 @@
+# browser (trusted)
+url: http://localhost:8000/long_page   scroll: 0/1880   viewport: 800x600
+elements: 26 shown / 26 in viewport / 60 total   next_cursor: -
+
+# page content (untrusted, origin=http://localhost:8000)
+title: "Long list"
+[e6] link      name="Item 1" → /item/1
+[e11] link      name="Item 2" → /item/2
+[e16] link      name="Item 3" → /item/3
+[e21] link      name="Item 4" → /item/4
+[e26] link      name="Item 5" → /item/5
+[e31] link      name="Item 6" → /item/6
+[e36] link      name="Item 7" → /item/7
+[e41] link      name="Item 8" → /item/8
+[e46] link      name="Item 9" → /item/9
+[e51] link      name="Item 10" → /item/10
+[e56] link      name="Item 11" → /item/11
+[e61] link      name="Item 12" → /item/12
+[e66] link      name="Item 13" → /item/13
+[e71] link      name="Item 14" → /item/14
+[e76] link      name="Item 15" → /item/15
+[e81] link      name="Item 16" → /item/16
+[e86] link      name="Item 17" → /item/17
+[e91] link      name="Item 18" → /item/18
+[e96] link      name="Item 19" → /item/19
+[e101] link      name="Item 20" → /item/20
+[e106] link      name="Item 21" → /item/21
+[e111] link      name="Item 22" → /item/22
+[e116] link      name="Item 23" → /item/23
+[e121] link      name="Item 24" → /item/24
+[e126] link      name="Item 25" → /item/25
+[e131] link      name="Item 26" → /item/26
+text:
+  "Item 1 description for item 1."
+  "Item 2 description for item 2."
+  "Item 3 description for item 3."
+  "Item 4 description for item 4."
+  "Item 5 description for item 5."
+  "Item 6 description for item 6."
+  "Item 7 description for item 7."
+  "Item 8 description for item 8."
+  "Item 9 description for item 9."
+  "Item 10 description for item 10."
+  "Item 11 description for item 11."
+  "Item 12 description for item 12."
+  "Item 13 description for item 13."
+  "Item 14 description for item 14."
+  "Item 15 description for item 15."
+  "Item 16 description for item 16."
+  "Item 17 description for item 17."
+  "Item 18 description for item 18."
+  "Item 19 description for item 19."
+  "Item 20 description for item 20."
+  "Item 21 description for item 21."
+  "Item 22 description for item 22."
+  "Item 23 description for item 23."
+  "Item 24 description for item 24."
+  "Item 25 description for item 25."
+  "Item 26 description for item 26."
