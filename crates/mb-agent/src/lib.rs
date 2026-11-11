@@ -15,13 +15,18 @@
 
 #![deny(clippy::print_stdout)]
 
+mod browser;
+mod error;
 mod index;
 mod observation;
 mod role;
 mod text;
 
+pub use browser::{AgentBrowser, AgentConfig, ClockMode, SUPPORTED_KEYS, is_local_dev_host};
+pub use error::AgentError;
+pub use mb_runtime::state::policy::ApproveMode;
 pub use observation::{
-    ElementObservation, ElementValue, Flag, Observation, ObserveInput, ObserveOptions, Scope,
-    observe,
+    Changes, ElementObservation, ElementValue, Flag, Observation, ObserveInput, ObserveOptions,
+    Scope, observe,
 };
 pub use role::Role;

@@ -1,5 +1,5 @@
 # browser (trusted)
-url: http://localhost:8000/signup_form   scroll: 0/422   viewport: 800x600
+url: http://localhost:8000/signup_form   scroll: 0/245   viewport: 800x600
 elements: 12 shown / 12 in viewport / 12 total   next_cursor: -
 
 # page content (untrusted, origin=http://localhost:8000)

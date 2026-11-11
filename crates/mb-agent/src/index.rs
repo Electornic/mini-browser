@@ -6,7 +6,7 @@
 // but keeping them ordered means nothing iteration-order-dependent can sneak
 // into the observation later (determinism rule, AGENTS.md).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use mb_runtime::dom::{Document, ElementData, NodeId, NodeType};
 use mb_runtime::layout::{BoxType, LayoutBox, Rect};
@@ -20,16 +20,22 @@ pub(crate) struct DomIndex<'a> {
     ids: BTreeMap<String, NodeId>,
     labels_for: BTreeMap<String, NodeId>,
     rects: BTreeMap<NodeId, Rect>,
+    click_listeners: BTreeSet<NodeId>,
 }
 
 impl<'a> DomIndex<'a> {
-    pub(crate) fn build(document: &'a Document, layout_root: &LayoutBox) -> Self {
+    pub(crate) fn build(
+        document: &'a Document,
+        layout_root: &LayoutBox,
+        click_listeners: &[NodeId],
+    ) -> Self {
         let mut index = Self {
             document,
             order: Vec::new(),
             ids: BTreeMap::new(),
             labels_for: BTreeMap::new(),
             rects: BTreeMap::new(),
+            click_listeners: click_listeners.iter().copied().collect(),
         };
         for &root in document.roots() {
             index.visit(root);
@@ -126,6 +132,11 @@ impl<'a> DomIndex<'a> {
         self.rects.get(&id).copied()
     }
 
+    /// Has a `click` listener registered from JS (addEventListener / on*).
+    pub(crate) fn has_click_listener(&self, id: NodeId) -> bool {
+        self.click_listeners.contains(&id)
+    }
+
     pub(crate) fn by_id_attr(&self, value: &str) -> Option<NodeId> {
         self.ids.get(value).copied()
     }
@@ -171,6 +182,41 @@ impl<'a> DomIndex<'a> {
             }
         }
     }
+}
+
+/// Border-box rect of `id` in the current layout (document coordinates),
+/// without building a whole index. Used right before acting on an element.
+pub(crate) fn find_rect(layout_box: &LayoutBox, id: NodeId) -> Option<Rect> {
+    let own = match &layout_box.box_type {
+        BoxType::BlockNode(node)
+        | BoxType::FlexNode(node)
+        | BoxType::GridNode(node)
+        | BoxType::TableNode(node)
+            if node.node_id == id =>
+        {
+            let d = &layout_box.dimensions;
+            Some(Rect {
+                x: d.content.x - d.padding.left - d.border.left,
+                y: d.content.y - d.padding.top - d.border.top,
+                width: d.border.left
+                    + d.padding.left
+                    + d.content.width
+                    + d.padding.right
+                    + d.border.right,
+                height: d.border.top
+                    + d.padding.top
+                    + d.content.height
+                    + d.padding.bottom
+                    + d.border.bottom,
+            })
+        }
+        _ => None,
+    };
+    layout_box
+        .children
+        .iter()
+        .filter_map(|child| find_rect(child, id))
+        .fold(own, |acc, r| Some(acc.map_or(r, |a| union(a, r))))
 }
 
 fn union(a: Rect, b: Rect) -> Rect {

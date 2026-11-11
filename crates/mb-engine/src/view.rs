@@ -443,8 +443,11 @@ pub fn caret_commands_for_focused_input(
         | layout::BoxType::GridNode(node)
         | layout::BoxType::TableNode(node) => {
             let (value, is_textarea) = match &node.node_type {
+                // Same text the field paints (bullets for passwords), so
+                // the caret lands after what's visible, not after the
+                // hidden value's real glyph widths.
                 NodeType::Element(elem) => (
-                    elem.attributes.get("value").cloned().unwrap_or_default(),
+                    render::field_display_value(elem).unwrap_or_default(),
                     elem.tag_name == "textarea",
                 ),
                 NodeType::Text(_) => return Vec::new(),

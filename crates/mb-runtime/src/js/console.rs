@@ -12,28 +12,42 @@
 // JS bootstrap. Same observable behaviour as the boa version, less
 // fighting with the borrow checker.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use rquickjs::{Ctx, Result, prelude::Func};
 
-pub(super) fn register_console(ctx: &Ctx<'_>) -> Result<()> {
+/// One `console.*` call, kept for the agent's observation (the line also
+/// still goes to stderr — never stdout, which belongs to MCP).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleMessage {
+    pub level: &'static str,
+    pub text: String,
+}
+
+/// Oldest messages are dropped past this, so a chatty page can't grow the
+/// buffer without bound between two agent observations.
+const MAX_BUFFERED: usize = 200;
+
+pub(super) type ConsoleBuffer = Rc<RefCell<Vec<ConsoleMessage>>>;
+
+fn sink(buffer: &ConsoleBuffer, level: &'static str) -> impl Fn(String) + 'static {
+    let buffer = buffer.clone();
+    move |s: String| {
+        eprintln!("[console.{level}] {s}");
+        let mut buf = buffer.borrow_mut();
+        if buf.len() >= MAX_BUFFERED {
+            buf.remove(0);
+        }
+        buf.push(ConsoleMessage { level, text: s });
+    }
+}
+
+pub(super) fn register_console(ctx: &Ctx<'_>, buffer: ConsoleBuffer) -> Result<()> {
     let globals = ctx.globals();
-    globals.set(
-        "__mb_console_log",
-        Func::from(|s: String| {
-            eprintln!("[console.log] {s}");
-        }),
-    )?;
-    globals.set(
-        "__mb_console_warn",
-        Func::from(|s: String| {
-            eprintln!("[console.warn] {s}");
-        }),
-    )?;
-    globals.set(
-        "__mb_console_error",
-        Func::from(|s: String| {
-            eprintln!("[console.error] {s}");
-        }),
-    )?;
+    globals.set("__mb_console_log", Func::from(sink(&buffer, "log")))?;
+    globals.set("__mb_console_warn", Func::from(sink(&buffer, "warn")))?;
+    globals.set("__mb_console_error", Func::from(sink(&buffer, "error")))?;
     ctx.eval::<(), _>(CONSOLE_BOOT)?;
     Ok(())
 }

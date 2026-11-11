@@ -312,6 +312,10 @@ fn is_inline_node(node: &StyledNode) -> bool {
             element.tag_name.as_str(),
             "a" | "abbr"
                 | "b"
+                | "button"
+                | "input"
+                | "select"
+                | "textarea"
                 | "bdi"
                 | "bdo"
                 | "big"

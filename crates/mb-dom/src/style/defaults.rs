@@ -352,6 +352,70 @@ pub(super) fn default_values(document: &Document, node_id: NodeId) -> PropertyMa
                 "padding-bottom".into(),
                 Value::Length(2.0, crate::css::Unit::Px),
             );
+            // Checkboxes and radios are small square widgets, not text
+            // fields: override the 200px text-field shell. The check mark
+            // itself is painted from the `checked` attribute.
+            let input_type = element
+                .attributes
+                .get("type")
+                .map(|t| t.trim().to_ascii_lowercase())
+                .unwrap_or_default();
+            if element.tag_name == "input" && matches!(input_type.as_str(), "checkbox" | "radio") {
+                values.insert("width".into(), Value::Length(13.0, crate::css::Unit::Px));
+                values.insert("height".into(), Value::Length(13.0, crate::css::Unit::Px));
+                for side in ["top", "right", "bottom", "left"] {
+                    values.insert(
+                        format!("padding-{side}"),
+                        Value::Length(0.0, crate::css::Unit::Px),
+                    );
+                }
+                values.insert(
+                    "margin-right".into(),
+                    Value::Length(4.0, crate::css::Unit::Px),
+                );
+            }
+        }
+        // Buttons and selects are inline-block widgets like <input>: they
+        // sit on the text line instead of breaking it, which is what keeps
+        // "read the terms before you <button>Continue</button>" on one line.
+        // A light gray face + 1px border makes them read as controls.
+        "button" | "select" => {
+            values.insert("display".into(), Value::Keyword("inline-block".into()));
+            values.insert(
+                "background-color".into(),
+                Value::Color(crate::css::Color {
+                    r: 239,
+                    g: 239,
+                    b: 239,
+                    a: 255,
+                }),
+            );
+            edge_defaults(&mut values, "border", 1.0);
+            values.insert(
+                "border-color".into(),
+                Value::Color(crate::css::Color {
+                    r: 118,
+                    g: 118,
+                    b: 118,
+                    a: 255,
+                }),
+            );
+            values.insert(
+                "padding-left".into(),
+                Value::Length(6.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "padding-right".into(),
+                Value::Length(6.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "padding-top".into(),
+                Value::Length(1.0, crate::css::Unit::Px),
+            );
+            values.insert(
+                "padding-bottom".into(),
+                Value::Length(1.0, crate::css::Unit::Px),
+            );
         }
         _ => {}
     }

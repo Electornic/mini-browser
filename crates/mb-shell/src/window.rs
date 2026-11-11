@@ -122,6 +122,7 @@ struct PendingInput {
     move_down: bool,
     page_up_pressed: bool,
     page_down_pressed: bool,
+    tab_pressed: bool,
     mouse_position: Option<(f32, f32)>,
     left_held: bool,
     modifiers: ModifiersState,
@@ -144,6 +145,11 @@ impl PendingInput {
             mouse_position: self.mouse_position,
             left_mouse_pressed: self.left_held && !last_left_down,
             left_mouse_held: self.left_held,
+            tab_pressed: std::mem::take(&mut self.tab_pressed),
+            // Escape quits the shell (below), so it never reaches the page.
+            escape_pressed: false,
+            // Everything the window delivers came from the person at it.
+            from_agent: false,
         }
     }
 }
@@ -318,6 +324,7 @@ where
             Key::Named(NamedKey::ArrowRight) if alt && !repeat => {
                 self.pending.forward_pressed = true;
             }
+            Key::Named(NamedKey::Tab) if !repeat => self.pending.tab_pressed = true,
             Key::Named(NamedKey::PageUp) if !repeat => self.pending.page_up_pressed = true,
             Key::Named(NamedKey::PageDown) if !repeat => self.pending.page_down_pressed = true,
             Key::Character(c) if cmd_or_ctrl && !repeat => match c.as_str() {

@@ -43,6 +43,7 @@ fn observe_fixture(name: &str, scroll_y: f32, options: ObserveOptions) -> Observ
             viewport_width: VIEWPORT_W,
             viewport_height: VIEWPORT_H,
             settled: None,
+            click_listeners: &[],
         },
         &options,
     )

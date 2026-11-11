@@ -41,7 +41,9 @@
 ├── crates/mb-agent    (agent interface)    mb-runtime 만
 │   - index            DOM·layout 한 바퀴 → 문서 순서 / id·label 맵 / NodeId→rect
 │   - role             role 판정 + accessible name (accname 축약판)
-│   - observation      observe() → Observation → to_text() (trusted/untrusted 블록)
+│   - observation      observe() → Observation → to_text() (trusted/untrusted 블록, changed/console/dialog)
+│   - browser          AgentBrowser — 행동 → 합성 WindowInput(from_agent) → settle → 관찰
+│   - error            AgentError (code / message / hint)
 │   - text             페이지 문자열 정규화·따옴표 (위조 방지)
 │
 └── crates/mb-shell    (binary [[bin]] mb-shell)  anyhow, softbuffer, winit
@@ -73,7 +75,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 609 (workspace 합계, 2026-11-11 G0 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 639 (workspace 합계, 2026-11-12 G1 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -116,6 +118,15 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 ## Gotchas / 함정 모음
 
 라이브러리 통합 중 만났던 함정 — 다시 만나지 않도록 기록.
+
+### 테스트 HTML 과 루트
+- `html::parse` 는 `<html>`/`<body>` 가 없으면 fragment 로 파싱해서 **최상위 형제가 각각 루트**가 되고, 화면에 그리는 건 `roots().last()` 뿐이다. `<input>…<script>` 처럼 최상위에 여러 개를 두면 마지막(`<script>`)만 레이아웃 루트가 되어 클릭·getElementById 가 다 빗나간다 → 테스트 HTML 은 `<div>` 하나로 감싸거나 완전한 문서로 쓸 것.
+
+### 레이아웃 경로 ≠ DOM 경로
+- 레이아웃 트리는 `display:none` 자식(`<head>`, `<script>`, `<style>`)과 공백 텍스트를 뺀다. 그래서 레이아웃 자식 인덱스로 만든 경로를 DOM 에서 풀면 엉뚱한 노드가 나온다 (G1 에서 hover/포커스가 이 버그였음). 노드를 가리킬 땐 **NodeId** 를, 경로가 필요하면 `dom_path_for_node` 로 DOM 기준 경로를 만든다.
+
+### NodeId 는 문서마다 재사용
+- 이동·뒤로·새로고침마다 새 `Document` 가 생기고 NodeId 가 0 부터 다시 매겨진다. NodeId 를 문서 밖으로 들고 다니면(에이전트 요소 ID 등) 반드시 `BrowserState::document_generation()` 과 짝지을 것.
 
 ### Workspace split
 - **orphan impl**: 타입을 다른 crate 로 옮기면 그 타입의 inherent impl 도 같이 옮겨야 함 (E0116). `impl Color { WHITE/BLACK }` 가 별도 파일에 있어서 마이그레이션 중 깨졌음.
@@ -166,6 +177,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - **stdout 금지**: stdio MCP 에서 stdout 은 JSON-RPC 전용. crate 의 lib·bin 코드에서 `println!`/`print!` 쓰지 말고 `eprintln!` 사용 (examples·tests 는 예외). `mb-agent`/`mb-mcp` 는 `#![deny(clippy::print_stdout)]`.
 - **이동은 반드시 정책 게이트를 지난다**: 새 이동 경로(`location.href =`, `window.open`, meta refresh 등)를 추가할 때 `navigate` / `navigate_to_href` / `try_submit_form` 과 같은 `policy::check` 를 통과시킨다. 우회 경로를 만들지 말 것.
 - **에이전트 전용 DOM 조작 API 금지**: 에이전트 행동은 합성 `WindowInput` 으로만. 편의를 위해 DOM 을 직접 바꾸는 단축로를 만들지 않는다.
+- **`WindowInput::from_agent` 는 mb-agent 만 켠다**: 셸(사람 입력)은 항상 false. 정책 게이트는 이 플래그로 판정 대상을 가른다.
 - **비밀번호 값은 어디에도 남기지 않는다**: 관찰(길이만)·로그(`<redacted>`)·화면(마스킹).
 - **`panic = "abort"` 로 바꾸지 말 것**: 엔진 패닉 복구가 unwind 에 의존한다.
 - **브라우저는 결정적이어야 한다**: 관찰·행동·정책 출력에 `HashMap` 순회 순서, 벽시계, 비시드 난수가 새어 나가면 안 된다. 시간은 엔진 시계(`ClockSource`)만, 순서는 문서 순서로. 비결정성은 LLM 판단에만 허용 ([concept.md#결정성](docs/concept.md#결정성)).

@@ -106,6 +106,34 @@ impl BrowserState {
             self.dispatch_typed_keys(&focused_path, input);
         }
 
+        if input.tab_pressed {
+            // Tab leaves the address bar for the page, then walks it.
+            self.address_bar_focused = false;
+            self.address_bar_selected = false;
+            let prevented = match self.focused_element() {
+                Some(id) => self.js.dispatch_keyboard_event(id, "keydown", "Tab"),
+                None => false,
+            };
+            if !prevented {
+                self.focus_next();
+            }
+        }
+
+        if input.escape_pressed {
+            if self.address_bar_focused {
+                self.address_bar_focused = false;
+                self.address_bar_selected = false;
+            } else {
+                let prevented = match self.focused_element() {
+                    Some(id) => self.js.dispatch_keyboard_event(id, "keydown", "Escape"),
+                    None => false,
+                };
+                if !prevented {
+                    self.set_focus_path(None);
+                }
+            }
+        }
+
         if input.back_pressed {
             self.go_back();
         }

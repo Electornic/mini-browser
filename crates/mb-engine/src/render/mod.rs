@@ -15,7 +15,9 @@ use crate::{
 mod display_list;
 mod raster;
 
-pub use display_list::{PaintContext, build_display_list, transform_for, translate};
+pub use display_list::{
+    PaintContext, build_display_list, field_display_value, transform_for, translate,
+};
 pub use raster::{
     clear_measure_cache, measure_text_width, measure_text_wrap, measure_text_wrap_with_family,
     rasterize, rasterize_into,
@@ -819,6 +821,37 @@ mod tests {
         // Two-row gap between the two visible lines (the empty middle
         // line still consumes a row even though it didn't paint).
         assert_eq!(texts[1].y - texts[0].y, 32.0);
+    }
+
+    fn texts(commands: &[DisplayCommand]) -> Vec<String> {
+        commands
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn password_field_paints_bullets_not_the_value() {
+        let commands = display_list(r#"<input type="password" value="hunter22">"#, "");
+        assert_eq!(texts(&commands), vec!["••••••••".to_string()]);
+    }
+
+    #[test]
+    fn checkbox_value_is_not_painted_as_text_and_check_mark_follows_checked() {
+        let unchecked = display_list(r#"<input type="checkbox" value="on">"#, "");
+        let checked = display_list(r#"<input type="checkbox" value="on" checked>"#, "");
+        assert!(texts(&unchecked).is_empty());
+        assert!(texts(&checked).is_empty());
+        let rects = |cmds: &[DisplayCommand]| {
+            cmds.iter()
+                .filter(|c| matches!(c, DisplayCommand::SolidRect(_, _)))
+                .count()
+        };
+        // Checked adds exactly one filled square on top of the box.
+        assert_eq!(rects(&checked), rects(&unchecked) + 1);
     }
 
     #[test]

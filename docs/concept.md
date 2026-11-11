@@ -1,6 +1,6 @@
 # Concept — 에이전트용 브라우저
 
-> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ 완료 (2026-11-11, `crates/mb-agent`)** · 다음 = G1 행동 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
+> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ (2026-11-12, `crates/mb-agent` `AgentBrowser`)** · 다음 = G2 MCP · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
 
 ## 한 줄
 
@@ -23,13 +23,15 @@
 |---|---|---|
 | 창 없이 렌더 (headless) | `build_document_view` → raster → `Vec<u32>` ([snapshot_tests.rs](../crates/mb-runtime/tests/snapshot_tests.rs)) | — |
 | 요소 위치 | **텍스트 노드를 포함한 모든 DOM 노드가 자기 LayoutBox 를 가진다** (인라인 요소도 `BoxType::BlockNode(StyledNode)` 로, 인라인 흐름 안에서 제 위치에 배치됨). `mb-agent` 는 layout 트리를 직접 돌며 `NodeId → border-box rect` 를 만든다 | 2026-11-11 검토에서 "인라인 요소 rect 없음"이라 적었던 건 **오판** — G0 구현 중 레이아웃 덤프로 확인. 여러 줄로 감기는 인라인 요소는 bounding rect 하나 |
-| 인라인 판정 | `layout/inline.rs` `is_inline_node` — phrasing content 태그 목록 | **`<button>`·`<input>`(text 등)·`<select>`·`<textarea>` 가 목록에 없음** → 버튼이 섞인 문단이 인라인 흐름을 못 타고 세로로 쌓인다 (G1 엔진 보강) |
+| 인라인 판정 | `layout/inline.rs` `is_inline_node` — phrasing content 태그 목록 | ✅ G1: `button`·`input`·`select`·`textarea` 추가 + `button`/`select` UA 기본 `inline-block` |
 | 안정적인 요소 핸들 | `NodeId` arena — 트리 재배치 후에도 같은 노드, 삭제는 tombstone | — |
 | 행동 주입 | `WindowInput` (mouse position/press/held, typed text, Enter, Backspace, ↑↓, PageUp/Down, scroll, back/forward) | Tab·Escape·←→·Home/End·Delete·수식키 없음. **입력 출처(사람/에이전트) 구분 없음** |
-| 폼 | `try_submit_form` ([lifecycle.rs](../crates/mb-runtime/src/state/lifecycle.rs)) — **GET 만**. POST 는 로그 남기고 skip | POST 제출. 네트워크 배관은 `net::fetch_with_request(url, method, headers, body)` 로 이미 있음 |
-| 입력 요소 | `<input>`(text 취급) · `<textarea>` 포커스·캐럿·편집 | `type=password` 마스킹, checkbox/radio, `<select>` 없음 |
-| 안정 판단 | `JsRuntime::has_pending_work()` + `BrowserState::has_pending_navigation()` | `has_pending_work` 가 `setInterval` 도 셈 → 인터벌 있는 페이지는 영원히 "바쁨". 다음 타이머 마감 시각 API 필요 |
-| 대화상자 | 없음 — `alert`/`confirm`/`prompt`/`window.open` 미정의 (호출 시 ReferenceError) | no-op + 기록 shim |
+| 폼 | `try_submit_form` ([lifecycle.rs](../crates/mb-runtime/src/state/lifecycle.rs)) | ✅ G1: POST(`application/x-www-form-urlencoded`) → `NavigationRequest` → `load_remote_document_request`. 303 은 ureq 가 GET 으로 따라감. method 는 get/post/dialog 만(그 외 GET). 폼 데이터 수집도 고침: 체크 안 된 checkbox/radio·submit 버튼·disabled 제외, `<select>` 선택값, 손 안 댄 `<textarea>` 텍스트 |
+| 입력 요소 | `<input>` · `<textarea>` 포커스·캐럿·편집 | ✅ G1: password 는 `•` 로 그림(`field_display_value`, 캐럿도 같은 텍스트 기준), checkbox/radio 13px 상자 + 체크 표시, 클릭·`<label>` 클릭으로 토글(radio 는 같은 form·name 그룹 해제, `input`/`change` 발화, preventDefault 존중). `<select>` 고르기는 아직 |
+| 안정 판단 | `JsRuntime::has_pending_work()` + `BrowserState::has_pending_navigation()` | ✅ G1: `JsRuntime::next_timer_deadline()` / `clock_now_ms()` 추가 → settle 이 "50ms 안에 올 타이머"만 기다림 |
+| 대화상자 | ✅ G1 `js/dialogs.rs`: `alert`/`confirm`(→false)/`prompt`(→null)/`window.open`(→null), 호출 기록 → 관찰의 `dialog:` 줄 | — |
+| 인라인 핸들러 | ✅ G1: HTML `onclick="…"` 등 `on*` 속성을 문서 설치 시 리스너로 컴파일 (`this`=요소, `event` 인자, `return false` = preventDefault). 그 전엔 **속성 핸들러가 전혀 실행되지 않았음** | 나중에 `setAttribute('onclick', …)` 로 단 핸들러는 아직 |
+| hover/포커스 경로 | — | ✅ G1 **버그 수정**: hover/포커스 경로를 레이아웃 자식 인덱스로 만들고 DOM 에서 풀던 탓에, `display:none` 형제(`<head>`·`<script>`·`<style>`)가 앞에 있는 실제 페이지에선 `:hover`·포커스가 엉뚱한 요소에 갔음 → hit 의 NodeId 로 DOM 경로를 계산 |
 | 계측 | `profile` span, `revision` 카운터 | — |
 
 ## 동작 모델
@@ -128,7 +130,7 @@
 | `navigate` | `url` | Observation | origin 이 바뀌면 정책 게이트 대상 (주소창 직접 입력도 에이전트 출처면 동일) |
 | `observe` | `scope?: viewport\|full`, `cursor?` | Observation | 기본 `viewport` |
 | `click` | `id` | Observation | 자동 scroll-into-view |
-| `type` | `id`, `text`, `clear?: bool`, `submit?: bool` | Observation | 포커스 → `clear` 면 비우고, 아니면 기존 값 끝에 입력. `submit=true` 면 Enter. 비밀번호 필드는 [자격증명 규칙](#자격증명-규칙) |
+| `type` | `id`, `text`, `clear?: bool`, `submit?: bool` | Observation | 클릭으로 포커스 → `clear` 면 값 길이만큼 Backspace 프레임, 아니면 기존 값 끝에 입력. `submit=true` 면 Enter. text 계열 input·textarea 가 아니면 `not_a_text_field`. 비밀번호 필드는 [자격증명 규칙](#자격증명-규칙) |
 | `press` | `key` | Observation | 지원 키는 [키 입력](#키-입력) 표. 그 외는 `unsupported_key` |
 | `scroll` | `dy` (px) | Observation | 음수 = 위 |
 | `back` / `forward` | — | Observation | |
@@ -141,7 +143,9 @@
 
 | 코드 | 언제 |
 |---|---|
-| `stale_element` | ID 의 노드가 삭제됨(tombstone) |
+| `stale_element` | ID 의 노드가 삭제됨(tombstone), **또는 현재 문서의 관찰에서 내준 적 없는 ID** — NodeId 는 문서마다 0 부터 다시 매겨지므로, 이전 페이지의 `e21` 이 새 페이지의 다른 요소를 가리킬 수 있다. `AgentBrowser` 가 문서 세대(`document_generation`)별로 내준 ID 집합을 들고 판정 |
+| `not_a_text_field` | `type` 대상이 텍스트 칸이 아님 |
+| `invalid_url` | `navigate` 인자가 http(s) URL 이 아님 |
 | `not_interactable` | 노드는 있지만 rect 가 없거나 크기 0 (display:none 등) |
 | `handoff_required` | 비밀번호 필드 입력 등 사람이 해야 하는 단계 |
 | `approval_denied` | 사람이(또는 `--approve deny` 가) 위험 행동을 거절 |
@@ -226,8 +230,9 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 | 키 | 지금 | 계획 |
 |---|---|---|
 | Enter, Backspace, ArrowUp/Down, PageUp/PageDown | ✅ `WindowInput` 에 있음 | — |
-| Tab / Shift+Tab | ❌ | G1: 포커스 이동 (DOM 순서 + `tabindex`) |
-| Escape, ArrowLeft/Right, Home/End, Delete | ❌ | G1: `WindowInput` 확장 |
+| Tab | ✅ G1 `tab_pressed` | 렌더된 focusable(링크·컨트롤·`tabindex>=0`, disabled/hidden 제외)을 문서 순서로 순환. keydown preventDefault 존중. 양수 tabindex 순서·Shift+Tab 은 아직 |
+| Escape | ✅ G1 `escape_pressed` | 주소창 또는 페이지 포커스 해제. **셸(mb-shell)에선 Escape = 창 닫기를 유지**하므로 사람 입력으론 안 들어감 |
+| ArrowLeft/Right, Home/End, Delete | ❌ 보류 | 입력값에 **캐럿 위치 개념이 없음**(항상 끝에 추가/삭제) → 캐럿 모델이 생기면 |
 | 수식키 조합 (Cmd/Ctrl+A 등) | ❌ | 필요해지면 |
 
 ### settle (안정 판단)
@@ -295,9 +300,10 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 
 | 출처 | 지금 | 대응 |
 |---|---|---|
-| 벽시계 (`Date.now`, 타이머 마감) | 엔진에 **이미 가상 시계 있음** — `ClockSource::Fixed` / `FixedClock` 이 `Date.now()` 와 모든 타이머 deadline 을 구동 ([timers.rs](../crates/mb-runtime/src/js/timers.rs)). 단 테스트 전용, BrowserState 는 `System` | G1: headless(`mb-mcp` 기본)에서 `FixedClock` 을 BrowserState 에 연결. 프레임마다 고정 간격(예: 16ms) 전진 + settle 중엔 "다음 타이머 마감까지 점프". window 모드는 사람이 보므로 실제 시계 |
-| `Math.random` | QuickJS 내장 (시드 고정 불가) | G1: 부트스트랩에서 시드 PRNG 로 교체 (`--seed N`, 기본 고정값) |
-| `performance.now` 등 다른 시간 API | 확인 필요 | 있으면 같은 엔진 시계에 연결 |
+| 벽시계 (`Date.now`, 타이머 마감) | ✅ G1: `JsOptions { fixed_clock }` → `BrowserState::set_js_options` 가 매 설치마다 같은 `FixedClock` 으로 런타임 생성. `AgentBrowser` 는 settle 프레임마다 16ms 전진 (`ClockMode::Virtual`, 기본) | "다음 타이머까지 점프"는 안 함 — 50ms 지평 밖 타이머는 기다리지 않으므로 불필요 |
+| `Math.random` | ✅ G1: `JsOptions { random_seed }` → mulberry32 로 교체 (`AgentConfig::seed`, 기본 1) | — |
+| `new Date()` (인자 없음), `performance.now` | ❌ 아직 호스트 시계 | `Date` 생성자 패치·`performance.now` 연결은 남은 일 — 이걸 쓰는 페이지는 결정성이 깨질 수 있음 |
+| 네트워크 로드 시간 | 워커 스레드, 실제 시간 | settle 이 이동 중엔 2ms 씩 실제로 기다림 + 5초 벽시계 상한 (`AgentConfig::settle_timeout`) |
 | 요소 수집 순서 | — | `HashMap` 순회 금지, 문서 순서로 정렬 (G0 골든 테스트로 고정) |
 | settle 판단 | 설계상 프레임·revision 기준 | 벽시계 타임아웃(5초)은 안전장치로만. 가상 시계 모드에선 "프레임 N개" 상한으로 대체 |
 | 폰트 (머신마다 시스템 폰트가 다름) | 시스템 폰트 사용 | 레이아웃 rect·스크린샷은 머신마다 다를 수 있음 → 관찰 기본 출력에서 rect 를 뺀 이유 중 하나. 골든 테스트는 폰트 없는 fallback 측정 경로(`font_size * 0.75`) 사용 |
@@ -566,7 +572,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | Phase | 산출물 | 엔진 보강 (선행/포함) | 눈에 보이는 결과 |
 |---|---|---|---|
 | **G0** 관찰 ✅ | `mb-agent::observe` — Observation (trusted/untrusted 분리, `e{NodeId}` ID, viewport scope, 상한·cursor, 문서 순서 고정, `field=` 힌트) | 불필요했음 (인라인 rect 이미 존재) | L2 골든 5개 + 결정성·위조 방지·비밀번호 은닉 테스트 (609 green) |
-| **G1** 행동 | `click`/`type`/`press`/`scroll`/`navigate`/`back`/`forward`, settle, 입력 출처 태그, `addEventListener` 리스너를 interactive 판정에 연결 | **POST 폼 제출**, `button`/`input`/`select`/`textarea` 를 인라인 레벨로, `type=password` 마스킹, checkbox/radio, Tab·Escape·←→·Home/End·Delete, 다음 타이머 마감 API, `alert`/`confirm`/`prompt`/`window.open` shim, `console` 버퍼, **headless 가상 시계 연결(`FixedClock`) + 시드 `Math.random`** | L3: headless 로 회원가입 폼 POST 제출 통합 테스트 |
+| **G1** 행동 ✅ | `AgentBrowser` ([browser.rs](../crates/mb-agent/src/browser.rs)): `navigate`/`click`/`type_text`/`press`/`scroll`/`back`/`forward`, settle, `changed:` 요약, 에러 코드([error.rs](../crates/mb-agent/src/error.rs)), 문서 세대별 ID 검증, 리스너 기반 clickable. 정책 게이트 [policy.rs](../crates/mb-runtime/src/state/policy.rs)(`Auto`/`Deny`, allow-list, 거절 기억) | POST 폼, 컨트롤 인라인화, password 마스킹, checkbox/radio 토글·`<label>`, Tab·Escape, 타이머 마감 API, 대화상자 shim, console 버퍼, 가상 시계·시드 난수 연결, **인라인 `on*` 핸들러**, **hover/포커스 경로 버그 수정**. 보류: ←→/Home/End/Delete(캐럿 모델), `<select>` 고르기, `new Date()`/`performance.now` | L3 10개 (fixture 서버 POST 회원가입·303 리다이렉트, Deny/거절 기억, 비밀번호 넘겨받기, allow-list, settle, 대화상자, 스크롤, stale, Tab, 결정성) — 639 green |
 | **G2** MCP | `mb-mcp` (stdio, headless), tools·에러 코드, `prompts.rs`(서버 instructions·tool 설명·에러 힌트), `repeat_count`, 추천 skill 예시 | — | **Claude Code 가 이 브라우저로 로컬 페이지를 조작** ← 첫 데모. L4 e2e |
 | **G3** 관전 UI | `mb-mcp --window`: ID 배지 오버레이·에이전트 패널·액션 타임라인. `mb-shell --mcp-http` (토큰·Host·Origin 검사) | `mb-shell` lib 화 | 창에서 에이전트가 누르는 걸 실시간으로 봄 |
 | **G4** 안전장치 | `policy.rs` 게이트 + 승인 카드 + 넘겨받기(`handoff_required`), elicitation, `--allow-origin`, 거절 기억(같은 대상 즉시 거절) | — | POST 제출 직전 멈춤 → 승인 후 진행. L5 |
@@ -584,6 +590,10 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-10 | 연결 = MCP 서버 (rmcp, stdio 먼저) | 앱에 API 키 불필요, Claude Code 를 에이전트로 재사용. 앱 내장 LLM 루프는 하지 않음 |
 | 2026-11-11 | G0: 관찰은 layout 트리에서 rect 를 직접 수집, `LinkTarget` 미사용 | 모든 노드가 LayoutBox 를 가져서 별도 인라인 수집 불필요 (검토 때 오판 정정) |
 | 2026-11-11 | G0: `text:` 에 링크 텍스트 포함, 폼 크롬 제외, 이름 없는 컨트롤은 `field=` | 링크를 빼면 문장이 끊김 ("or read the ."). 라벨·버튼은 요소 목록과 중복. 이름 없는 `select` 는 `name=""` 만으론 용도를 알 수 없음 |
+| 2026-11-12 | G1: 엔진 기본 승인 모드 = `Deny` | 아무도 설정 안 한 에이전트는 안전한 쪽. 사람 입력엔 영향 없음 |
+| 2026-11-12 | G1: `stale_element` 를 "현재 문서 관찰에서 내준 ID 집합"으로 판정 | NodeId 가 문서마다 재사용됨 — 세대 카운터만으론 "새 페이지를 본 뒤 옛 ID 사용"을 못 잡음 |
+| 2026-11-12 | G1: ←→/Home/End/Delete 보류, Tab·Escape 만 | 입력값에 캐럿 위치가 없어 의미 있게 구현 불가. 캐럿 모델은 별도 작업 |
+| 2026-11-12 | G1: 셸의 Escape 는 창 닫기 유지 | 사람이 쓰던 단축키를 바꾸지 않음. 에이전트만 `escape_pressed` 사용 |
 | 2026-11-11 | 요소 ID = `e{NodeId}` (재번호 없음) | 관찰 사이에 ID 가 안 바뀌어 에이전트가 덜 헷갈림. arena 가 이미 안정 ID |
 | 2026-11-11 | 페이지 문자열 전부 untrusted, 두 블록 분리 | 요소 이름·값도 페이지가 정함 (인젝션 경로) |
 | 2026-11-11 | 정책 게이트 = BrowserState 이동 진입점, 출처 태그로 판정 | 에이전트가 사람과 같은 입력 경로를 타므로 tool 레이어에선 못 막음 |

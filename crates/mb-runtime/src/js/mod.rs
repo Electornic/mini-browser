@@ -38,6 +38,7 @@ pub struct ElementRect {
 }
 
 mod console;
+mod dialogs;
 mod document;
 mod dom_globals;
 mod element;
@@ -49,8 +50,52 @@ mod util;
 mod window;
 mod xhr;
 
+pub use console::ConsoleMessage;
+pub use dialogs::DialogRecord;
 use timers::ClockSource;
 pub use timers::FixedClock;
+
+/// Knobs for a runtime that must behave deterministically (headless agent
+/// runs, docs/concept.md "결정성"). The default is the normal browser:
+/// system clock, host `Math.random`.
+#[derive(Clone, Default)]
+pub struct JsOptions {
+    /// Drive `Date.now()` and every timer deadline from this clock.
+    pub fixed_clock: Option<FixedClock>,
+    /// Replace `Math.random` with a PRNG seeded by this value.
+    pub random_seed: Option<u32>,
+}
+
+// Returns the installer. Registered through the same listener registry as
+// addEventListener, so dispatch, preventDefault (via `return false` too)
+// and the agent's listener lookup all see inline handlers.
+const INLINE_HANDLERS_BOOT: &str = r#"
+(function (ids, events, bodies) {
+    for (var i = 0; i < ids.length; i++) {
+        var fn;
+        try { fn = new Function('event', bodies[i]); }
+        catch (err) { console.error('inline ' + events[i] + ' handler: ' + err); continue; }
+        (function (id, type, handler) {
+            globalThis.__mb_listener_add(id, type, function (event) {
+                var result = handler.call(this, event);
+                if (result === false && event && event.preventDefault) event.preventDefault();
+            });
+        })(ids[i], events[i], fn);
+    }
+})
+"#;
+
+impl std::fmt::Debug for JsOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsOptions")
+            .field(
+                "fixed_clock_ms",
+                &self.fixed_clock.as_ref().map(FixedClock::millis),
+            )
+            .field("random_seed", &self.random_seed)
+            .finish()
+    }
+}
 
 pub struct JsRuntime {
     // Both handles are refcounted internally; we keep the `Runtime` even
@@ -72,11 +117,21 @@ pub struct JsRuntime {
     // so the count can be slightly stale-high — that costs one extra
     // frame of redraw, never under-redraw.
     pending_jobs: Rc<Cell<u32>>,
+    console: console::ConsoleBuffer,
+    dialogs: dialogs::DialogBuffer,
 }
 
 impl JsRuntime {
     pub fn new(dom: Rc<RefCell<Document>>) -> Self {
-        Self::build(dom, ClockSource::System)
+        Self::build(dom, ClockSource::System, None)
+    }
+
+    pub fn with_options(dom: Rc<RefCell<Document>>, options: &JsOptions) -> Self {
+        let clock = match &options.fixed_clock {
+            Some(clock) => clock.source(),
+            None => ClockSource::System,
+        };
+        Self::build(dom, clock, options.random_seed)
     }
 
     /// Build a runtime against a synthetic `FixedClock`. Drives every
@@ -87,21 +142,24 @@ impl JsRuntime {
     /// clock; the fixed clock is for tests and headless diagnostic
     /// runs that need deterministic time.
     pub fn new_with_fixed_clock(dom: Rc<RefCell<Document>>, clock: FixedClock) -> Self {
-        Self::build(dom, clock.source())
+        Self::build(dom, clock.source(), None)
     }
 
-    fn build(dom: Rc<RefCell<Document>>, clock: ClockSource) -> Self {
+    fn build(dom: Rc<RefCell<Document>>, clock: ClockSource, random_seed: Option<u32>) -> Self {
         let runtime = Runtime::new().expect("rquickjs Runtime should construct");
         let context = Context::full(&runtime).expect("rquickjs Context should construct");
         let location_url: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
         let layout_rects: Rc<RefCell<HashMap<NodeId, ElementRect>>> =
             Rc::new(RefCell::new(HashMap::new()));
         let pending_jobs: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+        let console_buffer: console::ConsoleBuffer = Rc::new(RefCell::new(Vec::new()));
+        let dialog_buffer: dialogs::DialogBuffer = Rc::new(RefCell::new(Vec::new()));
 
         context.with(|ctx| {
             ctx.eval::<(), _>(DISPLAY_HELPER)
                 .expect("display helper should compile");
-            console::register_console(&ctx).expect("console should register");
+            console::register_console(&ctx, console_buffer.clone())
+                .expect("console should register");
             // DOM constructor ladder must land BEFORE element/document
             // registration so the wrappers (and future per-instance
             // prototype links) can reference the prototypes.
@@ -118,6 +176,19 @@ impl JsRuntime {
                 .expect("timers should register");
             fetch::register_fetch(&ctx).expect("fetch should register");
             xhr::register_xhr(&ctx).expect("xhr should register");
+            dialogs::register_dialogs(&ctx, dialog_buffer.clone())
+                .expect("dialogs should register");
+            if let Some(seed) = random_seed {
+                // mulberry32: tiny, decent, and fully determined by `seed`.
+                ctx.eval::<(), _>(format!(
+                    "(function (s) {{ Math.random = function () {{ \
+                       s = (s + 0x6D2B79F5) >>> 0; var t = s; \
+                       t = Math.imul(t ^ (t >>> 15), t | 1); \
+                       t ^= t + Math.imul(t ^ (t >>> 7), t | 61); \
+                       return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }}; }})({seed});"
+                ))
+                .expect("seeded Math.random should install");
+            }
         });
 
         Self {
@@ -128,7 +199,76 @@ impl JsRuntime {
             layout_rects,
             clock,
             pending_jobs,
+            console: console_buffer,
+            dialogs: dialog_buffer,
         }
+    }
+
+    /// Current engine-clock time (ms). Fixed clock or wall clock.
+    pub fn clock_now_ms(&self) -> u64 {
+        self.clock.now_ms()
+    }
+
+    /// Earliest pending `setTimeout`/`setInterval` deadline on the engine
+    /// clock, `None` when no timer is queued.
+    pub fn next_timer_deadline(&self) -> Option<u64> {
+        self.context.with(|ctx| {
+            let f: Function<'_> = ctx.globals().get("__mb_next_deadline").ok()?;
+            let deadline: f64 = f.call(()).ok()?;
+            (deadline >= 0.0).then_some(deadline as u64)
+        })
+    }
+
+    /// Node ids with at least one live listener for `event_type`
+    /// (`addEventListener` or an `on*` property), in ascending id order.
+    pub fn nodes_with_listener(&self, event_type: &str) -> Vec<NodeId> {
+        let mut ids: Vec<NodeId> = self.context.with(|ctx| {
+            let Ok(f) = ctx.globals().get::<_, Function<'_>>("__mb_listener_nodes") else {
+                return Vec::new();
+            };
+            f.call::<_, Vec<u32>>((event_type,))
+                .unwrap_or_default()
+                .into_iter()
+                .map(NodeId::from_raw)
+                .collect()
+        });
+        ids.sort();
+        ids
+    }
+
+    /// Compile HTML event-handler attributes (`onclick="..."`) into
+    /// listeners, the way a browser does when it parses them. Each handler
+    /// runs with `this` = the element and `event` in scope. Handlers that
+    /// fail to compile are skipped (logged), like a browser would.
+    pub fn install_inline_handlers(&mut self, handlers: &[(NodeId, String, String)]) {
+        if handlers.is_empty() {
+            return;
+        }
+        let ids: Vec<u32> = handlers.iter().map(|(id, _, _)| id.raw()).collect();
+        let events: Vec<String> = handlers.iter().map(|(_, event, _)| event.clone()).collect();
+        let bodies: Vec<String> = handlers.iter().map(|(_, _, code)| code.clone()).collect();
+        self.context.with(|ctx| {
+            let installer: Function<'_> = match ctx.eval(INLINE_HANDLERS_BOOT) {
+                Ok(f) => f,
+                Err(err) => {
+                    eprintln!("[inline handlers] bootstrap failed: {err:?}");
+                    return;
+                }
+            };
+            if let Err(err) = installer.call::<_, ()>((ids, events, bodies)) {
+                eprintln!("[inline handlers] install failed: {err:?}");
+            }
+        });
+    }
+
+    /// `console.*` messages since the last call.
+    pub fn take_console_messages(&self) -> Vec<ConsoleMessage> {
+        std::mem::take(&mut *self.console.borrow_mut())
+    }
+
+    /// `alert`/`confirm`/`prompt`/`window.open` calls since the last call.
+    pub fn take_dialogs(&self) -> Vec<DialogRecord> {
+        std::mem::take(&mut *self.dialogs.borrow_mut())
     }
 
     /// True when the JS runtime owns time-driven work that needs another
@@ -1434,6 +1574,88 @@ mod tests {
         let clock = FixedClock::from_millis(0);
         let runtime = JsRuntime::new_with_fixed_clock(dom, clock.clone());
         (runtime, clock)
+    }
+
+    #[test]
+    fn next_timer_deadline_reports_the_earliest_live_timer() {
+        let (mut rt, clock) = rt_clock("<div></div>");
+        assert_eq!(rt.next_timer_deadline(), None);
+        rt.execute("setTimeout(function(){}, 500); var t = setTimeout(function(){}, 50); setInterval(function(){}, 1000);").unwrap();
+        assert_eq!(rt.next_timer_deadline(), Some(50));
+        rt.execute("clearTimeout(t)").unwrap();
+        assert_eq!(rt.next_timer_deadline(), Some(500));
+        clock.advance(600);
+        rt.drain_pending_jobs();
+        // The 500ms timer fired; only the interval (re-armed at 600+1000) remains.
+        assert_eq!(rt.next_timer_deadline(), Some(1000));
+    }
+
+    #[test]
+    fn seeded_math_random_is_reproducible() {
+        let run = |seed| {
+            let dom = Rc::new(RefCell::new(crate::html::parse("<div></div>").unwrap()));
+            let mut rt = JsRuntime::with_options(
+                dom,
+                &JsOptions {
+                    fixed_clock: None,
+                    random_seed: Some(seed),
+                },
+            );
+            rt.execute("[Math.random(), Math.random(), Math.random()].join(',')")
+                .unwrap()
+        };
+        assert_eq!(run(7), run(7));
+        assert_ne!(run(7), run(8));
+    }
+
+    #[test]
+    fn dialogs_return_safe_answers_and_are_recorded() {
+        let (mut rt, _) = rt_clock("<div></div>");
+        assert_eq!(rt.execute("confirm('Delete account?')").unwrap(), "false");
+        assert_eq!(rt.execute("prompt('Name?', 'x')").unwrap(), "null");
+        assert_eq!(
+            rt.execute("window.open('https://x.test/')").unwrap(),
+            "null"
+        );
+        rt.execute("alert('hi')").unwrap();
+        let kinds: Vec<String> = rt
+            .take_dialogs()
+            .into_iter()
+            .map(|d| format!("{}:{}", d.kind, d.message))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "confirm:Delete account?",
+                "prompt:Name?",
+                "open:https://x.test/",
+                "alert:hi"
+            ]
+        );
+        assert!(rt.take_dialogs().is_empty());
+    }
+
+    #[test]
+    fn console_messages_are_buffered_for_the_agent() {
+        let (mut rt, _) = rt_clock("<div></div>");
+        rt.execute("console.warn('deprecated', 1); console.log('ok')")
+            .unwrap();
+        let messages = rt.take_console_messages();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].level, "warn");
+        assert_eq!(messages[0].text, "deprecated 1");
+        assert!(rt.take_console_messages().is_empty());
+    }
+
+    #[test]
+    fn nodes_with_listener_finds_add_event_listener_and_on_props() {
+        let (mut rt, _) =
+            rt_clock(r#"<div><span id="a"></span><span id="b"></span><span id="c"></span></div>"#);
+        rt.execute("document.getElementById('a').addEventListener('click', function(){}); document.getElementById('c').onclick = function(){}; document.addEventListener('click', function(){});").unwrap();
+        let a = id_to_node(&rt, "a");
+        let c = id_to_node(&rt, "c");
+        assert_eq!(rt.nodes_with_listener("click"), vec![a, c]);
+        assert!(rt.nodes_with_listener("keydown").is_empty());
     }
 
     fn id_to_node(rt: &JsRuntime, target_id: &str) -> NodeId {

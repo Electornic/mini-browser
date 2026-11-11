@@ -4,6 +4,7 @@
 use std::fmt::Write as _;
 
 use mb_runtime::dom::{Document, NodeId, NodeType};
+use mb_runtime::js::{ConsoleMessage, DialogRecord};
 use mb_runtime::layout::{LayoutBox, Rect};
 use mb_runtime::net::Url;
 
@@ -24,8 +25,10 @@ pub struct ObserveInput<'a> {
     pub scroll_y: f32,
     pub viewport_width: f32,
     pub viewport_height: f32,
-    /// Filled in by the settle loop (G1). `None` = unknown, not printed.
+    /// Filled in by the settle loop. `None` = unknown, not printed.
     pub settled: Option<bool>,
+    /// Nodes with a JS `click` listener (sorted). Empty when unknown.
+    pub click_listeners: &'a [NodeId],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,10 +130,54 @@ pub struct Observation {
     /// Visible non-control text, one entry per block. Empty on later pages.
     pub text: Vec<String>,
     pub text_truncated: bool,
+    /// What the last action changed. Only on observations returned by an
+    /// action, never on a plain `observe`.
+    pub changed: Option<Changes>,
+    /// `console.*` output since the previous observation.
+    pub console: Vec<ConsoleMessage>,
+    /// `alert`/`confirm`/`prompt`/`window.open` calls since the previous
+    /// observation.
+    pub dialogs: Vec<DialogRecord>,
+}
+
+/// Before/after summary of one action (browser-computed, trusted).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Changes {
+    pub url_before: Option<String>,
+    pub url_after: Option<String>,
+    pub elements_added: usize,
+    pub elements_removed: usize,
+    /// Elements present before and after whose value / checked state moved.
+    pub values_changed: Vec<NodeId>,
+}
+
+impl Changes {
+    pub fn between(before: &Observation, after: &Observation) -> Self {
+        use std::collections::BTreeMap;
+        let state = |o: &Observation| -> BTreeMap<NodeId, (Option<ElementValue>, Option<bool>)> {
+            o.elements
+                .iter()
+                .map(|e| (e.id, (e.value.clone(), e.checked)))
+                .collect()
+        };
+        let a = state(before);
+        let b = state(after);
+        Self {
+            url_before: before.url.clone(),
+            url_after: after.url.clone(),
+            elements_added: b.keys().filter(|id| !a.contains_key(id)).count(),
+            elements_removed: a.keys().filter(|id| !b.contains_key(id)).count(),
+            values_changed: b
+                .iter()
+                .filter(|(id, v)| a.get(id).is_some_and(|old| old != *v))
+                .map(|(id, _)| *id)
+                .collect(),
+        }
+    }
 }
 
 pub fn observe(input: &ObserveInput<'_>, options: &ObserveOptions) -> Observation {
-    let index = DomIndex::build(input.document, input.layout_root);
+    let index = DomIndex::build(input.document, input.layout_root, input.click_listeners);
     let in_scope = |rect: Rect| match options.scope {
         Scope::Full => true,
         Scope::Viewport => {
@@ -188,6 +235,9 @@ pub fn observe(input: &ObserveInput<'_>, options: &ObserveOptions) -> Observatio
         next_cursor,
         text,
         text_truncated,
+        changed: None,
+        console: Vec::new(),
+        dialogs: Vec::new(),
     }
 }
 
@@ -587,6 +637,9 @@ impl Observation {
             self.viewport_width.round() as i64,
             self.viewport_height.round() as i64,
         );
+        if let Some(changed) = &self.changed {
+            let _ = writeln!(out, "changed: {}", changed.summary());
+        }
         let scope = match self.scope {
             Scope::Viewport => "in viewport",
             Scope::Full => "in page",
@@ -627,6 +680,73 @@ impl Observation {
             for block in &self.text {
                 let _ = writeln!(out, "  {}", quote(block));
             }
+        }
+        for dialog in &self.dialogs {
+            let answer = match dialog.kind.as_str() {
+                "confirm" => " → false",
+                "prompt" | "open" => " → null",
+                _ => "",
+            };
+            let _ = writeln!(
+                out,
+                "dialog: {} {}{answer}",
+                dialog.kind,
+                quote(&dialog.message)
+            );
+        }
+        if !self.console.is_empty() {
+            let count = |level: &str| self.console.iter().filter(|m| m.level == level).count();
+            let mut parts = Vec::new();
+            for (level, label) in [("error", "error"), ("warn", "warning"), ("log", "log")] {
+                let n = count(level);
+                if n > 0 {
+                    parts.push(format!("{n} {label}{}", if n == 1 { "" } else { "s" }));
+                }
+            }
+            let _ = writeln!(out, "console: {}", parts.join(", "));
+            // The most recent warnings/errors are what an agent debugging a
+            // form wants; plain logs only show up in the count.
+            for message in self
+                .console
+                .iter()
+                .filter(|m| m.level != "log")
+                .rev()
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
+                let _ = writeln!(
+                    out,
+                    "  {} {}",
+                    message.level,
+                    quote(&truncate_chars(&message.text, 200))
+                );
+            }
+        }
+        out
+    }
+}
+
+impl Changes {
+    fn summary(&self) -> String {
+        let path = |u: &Option<String>| u.clone().unwrap_or_else(|| "(none)".into());
+        let url = if self.url_before == self.url_after {
+            format!("url same ({})", path(&self.url_after))
+        } else {
+            format!("url {} → {}", path(&self.url_before), path(&self.url_after))
+        };
+        let mut out = format!(
+            "{url} · +{} / -{} elements",
+            self.elements_added, self.elements_removed
+        );
+        if !self.values_changed.is_empty() {
+            let ids: Vec<String> = self
+                .values_changed
+                .iter()
+                .map(|id| format!("e{}", id.raw()))
+                .collect();
+            out.push_str(&format!(" · values: {}", ids.join(" ")));
         }
         out
     }

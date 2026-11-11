@@ -10,13 +10,14 @@ use std::sync::mpsc;
 use crate::dom::NodeId;
 use crate::{
     async_runtime, css,
-    navigation::{LoadedDocument, load_remote_document},
+    navigation::{LoadedDocument, NavigationRequest, load_remote_document_request},
     net,
 };
 
+use super::policy::GatedKind;
 use super::{
     BrowserState, HistoryEntry, PendingKind, PendingNavigation, build_form_submit_url,
-    collect_form_data,
+    collect_form_data, encode_form_body,
 };
 
 impl BrowserState {
@@ -33,7 +34,15 @@ impl BrowserState {
             return;
         }
 
-        self.spawn_navigation(target, "load failed");
+        // Unparseable input falls through to the loader, which turns it
+        // into the usual error page; there's nothing to gate.
+        if let Ok(url) = net::Url::parse(&target)
+            && !self.gate(GatedKind::Navigate, "GET", &url)
+        {
+            return;
+        }
+
+        self.spawn_navigation(NavigationRequest::get(target), "load failed");
     }
 
     // Synthesise a `submit` event on `form_id` and, if no handler
@@ -67,13 +76,16 @@ impl BrowserState {
             (action, method, data)
         };
 
-        if method != "get" {
-            // POST/PUT/DELETE land in the network goal later; for now
-            // log and skip so a misconfigured form doesn't silently
-            // navigate as if it were GET.
-            eprintln!("[form] method={method} not supported yet, skipping submit");
-            return;
-        }
+        // HTML only knows get / post / dialog; anything else is GET.
+        // `dialog` closes a <dialog>, which the toy doesn't model.
+        let method = match method.trim() {
+            "post" => "post",
+            "dialog" => {
+                eprintln!("[form] method=dialog not supported, skipping submit");
+                return;
+            }
+            _ => "get",
+        };
 
         // Empty action means "self-post"; fall back to the current
         // URL so a query-string-only update still navigates somewhere.
@@ -89,8 +101,36 @@ impl BrowserState {
             action
         };
 
+        if method == "post" {
+            self.submit_post(&target_action, encode_form_body(&data));
+            return;
+        }
         let submit_url = build_form_submit_url(&target_action, &data);
         self.navigate_to_href(&submit_url);
+    }
+
+    fn submit_post(&mut self, action: &str, body: String) {
+        if self.pending_navigation.is_some() {
+            return;
+        }
+        let resolved = match self.resolve_href(action) {
+            Ok(url) => url,
+            Err(error) => {
+                eprintln!("{error}");
+                self.show_error_page("form failed", &error);
+                return;
+            }
+        };
+        if !self.gate(GatedKind::Submit, "POST", &resolved) {
+            return;
+        }
+        self.address_input = resolved.to_string();
+        self.address_bar_selected = false;
+        self.address_bar_focused = false;
+        self.spawn_navigation(
+            NavigationRequest::form_post(resolved.to_string(), body),
+            "form failed",
+        );
     }
 
     pub(super) fn navigate_to_href(&mut self, href: &str) {
@@ -110,6 +150,10 @@ impl BrowserState {
             }
         };
 
+        if !self.gate(GatedKind::Navigate, "GET", &resolved) {
+            return;
+        }
+
         // Sync UI feedback (URL bar shows the click target, focus moves
         // off the bar) lands the same frame as the click. The actual
         // load runs on the worker thread and commits later via
@@ -117,10 +161,10 @@ impl BrowserState {
         self.address_input = resolved.to_string();
         self.address_bar_selected = false;
         self.address_bar_focused = false;
-        self.spawn_navigation(resolved.to_string(), "link failed");
+        self.spawn_navigation(NavigationRequest::get(resolved.to_string()), "link failed");
     }
 
-    fn spawn_navigation(&mut self, target: String, error_title: &'static str) {
+    fn spawn_navigation(&mut self, request: NavigationRequest, error_title: &'static str) {
         // Caller already established `pending_navigation.is_none()` and
         // resolved the target string. The worker owns the blocking
         // `load_remote_document` call; the receiver lands on
@@ -129,7 +173,7 @@ impl BrowserState {
         let (sender, receiver) = mpsc::channel();
         let wake = self.navigation_wake.clone();
         async_runtime::handle().spawn_blocking(move || {
-            let _ = sender.send(load_remote_document(&target));
+            let _ = sender.send(load_remote_document_request(&request));
             // Poke the shell's `EventLoopProxy` so the next frame fires
             // immediately. Without this the main thread would have to
             // poll `pending_navigation.is_some()` via
@@ -207,7 +251,9 @@ impl BrowserState {
             // The worker thread owns the blocking `load_remote_document` call.
             // Send may fail if the BrowserState was dropped while the load
             // was in flight (e.g. window close mid-fetch); ignore that case.
-            let _ = sender.send(load_remote_document(&target));
+            let _ = sender.send(load_remote_document_request(&NavigationRequest::get(
+                target,
+            )));
             // Wake the main thread so the next frame fires immediately;
             // same rationale as `spawn_navigation`.
             if let Some(hook) = wake {

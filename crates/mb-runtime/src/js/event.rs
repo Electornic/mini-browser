@@ -53,6 +53,20 @@ const EVENT_BOOT: &str = r#"
     // Drop every entry for the listed `nodeId`s. Used by the
     // `innerHTML` setter to reap listeners that lived on the soon-to-be-
     // tombstoned subtree — matches the boa bridge's listener prune.
+    // Node ids (numbers only — not 'window'/'document') that have at
+    // least one live `type` listener. The agent layer uses it to list
+    // elements made clickable purely through addEventListener / `on*`.
+    globalThis.__mb_listener_nodes = function (type) {
+        var out = [];
+        for (var key in registry) {
+            var id = +key;
+            if (id !== id) continue;
+            var arr = registry[key][type];
+            if (arr && arr.length) out.push(id);
+        }
+        return out;
+    };
+
     globalThis.__mb_listener_prune = function (nodeIds) {
         if (!nodeIds || !nodeIds.length) return;
         for (var i = 0; i < nodeIds.length; i++) delete registry[nodeIds[i]];

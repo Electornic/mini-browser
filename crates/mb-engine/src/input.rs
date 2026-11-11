@@ -22,4 +22,12 @@ pub struct WindowInput {
     // what `:active` needs.
     pub left_mouse_pressed: bool,
     pub left_mouse_held: bool,
+    /// Tab: move page focus to the next focusable element.
+    pub tab_pressed: bool,
+    /// Escape: drop focus (address bar or page element).
+    pub escape_pressed: bool,
+    /// Provenance: this frame's input was synthesised by an agent, not
+    /// typed or clicked by a person. The runtime's policy gate judges only
+    /// agent-originated actions (docs/concept.md "정책 게이트").
+    pub from_agent: bool,
 }

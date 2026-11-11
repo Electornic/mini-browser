@@ -1977,6 +1977,174 @@ mod tests {
         assert_eq!(browser.js.execute("hits").unwrap(), "1");
     }
 
+    fn click_at(browser: &mut BrowserState, x: f32, y: f32) {
+        let _ = browser.display_list(
+            800,
+            600,
+            &input::WindowInput {
+                mouse_position: Some((x, CHROME_HEIGHT + y)),
+                left_mouse_pressed: true,
+                left_mouse_held: true,
+                ..input::WindowInput::default()
+            },
+        );
+        let _ = browser.display_list(
+            800,
+            600,
+            &input::WindowInput {
+                mouse_position: Some((x, CHROME_HEIGHT + y)),
+                ..input::WindowInput::default()
+            },
+        );
+    }
+
+    #[test]
+    fn click_focus_lands_on_the_right_element_when_head_and_scripts_precede_it() {
+        // Layout drops <head> and <script>; the focus path used to be built
+        // from layout child indices and resolved against the DOM, which put
+        // focus on a sibling. Typing then went nowhere.
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                "<html><head><title>t</title><style>p{}</style></head><body>",
+                "<script>var x = 1;</script><p>intro</p>",
+                r#"<input id="name" style="display:block">"#,
+                "</body></html>",
+            ),
+            "",
+        );
+        // Find the input's box via JS geometry, then click its middle.
+        let _ = browser.display_list(800, 600, &input::WindowInput::default());
+        let _ = browser.display_list(800, 600, &input::WindowInput::default());
+        let y: f32 = browser
+            .js
+            .execute("var r = document.getElementById('name').getBoundingClientRect(); r.top + r.height / 2")
+            .unwrap()
+            .parse()
+            .unwrap();
+        click_at(&mut browser, 20.0, y);
+        let _ = browser.display_list(
+            800,
+            600,
+            &input::WindowInput {
+                typed: "hi".into(),
+                ..input::WindowInput::default()
+            },
+        );
+        assert_eq!(
+            browser
+                .js
+                .execute("document.getElementById('name').getAttribute('value')")
+                .unwrap(),
+            "\"hi\""
+        );
+    }
+
+    #[test]
+    fn inline_onclick_attribute_runs_with_this_and_can_return_false() {
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                r#"<div><a id="l" href="/elsewhere" style="display:block" "#,
+                r#"onclick="window.who = this.id + ':' + event.type; return false">go</a></div>"#,
+            ),
+            "",
+        );
+        click_at(&mut browser, 5.0, 5.0);
+        assert_eq!(browser.js.execute("window.who").unwrap(), "\"l:click\"");
+        // `return false` prevented the link navigation.
+        assert!(!browser.has_pending_navigation());
+    }
+
+    #[test]
+    fn clicking_a_checkbox_toggles_checked_and_fires_change() {
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                r#"<div><input id="c" type="checkbox">"#,
+                "<script>var changes = 0;",
+                "document.getElementById('c').addEventListener('change', function() { changes = changes + 1; });",
+                "</script></div>",
+            ),
+            "#c { display: block; margin: 0; }",
+        );
+        click_at(&mut browser, 5.0, 5.0);
+        assert_eq!(
+            browser
+                .js
+                .execute("document.getElementById('c').getAttribute('checked') !== null")
+                .unwrap(),
+            "true"
+        );
+        click_at(&mut browser, 5.0, 5.0);
+        assert_eq!(
+            browser
+                .js
+                .execute("document.getElementById('c').getAttribute('checked') !== null")
+                .unwrap(),
+            "false"
+        );
+        assert_eq!(browser.js.execute("changes").unwrap(), "2");
+    }
+
+    #[test]
+    fn clicking_a_label_toggles_its_checkbox() {
+        let mut browser = browser_with_html_and_css(
+            r#"<div><label id="l" for="c">Agree</label><input id="c" type="checkbox"></div>"#,
+            "#l { display: block; width: 200px; height: 30px; }",
+        );
+        click_at(&mut browser, 20.0, 10.0);
+        assert_eq!(
+            browser
+                .js
+                .execute("document.getElementById('c').getAttribute('checked') !== null")
+                .unwrap(),
+            "true"
+        );
+    }
+
+    #[test]
+    fn selecting_a_radio_clears_the_rest_of_its_group() {
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                r#"<div><form><input id="a" type="radio" name="p" checked>"#,
+                r#"<input id="b" type="radio" name="p"></form>"#,
+                r#"<input id="other" type="radio" name="p" checked></div>"#,
+            ),
+            "input { display: block; margin: 0; }",
+        );
+        // #b is the second 13px box.
+        click_at(&mut browser, 5.0, 18.0);
+        let mut checked = |id: &str| {
+            browser
+                .js
+                .execute(&format!(
+                    "document.getElementById('{id}').getAttribute('checked') !== null"
+                ))
+                .unwrap()
+        };
+        assert_eq!(checked("a"), "false");
+        assert_eq!(checked("b"), "true");
+        // Same name but outside the form: a different group.
+        assert_eq!(checked("other"), "true");
+    }
+
+    #[test]
+    fn prevent_default_on_click_keeps_checkbox_unchanged() {
+        let mut browser = browser_with_html_and_css(
+            concat!(
+                r#"<div><input id="c" type="checkbox">"#,
+                "<script>document.getElementById('c').addEventListener('click', function(e) { e.preventDefault(); });</script></div>",
+            ),
+            "#c { display: block; margin: 0; }",
+        );
+        click_at(&mut browser, 5.0, 5.0);
+        assert_eq!(
+            browser
+                .js
+                .execute("document.getElementById('c').getAttribute('checked') !== null")
+                .unwrap(),
+            "false"
+        );
+    }
+
     #[test]
     fn button_with_explicit_type_button_does_not_submit() {
         // type="button" opts out of the default-submit behaviour.

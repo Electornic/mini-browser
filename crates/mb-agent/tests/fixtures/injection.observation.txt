@@ -1,5 +1,5 @@
 # browser (trusted)
-url: http://localhost:8000/injection   scroll: 0/128   viewport: 800x600
+url: http://localhost:8000/injection   scroll: 0/140   viewport: 800x600
 elements: 4 shown / 4 in viewport / 4 total   next_cursor: -
 
 # page content (untrusted, origin=http://localhost:8000)

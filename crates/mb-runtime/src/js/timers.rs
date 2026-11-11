@@ -183,6 +183,19 @@ const TIMERS_BOOT: &str = r#"
         return fired;
     };
 
+    // Earliest pending timer deadline on the engine clock, or -1 when no
+    // timer is queued. Settle uses it to tell "a timer is about to fire"
+    // apart from "a slow interval exists" (docs/concept.md "settle").
+    globalThis.__mb_next_deadline = function () {
+        var best = -1;
+        for (var i = 0; i < queue.length; i++) {
+            var e = queue[i];
+            if (cancelled[e.id]) continue;
+            if (best < 0 || e.deadline < best) best = e.deadline;
+        }
+        return best;
+    };
+
     globalThis.__mb_run_raf = function (timestamp) {
         // Snapshot so a handler that re-schedules itself queues for the
         // *next* frame (browser-spec behaviour).

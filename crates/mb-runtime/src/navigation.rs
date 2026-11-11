@@ -24,13 +24,56 @@ pub struct LoadedDocument {
     pub favicon: Option<resource::LoadedImage>,
 }
 
+/// The HTTP request behind a navigation. Link clicks and the URL bar are a
+/// plain GET; a POST form submission carries its encoded body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavigationRequest {
+    pub url: String,
+    pub method: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl NavigationRequest {
+    pub fn get(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            method: "GET".into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    /// `application/x-www-form-urlencoded` POST, the default form encoding.
+    pub fn form_post(url: impl Into<String>, encoded_body: String) -> Self {
+        Self {
+            url: url.into(),
+            method: "POST".into(),
+            headers: vec![(
+                "content-type".into(),
+                "application/x-www-form-urlencoded".into(),
+            )],
+            body: encoded_body.into_bytes(),
+        }
+    }
+}
+
 pub fn load_remote_document(raw_url: &str) -> Result<LoadedDocument, String> {
+    load_remote_document_request(&NavigationRequest::get(raw_url))
+}
+
+pub fn load_remote_document_request(request: &NavigationRequest) -> Result<LoadedDocument, String> {
     // This function is the app-facing loader. It translates low-level fetch/content-type details
     // into "what document should the browser show?".
     let total = profile::Span::start("navigation::load_remote_document");
-    let url = net::Url::parse(raw_url).map_err(|error| format!("url error: {error:?}"))?;
-    let fetch_result = profile::time_block("navigation::fetch_html", || net::fetch(&url))
-        .map_err(|error| describe_network_error(&error))?;
+    let url = net::Url::parse(&request.url).map_err(|error| format!("url error: {error:?}"))?;
+    // A POST answered with 303 (the usual post/redirect/get) comes back as
+    // the redirected GET's response: ureq downgrades the method and drops
+    // the body on 301/302/303.
+    let fetch_result = profile::time_block("navigation::fetch_html", || {
+        net::fetch_with_request(&url, &request.method, &request.headers, &request.body)
+    })
+    .map_err(|error| describe_network_error(&error))?;
     let response = fetch_result.response;
     let final_url = fetch_result.final_url;
 

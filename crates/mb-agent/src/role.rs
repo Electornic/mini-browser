@@ -103,11 +103,18 @@ pub(crate) fn classify(index: &DomIndex<'_>, id: NodeId) -> Option<Role> {
         .attr(id, "tabindex")
         .and_then(|v| v.trim().parse::<i32>().ok())
         .is_some_and(|v| v >= 0);
-    if index.has_attr(id, "onclick") || tabbable {
+    // `on*` props and addEventListener both land in the JS listener
+    // registry; the `onclick` attribute covers markup the runtime hasn't
+    // compiled into a listener.
+    // <html>/<body> listeners are event delegation for the whole page, not
+    // a sign that the page itself is a button.
+    let delegated_root = matches!(tag, "html" | "body");
+    if index.has_attr(id, "onclick")
+        || tabbable
+        || (index.has_click_listener(id) && !delegated_root)
+    {
         return Some(Role::Clickable);
     }
-    // TODO(G1): listeners added via addEventListener live in the JS runtime,
-    // not the DOM; consult its listener registry here.
     None
 }
 

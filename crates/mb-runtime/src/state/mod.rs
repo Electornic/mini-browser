@@ -8,6 +8,7 @@
 mod events;
 mod history;
 mod lifecycle;
+pub mod policy;
 
 use std::{cell::RefCell, collections::HashMap, env, rc::Rc, sync::Arc, sync::mpsc};
 
@@ -179,6 +180,21 @@ pub struct BrowserState {
     // overlap with `parsed_document.borrow()` so refcell panics aren't
     // possible.
     focused_node_cache: RefCell<Option<FocusCache>>,
+
+    /// What the gate does with risky actions the agent's input causes.
+    pub agent_policy: policy::AgentPolicy,
+    // Provenance of the frame currently being processed — copied from
+    // `WindowInput::from_agent` at the top of `display_list`, read by the
+    // navigation entry points through `gate`.
+    input_from_agent: bool,
+    // Gate decisions since the agent layer last asked (`take_policy_events`).
+    policy_events: Vec<policy::PolicyEvent>,
+    // Applied to every JsRuntime this state builds (each install).
+    js_options: js::JsOptions,
+    // Bumped on every `install_document`. NodeIds restart from zero in
+    // each new Document, so an id is only meaningful together with the
+    // generation it was observed in.
+    document_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -303,6 +319,11 @@ impl BrowserState {
             // document strings + resources, not the favicon. Tests
             // without a favicon naturally see `None`.
             favicon: None,
+            agent_policy: policy::AgentPolicy::default(),
+            input_from_agent: false,
+            policy_events: Vec::new(),
+            js_options: js::JsOptions::default(),
+            document_generation: 0,
         };
         // The first page seen on construction also runs its scripts so the
         // initial document follows the same lifecycle as later navigations
@@ -329,6 +350,7 @@ impl BrowserState {
         // and any future caller that holds on to the handle observe the new
         // tree without re-fetching the Rc.
         *self.parsed_document.borrow_mut() = html::parse(&document_html).unwrap_or_default();
+        self.document_generation += 1;
         // Reset to just the external sheet; the inline `<style>` slot is
         // re-collected on the first build of the new document (forced by
         // clearing the revision memo below).
@@ -342,7 +364,7 @@ impl BrowserState {
         // route through here, so the same reset rule applies on history moves.
         // The new runtime takes a clone of the same Rc so JS mutations during
         // run_scripts land in the document we're about to render.
-        self.js = js::JsRuntime::new(self.parsed_document.clone());
+        self.js = js::JsRuntime::with_options(self.parsed_document.clone(), &self.js_options);
         // Mirror the live current_url into the new runtime so the
         // `location` global reflects the page the script is running
         // against. Callers that swap `current_url` must do so *before*
@@ -399,6 +421,17 @@ impl BrowserState {
                 );
             }
         }
+        // HTML `on*` attributes become listeners before any script runs,
+        // as they would during parsing in a real browser.
+        let inline_handlers = {
+            let document = self.parsed_document.borrow();
+            let mut out = Vec::new();
+            for &root in document.roots() {
+                collect_inline_handlers(&document, root, &mut out);
+            }
+            out
+        };
+        self.js.install_inline_handlers(&inline_handlers);
         for (source, url) in sources {
             if let Err(err) = self.js.execute_with_url(&source, &url) {
                 eprintln!("script error: {err}");
@@ -422,6 +455,7 @@ impl BrowserState {
     ) -> Vec<render::DisplayCommand> {
         // The browser re-builds its visible scene every frame from current state + fresh input.
         self.frame_index = self.frame_index.wrapping_add(1);
+        self.input_from_agent = input.from_agent;
         // Drain any completed async load before input dispatch. Refresh today,
         // navigate / navigate_to_href once 5.8b lands. Doing it before
         // `apply_input` matters: a click that lands the same frame the load
@@ -487,6 +521,21 @@ impl BrowserState {
         // suppresses both default actions (form submit and link nav).
         // Form submit takes priority over link navigation since you
         // don't typically nest a default-submit button inside a link.
+        // Checkbox / radio activation (directly, or through a <label>)
+        // is the click's default action too, so preventDefault skips it.
+        if click_in_page
+            && !click_default_prevented
+            && let Some(id) = click_node_id
+        {
+            let target = {
+                let document = self.parsed_document.borrow();
+                find_checkable_activation_target(&document, id)
+            };
+            if let Some(control) = target {
+                self.toggle_checkable(control);
+            }
+        }
+
         if !click_default_prevented {
             if let Some(form_id) = submit_form_id {
                 self.try_submit_form(form_id);
@@ -500,7 +549,19 @@ impl BrowserState {
         // The next frame's style pass picks up `hovered_dom_path` — a
         // deliberate one-frame lag that keeps style and layout strictly
         // forward, no double-pass per frame required.
-        self.hovered_dom_path = hover_hit.map(|hit| hit.path);
+        //
+        // The path is rebuilt from the hit's NodeId against the DOM, not
+        // taken from the layout walk: layout drops `display:none` children
+        // (<head>, <script>, <style>) and whitespace text, so layout child
+        // indices drift from DOM child indices on any real page, and the
+        // DOM-indexed consumers (:hover styling, focus) landed on the wrong
+        // element. The layout path stays as the fallback for hits without
+        // a NodeId.
+        self.hovered_dom_path = hover_hit.map(|hit| {
+            hit.node_id
+                .and_then(|id| dom_path_for_node(&self.parsed_document.borrow(), id))
+                .unwrap_or(hit.path)
+        });
 
         self.dispatch_focus_change(input);
         let hovered_href = self
@@ -517,6 +578,163 @@ impl BrowserState {
         })
     }
 
+    // Tab: next focusable element after the focused one, in document order,
+    // wrapping around. Only rendered elements are candidates.
+    pub(super) fn focus_next(&mut self) {
+        let rendered = match self.cached_view.as_ref() {
+            Some(cached) => {
+                let mut ids = std::collections::BTreeSet::new();
+                collect_box_node_ids(&cached.view.layout_root, &mut ids);
+                ids
+            }
+            None => return,
+        };
+        let (candidates, current) = {
+            let document = self.parsed_document.borrow();
+            let mut order = Vec::new();
+            if let Some(&root) = document.roots().last() {
+                collect_focusable(&document, root, &mut order);
+            }
+            let candidates: Vec<NodeId> = order
+                .into_iter()
+                .filter(|id| rendered.contains(id))
+                .collect();
+            let current = self
+                .focused_dom_path
+                .as_deref()
+                .and_then(|path| node_id_for_dom_path(&document, path));
+            (candidates, current)
+        };
+        if candidates.is_empty() {
+            return;
+        }
+        let next = match current.and_then(|c| candidates.iter().position(|&id| id == c)) {
+            Some(i) => candidates[(i + 1) % candidates.len()],
+            None => candidates[0],
+        };
+        let path = dom_path_for_node(&self.parsed_document.borrow(), next);
+        if path.is_some() {
+            self.set_focus_path(path);
+        }
+    }
+
+    /// Switch JS determinism knobs (fixed clock, seeded `Math.random`).
+    /// Re-installs the current document so the page's scripts run again
+    /// under the new runtime — call it before the agent starts working.
+    pub fn set_js_options(&mut self, options: js::JsOptions) {
+        self.js_options = options;
+        self.install_document(
+            self.document_html.clone(),
+            self.stylesheet.clone(),
+            self.external_scripts.clone(),
+        );
+    }
+
+    /// The document view the last `display_list` built (layout tree +
+    /// link rects). `None` before the first frame of a document.
+    pub fn current_view(&self) -> Option<Rc<DocumentView>> {
+        self.cached_view.as_ref().map(|cached| cached.view.clone())
+    }
+
+    /// Increments every time a new document is installed (navigation,
+    /// back/forward, refresh). See the field comment.
+    pub fn document_generation(&self) -> u64 {
+        self.document_generation
+    }
+
+    /// The element that currently has page focus, if any.
+    pub fn focused_element(&self) -> Option<NodeId> {
+        self.focused_node_id()
+    }
+
+    /// Ask the policy gate whether a navigation may start. Records what it
+    /// decided (for risky or blocked actions) and returns false to stop it.
+    pub(super) fn gate(
+        &mut self,
+        kind: policy::GatedKind,
+        method: &str,
+        target: &net::Url,
+    ) -> bool {
+        let action = policy::GatedAction {
+            kind,
+            method: method.to_string(),
+            target: target.clone(),
+        };
+        let decision = policy::decide(
+            &mut self.agent_policy,
+            self.input_from_agent,
+            self.current_url.as_ref(),
+            &action,
+        );
+        let allowed = matches!(
+            decision,
+            policy::PolicyDecision::Allowed | policy::PolicyDecision::Approved
+        );
+        if decision != policy::PolicyDecision::Allowed {
+            if !allowed {
+                eprintln!("[policy] {decision:?}: {method} {target}");
+            }
+            self.policy_events
+                .push(policy::PolicyEvent { action, decision });
+        }
+        allowed
+    }
+
+    /// Gate decisions (approved / denied / blocked) since the last call.
+    pub fn take_policy_events(&mut self) -> Vec<policy::PolicyEvent> {
+        std::mem::take(&mut self.policy_events)
+    }
+
+    // Flip a checkbox, or select a radio and clear the others in its group
+    // (same `name`, same form — or the whole document when formless).
+    // Then fire `input` + `change`, which bubble, like a real toggle.
+    fn toggle_checkable(&mut self, control: NodeId) {
+        let changed = {
+            let mut document = self.parsed_document.borrow_mut();
+            let Some(elem) = document.element_data(control) else {
+                return;
+            };
+            let is_radio = elem
+                .attributes
+                .get("type")
+                .is_some_and(|t| t.trim().eq_ignore_ascii_case("radio"));
+            let was_checked = elem.attributes.contains_key("checked");
+            if is_radio {
+                if was_checked {
+                    false
+                } else {
+                    let group = elem.attributes.get("name").cloned();
+                    let scope = find_enclosing_form(&document, control);
+                    if let Some(group) = group {
+                        for other in radio_group(&document, scope, &group) {
+                            if let Some(e) = document.element_data_mut(other) {
+                                e.attributes.remove("checked");
+                            }
+                        }
+                    }
+                    if let Some(e) = document.element_data_mut(control) {
+                        e.attributes.insert("checked".into(), String::new());
+                    }
+                    true
+                }
+            } else {
+                if let Some(e) = document.element_data_mut(control) {
+                    if was_checked {
+                        e.attributes.remove("checked");
+                    } else {
+                        e.attributes.insert("checked".into(), String::new());
+                    }
+                }
+                true
+            }
+        };
+        if changed {
+            self.parsed_document.borrow_mut().touch();
+            self.js.dispatch_event(control, "input");
+            self.js.dispatch_event(control, "change");
+        }
+    }
+
     // A page-area click moves :focus to the just-hovered element; clicks
     // anywhere outside the page (chrome buttons, the address bar,
     // off-window) clear it. When the path actually changes we also fire
@@ -531,6 +749,12 @@ impl BrowserState {
             Some((_, mouse_y)) if mouse_y >= CHROME_HEIGHT => self.hovered_dom_path.clone(),
             _ => None,
         };
+        self.set_focus_path(new_focus);
+    }
+
+    // Move page focus to `new_focus` (a DOM path), firing change/blur on
+    // the old element and focus on the new one. Shared by click and Tab.
+    pub(super) fn set_focus_path(&mut self, new_focus: Option<Vec<usize>>) {
         if new_focus == self.focused_dom_path {
             return;
         }
@@ -1122,6 +1346,208 @@ fn find_default_submit_button(document: &dom::Document, start: NodeId) -> Option
     None
 }
 
+// (node, event type without the "on", handler source) for every `on*`
+// attribute, in document order.
+fn collect_inline_handlers(
+    document: &dom::Document,
+    id: NodeId,
+    out: &mut Vec<(NodeId, String, String)>,
+) {
+    let Some(node) = document.get(id) else {
+        return;
+    };
+    if let NodeType::Element(elem) = &node.node_type {
+        for (name, value) in &elem.attributes {
+            let lower = name.to_ascii_lowercase();
+            if let Some(event) = lower.strip_prefix("on")
+                && !event.is_empty()
+                && event.chars().all(|c| c.is_ascii_alphabetic())
+            {
+                out.push((id, event.to_string(), value.clone()));
+            }
+        }
+    }
+    for &child in &node.children {
+        collect_inline_handlers(document, child, out);
+    }
+}
+
+fn collect_box_node_ids(
+    layout_box: &layout::LayoutBox,
+    out: &mut std::collections::BTreeSet<NodeId>,
+) {
+    match &layout_box.box_type {
+        layout::BoxType::BlockNode(node)
+        | layout::BoxType::FlexNode(node)
+        | layout::BoxType::GridNode(node)
+        | layout::BoxType::TableNode(node) => {
+            out.insert(node.node_id);
+        }
+        layout::BoxType::AnonymousBlock => {}
+    }
+    for child in &layout_box.children {
+        collect_box_node_ids(child, out);
+    }
+}
+
+// Sequential-focus candidates: links with href, form controls (not
+// hidden / disabled), and anything with tabindex >= 0. Document order;
+// positive tabindex ordering isn't modelled.
+fn collect_focusable(document: &dom::Document, id: NodeId, out: &mut Vec<NodeId>) {
+    let Some(node) = document.get(id) else {
+        return;
+    };
+    if let NodeType::Element(elem) = &node.node_type {
+        let attr = |name: &str| elem.attributes.get(name);
+        let tabindex = attr("tabindex").and_then(|v| v.trim().parse::<i32>().ok());
+        let focusable = match tabindex {
+            Some(t) if t < 0 => false,
+            Some(_) => true,
+            None => match elem.tag_name.as_str() {
+                "a" => attr("href").is_some(),
+                "button" | "select" | "textarea" => true,
+                "input" => !attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("hidden")),
+                _ => false,
+            },
+        };
+        if focusable && attr("disabled").is_none() && attr("hidden").is_none() {
+            out.push(id);
+        }
+    }
+    for &child in &node.children {
+        collect_focusable(document, child, out);
+    }
+}
+
+// Inverse of `node_id_for_dom_path`: child indices from the last root.
+fn dom_path_for_node(document: &dom::Document, id: NodeId) -> Option<Vec<usize>> {
+    let root = *document.roots().last()?;
+    let mut path = Vec::new();
+    let mut current = id;
+    while current != root {
+        let parent = document.get(current)?.parent?;
+        let index = document
+            .get(parent)?
+            .children
+            .iter()
+            .position(|&c| c == current)?;
+        path.push(index);
+        current = parent;
+    }
+    path.reverse();
+    Some(path)
+}
+
+fn is_checkable(elem: &dom::ElementData) -> bool {
+    elem.tag_name == "input"
+        && elem.attributes.get("type").is_some_and(|t| {
+            let t = t.trim();
+            t.eq_ignore_ascii_case("checkbox") || t.eq_ignore_ascii_case("radio")
+        })
+}
+
+// The checkbox/radio a click at `start` activates: the control itself, or
+// the control a `<label>` around the click points at (`for=` first, then
+// the first checkable inside it). Disabled controls don't activate.
+fn find_checkable_activation_target(document: &dom::Document, start: NodeId) -> Option<NodeId> {
+    let mut cur = Some(start);
+    while let Some(id) = cur {
+        let node = document.get(id)?;
+        if let NodeType::Element(elem) = &node.node_type {
+            if is_checkable(elem) {
+                return (!elem.attributes.contains_key("disabled")).then_some(id);
+            }
+            if elem.tag_name == "label" {
+                let control = match elem.attributes.get("for") {
+                    Some(target) => find_by_id_attr(document, target),
+                    None => first_descendant(document, id, &|e| is_checkable(e)),
+                }?;
+                let control_elem = document.element_data(control)?;
+                return (is_checkable(control_elem)
+                    && !control_elem.attributes.contains_key("disabled"))
+                .then_some(control);
+            }
+        }
+        cur = node.parent;
+    }
+    None
+}
+
+fn find_by_id_attr(document: &dom::Document, value: &str) -> Option<NodeId> {
+    document.roots().iter().find_map(|&root| {
+        first_descendant_or_self(document, root, &|e| {
+            e.attributes.get("id").is_some_and(|v| v == value)
+        })
+    })
+}
+
+fn first_descendant(
+    document: &dom::Document,
+    id: NodeId,
+    pred: &dyn Fn(&dom::ElementData) -> bool,
+) -> Option<NodeId> {
+    document
+        .get(id)?
+        .children
+        .iter()
+        .find_map(|&child| first_descendant_or_self(document, child, pred))
+}
+
+fn first_descendant_or_self(
+    document: &dom::Document,
+    id: NodeId,
+    pred: &dyn Fn(&dom::ElementData) -> bool,
+) -> Option<NodeId> {
+    if document.element_data(id).is_some_and(pred) {
+        return Some(id);
+    }
+    first_descendant(document, id, pred)
+}
+
+// Every radio named `group` under `scope` (a form), or in the whole
+// document when the radio isn't in a form.
+fn radio_group(document: &dom::Document, scope: Option<NodeId>, group: &str) -> Vec<NodeId> {
+    fn walk(
+        document: &dom::Document,
+        id: NodeId,
+        group: &str,
+        in_form: bool,
+        out: &mut Vec<NodeId>,
+    ) {
+        let Some(node) = document.get(id) else {
+            return;
+        };
+        if let NodeType::Element(elem) = &node.node_type {
+            // A formless radio's group excludes radios that live in forms.
+            if !in_form && elem.tag_name == "form" {
+                return;
+            }
+            if is_checkable(elem)
+                && elem
+                    .attributes
+                    .get("type")
+                    .is_some_and(|t| t.trim().eq_ignore_ascii_case("radio"))
+                && elem.attributes.get("name").is_some_and(|n| n == group)
+            {
+                out.push(id);
+            }
+        }
+        for &child in &node.children {
+            walk(document, child, group, in_form, out);
+        }
+    }
+    let mut out = Vec::new();
+    match scope {
+        Some(form) => walk(document, form, group, true, &mut out),
+        None => {
+            for &root in document.roots() {
+                walk(document, root, group, false, &mut out);
+            }
+        }
+    }
+    out
+}
+
 // Walks the parent chain from `start` looking for the nearest `<form>`
 // ancestor. Returns the form's NodeId, or None if `start` isn't inside
 // a form. Used by both the Enter-in-input path and the button-click
@@ -1156,15 +1582,103 @@ fn walk_form_subtree(document: &dom::Document, node_id: NodeId, out: &mut Vec<(S
         return;
     };
     if let NodeType::Element(elem) = &node.node_type
-        && is_text_field_tag(&elem.tag_name)
         && let Some(name) = elem.attributes.get("name")
+        && !elem.attributes.contains_key("disabled")
     {
-        let value = elem.attributes.get("value").cloned().unwrap_or_default();
-        out.push((name.clone(), value));
+        match elem.tag_name.as_str() {
+            "input" => {
+                let input_type = elem
+                    .attributes
+                    .get("type")
+                    .map(|t| t.trim().to_ascii_lowercase())
+                    .unwrap_or_default();
+                match input_type.as_str() {
+                    // Buttons only submit their value when they're the
+                    // submitter; the toy doesn't track which one was.
+                    "submit" | "button" | "reset" | "image" | "file" => {}
+                    // Unchecked boxes aren't part of the form data at all;
+                    // a checked one without a value sends "on".
+                    "checkbox" | "radio" => {
+                        if elem.attributes.contains_key("checked") {
+                            let value = elem
+                                .attributes
+                                .get("value")
+                                .cloned()
+                                .unwrap_or_else(|| "on".into());
+                            out.push((name.clone(), value));
+                        }
+                    }
+                    _ => {
+                        let value = elem.attributes.get("value").cloned().unwrap_or_default();
+                        out.push((name.clone(), value));
+                    }
+                }
+            }
+            "textarea" => {
+                let value = elem.attributes.get("value").cloned().unwrap_or_else(|| {
+                    // Untouched <textarea>: its text content is the value.
+                    node.children
+                        .iter()
+                        .filter_map(|c| document.text(*c))
+                        .collect::<String>()
+                });
+                out.push((name.clone(), value));
+            }
+            "select" => {
+                if let Some(value) = selected_option_value(document, node_id) {
+                    out.push((name.clone(), value));
+                }
+            }
+            _ => {}
+        }
     }
     for child in &node.children {
         walk_form_subtree(document, *child, out);
     }
+}
+
+/// The `<option>` a `<select>` submits: the one marked `selected`, else
+/// the first. Its `value` attribute, falling back to its text.
+fn selected_option_value(document: &dom::Document, select_id: NodeId) -> Option<String> {
+    fn options(document: &dom::Document, id: NodeId, out: &mut Vec<NodeId>) {
+        let Some(node) = document.get(id) else {
+            return;
+        };
+        for &child in &node.children {
+            if document
+                .element_data(child)
+                .is_some_and(|e| e.tag_name == "option")
+            {
+                out.push(child);
+            }
+            options(document, child, out);
+        }
+    }
+    let mut found = Vec::new();
+    options(document, select_id, &mut found);
+    let chosen = found
+        .iter()
+        .copied()
+        .find(|&id| {
+            document
+                .element_data(id)
+                .is_some_and(|e| e.attributes.contains_key("selected"))
+        })
+        .or_else(|| found.first().copied())?;
+    let elem = document.element_data(chosen)?;
+    Some(elem.attributes.get("value").cloned().unwrap_or_else(|| {
+        document
+            .get(chosen)
+            .map(|n| {
+                n.children
+                    .iter()
+                    .filter_map(|c| document.text(*c))
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            .unwrap_or_default()
+    }))
 }
 
 // Percent-encode a single form field per `application/x-www-form-urlencoded`
@@ -1195,12 +1709,17 @@ fn url_encode(input: &str) -> String {
 // otherwise we introduce `?`. An empty data list returns `action`
 // unchanged so a buttonless form with no fields still routes through
 // the navigator (rare, but exercises the same path).
-fn build_form_submit_url(action: &str, data: &[(String, String)]) -> String {
-    let query = data
-        .iter()
+/// `name=value&...` in `application/x-www-form-urlencoded`. Shared by the
+/// GET query string and the POST body.
+fn encode_form_body(data: &[(String, String)]) -> String {
+    data.iter()
         .map(|(name, value)| format!("{}={}", url_encode(name), url_encode(value)))
         .collect::<Vec<_>>()
-        .join("&");
+        .join("&")
+}
+
+fn build_form_submit_url(action: &str, data: &[(String, String)]) -> String {
+    let query = encode_form_body(data);
     if query.is_empty() {
         return action.to_string();
     }
