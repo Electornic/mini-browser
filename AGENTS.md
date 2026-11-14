@@ -86,7 +86,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 653 (workspace 합계, 2026-11-14 G2 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 655 (workspace 합계, 2026-11-14 G2 + 보안 후속). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -190,7 +190,8 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - **이동은 반드시 정책 게이트를 지난다**: 새 이동 경로(`location.href =`, `window.open`, meta refresh 등)를 추가할 때 `navigate` / `navigate_to_href` / `try_submit_form` 과 같은 `policy::check` 를 통과시킨다. 우회 경로를 만들지 말 것.
 - **에이전트 전용 DOM 조작 API 금지**: 에이전트 행동은 합성 `WindowInput` 으로만. 편의를 위해 DOM 을 직접 바꾸는 단축로를 만들지 않는다.
 - **`WindowInput::from_agent` 는 mb-agent 만 켠다**: 셸(사람 입력)은 항상 false. 정책 게이트는 이 플래그로 판정 대상을 가른다.
-- **비밀번호 값은 어디에도 남기지 않는다**: 관찰(길이만)·로그(`<redacted>`)·화면(마스킹).
+- **비밀번호 값은 어디에도 남기지 않는다**: 관찰(길이만)·로그(`<redacted>`)·화면(마스킹). 에이전트가 입력한 텍스트도 로그에 남기지 않는다(`worker::Request` 의 Debug 가 가림), URL 로그는 쿼리 제외.
+- **ID 는 관찰만 발급한다**: `AgentBrowser` 의 발급 집합(`issued`)에 넣는 건 관찰을 돌려줄 때뿐. 다른 경로(wait_for 등)가 ID 를 유효하게 만들면 stale 가드가 무너진다.
 - **`panic = "abort"` 로 바꾸지 말 것**: 엔진 패닉 복구가 unwind 에 의존한다.
 - **브라우저는 결정적이어야 한다**: 관찰·행동·정책 출력에 `HashMap` 순회 순서, 벽시계, 비시드 난수가 새어 나가면 안 된다. 시간은 엔진 시계(`ClockSource`)만, 순서는 문서 순서로. 비결정성은 LLM 판단에만 허용 ([concept.md#결정성](docs/concept.md#결정성)).
 

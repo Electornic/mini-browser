@@ -527,3 +527,23 @@ fn screenshot_renders_the_page_area_without_chrome() {
         "the form should paint something ({non_white} px)"
     );
 }
+
+#[test]
+fn wait_for_never_turns_a_guessed_or_old_id_into_a_usable_one() {
+    use std::time::Duration;
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/signup")).unwrap();
+    let email = find(&page, Role::Textbox, "Email");
+    b.navigate(&server.url("/timers")).unwrap();
+    // The old id may well name a rendered node on the new page; waiting on
+    // it must not launder it.
+    let err = b
+        .wait_for(
+            mb_agent::WaitCondition::Element(email),
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), "stale_element");
+    assert_eq!(b.click(email).unwrap_err().code(), "stale_element");
+}

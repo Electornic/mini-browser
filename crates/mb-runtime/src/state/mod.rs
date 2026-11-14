@@ -680,7 +680,13 @@ impl BrowserState {
         );
         if decision != policy::PolicyDecision::Allowed {
             if !allowed {
-                eprintln!("[policy] {decision:?}: {method} {target}");
+                // Origin + path only: a GET form puts field values (maybe a
+                // password) in the query string.
+                let path = target.path.split(['?', '#']).next().unwrap_or("");
+                eprintln!(
+                    "[policy] {decision:?}: {method} {}{path}",
+                    policy::origin_of(target)
+                );
             }
             self.policy_events
                 .push(policy::PolicyEvent { action, decision });

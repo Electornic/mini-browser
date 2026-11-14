@@ -375,17 +375,26 @@ impl AgentBrowser {
         condition: WaitCondition,
         timeout: Duration,
     ) -> Result<Observation, AgentError> {
+        // Waiting on an element is only meaningful for an id this page's
+        // observations handed out. Never grant ids here: a guessed or
+        // previous-page id must stay unusable (same rule as `target_rect`).
+        if let WaitCondition::Element(id) = condition
+            && !self.is_issued(id)
+        {
+            return Err(AgentError::StaleElement {
+                id,
+                page_changed: true,
+            });
+        }
         let started = Instant::now();
         let start_clock = self.state.js.clock_now_ms();
         let timeout_ms = timeout.as_millis() as u64;
         loop {
             self.settle();
             if self.condition_holds(&condition) {
-                let observation = self.observe(&ObserveOptions::default());
-                if let WaitCondition::Element(id) = condition {
-                    self.issued.insert(id);
-                }
-                return Ok(observation);
+                // The returned observation issues whatever ids are on the
+                // page now, through the normal path.
+                return Ok(self.observe(&ObserveOptions::default()));
             }
             let elapsed = match self.clock {
                 Some(_) => self.state.js.clock_now_ms().saturating_sub(start_clock),
@@ -427,6 +436,10 @@ impl AgentBrowser {
                     })
             }
             WaitCondition::Element(id) => {
+                // A navigation during the wait makes the id meaningless.
+                if !self.is_issued(*id) {
+                    return false;
+                }
                 let view = self.state.current_view();
                 self.state.parsed_document.borrow().get(*id).is_some()
                     && view
@@ -527,9 +540,13 @@ impl AgentBrowser {
     // Helpers
     // -----------------------------------------------------------------
 
+    // Was `id` listed in an observation of the document currently shown?
+    fn is_issued(&self, id: NodeId) -> bool {
+        self.state.document_generation() == self.issued_generation && self.issued.contains(&id)
+    }
+
     fn target_rect(&mut self, id: NodeId) -> Result<Rect, AgentError> {
-        if self.state.document_generation() != self.issued_generation || !self.issued.contains(&id)
-        {
+        if !self.is_issued(id) {
             return Err(AgentError::StaleElement {
                 id,
                 page_changed: true,

@@ -15,7 +15,9 @@ use tokio::sync::oneshot;
 
 use crate::cli::Options;
 
-#[derive(Debug, Clone, PartialEq)]
+// Debug is hand-written below: `Type.text` may be a (test) password, and
+// requests end up in logs and in the repeat-tracker key.
+#[derive(Clone, PartialEq)]
 pub enum Request {
     Navigate {
         url: String,
@@ -49,6 +51,50 @@ pub enum Request {
     },
 }
 
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Request::Navigate { url } => f.debug_struct("Navigate").field("url", url).finish(),
+            Request::Observe { full, cursor } => f
+                .debug_struct("Observe")
+                .field("full", full)
+                .field("cursor", cursor)
+                .finish(),
+            Request::Click { id } => f.debug_struct("Click").field("id", id).finish(),
+            Request::Type {
+                id,
+                text,
+                clear,
+                submit,
+            } => f
+                .debug_struct("Type")
+                .field("id", id)
+                .field(
+                    "text",
+                    &format_args!("<redacted, {} chars>", text.chars().count()),
+                )
+                .field("clear", clear)
+                .field("submit", submit)
+                .finish(),
+            Request::Press { key } => f.debug_struct("Press").field("key", key).finish(),
+            Request::Scroll { dy } => f.debug_struct("Scroll").field("dy", dy).finish(),
+            Request::Back => f.write_str("Back"),
+            Request::Forward => f.write_str("Forward"),
+            Request::Screenshot => f.write_str("Screenshot"),
+            Request::WaitFor {
+                text,
+                id,
+                timeout_ms,
+            } => f
+                .debug_struct("WaitFor")
+                .field("text", text)
+                .field("id", id)
+                .field("timeout_ms", timeout_ms)
+                .finish(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Reply {
     /// (browser block, page block) — sent as two content items.
@@ -60,6 +106,8 @@ pub enum Reply {
         png: Vec<u8>,
         width: usize,
         height: usize,
+        /// Origin of the page shown, for the untrusted label.
+        origin: Option<String>,
     },
     Error(ErrorReport),
 }
@@ -267,6 +315,11 @@ fn execute(browser: &mut AgentBrowser, request: &Request) -> Result<Reply, ToolE
                 png: encode_png(&shot),
                 width: shot.width,
                 height: shot.height,
+                origin: browser
+                    .state()
+                    .current_url
+                    .as_ref()
+                    .map(mb_runtime::state::policy::origin_of),
             });
         }
         Request::WaitFor {
@@ -319,6 +372,19 @@ mod tests {
         assert_eq!(parse_id(" 7 ").unwrap(), NodeId::from_raw(7));
         assert!(parse_id("button").is_err());
         assert!(parse_id("e-1").is_err());
+    }
+
+    #[test]
+    fn typed_text_never_shows_up_in_debug_output() {
+        let request = Request::Type {
+            id: "e3".into(),
+            text: "hunter22".into(),
+            clear: false,
+            submit: true,
+        };
+        let shown = format!("{request:?}");
+        assert!(!shown.contains("hunter22"), "{shown}");
+        assert!(shown.contains("<redacted, 8 chars>"), "{shown}");
     }
 
     #[test]
