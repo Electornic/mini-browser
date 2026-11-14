@@ -2,9 +2,8 @@
 // shared font system, and hand the per-frame closure to `window::run`. All
 // real work lives in `mb_runtime::state::BrowserState::display_list`.
 
-mod window;
+use mb_shell::window;
 
-use mb_engine::render;
 use mb_runtime::profile;
 use mb_runtime::state::{install_fonts, load_initial_state};
 
@@ -18,44 +17,39 @@ fn main() {
     // free of winit dependencies.
     let mut wake_registered = false;
 
-    if let Err(error) = window::run(
-        "mini-browser",
-        800,
-        600,
-        |width, height, input, target, wake| {
-            if !wake_registered {
-                browser.set_navigation_wake(wake.as_arc());
-                wake_registered = true;
-            }
-            // Rebuild font cache when navigation loads new fonts. Done before
-            // display_list so chrome's caret-width measurement sees the fresh fonts.
-            // `install_fonts` rebuilds the shared swash glyph cache atomically
-            // with the FontSystem swap, so callers don't need a separate
-            // invalidation step.
-            if browser.font_data.len() != last_font_count {
-                install_fonts(&browser.font_data);
-                last_font_count = browser.font_data.len();
-            }
+    if let Err(error) = window::run("mini-browser", 800, 600, |frame, input, wake| {
+        if !wake_registered {
+            browser.set_navigation_wake(wake.as_arc());
+            wake_registered = true;
+        }
+        // Rebuild font cache when navigation loads new fonts. Done before
+        // display_list so chrome's caret-width measurement sees the fresh fonts.
+        // `install_fonts` rebuilds the shared swash glyph cache atomically
+        // with the FontSystem swap, so callers don't need a separate
+        // invalidation step.
+        if browser.font_data.len() != last_font_count {
+            install_fonts(&browser.font_data);
+            last_font_count = browser.font_data.len();
+        }
 
-            let frame = profile::Span::start("frame::total");
-            let commands = profile::time_block("frame::display_list", || {
-                browser.display_list(width, height, input)
-            });
-            // Paint straight into the softbuffer surface to skip the
-            // intermediate `Vec<u32>` allocation + memcpy that the
-            // previous `rasterize` + caller-copy pattern produced
-            // every frame.
-            profile::time_block("frame::rasterize_into", || {
-                render::rasterize_into(&commands, width, height, target);
-            });
-            frame.end();
-            // Caret blink + live JS timers need follow-up frames even
-            // with no input. Navigation completion no longer rides here
-            // — the worker thread pokes the wake proxy directly when
-            // it's done, so the shell sleeps at 0% CPU until then.
-            browser.wants_continuous_redraw()
-        },
-    ) {
+        let frame_span = profile::Span::start("frame::total");
+        let commands = profile::time_block("frame::display_list", || {
+            browser.display_list(frame.width, frame.height, input)
+        });
+        // Paint straight into the softbuffer surface to skip the
+        // intermediate `Vec<u32>` allocation + memcpy that the
+        // previous `rasterize` + caller-copy pattern produced
+        // every frame.
+        profile::time_block("frame::rasterize_into", || {
+            frame.present(&commands);
+        });
+        frame_span.end();
+        // Caret blink + live JS timers need follow-up frames even
+        // with no input. Navigation completion no longer rides here
+        // — the worker thread pokes the wake proxy directly when
+        // it's done, so the shell sleeps at 0% CPU until then.
+        browser.wants_continuous_redraw()
+    }) {
         eprintln!("window error: {error}");
     }
 }

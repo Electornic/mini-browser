@@ -1,6 +1,6 @@
 # Concept — 에이전트용 브라우저
 
-> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ (2026-11-14, `crates/mb-mcp`)** · 다음 = G3 관전 UI · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
+> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ (2026-11-14)** · 다음 = G4 승인 카드·넘겨받기 → G3b HTTP 붙기 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
 
 ## 한 줄
 
@@ -527,7 +527,10 @@ claude mcp add --scope project mini-browser -- /abs/path/to/target/release/mb-mc
 
 | 플래그 | 기본값 | 의미 |
 |---|---|---|
-| `--window` | off (headless) | 관전 창을 연다. 사람이 창에서 오버레이·타임라인·승인 카드를 본다 |
+| `--window` | off (headless) | 관전 창을 연다: 페이지 + 요소 ID 배지 + 마지막 대상 테두리 + 에이전트 패널(정책·행동 타임라인). 시계 기본값이 `system` 으로 바뀐다 (`--clock` 으로 덮어쓰기). 승인 카드는 G4 |
+| `--preview PATH` | — | 창을 열지 않고 관전 창 한 프레임을 PNG 로 렌더하고 종료 (`--start-url` 후). 오버레이 확인·문서 이미지용 |
+| `--preview-click ID` (반복) | — | `--preview` 전에 클릭할 요소 |
+| `--preview-scale N` | `1` | `--preview` 의 기기 배율 (2 = Retina). 창과 같은 경로: CSS px 레이아웃 후 확대 |
 | `--viewport WxH` | `1280x800` | 페이지 뷰포트 크기 (크롬 UI 102px 는 별도로 위에 붙는다) |
 | `--start-url URL` | `about:blank` | 시작 페이지 |
 | `--allow-origin ORIGIN` (반복) | 없음 | 이동 가능한 origin 화이트리스트. 지정하면 목록 밖 이동은 즉시 `navigation_blocked`. 미지정이면 모든 origin 가능하되 origin 이동은 승인 대상 |
@@ -597,13 +600,15 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | **G0** 관찰 ✅ | `mb-agent::observe` — Observation (trusted/untrusted 분리, `e{NodeId}` ID, viewport scope, 상한·cursor, 문서 순서 고정, `field=` 힌트) | 불필요했음 (인라인 rect 이미 존재) | L2 골든 5개 + 결정성·위조 방지·비밀번호 은닉 테스트 (609 green) |
 | **G1** 행동 ✅ | `AgentBrowser` ([browser.rs](../crates/mb-agent/src/browser.rs)): `navigate`/`click`/`type_text`/`press`/`scroll`/`back`/`forward`, settle, `changed:` 요약, 에러 코드([error.rs](../crates/mb-agent/src/error.rs)), 문서 세대별 ID 검증, 리스너 기반 clickable. 정책 게이트 [policy.rs](../crates/mb-runtime/src/state/policy.rs)(`Auto`/`Deny`, allow-list, 거절 기억) | POST 폼, 컨트롤 인라인화, password 마스킹, checkbox/radio 토글·`<label>`, Tab·Escape, 타이머 마감 API, 대화상자 shim, console 버퍼, 가상 시계·시드 난수 연결, **인라인 `on*` 핸들러**, **hover/포커스 경로 버그 수정**. 보류: ←→/Home/End/Delete(캐럿 모델), `<select>` 고르기, `new Date()`/`performance.now` | L3 12개 (fixture 서버 POST 회원가입·303 리다이렉트, Deny/거절 기억, 비밀번호 넘겨받기, allow-list, **리다이렉트 hop 게이트·307 body**, settle, 대화상자, 스크롤, stale, Tab, 결정성) |
 | **G2** MCP ✅ | [`crates/mb-mcp`](../crates/mb-mcp): `cli.rs`(옵션), `prompts.rs`, `worker.rs`(브라우저 스레드·`Job` 채널·`repeat_count`·패닉 시 재생성), `server.rs`(rmcp tool 10개, 관찰=텍스트 2개 / 에러=JSON+관찰 / 스크린샷=PNG image). mb-agent 에 `screenshot`·`wait_for`·`to_blocks`·`system_fonts` 추가. 추천 skill [`examples/claude-skill/mini-browser-testing`](../examples/claude-skill/mini-browser-testing/SKILL.md), 데모 페이지 [`examples/agent-demo`](../examples/agent-demo) | `--window`(G3), `--approve ask`(G4), `--log`(G5) 는 아직 — 넘기면 명확한 에러 | L4 e2e 4개(실제 바이너리 + JSON-RPC: tools/list, navigate→click→back, 에러·repeat_count, PNG), CLI·worker 단위 테스트. **Claude Code 실연결 데모는 사용자 등록 후 확인 필요** (중첩 `claude -p` 는 이 환경에서 401) |
-| **G3** 관전 UI | `mb-mcp --window`: ID 배지 오버레이·에이전트 패널·액션 타임라인. `mb-shell --mcp-http` (토큰·Host·Origin 검사) | `mb-shell` lib 화 | 창에서 에이전트가 누르는 걸 실시간으로 봄 |
+| **G3a** 관전 창 ✅ | `mb-mcp --window` ([window_mode.rs](../crates/mb-mcp/src/window_mode.rs), [overlay.rs](../crates/mb-mcp/src/overlay.rs)): 메인 스레드 winit 루프가 프레임마다 에이전트 Job 을 처리(MCP 스레드가 큐에 넣고 wake), 사람 입력은 `human_frame`(게이트 대상 아님), ID 배지(요소 왼쪽 여백, 자리 없으면 모서리)·마지막 대상 주황 테두리·오른쪽 300px 패널(정책·타임라인, 700px 미만이면 생략). 창 닫힘 → 이후 호출 `browser_closed`, 클라이언트 종료 → 프로세스 종료. `--preview` PNG 렌더 | `mb-shell` = lib + bin, `Worker` 구조체(헤드리스·창 공용, 타임라인), `AgentBrowser::{set_viewport, human_frame, element_boxes, last_target}` | ![관전 창](images/g3-observation-window.png) — 오버레이·패널 단위 테스트 5개. **실제 창은 사용자 확인 필요** (GUI) |
+| **G3b** 붙기 모드 | `mb-shell --mcp-http` (토큰·Host·Origin 검사) — 사람이 띄운 브라우저에 에이전트가 붙음 | — | G4 다음 |
 | **G4** 안전장치 | `policy.rs` 게이트 + 승인 카드 + 넘겨받기(`handoff_required`), elicitation, `--allow-origin`, 거절 기억(같은 대상 즉시 거절) | — | POST 제출 직전 멈춤 → 승인 후 진행. L5 |
 | **G5** 기록·재생 | 세션 로그(JSONL, redact, role+name 함께 기록), `mb-replay`(LLM 없는 결정적 재생 + 회귀 지점 보고), 단계별 재생 뷰, `mb-eval`(N회 실행 성공률 집계, 안전 지표 포함, `prompts.rs` 해시 기록) | — | 한 번 탐색한 경로가 회귀 테스트가 됨. 프롬프트 변경을 숫자로 비교. L6·L7 |
 
 - G4 의 게이트 **판정 로직**은 G1 에서 입력 출처 태그와 함께 먼저 들어간다 (`--approve auto|deny` 만). G4 는 사람에게 묻는 UI(`ask`)·넘겨받기·elicitation 을 붙이는 단계.
 - `<select>` 는 G1 이후 필요해질 때 (`select(id, option)` tool 추가).
-- 호환성 트랙: Tier 1.5 (Preact 실증) → Tier 2 (모듈 로더) 는 "에이전트 데모 대상 페이지가 깨지는 지점"이 나올 때 우선순위를 올린다.
+- - 호환성 트랙 메모 (G3a 미리보기에서 발견): 블록과 인라인이 섞인 부모(`<body>` 안의 label·input·button)에서 연속된 인라인 형제를 익명 인라인 줄로 묶지 못해, 각자 블록처럼 쌓이고 `<button>` 이 가로로 꽉 찬다. 데모 todo 페이지의 Add 버튼이 그 예.
+호환성 트랙: Tier 1.5 (Preact 실증) → Tier 2 (모듈 로더) 는 "에이전트 데모 대상 페이지가 깨지는 지점"이 나올 때 우선순위를 올린다.
 
 ## 결정 기록
 
@@ -613,6 +618,11 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-10 | 연결 = MCP 서버 (rmcp, stdio 먼저) | 앱에 API 키 불필요, Claude Code 를 에이전트로 재사용. 앱 내장 LLM 루프는 하지 않음 |
 | 2026-11-11 | G0: 관찰은 layout 트리에서 rect 를 직접 수집, `LinkTarget` 미사용 | 모든 노드가 LayoutBox 를 가져서 별도 인라인 수집 불필요 (검토 때 오판 정정) |
 | 2026-11-11 | G0: `text:` 에 링크 텍스트 포함, 폼 크롬 제외, 이름 없는 컨트롤은 `field=` | 링크를 빼면 문장이 끊김 ("or read the ."). 라벨·버튼은 요소 목록과 중복. 이름 없는 `select` 는 `name=""` 만으론 용도를 알 수 없음 |
+| 2026-11-14 | 창은 논리 크기(CSS px)로 레이아웃하고 그릴 때만 배율 적용 (`window::Frame`, `render::scale_display_list`) | 관전 창 실연결 테스트에서 Retina 물리 픽셀(2620×1702)이 CSS px 로 쓰여 글자가 반 크기, 에이전트 레이아웃도 headless 와 달랐음. 명령 좌표·글자 크기를 곱해서 글리프를 큰 크기로 래스터 → 선명. mb-shell 도 같이 고쳐짐. 스프라이트(source offset) 이미지는 1:1 로 남는 한계 |
+| 2026-11-14 | 체크박스 = 파란 채움 + 흰 ✓(회전 막대 2개), 라디오 = 둥근 점 | 작은 채운 사각형은 체크 여부가 잘 안 보였음 (실연결 테스트) |
+| 2026-11-14 | G3 을 G3a(관전 창) → G4(승인 카드) → G3b(HTTP 붙기) 순으로 | 승인 카드·넘겨받기는 관전 창 위에 얹는 게 자연스럽고, HTTP 붙기는 보안 작업이 따로 큼 |
+| 2026-11-14 | 관전 창: winit 이 메인 스레드, 에이전트 행동은 프레임 안에서 동기 실행 | macOS 제약. 행동(+settle) 중엔 창이 갱신되지 않지만 단순하고 결정적 — 행동 중 애니메이션은 필요해지면 |
+| 2026-11-14 | 관전 창 패널은 페이지 옆(오버레이 아님), 배지는 요소 왼쪽 여백 우선 | 패널이 페이지를 가리지 않게. 배지가 작은 체크박스·링크 첫 글자를 덮던 문제(미리보기로 확인) |
 | 2026-11-14 | 실연결 테스트 피드백 반영: 새 문서 표시, 값 이전→이후·텍스트 증감은 untrusted `changes:` 섹션, `scroll_y`/`page_height` 표기 | 에이전트가 ID 재사용·상태 초기화·변화 내용을 관찰만으로 알 수 있게. 페이지 문자열은 trusted 블록에 넣지 않는다 |
 | 2026-11-14 | G2 후속(보안 리뷰): `wait_for(id)` 는 ID 를 발급하지 않고, 발급 안 된 ID 면 `stale_element` | 추측·이전 페이지 ID 를 `wait_for` 로 "세탁"해 stale 가드를 우회할 수 있었음 |
 | 2026-11-14 | G2 후속: 스크린샷 결과는 untrusted 라벨(origin 포함)을 이미지 앞에 붙이고, instructions 규칙 3 이 이미지 속 글자도 포함 | 이미지에 렌더된 페이지 글자도 인젝션 경로 |

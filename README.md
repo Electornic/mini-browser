@@ -86,6 +86,14 @@ claude mcp add mini-browser -- "$(pwd)/target/release/mb-mcp"
 claude mcp add mini-browser -- "$(pwd)/target/release/mb-mcp" --approve auto --allow-origin http://localhost:3000
 ```
 
+에이전트가 누르는 걸 **창으로 보고 싶으면** `--window` 를 붙인다 (요소 ID 배지, 마지막 대상 테두리, 행동 타임라인 패널):
+
+```sh
+claude mcp add mini-browser -- "$(pwd)/target/release/mb-mcp" --window
+```
+
+![관전 창](docs/images/g3-observation-window.png)
+
 데모 페이지: `cd examples/agent-demo && python3 -m http.server 8765` 후 "http://127.0.0.1:8765/ 에서 'buy milk' 할 일을 추가하고 완료 처리해줘". 추천 skill: [examples/claude-skill/mini-browser-testing](examples/claude-skill/mini-browser-testing/SKILL.md). 설계: [docs/concept.md](docs/concept.md).
 
 ## What Works

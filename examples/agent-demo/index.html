@@ -31,7 +31,7 @@
       document.getElementById('summary').textContent =
         done + ' of ' + boxes.length + ' done';
     }
-    document.getElementById('add').addEventListener('click', function () {
+    function addItem() {
       var input = document.getElementById('new');
       var text = (input.value || '').trim();
       if (!text) return;
@@ -41,6 +41,12 @@
       document.getElementById('list').appendChild(li);
       input.value = '';
       refresh();
+    }
+    document.getElementById('add').addEventListener('click', addItem);
+    // Enter in the field adds too (the field isn't in a <form>, so there's
+    // no submit to do it for us).
+    document.getElementById('new').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') addItem();
     });
     document.getElementById('list').addEventListener('change', refresh);
     refresh();

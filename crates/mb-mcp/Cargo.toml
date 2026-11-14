@@ -12,6 +12,8 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
 mb-agent = { path = "../mb-agent" }
 mb-runtime = { path = "../mb-runtime" }
+mb-shell = { path = "../mb-shell" }
+mb-engine = { path = "../mb-engine" }
 rmcp = { version = "3", features = ["server", "macros", "transport-io", "schemars"] }
 schemars = "1.2.3"
 serde = { version = "1", features = ["derive"] }

@@ -22,6 +22,13 @@ OPTIONS:
     --clock MODE            virtual | system                   [default: virtual]
     --seed N                Math.random seed                   [default: 1]
     --settle-timeout-ms N   Wall-clock cap per settle          [default: 5000]
+    --window                Open an observation window: the page with the
+                            agent's element ids, its last target, and an
+                            action timeline (clock defaults to system)
+    --preview PATH          Render one observation-window frame (after
+                            --start-url) to a PNG and exit — no window, no MCP
+    --preview-click ID      Click this element before --preview (repeatable)
+    --preview-scale N       Device pixel ratio for --preview, e.g. 2 for Retina
     -h, --help              Print this help (to stderr)
 
 stdout carries the MCP protocol only; logs go to stderr.
@@ -31,6 +38,14 @@ stdout carries the MCP protocol only; logs go to stderr.
 pub struct Options {
     pub agent: AgentConfig,
     pub start_url: Option<String>,
+    /// Open the observation window (G3).
+    pub window: bool,
+    /// `--preview PATH`: render one observation-window frame and exit.
+    pub preview: Option<std::path::PathBuf>,
+    /// `--preview-click ID` (repeatable): clicks to perform before it.
+    pub preview_clicks: Vec<String>,
+    /// `--preview-scale N`: device pixel ratio for the preview (default 1).
+    pub preview_scale: f32,
 }
 
 pub enum Parsed {
@@ -41,6 +56,11 @@ pub enum Parsed {
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> {
     let mut agent = AgentConfig::default();
     let mut start_url = None;
+    let mut window = false;
+    let mut clock_given = false;
+    let mut preview = None;
+    let mut preview_clicks = Vec::new();
+    let mut preview_scale = 1.0_f32;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -73,6 +93,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
                 }
             }
             "--clock" => {
+                clock_given = true;
                 agent.clock = match value("--clock")?.as_str() {
                     "virtual" => ClockMode::Virtual,
                     "system" => ClockMode::System,
@@ -92,13 +113,32 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
                     .map_err(|_| format!("--settle-timeout-ms expects a number, got {raw:?}"))?;
                 agent.settle_timeout = Duration::from_millis(ms);
             }
-            "--window" => {
-                return Err("--window (observation window) arrives in G3".into());
+            "--window" => window = true,
+            "--preview" => preview = Some(std::path::PathBuf::from(value("--preview")?)),
+            "--preview-click" => preview_clicks.push(value("--preview-click")?),
+            "--preview-scale" => {
+                let raw = value("--preview-scale")?;
+                preview_scale = raw
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|s| (0.5..=4.0).contains(s))
+                    .ok_or_else(|| format!("--preview-scale expects 0.5..=4, got {raw:?}"))?;
             }
             other => return Err(format!("unknown option {other:?} (see --help)")),
         }
     }
-    Ok(Parsed::Run(Options { agent, start_url }))
+    // A person is watching: timers should run at the speed they see.
+    if window && !clock_given {
+        agent.clock = ClockMode::System;
+    }
+    Ok(Parsed::Run(Options {
+        agent,
+        start_url,
+        window,
+        preview,
+        preview_clicks,
+        preview_scale,
+    }))
 }
 
 fn parse_dimension(raw: &str, whole: &str) -> Result<usize, String> {
@@ -169,11 +209,21 @@ mod tests {
     }
 
     #[test]
+    fn window_mode_defaults_to_the_system_clock_unless_told_otherwise() {
+        let watched = run(&["--window"]);
+        assert!(watched.window);
+        assert_eq!(watched.agent.clock, ClockMode::System);
+        let pinned = run(&["--window", "--clock", "virtual"]);
+        assert_eq!(pinned.agent.clock, ClockMode::Virtual);
+    }
+
+    #[test]
     fn rejects_bad_input() {
         for bad in [
             vec!["--viewport", "big"],
             vec!["--approve", "maybe"],
             vec!["--approve", "ask"],
+            vec!["--clock", "fast"],
             vec!["--allow-origin", "ftp://x"],
             vec!["--seed"],
             vec!["--bogus"],

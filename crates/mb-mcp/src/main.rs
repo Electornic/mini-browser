@@ -12,8 +12,10 @@
 #![deny(clippy::print_stdout)]
 
 mod cli;
+mod overlay;
 mod prompts;
 mod server;
+mod window_mode;
 mod worker;
 
 use std::process::ExitCode;
@@ -37,14 +39,30 @@ fn main() -> ExitCode {
     // Real text metrics and readable screenshots for a live session.
     options.agent.system_fonts = true;
 
+    if let Some(path) = options.preview.clone() {
+        let clicks = options.preview_clicks.clone();
+        return match window_mode::preview(options, &path, &clicks) {
+            Ok(()) => {
+                eprintln!("[mb-mcp] wrote {}", path.display());
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("mb-mcp: {message}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     let (jobs_tx, jobs_rx) = mpsc::channel::<worker::Job>();
+    let wake_slot: window_mode::WakeSlot = Default::default();
+    let server_wake = wake_slot.clone();
     let server_thread = std::thread::spawn(move || -> Result<(), String> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("tokio runtime: {e}"))?;
         runtime.block_on(async move {
-            let service = server::BrowserServer::new(jobs_tx)
+            let service = server::BrowserServer::new(jobs_tx, server_wake)
                 .serve(rmcp::transport::stdio())
                 .await
                 .map_err(|e| format!("mcp handshake failed: {e}"))?;
@@ -56,8 +74,13 @@ fn main() -> ExitCode {
         })
     });
 
-    eprintln!("[mb-mcp] ready (stdio)");
-    worker::run(options, jobs_rx);
+    if options.window {
+        eprintln!("[mb-mcp] ready (stdio, observation window)");
+        window_mode::run(options, jobs_rx, wake_slot);
+    } else {
+        eprintln!("[mb-mcp] ready (stdio)");
+        worker::run(options, jobs_rx);
+    }
 
     match server_thread.join() {
         Ok(Ok(())) => ExitCode::SUCCESS,

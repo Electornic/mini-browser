@@ -261,6 +261,72 @@ pub struct ImageCommand {
     pub source_y: f32,
 }
 
+/// Multiply every coordinate, size and font size in a display list by
+/// `factor`. Used to paint a list laid out in CSS px onto a HiDPI surface
+/// (device pixel ratio > 1): text is re-shaped at the larger size instead of
+/// being stretched, so it stays crisp. Images positioned by a source offset
+/// (sprite slices) still draw source pixels 1:1 — a known gap.
+pub fn scale_display_list(commands: &[DisplayCommand], factor: f32) -> Vec<DisplayCommand> {
+    if (factor - 1.0).abs() < f32::EPSILON {
+        return commands.to_vec();
+    }
+    let rect = |r: &crate::layout::Rect| crate::layout::Rect {
+        x: r.x * factor,
+        y: r.y * factor,
+        width: r.width * factor,
+        height: r.height * factor,
+    };
+    commands
+        .iter()
+        .map(|command| match command {
+            DisplayCommand::SolidRect(color, r) => DisplayCommand::SolidRect(*color, rect(r)),
+            DisplayCommand::RoundedRect(color, r, radii) => DisplayCommand::RoundedRect(
+                *color,
+                rect(r),
+                CornerRadii {
+                    tl: radii.tl * factor,
+                    tr: radii.tr * factor,
+                    br: radii.br * factor,
+                    bl: radii.bl * factor,
+                },
+            ),
+            DisplayCommand::Text(text) => DisplayCommand::Text(TextCommand {
+                x: text.x * factor,
+                y: text.y * factor,
+                font_size: text.font_size * factor,
+                wrap_width: text.wrap_width.map(|w| w * factor),
+                ..text.clone()
+            }),
+            DisplayCommand::Image(image) => DisplayCommand::Image(ImageCommand {
+                x: image.x * factor,
+                y: image.y * factor,
+                width: image.width * factor,
+                height: image.height * factor,
+                ..image.clone()
+            }),
+            DisplayCommand::Gradient(gradient) => DisplayCommand::Gradient(GradientCommand {
+                rect: rect(&gradient.rect),
+                ..gradient.clone()
+            }),
+            DisplayCommand::BoxShadow(shadow) => DisplayCommand::BoxShadow(ShadowCommand {
+                rect: rect(&shadow.rect),
+                blur_radius: shadow.blur_radius * factor,
+                color: shadow.color,
+            }),
+            // Conjugate by the scale: the linear part is unchanged, the
+            // translation is in (now scaled) pixel units.
+            DisplayCommand::TransformGroup(affine, inner) => DisplayCommand::TransformGroup(
+                Affine {
+                    e: affine.e * factor,
+                    f: affine.f * factor,
+                    ..*affine
+                },
+                scale_display_list(inner, factor),
+            ),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{css, html, layout, render, style};
@@ -831,6 +897,52 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn scaling_a_display_list_scales_geometry_and_font_size() {
+        let commands = vec![
+            DisplayCommand::SolidRect(
+                Color::BLACK,
+                crate::layout::Rect {
+                    x: 1.0,
+                    y: 2.0,
+                    width: 3.0,
+                    height: 4.0,
+                },
+            ),
+            DisplayCommand::Text(TextCommand {
+                text: "hi".into(),
+                x: 5.0,
+                y: 6.0,
+                color: Color::BLACK,
+                font_size: 10.0,
+                wrap_width: Some(100.0),
+                font_family: None,
+                font_weight: 400,
+            }),
+        ];
+        let scaled = super::scale_display_list(&commands, 2.0);
+        assert_eq!(
+            scaled[0],
+            DisplayCommand::SolidRect(
+                Color::BLACK,
+                crate::layout::Rect {
+                    x: 2.0,
+                    y: 4.0,
+                    width: 6.0,
+                    height: 8.0
+                },
+            )
+        );
+        let DisplayCommand::Text(t) = &scaled[1] else {
+            panic!()
+        };
+        assert_eq!(
+            (t.x, t.y, t.font_size, t.wrap_width),
+            (10.0, 12.0, 20.0, Some(200.0))
+        );
+        assert_eq!(super::scale_display_list(&commands, 1.0), commands);
     }
 
     #[test]

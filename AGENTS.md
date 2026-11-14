@@ -52,8 +52,11 @@
 │   - prompts          서버 instructions + tool 설명 (LLM 이 읽는 텍스트, 영어)
 │   - worker           Job 채널 처리, repeat_count, 패닉 시 AgentBrowser 재생성
 │   - server           #[tool_router] tool 10개 → worker::Request, 결과 → CallToolResult
+│   - window_mode      --window: 메인 스레드 winit 루프 + 프레임마다 Job 처리, --preview PNG
+│   - overlay          ID 배지·대상 테두리·에이전트 패널 (DisplayCommand 순수 함수)
 │
-└── crates/mb-shell    (binary [[bin]] mb-shell)  anyhow, softbuffer, winit
+└── crates/mb-shell    (lib + [[bin]] mb-shell)  anyhow, softbuffer, winit
+    - lib.rs           pub mod window — mb-mcp --window 도 같은 창 코드를 씀
     - main.rs          진입점 — install_fonts → window::run(closure)
     - window.rs        winit 이벤트 루프 + softbuffer 프레임 출력
 ```
@@ -72,6 +75,8 @@ cargo test --workspace 2>&1 | grep "test result"
 # mb-mcp: 실제 바이너리 e2e (JSON-RPC over stdio) + release 빌드
 cargo test -p mb-mcp --test e2e
 cargo build --release -p mb-mcp      # → target/release/mb-mcp (claude mcp add 대상)
+# 관전 창 한 프레임을 PNG 로 (GUI 없이 오버레이 확인)
+./target/debug/mb-mcp --start-url http://127.0.0.1:8765/ --preview-click e31 --preview /tmp/frame.png
 
 # mb-agent 관찰 골든 (의도한 변경이면 UPDATE_GOLDEN=1 로 갱신 후 diff 를 눈으로 확인)
 cargo test -p mb-agent --test golden
@@ -86,7 +91,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 655 (workspace 합계, 2026-11-14 G2 + 보안 후속). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 662 (workspace 합계, 2026-11-14 G3a + HiDPI). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -135,6 +140,9 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
 ### 레이아웃 경로 ≠ DOM 경로
 - 레이아웃 트리는 `display:none` 자식(`<head>`, `<script>`, `<style>`)과 공백 텍스트를 뺀다. 그래서 레이아웃 자식 인덱스로 만든 경로를 DOM 에서 풀면 엉뚱한 노드가 나온다 (G1 에서 hover/포커스가 이 버그였음). 노드를 가리킬 땐 **NodeId** 를, 경로가 필요하면 `dom_path_for_node` 로 DOM 기준 경로를 만든다.
+
+### 창 크기는 CSS px (논리), 버퍼는 물리 픽셀
+- `mb_shell::window::run` 의 콜백은 `Frame` 을 받는다: `frame.width/height` 와 `WindowInput.mouse_position` 은 **논리(CSS px)**, 그리기는 반드시 `frame.present(&commands)` 로 (기기 배율만큼 `scale_display_list` 후 물리 버퍼에 래스터). 물리 크기를 레이아웃에 넘기면 Retina 에서 글자가 반 크기가 되고 에이전트 관찰도 달라진다.
 
 ### NodeId 는 문서마다 재사용
 - 이동·뒤로·새로고침마다 새 `Document` 가 생기고 NodeId 가 0 부터 다시 매겨진다. NodeId 를 문서 밖으로 들고 다니면(에이전트 요소 ID 등) 반드시 `BrowserState::document_generation()` 과 짝지을 것.

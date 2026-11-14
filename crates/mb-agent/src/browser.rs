@@ -85,6 +85,9 @@ pub struct AgentBrowser {
     issued: BTreeSet<NodeId>,
     // Page font count last installed (system_fonts only); `None` = never.
     installed_fonts: Option<usize>,
+    // Element the last click/type aimed at, with the document it was on —
+    // for the observation window's highlight.
+    last_target: Option<(u64, NodeId)>,
 }
 
 /// What `wait_for` waits for.
@@ -142,6 +145,7 @@ impl AgentBrowser {
             issued_generation: 0,
             issued: BTreeSet::new(),
             installed_fonts: None,
+            last_target: None,
         };
         browser.settle();
         browser
@@ -212,6 +216,49 @@ impl AgentBrowser {
             max_text_chars: 100_000,
             cursor: 0,
         })
+    }
+
+    // -----------------------------------------------------------------
+    // Observation window support (G3)
+    // -----------------------------------------------------------------
+
+    /// Follow the window: the page area the agent lays out against is the
+    /// one the human sees.
+    pub fn set_viewport(&mut self, width: usize, height: usize) {
+        self.config.viewport_width = width.max(1);
+        self.config.viewport_height = height.max(1);
+    }
+
+    /// A frame driven by the person at the window. Never tagged as agent
+    /// input, so the policy gate lets it through like any human action.
+    pub fn human_frame(&mut self, input: &WindowInput) -> Vec<mb_runtime::render::DisplayCommand> {
+        self.sync_fonts();
+        let mut input = input.clone();
+        input.from_agent = false;
+        let width = self.config.viewport_width;
+        let height = self.config.viewport_height + CHROME_HEIGHT as usize;
+        self.state.display_list(width, height, &input)
+    }
+
+    /// Every interactive element on the page with its rect, for drawing
+    /// id badges. Read-only: unlike `observe` it issues no ids and drains
+    /// no console/dialog records.
+    pub fn element_boxes(&mut self) -> Vec<crate::ElementObservation> {
+        self.observe_raw(&ObserveOptions {
+            scope: Scope::Full,
+            max_elements: usize::MAX,
+            max_text_chars: 0,
+            cursor: 0,
+        })
+        .elements
+    }
+
+    /// The element the last click / type aimed at, if it's on the current
+    /// document.
+    pub fn last_target(&self) -> Option<NodeId> {
+        self.last_target
+            .filter(|(generation, _)| *generation == self.state.document_generation())
+            .map(|(_, id)| id)
     }
 
     // -----------------------------------------------------------------
@@ -517,6 +564,7 @@ impl AgentBrowser {
 
     fn click_raw(&mut self, id: NodeId) -> Result<(), AgentError> {
         let rect = self.target_rect(id)?;
+        self.last_target = Some((self.state.document_generation(), id));
         self.scroll_into_view(rect);
         let rect = self.target_rect(id)?;
         let point = self.click_point(rect);

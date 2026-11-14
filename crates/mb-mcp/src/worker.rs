@@ -157,37 +157,146 @@ impl RepeatTracker {
     }
 }
 
-/// Serve jobs until every sender is gone (the MCP server shut down).
-pub fn run(options: Options, jobs: Receiver<Job>) {
-    let mut browser = new_browser(&options);
-    let mut repeats = RepeatTracker::default();
-    while let Ok(job) = jobs.recv() {
+/// One line of the observation window's action timeline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineEntry {
+    /// e.g. "click e24", "type e22 (8 chars)". Never the typed text.
+    pub label: String,
+    /// `None` = succeeded, `Some(code)` = failed with that error code.
+    pub error: Option<String>,
+}
+
+const TIMELINE_LEN: usize = 50;
+
+/// The browser plus everything that survives across requests: repeat
+/// tracking, the timeline, and how to rebuild after a panic. Both the
+/// headless loop (`run`) and the observation window drive it.
+pub struct Worker {
+    options: Options,
+    browser: AgentBrowser,
+    repeats: RepeatTracker,
+    timeline: Vec<TimelineEntry>,
+}
+
+impl Worker {
+    pub fn new(options: Options) -> Self {
+        let browser = new_browser(&options);
+        Self {
+            options,
+            browser,
+            repeats: RepeatTracker::default(),
+            timeline: Vec::new(),
+        }
+    }
+
+    pub fn browser(&mut self) -> &mut AgentBrowser {
+        &mut self.browser
+    }
+
+    pub fn options(&self) -> &Options {
+        &self.options
+    }
+
+    pub fn timeline(&self) -> &[TimelineEntry] {
+        &self.timeline
+    }
+
+    /// Run one request, surviving engine panics.
+    pub fn process(&mut self, request: &Request) -> Reply {
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            handle(&mut browser, &mut repeats, &job.request)
+            handle(&mut self.browser, &mut self.repeats, request)
         }));
         let reply = match outcome {
             Ok(reply) => reply,
             Err(_) => {
                 // The state may be broken mid-update: throw it away and start
                 // over on the page we were on (docs/concept.md "엔진 패닉").
-                let last_url = browser.state().current_url.as_ref().map(|u| u.to_string());
-                eprintln!(
-                    "[mb-mcp] engine panicked handling {:?}; rebuilding",
-                    job.request
-                );
-                browser = new_browser(&options);
+                let last_url = self
+                    .browser
+                    .state()
+                    .current_url
+                    .as_ref()
+                    .map(|u| u.to_string());
+                eprintln!("[mb-mcp] engine panicked handling {request:?}; rebuilding");
+                self.browser = new_browser(&self.options);
                 if let Some(url) = last_url {
-                    let _ = browser.navigate(&url);
+                    let _ = self.browser.navigate(&url);
                 }
                 Reply::Error(ErrorReport {
                     code: "engine_crashed".into(),
                     message: "The browser engine crashed and was restarted on the same URL.".into(),
                     hint: "Call `observe` to see the reloaded page; form input was lost.".into(),
-                    repeat_count: repeats.failure(&job.request, "engine_crashed"),
+                    repeat_count: self.repeats.failure(request, "engine_crashed"),
                     observation: None,
                 })
             }
         };
+        self.timeline.push(TimelineEntry {
+            label: request.label(),
+            error: match &reply {
+                Reply::Error(report) => Some(report.code.clone()),
+                _ => None,
+            },
+        });
+        if self.timeline.len() > TIMELINE_LEN {
+            self.timeline.remove(0);
+        }
+        reply
+    }
+}
+
+impl Request {
+    /// Short, log-safe description (typed text reduced to its length).
+    pub fn label(&self) -> String {
+        match self {
+            Request::Navigate { url } => format!("navigate {url}"),
+            Request::Observe { full, .. } => {
+                if *full {
+                    "observe (full)".into()
+                } else {
+                    "observe".into()
+                }
+            }
+            Request::Click { id } => format!("click {id}"),
+            Request::Type {
+                id, text, submit, ..
+            } => format!(
+                "type {id} ({} chars){}",
+                text.chars().count(),
+                if *submit { " + Enter" } else { "" }
+            ),
+            Request::Press { key } => format!("press {key}"),
+            Request::Scroll { dy } => format!("scroll {dy:+}"),
+            Request::Back => "back".into(),
+            Request::Forward => "forward".into(),
+            Request::Screenshot => "screenshot".into(),
+            Request::WaitFor { text, id, .. } => match (text, id) {
+                (Some(_), _) => "wait_for text".into(),
+                (_, Some(id)) => format!("wait_for {id}"),
+                _ => "wait_for".into(),
+            },
+        }
+    }
+}
+
+/// The reply every tool call gets once the observation window was closed.
+pub fn browser_closed() -> Reply {
+    Reply::Error(ErrorReport {
+        code: "browser_closed".into(),
+        message: "The person watching closed the browser window.".into(),
+        hint:
+            "Tell the user the browser was closed; it can't be used until the MCP server restarts."
+                .into(),
+        repeat_count: 1,
+        observation: None,
+    })
+}
+
+/// Headless: serve jobs until every sender is gone (the MCP server shut down).
+pub fn run(options: Options, jobs: Receiver<Job>) {
+    let mut worker = Worker::new(options);
+    while let Ok(job) = jobs.recv() {
+        let reply = worker.process(&job.request);
         // The server side may have given up (client cancelled): fine.
         let _ = job.reply.send(reply);
     }
@@ -343,9 +452,14 @@ fn execute(browser: &mut AgentBrowser, request: &Request) -> Result<Reply, ToolE
 }
 
 fn encode_png(shot: &Screenshot) -> Vec<u8> {
+    encode_rgb_png(&shot.pixels, shot.width, shot.height)
+}
+
+/// `0x00RRGGBB` pixels → PNG bytes.
+pub fn encode_rgb_png(pixels: &[u32], width: usize, height: usize) -> Vec<u8> {
     use image::ImageEncoder;
-    let mut rgb = Vec::with_capacity(shot.pixels.len() * 3);
-    for pixel in &shot.pixels {
+    let mut rgb = Vec::with_capacity(pixels.len() * 3);
+    for pixel in pixels {
         rgb.push((pixel >> 16) as u8);
         rgb.push((pixel >> 8) as u8);
         rgb.push(*pixel as u8);
@@ -354,8 +468,8 @@ fn encode_png(shot: &Screenshot) -> Vec<u8> {
     image::codecs::png::PngEncoder::new(&mut png)
         .write_image(
             &rgb,
-            shot.width as u32,
-            shot.height as u32,
+            width as u32,
+            height as u32,
             image::ExtendedColorType::Rgb8,
         )
         .expect("encoding an in-memory RGB buffer as PNG can't fail");

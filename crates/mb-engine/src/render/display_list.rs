@@ -222,9 +222,7 @@ fn paint_self(
     // inputs. <textarea> emits one Text command per `\n`-delimited
     // line; the vector is empty when the value is empty.
     commands.extend(input_value_text_commands(layout_box, alpha));
-    if let Some(command) = check_mark_command(layout_box, alpha) {
-        commands.push(command);
-    }
+    commands.extend(check_mark_commands(layout_box, alpha));
     // Push the inherited+own transform onto the commands this box just emitted.
     // The emitters work in logical (untransformed) coordinates; the affine
     // matrix is the only thing that maps logical → screen pixels.
@@ -706,42 +704,84 @@ pub fn field_display_value(element: &crate::dom::ElementData) -> Option<String> 
     }
 }
 
-/// Checked checkbox / radio: a filled square inset inside the 13px box.
-fn check_mark_command(layout_box: &LayoutBox, alpha: f32) -> Option<DisplayCommand> {
-    let node = layout_box.styled_node()?;
+/// Checked checkbox / radio. Checkbox: the box filled with an accent
+/// colour and a white tick (two rotated strokes). Radio: a round dot.
+fn check_mark_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayCommand> {
+    let Some(node) = layout_box.styled_node() else {
+        return Vec::new();
+    };
     let NodeType::Element(element) = &node.node_type else {
-        return None;
+        return Vec::new();
     };
     if element.tag_name != "input" || !element.attributes.contains_key("checked") {
-        return None;
+        return Vec::new();
     }
     let input_type = element
         .attributes
         .get("type")
         .map(|t| t.trim().to_ascii_lowercase())
         .unwrap_or_default();
-    if !matches!(input_type.as_str(), "checkbox" | "radio") {
-        return None;
-    }
     let content = layout_box.dimensions.content;
-    let inset = (content.width.min(content.height) * 0.25).max(1.0);
-    Some(DisplayCommand::SolidRect(
-        apply_alpha(
-            Color {
-                r: 30,
-                g: 30,
-                b: 30,
-                a: 255,
-            },
-            alpha,
-        ),
-        Rect {
-            x: content.x + inset,
-            y: content.y + inset,
-            width: (content.width - inset * 2.0).max(1.0),
-            height: (content.height - inset * 2.0).max(1.0),
+    let accent = apply_alpha(
+        Color {
+            r: 37,
+            g: 99,
+            b: 235,
+            a: 255,
         },
-    ))
+        alpha,
+    );
+    match input_type.as_str() {
+        "checkbox" => {
+            let white = apply_alpha(Color::WHITE, alpha);
+            let (w, h) = (content.width, content.height);
+            let thickness = (w.min(h) * 0.16).max(1.5);
+            // Tick: down-right from the left, then up-right to the top.
+            let stroke = |x0: f32, y0: f32, x1: f32, y1: f32| {
+                let (dx, dy) = (x1 - x0, y1 - y0);
+                let length = (dx * dx + dy * dy).sqrt();
+                DisplayCommand::TransformGroup(
+                    Affine::translate(content.x + x0, content.y + y0)
+                        .compose(Affine::rotate(dy.atan2(dx))),
+                    vec![DisplayCommand::SolidRect(
+                        white,
+                        Rect {
+                            x: 0.0,
+                            y: -thickness / 2.0,
+                            width: length,
+                            height: thickness,
+                        },
+                    )],
+                )
+            };
+            vec![
+                DisplayCommand::SolidRect(accent, content),
+                stroke(0.20 * w, 0.52 * h, 0.42 * w, 0.74 * h),
+                stroke(0.40 * w, 0.74 * h, 0.80 * w, 0.28 * h),
+            ]
+        }
+        "radio" => {
+            let inset = (content.width.min(content.height) * 0.25).max(1.0);
+            let dot = Rect {
+                x: content.x + inset,
+                y: content.y + inset,
+                width: (content.width - inset * 2.0).max(1.0),
+                height: (content.height - inset * 2.0).max(1.0),
+            };
+            let r = dot.width.min(dot.height) / 2.0;
+            vec![DisplayCommand::RoundedRect(
+                accent,
+                dot,
+                CornerRadii {
+                    tl: r,
+                    tr: r,
+                    br: r,
+                    bl: r,
+                },
+            )]
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn input_value_text_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayCommand> {

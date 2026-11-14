@@ -25,6 +25,41 @@ use winit::window::{Window, WindowId};
 // speak the shape without depending on winit. Local code paints / reads it
 // through that name.
 use mb_engine::input::WindowInput;
+use mb_engine::render::{DisplayCommand, rasterize_into, scale_display_list};
+
+/// One frame's drawing surface. Sizes are in CSS px (logical): lay out and
+/// build display lists against `width` × `height`, then hand the commands to
+/// `present`, which scales them by the window's device pixel ratio and
+/// paints the physical buffer. Mouse positions in `WindowInput` are logical
+/// too. On a Retina display `scale` is 2: a 1280-px-wide window is 2560
+/// physical pixels, and without this the page would lay out at 2560 CSS px
+/// with half-size text.
+pub struct Frame<'a> {
+    pub width: usize,
+    pub height: usize,
+    pub scale: f32,
+    physical_width: usize,
+    physical_height: usize,
+    target: &'a mut [u32],
+}
+
+impl Frame<'_> {
+    pub fn present(&mut self, commands: &[DisplayCommand]) {
+        let scaled;
+        let commands = if (self.scale - 1.0).abs() < f32::EPSILON {
+            commands
+        } else {
+            scaled = scale_display_list(commands, self.scale);
+            &scaled
+        };
+        rasterize_into(
+            commands,
+            self.physical_width,
+            self.physical_height,
+            self.target,
+        );
+    }
+}
 
 /// Cross-thread wake-up handle. Workers (currently just the navigation
 /// loader) call `wake()` after they finish so the shell promptly
@@ -51,8 +86,8 @@ impl WakeHandle {
     }
 }
 
-/// The per-frame closure paints directly into the softbuffer surface
-/// (`target`) and returns whether the browser wants another frame even
+/// The per-frame closure builds its scene at the frame's logical size and
+/// paints it with `Frame::present`, then returns whether the browser wants another frame even
 /// without input: `true` schedules another `request_redraw` from
 /// `about_to_wait`, `false` lets winit block on the next real input
 /// event and drops idle CPU to ~0%. The `wake` handle is the same on
@@ -66,7 +101,7 @@ pub fn run<F>(
     build_scene: F,
 ) -> Result<()>
 where
-    F: FnMut(usize, usize, &WindowInput, &mut [u32], &WakeHandle) -> bool,
+    F: FnMut(&mut Frame<'_>, &WindowInput, &WakeHandle) -> bool,
 {
     let event_loop = EventLoop::new().context("create event loop")?;
     // `Wait` lets winit block on the next real event when no animation
@@ -95,7 +130,7 @@ where
 
 struct App<F>
 where
-    F: FnMut(usize, usize, &WindowInput, &mut [u32], &WakeHandle) -> bool,
+    F: FnMut(&mut Frame<'_>, &WindowInput, &WakeHandle) -> bool,
 {
     title: String,
     initial_size: (u32, u32),
@@ -129,7 +164,8 @@ struct PendingInput {
 }
 
 impl PendingInput {
-    fn drain_for_frame(&mut self, last_left_down: bool) -> WindowInput {
+    // Pointer positions arrive in physical pixels; the page works in CSS px.
+    fn drain_for_frame(&mut self, last_left_down: bool, scale: f32) -> WindowInput {
         WindowInput {
             typed: std::mem::take(&mut self.typed),
             enter_pressed: std::mem::take(&mut self.enter_pressed),
@@ -142,7 +178,7 @@ impl PendingInput {
             move_down: std::mem::take(&mut self.move_down),
             page_up_pressed: std::mem::take(&mut self.page_up_pressed),
             page_down_pressed: std::mem::take(&mut self.page_down_pressed),
-            mouse_position: self.mouse_position,
+            mouse_position: self.mouse_position.map(|(x, y)| (x / scale, y / scale)),
             left_mouse_pressed: self.left_held && !last_left_down,
             left_mouse_held: self.left_held,
             tab_pressed: std::mem::take(&mut self.tab_pressed),
@@ -156,7 +192,7 @@ impl PendingInput {
 
 impl<F> App<F>
 where
-    F: FnMut(usize, usize, &WindowInput, &mut [u32], &WakeHandle) -> bool,
+    F: FnMut(&mut Frame<'_>, &WindowInput, &WakeHandle) -> bool,
 {
     fn new(title: String, w: u32, h: u32, build_scene: F, wake: WakeHandle) -> Self {
         Self {
@@ -189,7 +225,7 @@ where
 
 impl<F> ApplicationHandler for App<F>
 where
-    F: FnMut(usize, usize, &WindowInput, &mut [u32], &WakeHandle) -> bool,
+    F: FnMut(&mut Frame<'_>, &WindowInput, &WakeHandle) -> bool,
 {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -297,7 +333,7 @@ where
 
 impl<F> App<F>
 where
-    F: FnMut(usize, usize, &WindowInput, &mut [u32], &WakeHandle) -> bool,
+    F: FnMut(&mut Frame<'_>, &WindowInput, &WakeHandle) -> bool,
 {
     fn handle_keyboard(&mut self, event_loop: &ActiveEventLoop, event: KeyEvent) {
         if event.state != ElementState::Pressed {
@@ -364,7 +400,8 @@ where
             .resize(width_nz, height_nz)
             .map_err(|e| anyhow!("softbuffer resize: {e}"))?;
 
-        let input = self.pending.drain_for_frame(self.last_left_down);
+        let scale = window.scale_factor() as f32;
+        let input = self.pending.drain_for_frame(self.last_left_down, scale);
         self.last_left_down = input.left_mouse_held;
 
         let mut buffer = surface
@@ -374,13 +411,15 @@ where
         // height`, and the renderer paints every pixel inside that
         // rectangle starting from an opaque-white pixmap. No prior-frame
         // residue can leak through, so no explicit zero pass is needed.
-        let wants_redraw = (self.build_scene)(
-            size.width as usize,
-            size.height as usize,
-            &input,
-            &mut buffer,
-            &self.wake,
-        );
+        let mut frame = Frame {
+            width: ((size.width as f32) / scale).floor().max(1.0) as usize,
+            height: ((size.height as f32) / scale).floor().max(1.0) as usize,
+            scale,
+            physical_width: size.width as usize,
+            physical_height: size.height as usize,
+            target: &mut buffer,
+        };
+        let wants_redraw = (self.build_scene)(&mut frame, &input, &self.wake);
         self.last_wants_redraw = wants_redraw;
         buffer
             .present()

@@ -26,6 +26,9 @@ use crate::worker::{ErrorReport, Job, Reply, Request};
 #[derive(Clone)]
 pub struct BrowserServer {
     jobs: Sender<Job>,
+    // Window mode: poke the event loop after queueing a job so it runs now
+    // rather than on the next input event. Empty in headless mode.
+    wake: crate::window_mode::WakeSlot,
     tool_router: ToolRouter<Self>,
 }
 
@@ -90,9 +93,10 @@ const MAX_WAIT_MS: u64 = 60_000;
 
 #[tool_router]
 impl BrowserServer {
-    pub fn new(jobs: Sender<Job>) -> Self {
+    pub fn new(jobs: Sender<Job>, wake: crate::window_mode::WakeSlot) -> Self {
         Self {
             jobs,
+            wake,
             tool_router: Self::tool_router(),
         }
     }
@@ -105,6 +109,9 @@ impl BrowserServer {
                 reply: reply_tx,
             })
             .map_err(|_| McpError::internal_error("browser thread is gone", None))?;
+        if let Some(wake) = self.wake.get() {
+            wake();
+        }
         let reply = reply_rx
             .await
             .map_err(|_| McpError::internal_error("browser thread dropped the request", None))?;
