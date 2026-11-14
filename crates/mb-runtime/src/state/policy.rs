@@ -20,10 +20,12 @@ pub enum ApproveMode {
     /// Approve everything. For tests and evals against local fixtures.
     Auto,
     /// Refuse every risky action. Also the default: an agent nobody
-    /// configured gets the safe behaviour. (G4 adds an `Ask` mode that
-    /// holds the action until a human answers.)
+    /// configured gets the safe behaviour.
     #[default]
     Deny,
+    /// Hold the action and ask the person watching (observation window).
+    /// The navigation waits in `BrowserState` until `resolve_held`.
+    Ask,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -73,6 +75,8 @@ pub enum PolicyDecision {
     Denied { remembered: bool },
     /// Outside `allow_origins`.
     Blocked,
+    /// Risky, waiting for a person to approve or refuse (`Ask` mode).
+    Held,
 }
 
 /// What the gate saw and decided, for the agent layer to turn into a
@@ -132,12 +136,18 @@ impl HopGuard {
             method: method.to_string(),
             target,
         };
-        let decision = decide(
+        let mut decision = decide(
             &mut self.policy,
             self.from_agent,
             self.origin_page.as_ref(),
             &action,
         );
+        // A redirect hop is judged on the loader thread mid-fetch, where
+        // nobody can be asked. Refuse it; the agent sees approval_denied
+        // and the person can follow the link themselves.
+        if decision == PolicyDecision::Held {
+            decision = PolicyDecision::Denied { remembered: false };
+        }
         let allowed = matches!(decision, PolicyDecision::Allowed | PolicyDecision::Approved);
         if decision != PolicyDecision::Allowed {
             self.events.push(PolicyEvent { action, decision });
@@ -177,6 +187,7 @@ pub fn decide(
             policy.denied.insert(key);
             PolicyDecision::Denied { remembered: false }
         }
+        ApproveMode::Ask => PolicyDecision::Held,
     }
 }
 
@@ -296,6 +307,51 @@ mod tests {
         assert!(!guard.allow("POST", url("http://a.test/other")));
         assert_eq!(guard.events.len(), 2);
         assert_eq!(guard.events[1].action.kind, GatedKind::Submit);
+    }
+
+    #[test]
+    fn ask_mode_holds_risky_actions_but_not_safe_ones() {
+        let mut policy = AgentPolicy::new(ApproveMode::Ask, vec![]);
+        let here = url("http://a.test/");
+        assert_eq!(
+            decide(
+                &mut policy,
+                true,
+                Some(&here),
+                &post("http://a.test/signup")
+            ),
+            PolicyDecision::Held
+        );
+        assert_eq!(
+            decide(&mut policy, true, Some(&here), &nav("http://a.test/next")),
+            PolicyDecision::Allowed
+        );
+        // Once the person refused it, the same action isn't asked again.
+        policy.record_denial(&post("http://a.test/signup"));
+        assert_eq!(
+            decide(
+                &mut policy,
+                true,
+                Some(&here),
+                &post("http://a.test/signup")
+            ),
+            PolicyDecision::Denied { remembered: true }
+        );
+    }
+
+    #[test]
+    fn redirect_hops_cannot_be_held() {
+        let mut guard = HopGuard {
+            policy: AgentPolicy::new(ApproveMode::Ask, vec![]),
+            from_agent: true,
+            origin_page: Some(url("http://a.test/")),
+            events: Vec::new(),
+        };
+        assert!(!guard.allow("GET", url("http://b.test/")));
+        assert_eq!(
+            guard.events[0].decision,
+            PolicyDecision::Denied { remembered: false }
+        );
     }
 
     #[test]

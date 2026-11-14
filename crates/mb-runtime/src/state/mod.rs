@@ -191,6 +191,8 @@ pub struct BrowserState {
     policy_events: Vec<policy::PolicyEvent>,
     // Applied to every JsRuntime this state builds (each install).
     js_options: js::JsOptions,
+    // Ask mode: the agent navigation waiting for a person's answer.
+    held_navigation: Option<HeldNavigation>,
     // Bumped on every `install_document`. NodeIds restart from zero in
     // each new Document, so an id is only meaningful together with the
     // generation it was observed in.
@@ -208,6 +210,15 @@ struct FocusCache {
 struct PendingNavigation {
     kind: PendingKind,
     receiver: mpsc::Receiver<WorkerResult>,
+}
+
+// A navigation the gate parked in Ask mode, with everything needed to
+// start it later exactly as the agent asked.
+#[derive(Debug)]
+struct HeldNavigation {
+    action: policy::GatedAction,
+    request: crate::navigation::NavigationRequest,
+    error_title: &'static str,
 }
 
 // What a navigation worker sends back: the load outcome plus the policy
@@ -332,6 +343,7 @@ impl BrowserState {
             policy_events: Vec::new(),
             js_options: js::JsOptions::default(),
             document_generation: 0,
+            held_navigation: None,
         };
         // The first page seen on construction also runs its scripts so the
         // initial document follows the same lifecycle as later navigations
@@ -660,9 +672,11 @@ impl BrowserState {
     pub(super) fn gate(
         &mut self,
         kind: policy::GatedKind,
-        method: &str,
         target: &net::Url,
+        request: &crate::navigation::NavigationRequest,
+        error_title: &'static str,
     ) -> bool {
+        let method = request.method.as_str();
         let action = policy::GatedAction {
             kind,
             method: method.to_string(),
@@ -688,10 +702,62 @@ impl BrowserState {
                     policy::origin_of(target)
                 );
             }
+            if decision == policy::PolicyDecision::Held {
+                // Ask mode: park the exact request until a person answers.
+                self.held_navigation = Some(HeldNavigation {
+                    action: action.clone(),
+                    request: request.clone(),
+                    error_title,
+                });
+            }
             self.policy_events
                 .push(policy::PolicyEvent { action, decision });
         }
         allowed
+    }
+
+    /// The agent action waiting for a person's answer (Ask mode), if any.
+    pub fn held_action(&self) -> Option<&policy::GatedAction> {
+        self.held_navigation.as_ref().map(|held| &held.action)
+    }
+
+    /// Answer the held action. Approved: the parked request starts now
+    /// (still as an agent navigation, so its redirect hops are gated).
+    /// Refused: it's dropped and remembered for the session. Either way a
+    /// policy event records the answer. Returns false if nothing was held.
+    pub fn resolve_held(&mut self, approve: bool) -> bool {
+        let Some(held) = self.held_navigation.take() else {
+            return false;
+        };
+        if approve {
+            if self.pending_navigation.is_some() {
+                // Something else is already loading; refuse rather than
+                // silently dropping the person's approval.
+                self.policy_events.push(policy::PolicyEvent {
+                    action: held.action,
+                    decision: policy::PolicyDecision::Denied { remembered: false },
+                });
+                return true;
+            }
+            let previous = self.input_from_agent;
+            self.input_from_agent = true;
+            self.address_input = held.request.url.clone();
+            self.address_bar_selected = false;
+            self.address_bar_focused = false;
+            self.spawn_navigation(held.request, held.error_title);
+            self.input_from_agent = previous;
+            self.policy_events.push(policy::PolicyEvent {
+                action: held.action,
+                decision: policy::PolicyDecision::Approved,
+            });
+        } else {
+            self.agent_policy.record_denial(&held.action);
+            self.policy_events.push(policy::PolicyEvent {
+                action: held.action,
+                decision: policy::PolicyDecision::Denied { remembered: false },
+            });
+        }
+        true
     }
 
     /// Gate decisions (approved / denied / blocked) since the last call.

@@ -17,8 +17,9 @@ OPTIONS:
     --start-url URL         Page to open before the first tool call
     --allow-origin ORIGIN   Only allow navigation to this origin (repeatable),
                             e.g. http://localhost:3000
-    --approve MODE          auto | deny  — risky actions (POST, cross-origin)
-                                                               [default: deny]
+    --approve MODE          auto | deny | ask — risky actions (POST, cross-
+                            origin). ask (needs --window) holds the action
+                            and asks the person watching   [default: deny]
     --clock MODE            virtual | system                   [default: virtual]
     --seed N                Math.random seed                   [default: 1]
     --settle-timeout-ms N   Wall-clock cap per settle          [default: 5000]
@@ -83,13 +84,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
                 agent.approve = match value("--approve")?.as_str() {
                     "auto" => ApproveMode::Auto,
                     "deny" => ApproveMode::Deny,
-                    "ask" => {
-                        return Err(
-                            "--approve ask needs the observation window (G3/G4); use auto or deny"
-                                .into(),
-                        );
+                    "ask" => ApproveMode::Ask,
+                    other => {
+                        return Err(format!("--approve expects auto|deny|ask, got {other:?}"));
                     }
-                    other => return Err(format!("--approve expects auto|deny, got {other:?}")),
                 }
             }
             "--clock" => {
@@ -126,6 +124,13 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             }
             other => return Err(format!("unknown option {other:?} (see --help)")),
         }
+    }
+    // Someone has to be there to answer.
+    if agent.approve == ApproveMode::Ask && !window && preview.is_none() {
+        return Err(
+            "--approve ask needs --window: the approval card lives in the observation window"
+                .into(),
+        );
     }
     // A person is watching: timers should run at the speed they see.
     if window && !clock_given {
@@ -218,11 +223,19 @@ mod tests {
     }
 
     #[test]
+    fn ask_mode_requires_the_window() {
+        assert!(parse(["--approve", "ask"].map(String::from)).is_err());
+        let options = run(&["--approve", "ask", "--window"]);
+        assert_eq!(options.agent.approve, ApproveMode::Ask);
+    }
+
+    #[test]
     fn rejects_bad_input() {
         for bad in [
             vec!["--viewport", "big"],
             vec!["--approve", "maybe"],
             vec!["--approve", "ask"],
+            vec!["--approve", "maybe", "--window"],
             vec!["--clock", "fast"],
             vec!["--allow-origin", "ftp://x"],
             vec!["--seed"],

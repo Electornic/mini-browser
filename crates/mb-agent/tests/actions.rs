@@ -581,3 +581,86 @@ fn wait_for_never_turns_a_guessed_or_old_id_into_a_usable_one() {
     assert_eq!(err.code(), "stale_element");
     assert_eq!(b.click(email).unwrap_err().code(), "stale_element");
 }
+
+#[test]
+fn ask_mode_holds_the_post_until_a_person_approves() {
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Ask);
+    let page = b.navigate(&server.url("/signup")).unwrap();
+    let email = find(&page, Role::Textbox, "Email");
+    let submit = find(&page, Role::Button, "Sign up");
+    b.type_text(email, "dev@example.test", false, false)
+        .unwrap();
+
+    let err = b.click(submit).unwrap_err();
+    assert_eq!(err.code(), "approval_pending");
+    assert!(err.message().contains("POST"), "{}", err.message());
+    assert!(b.pending_approval().unwrap().starts_with("POST "));
+    assert!(server.posts().is_empty(), "nothing is sent while held");
+    // While waiting, other actions are refused rather than queued.
+    assert_eq!(b.scroll(100.0).unwrap_err().code(), "approval_pending");
+
+    let done = b.resolve_approval(true).unwrap();
+    assert_eq!(path_of(&done), "/welcome");
+    assert!(done.changed.as_ref().unwrap().new_document);
+    assert_eq!(server.posts().len(), 1);
+    assert!(b.pending_approval().is_none());
+    assert_eq!(
+        b.resolve_approval(true).unwrap_err().code(),
+        "nothing_pending"
+    );
+}
+
+#[test]
+fn ask_mode_refusal_is_reported_and_remembered() {
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Ask);
+    let page = b.navigate(&server.url("/signup")).unwrap();
+    let submit = find(&page, Role::Button, "Sign up");
+    assert_eq!(b.click(submit).unwrap_err().code(), "approval_pending");
+
+    match b.resolve_approval(false) {
+        Err(AgentError::ApprovalDenied {
+            remembered,
+            observation,
+            ..
+        }) => {
+            assert!(!remembered);
+            assert_eq!(path_of(&observation), "/signup");
+        }
+        other => panic!("expected approval_denied, got {other:?}"),
+    }
+    // Asking again for the same thing doesn't bother the person twice.
+    match b.click(submit) {
+        Err(AgentError::ApprovalDenied { remembered, .. }) => assert!(remembered),
+        other => panic!("expected remembered refusal, got {other:?}"),
+    }
+    assert!(b.pending_approval().is_none());
+    assert!(server.posts().is_empty());
+}
+
+#[test]
+fn a_page_the_person_changed_is_flagged_once() {
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    b.navigate(&server.url("/signup")).unwrap();
+    let welcome = b.navigate(&server.url("/welcome")).unwrap();
+    assert!(!welcome.changed_by_person, "the agent's own navigation");
+    let stale = find(&welcome, Role::Link, "Back");
+
+    // The person presses back in the window between two tool calls.
+    b.human_frame(&mb_runtime::input::WindowInput {
+        back_pressed: true,
+        ..Default::default()
+    });
+    b.settle();
+
+    // The next tool call says so — its ids from before are gone.
+    assert_eq!(b.click(stale).unwrap_err().code(), "stale_element");
+    let now = b.observe(&Default::default());
+    assert_eq!(path_of(&now), "/signup");
+    assert!(now.changed_by_person);
+    assert!(now.to_text().contains("the person used the window"));
+    // Only once: after that the agent has seen the page.
+    assert!(!b.observe(&Default::default()).changed_by_person);
+}

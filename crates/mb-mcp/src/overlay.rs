@@ -16,7 +16,7 @@ use mb_runtime::dom::NodeId;
 use mb_runtime::layout::Rect;
 use mb_runtime::render::{DisplayCommand, TextCommand, measure_text_width};
 
-use crate::worker::TimelineEntry;
+use crate::worker::{Answer, TimelineEntry, Waiting};
 
 /// Width of the agent panel on the right. Below `MIN_WINDOW_FOR_PANEL` the
 /// panel is dropped so the page keeps a usable width.
@@ -216,10 +216,191 @@ pub struct PanelInfo<'a> {
     pub approve: ApproveMode,
     pub allow_origins: &'a [String],
     pub timeline: &'a [TimelineEntry],
+    /// A request waiting for the person (approval / password handoff).
+    pub waiting: Option<&'a Waiting>,
 }
 
-/// The agent panel occupying `[x, x + width) × [0, height)`.
-pub fn panel(info: &PanelInfo<'_>, x: f32, width: f32, height: f32) -> Vec<DisplayCommand> {
+/// A clickable button in the panel, in window coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Button {
+    pub rect: Rect,
+    pub answer: Answer,
+}
+
+impl Button {
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.rect.x
+            && x < self.rect.x + self.rect.width
+            && y >= self.rect.y
+            && y < self.rect.y + self.rect.height
+    }
+}
+
+const CARD_BG: Color = Color {
+    r: 255,
+    g: 247,
+    b: 214,
+    a: 255,
+};
+const CARD_BORDER: Color = Color {
+    r: 217,
+    g: 119,
+    b: 6,
+    a: 255,
+};
+const BUTTON_BG: Color = Color {
+    r: 255,
+    g: 255,
+    b: 255,
+    a: 255,
+};
+const BUTTON_PRIMARY: Color = Color {
+    r: 37,
+    g: 99,
+    b: 235,
+    a: 255,
+};
+const BUTTON_HEIGHT: f32 = 26.0;
+
+/// (label, answer, primary?)
+type CardButton = (&'static str, Answer, bool);
+
+// The card asking the person something, at `top`. Returns its commands,
+// its buttons and its height.
+fn card(
+    waiting: &Waiting,
+    x: f32,
+    width: f32,
+    top: f32,
+) -> (Vec<DisplayCommand>, Vec<Button>, f32) {
+    let (title, lines, buttons): (&str, Vec<String>, Vec<CardButton>) = match waiting {
+        Waiting::Approval { action } => (
+            "The agent wants to:",
+            wrap(action, ((width - 2.0 * PANEL_PAD) / 7.0) as usize, 3),
+            vec![
+                ("Approve", Answer::Approve, true),
+                ("Deny", Answer::Deny, false),
+                ("Do it myself", Answer::TakeOver, false),
+            ],
+        ),
+        Waiting::Handoff { id } => (
+            "Type the password yourself",
+            vec![
+                format!("Field {id} is outlined on the page."),
+                "Click it, type, then press Done.".into(),
+            ],
+            vec![
+                ("Done", Answer::HandoffDone, true),
+                ("Cancel", Answer::HandoffCancel, false),
+            ],
+        ),
+    };
+    let inner_left = x + PANEL_PAD;
+    let inner_width = width - 2.0 * PANEL_PAD;
+    let height = 12.0 + PANEL_LINE * (1 + lines.len()) as f32 + 8.0 + BUTTON_HEIGHT + 12.0;
+    let mut commands = vec![
+        DisplayCommand::SolidRect(
+            CARD_BORDER,
+            Rect {
+                x: inner_left - 6.0,
+                y: top,
+                width: inner_width + 12.0,
+                height,
+            },
+        ),
+        DisplayCommand::SolidRect(
+            CARD_BG,
+            Rect {
+                x: inner_left - 4.0,
+                y: top + 2.0,
+                width: inner_width + 8.0,
+                height: height - 4.0,
+            },
+        ),
+    ];
+    let mut y = top + 12.0;
+    commands.push(text(title, inner_left, y, PANEL_FONT, INK, true));
+    y += PANEL_LINE;
+    for line in &lines {
+        commands.push(text(line.clone(), inner_left, y, PANEL_FONT, INK, false));
+        y += PANEL_LINE;
+    }
+    y += 8.0;
+    let gap = 6.0;
+    let count = buttons.len() as f32;
+    let button_width = (inner_width - gap * (count - 1.0)) / count;
+    let mut hit = Vec::new();
+    for (i, (label, answer, primary)) in buttons.into_iter().enumerate() {
+        let rect = Rect {
+            x: inner_left + i as f32 * (button_width + gap),
+            y,
+            width: button_width,
+            height: BUTTON_HEIGHT,
+        };
+        let (bg, fg) = if primary {
+            (BUTTON_PRIMARY, BADGE_FG)
+        } else {
+            (BUTTON_BG, INK)
+        };
+        commands.extend(outline(rect, 1.0, PANEL_RULE));
+        commands.push(DisplayCommand::SolidRect(bg, rect));
+        let label_width = measure_text_width(label, PANEL_FONT);
+        commands.push(text(
+            label,
+            rect.x + (rect.width - label_width).max(0.0) / 2.0,
+            rect.y + 6.0,
+            PANEL_FONT,
+            fg,
+            primary,
+        ));
+        hit.push(Button { rect, answer });
+    }
+    (commands, hit, height)
+}
+
+// Split on spaces into lines of at most `max` chars, `limit` lines.
+fn wrap(s: &str, max: usize, limit: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in s.split(' ') {
+        let mut word = word.to_string();
+        while word.chars().count() > max {
+            let head: String = word.chars().take(max).collect();
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            lines.push(head);
+            word = word.chars().skip(max).collect();
+        }
+        if current.is_empty() {
+            current = word;
+        } else if current.chars().count() + 1 + word.chars().count() <= max {
+            current.push(' ');
+            current.push_str(&word);
+        } else {
+            lines.push(std::mem::replace(&mut current, word));
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.len() > limit {
+        lines.truncate(limit);
+        if let Some(last) = lines.last_mut() {
+            *last = clip(&format!("{last}…"), max);
+        }
+    }
+    lines
+}
+
+/// The agent panel occupying `[x, x + width) × [0, height)`, plus the
+/// buttons of any question card in it.
+pub fn panel(
+    info: &PanelInfo<'_>,
+    x: f32,
+    width: f32,
+    height: f32,
+) -> (Vec<DisplayCommand>, Vec<Button>) {
     let mut commands = vec![
         DisplayCommand::SolidRect(
             PANEL_BG,
@@ -259,6 +440,7 @@ pub fn panel(info: &PanelInfo<'_>, x: f32, width: f32, height: f32) -> Vec<Displ
     let (approve, meaning) = match info.approve {
         ApproveMode::Auto => ("auto", "risky actions are allowed"),
         ApproveMode::Deny => ("deny", "POST / other-origin moves refused"),
+        ApproveMode::Ask => ("ask", "you approve POST / other-origin moves"),
     };
     line(
         &mut commands,
@@ -295,6 +477,13 @@ pub fn panel(info: &PanelInfo<'_>, x: f32, width: f32, height: f32) -> Vec<Displ
         false,
     );
     y += PANEL_LINE / 2.0;
+    let mut buttons = Vec::new();
+    if let Some(waiting) = info.waiting {
+        let (card_commands, card_buttons, card_height) = card(waiting, x, width, y);
+        commands.extend(card_commands);
+        buttons = card_buttons;
+        y += card_height + PANEL_LINE / 2.0;
+    }
     line(&mut commands, &mut y, "Agent actions".into(), INK, true);
 
     // Newest at the bottom, as many as fit.
@@ -327,7 +516,7 @@ pub fn panel(info: &PanelInfo<'_>, x: f32, width: f32, height: f32) -> Vec<Displ
             ),
         }
     }
-    commands
+    (commands, buttons)
 }
 
 fn clip(s: &str, max_chars: usize) -> String {
@@ -423,11 +612,12 @@ mod tests {
                 error: Some("approval_denied".into()),
             },
         ];
-        let commands = panel(
+        let (commands, _) = panel(
             &PanelInfo {
                 approve: ApproveMode::Deny,
                 allow_origins: &[],
                 timeline: &timeline,
+                waiting: None,
             },
             900.0,
             300.0,
@@ -441,6 +631,80 @@ mod tests {
                 .any(|t| t.starts_with("✗ click e30 — approval_denied")),
             "{texts:?}"
         );
+    }
+
+    #[test]
+    fn approval_card_offers_three_answers_with_hit_boxes() {
+        let waiting = Waiting::Approval {
+            action: "POST http://127.0.0.1:8765/signup".into(),
+        };
+        let (commands, buttons) = panel(
+            &PanelInfo {
+                approve: ApproveMode::Ask,
+                allow_origins: &[],
+                timeline: &[],
+                waiting: Some(&waiting),
+            },
+            900.0,
+            300.0,
+            700.0,
+        );
+        let texts = badge_texts(&commands);
+        assert!(
+            texts.contains(&"The agent wants to:".to_string()),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|t| t.contains("/signup")), "{texts:?}");
+        let answers: Vec<Answer> = buttons.iter().map(|b| b.answer).collect();
+        assert_eq!(
+            answers,
+            vec![Answer::Approve, Answer::Deny, Answer::TakeOver]
+        );
+        // Buttons sit inside the panel and don't overlap.
+        for b in &buttons {
+            assert!(
+                b.rect.x >= 900.0 && b.rect.x + b.rect.width <= 1200.0,
+                "{b:?}"
+            );
+        }
+        let centre = |b: &Button| {
+            (
+                b.rect.x + b.rect.width / 2.0,
+                b.rect.y + b.rect.height / 2.0,
+            )
+        };
+        let (x, y) = centre(&buttons[1]);
+        assert!(buttons[1].contains(x, y));
+        assert!(!buttons[0].contains(x, y));
+    }
+
+    #[test]
+    fn handoff_card_offers_done_and_cancel() {
+        let waiting = Waiting::Handoff { id: "e15".into() };
+        let (_, buttons) = panel(
+            &PanelInfo {
+                approve: ApproveMode::Ask,
+                allow_origins: &[],
+                timeline: &[],
+                waiting: Some(&waiting),
+            },
+            900.0,
+            300.0,
+            700.0,
+        );
+        let answers: Vec<Answer> = buttons.iter().map(|b| b.answer).collect();
+        assert_eq!(answers, vec![Answer::HandoffDone, Answer::HandoffCancel]);
+    }
+
+    #[test]
+    fn wrap_breaks_long_actions_into_lines() {
+        let lines = wrap(
+            "POST http://127.0.0.1:8765/a-very-long-path/that/keeps/going",
+            20,
+            3,
+        );
+        assert!(lines.len() <= 3);
+        assert!(lines.iter().all(|l| l.chars().count() <= 20), "{lines:?}");
     }
 
     #[test]

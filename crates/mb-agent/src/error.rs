@@ -45,6 +45,13 @@ pub enum AgentError {
     UnsupportedKey {
         key: String,
     },
+    /// Ask mode: the action is waiting for the person watching to approve
+    /// it. (Transports that can wait keep the call open instead.)
+    ApprovalPending {
+        action: String,
+    },
+    /// `resolve_approval` with nothing waiting.
+    NothingPending,
     /// `wait_for` gave up. Carries the page as it was at the deadline.
     WaitTimeout {
         waited_ms: u64,
@@ -66,6 +73,8 @@ impl AgentError {
             AgentError::NavigationBlocked { .. } => "navigation_blocked",
             AgentError::UnsupportedKey { .. } => "unsupported_key",
             AgentError::WaitTimeout { .. } => "wait_timeout",
+            AgentError::ApprovalPending { .. } => "approval_pending",
+            AgentError::NothingPending => "nothing_pending",
             AgentError::InvalidUrl { .. } => "invalid_url",
         }
     }
@@ -110,6 +119,10 @@ impl AgentError {
             AgentError::WaitTimeout { waited_ms, .. } => {
                 format!("The condition did not become true within {waited_ms} ms.")
             }
+            AgentError::ApprovalPending { action } => {
+                format!("{action} is waiting for the person watching to approve it.")
+            }
+            AgentError::NothingPending => "No action is waiting for approval.".into(),
             AgentError::InvalidUrl { url } => format!("{url:?} is not a valid http(s) URL."),
         }
     }
@@ -139,6 +152,10 @@ impl AgentError {
             AgentError::WaitTimeout { .. } => {
                 "Check the observation: the page may show an error, or the text may differ."
             }
+            AgentError::ApprovalPending { .. } => {
+                "Wait for the person's answer; don't start other actions meanwhile."
+            }
+            AgentError::NothingPending => "There is nothing to resolve.",
         }
     }
 

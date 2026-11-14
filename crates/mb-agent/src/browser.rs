@@ -88,6 +88,30 @@ pub struct AgentBrowser {
     // Element the last click/type aimed at, with the document it was on —
     // for the observation window's highlight.
     last_target: Option<(u64, NodeId)>,
+    // Ask mode: an action waiting for the person watching.
+    pending_approval: Option<PendingApproval>,
+    // (document generation, url) of the last observation handed out.
+    last_reported: Option<(u64, Option<String>)>,
+    // A password handoff in progress: the page before the person typed.
+    handoff_before: Option<(Observation, u64)>,
+}
+
+/// An agent action held for approval, with what's needed to report its
+/// outcome later.
+struct PendingApproval {
+    before: Observation,
+    generation_before: u64,
+    action: String,
+    // The person had changed the page before this action started.
+    moved: bool,
+}
+
+/// "POST http://…/signup" / "Navigation to http://…" — browser-computed.
+fn describe_action(action: &mb_runtime::state::policy::GatedAction) -> String {
+    match action.kind {
+        GatedKind::Submit => format!("{} {}", action.method, action.target),
+        GatedKind::Navigate => format!("Navigation to {}", action.target),
+    }
 }
 
 /// What `wait_for` waits for.
@@ -146,6 +170,9 @@ impl AgentBrowser {
             issued: BTreeSet::new(),
             installed_fonts: None,
             last_target: None,
+            pending_approval: None,
+            last_reported: None,
+            handoff_before: None,
         };
         browser.settle();
         browser
@@ -170,7 +197,32 @@ impl AgentBrowser {
     /// The current page, as the agent reads it. Drains console / dialog
     /// records accumulated since the previous observation.
     pub fn observe(&mut self, options: &ObserveOptions) -> Observation {
+        let moved = self.changed_by_person();
+        self.report(options, moved)
+    }
+
+    // Did the document change since the agent's last result, without the
+    // agent? (Only the person at the window can do that: page scripts have
+    // no navigation API, and agent navigations update `last_reported`.)
+    fn changed_by_person(&self) -> bool {
+        self.last_reported.as_ref().is_some_and(|last| {
+            *last
+                != (
+                    self.state.document_generation(),
+                    self.state.current_url.as_ref().map(|u| u.to_string()),
+                )
+        })
+    }
+
+    // An observation handed to the agent: issues its ids, drains console /
+    // dialog records, and becomes the baseline for `changed_by_person`.
+    fn report(&mut self, options: &ObserveOptions, changed_by_person: bool) -> Observation {
         let mut observation = self.observe_raw(options);
+        observation.changed_by_person = changed_by_person;
+        self.last_reported = Some((
+            self.state.document_generation(),
+            self.state.current_url.as_ref().map(|u| u.to_string()),
+        ));
         let generation = self.state.document_generation();
         if generation != self.issued_generation {
             self.issued.clear();
@@ -251,6 +303,12 @@ impl AgentBrowser {
             cursor: 0,
         })
         .elements
+    }
+
+    /// Point the window's target outline at `id` (e.g. the password field a
+    /// person is asked to fill in).
+    pub fn highlight(&mut self, id: NodeId) {
+        self.last_target = Some((self.state.document_generation(), id));
     }
 
     /// The element the last click / type aimed at, if it's on the current
@@ -434,6 +492,7 @@ impl AgentBrowser {
                 page_changed: true,
             });
         }
+        let moved = self.changed_by_person();
         let started = Instant::now();
         let start_clock = self.state.js.clock_now_ms();
         let timeout_ms = timeout.as_millis() as u64;
@@ -442,7 +501,7 @@ impl AgentBrowser {
             if self.condition_holds(&condition) {
                 // The returned observation issues whatever ids are on the
                 // page now, through the normal path.
-                return Ok(self.observe(&ObserveOptions::default()));
+                return Ok(self.report(&ObserveOptions::default(), moved));
             }
             let elapsed = match self.clock {
                 Some(_) => self.state.js.clock_now_ms().saturating_sub(start_clock),
@@ -451,7 +510,7 @@ impl AgentBrowser {
             if elapsed >= timeout_ms || started.elapsed() > timeout + self.config.settle_timeout {
                 return Err(AgentError::WaitTimeout {
                     waited_ms: elapsed,
-                    observation: Box::new(self.observe(&ObserveOptions::default())),
+                    observation: Box::new(self.report(&ObserveOptions::default(), moved)),
                 });
             }
             // Let time pass even when the page is "quiet": the thing we're
@@ -525,27 +584,53 @@ impl AgentBrowser {
         &mut self,
         action: impl FnOnce(&mut Self) -> Result<(), AgentError>,
     ) -> Result<Observation, AgentError> {
+        if let Some(pending) = &self.pending_approval {
+            return Err(AgentError::ApprovalPending {
+                action: pending.action.clone(),
+            });
+        }
+        let moved = self.changed_by_person();
         let before = self.full_snapshot();
         let generation_before = self.state.document_generation();
         self.state.take_policy_events();
         action(self)?;
         self.settle();
         let events = self.state.take_policy_events();
+        // Ask mode: the gate parked the navigation. Remember where we were
+        // so the answer can be reported as this action's result.
+        if let Some(held) = events.iter().find(|e| e.decision == PolicyDecision::Held) {
+            let action = describe_action(&held.action);
+            self.pending_approval = Some(PendingApproval {
+                before,
+                generation_before,
+                action: action.clone(),
+                moved,
+            });
+            return Err(AgentError::ApprovalPending { action });
+        }
+        self.finish_action(&before, generation_before, events, moved)
+    }
+
+    // Observation with the `changed:` summary, or the policy verdict as an
+    // error. Shared by `act` and `resolve_approval`.
+    fn finish_action(
+        &mut self,
+        before: &Observation,
+        generation_before: u64,
+        events: Vec<mb_runtime::state::policy::PolicyEvent>,
+        moved: bool,
+    ) -> Result<Observation, AgentError> {
         let after = self.full_snapshot();
-        let mut observation = self.observe(&ObserveOptions::default());
+        let mut observation = self.report(&ObserveOptions::default(), moved);
         let new_document = self.state.document_generation() != generation_before;
-        observation.changed = Some(Changes::between(&before, &after, new_document));
+        observation.changed = Some(Changes::between(before, &after, new_document));
 
         for event in events {
             let target = event.action.target.to_string();
             match event.decision {
                 PolicyDecision::Denied { remembered } => {
-                    let action = match event.action.kind {
-                        GatedKind::Submit => format!("{} {target}", event.action.method),
-                        GatedKind::Navigate => format!("Navigation to {target}"),
-                    };
                     return Err(AgentError::ApprovalDenied {
-                        action,
+                        action: describe_action(&event.action),
                         remembered,
                         observation: Box::new(observation),
                     });
@@ -556,10 +641,57 @@ impl AgentBrowser {
                         observation: Box::new(observation),
                     });
                 }
-                PolicyDecision::Allowed | PolicyDecision::Approved => {}
+                PolicyDecision::Allowed | PolicyDecision::Approved | PolicyDecision::Held => {}
             }
         }
         Ok(observation)
+    }
+
+    /// The action waiting for a person's answer (`ApproveMode::Ask`), as
+    /// shown to them, e.g. "POST http://localhost:3000/signup".
+    pub fn pending_approval(&self) -> Option<&str> {
+        self.pending_approval.as_ref().map(|p| p.action.as_str())
+    }
+
+    /// The person answered. Approved: the held navigation runs now and the
+    /// result is the observation the original action would have returned.
+    /// Refused: `approval_denied` (and the refusal is remembered).
+    pub fn resolve_approval(&mut self, approve: bool) -> Result<Observation, AgentError> {
+        let Some(pending) = self.pending_approval.take() else {
+            return Err(AgentError::NothingPending);
+        };
+        self.state.take_policy_events();
+        self.state.resolve_held(approve);
+        self.settle();
+        let events = self.state.take_policy_events();
+        self.finish_action(
+            &pending.before,
+            pending.generation_before,
+            events,
+            pending.moved,
+        )
+    }
+
+    /// A password handoff begins (window mode): remember the page so the
+    /// result can say what the person changed.
+    pub fn begin_handoff(&mut self) {
+        let before = self.full_snapshot();
+        self.handoff_before = Some((before, self.state.document_generation()));
+    }
+
+    /// The person says they're done: the observation now, with a
+    /// `changed:` summary since `begin_handoff` (values stay hidden).
+    pub fn finish_handoff(&mut self) -> Observation {
+        let moved = self.changed_by_person();
+        let Some((before, generation_before)) = self.handoff_before.take() else {
+            return self.observe(&ObserveOptions::default());
+        };
+        self.settle();
+        let after = self.full_snapshot();
+        let new_document = self.state.document_generation() != generation_before;
+        let mut observation = self.report(&ObserveOptions::default(), moved && new_document);
+        observation.changed = Some(Changes::between(&before, &after, new_document));
+        observation
     }
 
     fn click_raw(&mut self, id: NodeId) -> Result<(), AgentError> {

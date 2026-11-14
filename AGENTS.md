@@ -48,9 +48,9 @@
 │
 ├── crates/mb-mcp      (binary [[bin]] mb-mcp)  rmcp 3.x, tokio, image(png), base64
 │   - main             tokio 스레드 = rmcp stdio 서버, 메인 스레드 = 브라우저
-│   - cli              --viewport / --start-url / --allow-origin / --approve / --clock / --seed
+│   - cli              --viewport / --start-url / --allow-origin / --approve auto|deny|ask / --clock / --seed / --window / --preview
 │   - prompts          서버 instructions + tool 설명 (LLM 이 읽는 텍스트, 영어)
-│   - worker           Job 채널 처리, repeat_count, 패닉 시 AgentBrowser 재생성
+│   - worker           Job 처리, repeat_count, 패닉 시 재생성, 창 모드의 park(승인·넘겨받기 대기)/answer
 │   - server           #[tool_router] tool 10개 → worker::Request, 결과 → CallToolResult
 │   - window_mode      --window: 메인 스레드 winit 루프 + 프레임마다 Job 처리, --preview PNG
 │   - overlay          ID 배지·대상 테두리·에이전트 패널 (DisplayCommand 순수 함수)
@@ -91,7 +91,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 662 (workspace 합계, 2026-11-14 G3a + HiDPI). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 673 (workspace 합계, 2026-11-14 G4 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 

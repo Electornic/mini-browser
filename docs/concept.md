@@ -1,6 +1,6 @@
 # Concept — 에이전트용 브라우저
 
-> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ (2026-11-14)** · 다음 = G4 승인 카드·넘겨받기 → G3b HTTP 붙기 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
+> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ (2026-11-14)** · 다음 = G3b HTTP 붙기 / G5 기록·재생 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
 
 ## 한 줄
 
@@ -150,7 +150,10 @@
 | `invalid_arguments` | 인자 조합 오류 (`wait_for` 에 text·id 둘 다/둘 다 없음, `scope` 오타, `dy` 무한대) |
 | `wait_timeout` | `wait_for` 시간 초과 — 그 시점 관찰을 함께 반환 |
 | `not_interactable` | 노드는 있지만 rect 가 없거나 크기 0 (display:none 등) |
-| `handoff_required` | 비밀번호 필드 입력 등 사람이 해야 하는 단계 |
+| `handoff_required` | 비밀번호 필드 입력 등 사람이 해야 하는 단계 (headless) |
+| `approval_pending` | 사람의 답을 기다리는 행동이 있는 동안 들어온 다른 호출 (window + `ask`) |
+| `taken_over` | 승인 카드에서 사람이 "Do it myself" 를 고름 — 다시 시도하지 말 것 |
+| `handoff_declined` | 넘겨받기 카드에서 사람이 Cancel |
 | `approval_denied` | 사람이(또는 `--approve deny` 가) 위험 행동을 거절 |
 | `navigation_blocked` | `--allow-origin` 목록 밖 이동 |
 | `unsupported_key` | `press` 지원 목록 밖 |
@@ -282,7 +285,14 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 | 비밀번호 필드 입력 | 게이트가 아니라 [자격증명 규칙](#자격증명-규칙) 으로 처리 |
 
 - **승인 처리** (`--approve`):
-  - `ask` (기본): window 모드면 창의 승인 카드. headless 면 MCP elicitation 으로 클라이언트 쪽 사람에게 질의 — 클라이언트가 elicitation 을 지원하지 않으면 거절.
+  - `ask` (G4, **`--window` 필수**): 게이트가 `PolicyDecision::Held` 를 내고 이동 요청(`NavigationRequest` — POST body 포함)을 `BrowserState` 에 **보관**한다 (`held_navigation`). 이동은 시작하지 않는다. `AgentBrowser` 는 행동 직전 스냅샷을 들고 `approval_pending` 상태가 되고, mb-mcp `Worker` 는 그 tool 호출의 **응답 채널을 보관(park)** 한 채 창 패널에 승인 카드를 띄운다 — 에이전트 쪽에선 tool 호출이 그냥 오래 걸리는 것으로 보인다. 카드 답:
+    - **Approve** → `BrowserState::resolve_held(true)` 가 보관한 요청을 **에이전트 출처로** 시작(리다이렉트 hop 도 계속 게이트) → settle → 원래 행동의 결과 관찰로 응답.
+    - **Deny** → 거절 기억에 넣고 `approval_denied`.
+    - **Do it myself** → 거절 기억에 넣고 `taken_over` (+현재 관찰). 사람이 창에서 직접 하면 된다 (사람 입력은 게이트 밖).
+    - 기다리는 동안 들어온 다른 tool 호출은 줄 세우지 않고 `approval_pending` 으로 즉시 거절.
+    - 리다이렉트 hop 은 로더 스레드에서 판정돼 물어볼 수 없으므로 `ask` 모드에서도 다른 origin hop 은 **거절** (`approval_denied`). 사람이 직접 따라가면 된다.
+    - headless 에서 `ask` 는 CLI 가 거부한다. MCP elicitation(클라이언트 쪽 사람에게 질의)은 미구현 — 아래 열린 결정 4.
+    - MCP 클라이언트의 tool 호출 타임아웃이 사람의 결정보다 짧으면 클라이언트 쪽이 먼저 포기할 수 있다 (Claude Code 는 `MCP_TOOL_TIMEOUT` 로 조정).
   - `auto`: 전부 승인. 로컬 fixture 를 쓰는 테스트·평가 전용.
   - `deny`: 전부 거절 (읽기 전용 에이전트).
 - 보류 중엔 해당 tool 호출이 응답을 기다린다 (타임아웃 없음, 사람이 고를 때까지). 거절되면 `approval_denied` + 이동 전 상태의 Observation.
@@ -290,7 +300,8 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 
 ### 자격증명 규칙
 
-- 기본: 에이전트가 `type(id)` 로 `type=password` 필드에 입력하면 **`handoff_required`**. window 모드면 창에 "여기서 직접 입력하세요" 카드가 뜨고, 사람이 입력 후 "계속"을 누르면 에이전트의 다음 tool 호출이 진행된다.
+- 기본: 에이전트가 `type(id)` 로 `type=password` 필드에 입력하면 **`handoff_required`** (headless).
+- window 모드(G4): 그 `type` 호출이 **park** 되고 창 패널에 "Type the password yourself" 카드가 뜬다 (해당 필드에 주황 테두리). 사람이 필드를 눌러 직접 입력 → **Done** 이면 그 시점 관찰로 응답 — 카드가 뜬 순간부터의 `changed:` 요약 포함(어느 ID 의 값이 바뀌었는지·새 문서 여부, 값은 길이만), **Cancel** 이면 `handoff_declined`. 에이전트는 비밀번호를 끝까지 모른다.
 - 예외: 현재 origin 이 **로컬 개발 호스트**(`localhost`, `127.0.0.1`, `[::1]`, `*.localhost`, `*.test`)이고 `--approve auto` 이거나 사람이 승인 카드에서 허용하면, 에이전트가 테스트 계정 비밀번호를 입력할 수 있다.
 - 어떤 경우에도 관찰·로그·스크린샷에 비밀번호 값은 남기지 않는다 (관찰은 길이만, 로그는 `"<redacted>"`, 화면은 마스킹 — 마스킹 렌더는 G1 엔진 보강).
 
@@ -534,7 +545,7 @@ claude mcp add --scope project mini-browser -- /abs/path/to/target/release/mb-mc
 | `--viewport WxH` | `1280x800` | 페이지 뷰포트 크기 (크롬 UI 102px 는 별도로 위에 붙는다) |
 | `--start-url URL` | `about:blank` | 시작 페이지 |
 | `--allow-origin ORIGIN` (반복) | 없음 | 이동 가능한 origin 화이트리스트. 지정하면 목록 밖 이동은 즉시 `navigation_blocked`. 미지정이면 모든 origin 가능하되 origin 이동은 승인 대상 |
-| `--approve auto\|ask\|deny` | `ask` | 위험 행동 처리 ([정책 게이트](#정책-게이트)) |
+| `--approve auto\|deny\|ask` | `deny` | 위험 행동 처리 ([정책 게이트](#정책-게이트)). `ask` 는 `--window` 필요 |
 | `--log PATH` | 없음 | 관찰·행동 세션 로그(JSONL) 저장 → G5 재생 입력. 비밀번호는 `<redacted>` (**G5**, 아직 없음) |
 | `--settle-timeout-ms N` | `5000` | settle 한 번의 벽시계 상한 |
 | `--clock virtual\|system` | headless=`virtual`, window=`system` | 가상 시계(결정적) / 실제 시계 |
@@ -602,7 +613,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | **G2** MCP ✅ | [`crates/mb-mcp`](../crates/mb-mcp): `cli.rs`(옵션), `prompts.rs`, `worker.rs`(브라우저 스레드·`Job` 채널·`repeat_count`·패닉 시 재생성), `server.rs`(rmcp tool 10개, 관찰=텍스트 2개 / 에러=JSON+관찰 / 스크린샷=PNG image). mb-agent 에 `screenshot`·`wait_for`·`to_blocks`·`system_fonts` 추가. 추천 skill [`examples/claude-skill/mini-browser-testing`](../examples/claude-skill/mini-browser-testing/SKILL.md), 데모 페이지 [`examples/agent-demo`](../examples/agent-demo) | `--window`(G3), `--approve ask`(G4), `--log`(G5) 는 아직 — 넘기면 명확한 에러 | L4 e2e 4개(실제 바이너리 + JSON-RPC: tools/list, navigate→click→back, 에러·repeat_count, PNG), CLI·worker 단위 테스트. **Claude Code 실연결 데모는 사용자 등록 후 확인 필요** (중첩 `claude -p` 는 이 환경에서 401) |
 | **G3a** 관전 창 ✅ | `mb-mcp --window` ([window_mode.rs](../crates/mb-mcp/src/window_mode.rs), [overlay.rs](../crates/mb-mcp/src/overlay.rs)): 메인 스레드 winit 루프가 프레임마다 에이전트 Job 을 처리(MCP 스레드가 큐에 넣고 wake), 사람 입력은 `human_frame`(게이트 대상 아님), ID 배지(요소 왼쪽 여백, 자리 없으면 모서리)·마지막 대상 주황 테두리·오른쪽 300px 패널(정책·타임라인, 700px 미만이면 생략). 창 닫힘 → 이후 호출 `browser_closed`, 클라이언트 종료 → 프로세스 종료. `--preview` PNG 렌더 | `mb-shell` = lib + bin, `Worker` 구조체(헤드리스·창 공용, 타임라인), `AgentBrowser::{set_viewport, human_frame, element_boxes, last_target}` | ![관전 창](images/g3-observation-window.png) — 오버레이·패널 단위 테스트 5개. **실제 창은 사용자 확인 필요** (GUI) |
 | **G3b** 붙기 모드 | `mb-shell --mcp-http` (토큰·Host·Origin 검사) — 사람이 띄운 브라우저에 에이전트가 붙음 | — | G4 다음 |
-| **G4** 안전장치 | `policy.rs` 게이트 + 승인 카드 + 넘겨받기(`handoff_required`), elicitation, `--allow-origin`, 거절 기억(같은 대상 즉시 거절) | — | POST 제출 직전 멈춤 → 승인 후 진행. L5 |
+| **G4** 승인·넘겨받기 ✅ | `ApproveMode::Ask` + `PolicyDecision::Held`, `BrowserState::{held_action, resolve_held}`, `AgentBrowser::{pending_approval, resolve_approval}`, `Worker::{submit, waiting, answer}`(응답 park), 패널의 승인 카드(Approve / Deny / Do it myself)·넘겨받기 카드(Done / Cancel), 데모 `signin.html`·localhost 링크 | elicitation 은 미구현(headless ask 거부) | ![승인 카드](images/g4-approval-card.png) — 정책 2·AgentBrowser 통합 2·Worker 2·카드 3·CLI 1 테스트 + 실연결 피드백 2건(사람이 바꾼 페이지 표시, 넘겨받기 `changed:`) — AgentBrowser 통합 1 + Worker 넘겨받기 테스트 보강 (673 green). **실연결 확인**: 승인 카드 Approve → POST·리다이렉트, 비밀번호 넘겨받기 → "Signed in", 관찰에 비밀번호 없음 |
 | **G5** 기록·재생 | 세션 로그(JSONL, redact, role+name 함께 기록), `mb-replay`(LLM 없는 결정적 재생 + 회귀 지점 보고), 단계별 재생 뷰, `mb-eval`(N회 실행 성공률 집계, 안전 지표 포함, `prompts.rs` 해시 기록) | — | 한 번 탐색한 경로가 회귀 테스트가 됨. 프롬프트 변경을 숫자로 비교. L6·L7 |
 
 - G4 의 게이트 **판정 로직**은 G1 에서 입력 출처 태그와 함께 먼저 들어간다 (`--approve auto|deny` 만). G4 는 사람에게 묻는 UI(`ask`)·넘겨받기·elicitation 을 붙이는 단계.
@@ -618,6 +629,11 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-10 | 연결 = MCP 서버 (rmcp, stdio 먼저) | 앱에 API 키 불필요, Claude Code 를 에이전트로 재사용. 앱 내장 LLM 루프는 하지 않음 |
 | 2026-11-11 | G0: 관찰은 layout 트리에서 rect 를 직접 수집, `LinkTarget` 미사용 | 모든 노드가 LayoutBox 를 가져서 별도 인라인 수집 불필요 (검토 때 오판 정정) |
 | 2026-11-11 | G0: `text:` 에 링크 텍스트 포함, 폼 크롬 제외, 이름 없는 컨트롤은 `field=` | 링크를 빼면 문장이 끊김 ("or read the ."). 라벨·버튼은 요소 목록과 중복. 이름 없는 `select` 는 `name=""` 만으론 용도를 알 수 없음 |
+| 2026-11-14 | G4: 승인은 "보관 후 재개" — 게이트가 요청을 보관하고 tool 응답을 park, 카드 답에 따라 재개/거절 | 창 루프 안에서 에이전트 행동이 동기 실행되므로 그 자리에서 기다리면 창이 멈춤. 승인된 요청은 에이전트 출처로 시작해 hop 게이트 유지 |
+| 2026-11-14 | 사람이 창에서 페이지를 바꾸면(링크·뒤로 등) 다음 결과의 trusted 블록에 `note: the page changed since your last result without you — the person used the window` 한 번 표시 (`Observation::changed_by_person`, 기준 = 마지막으로 내준 관찰의 문서 세대·URL) | ask 모드 실연결 테스트: 사람의 이동이 에이전트에게 안 보여 이전 ID·가정으로 행동할 수 있었음. 페이지 스크립트는 이동 API 가 없어 "에이전트가 안 한 문서 변경 = 사람" 으로 판정 가능 |
+| 2026-11-14 | 넘겨받기 Done 응답에 `changed:` 요약 (`AgentBrowser::{begin_handoff, finish_handoff}`) | 실연결 테스트: 사람이 무엇을 했는지(값 입력·제출로 새 문서) 에이전트가 관찰을 diff 하지 않고 알 수 있게 |
+| 2026-11-14 | G4: "Do it myself" 는 거절 기억에 포함 | 사람이 직접 하기로 한 행동을 에이전트가 다른 경로로 다시 시도하지 않게 |
+| 2026-11-14 | G4: `ask` 모드의 다른 origin 리다이렉트 hop 은 거절 | 로더 스레드에서 판정 중이라 물어볼 수 없음. 사람은 직접 따라갈 수 있음 |
 | 2026-11-14 | 창은 논리 크기(CSS px)로 레이아웃하고 그릴 때만 배율 적용 (`window::Frame`, `render::scale_display_list`) | 관전 창 실연결 테스트에서 Retina 물리 픽셀(2620×1702)이 CSS px 로 쓰여 글자가 반 크기, 에이전트 레이아웃도 headless 와 달랐음. 명령 좌표·글자 크기를 곱해서 글리프를 큰 크기로 래스터 → 선명. mb-shell 도 같이 고쳐짐. 스프라이트(source offset) 이미지는 1:1 로 남는 한계 |
 | 2026-11-14 | 체크박스 = 파란 채움 + 흰 ✓(회전 막대 2개), 라디오 = 둥근 점 | 작은 채운 사각형은 체크 여부가 잘 안 보였음 (실연결 테스트) |
 | 2026-11-14 | G3 을 G3a(관전 창) → G4(승인 카드) → G3b(HTTP 붙기) 순으로 | 승인 카드·넘겨받기는 관전 창 위에 얹는 게 자연스럽고, HTTP 붙기는 보안 작업이 따로 큼 |
@@ -648,4 +664,4 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 1. **사람의 역할 기본값** — 관전+승인(권장, 이 문서의 전제) vs 공동 조작(사람과 에이전트가 같은 페이지를 동시에 만짐 — 입력 출처 태그가 있으니 기술적으로는 가능).
 2. **스크린샷 자동 첨부** — 텍스트 관찰만(권장) vs 행동 결과마다 ID 배지 스크린샷 첨부.
 3. **이름** — "mini-browser" 유지 vs 컨셉에 맞는 이름.
-4. **elicitation 지원 확인** — Claude Code 가 MCP elicitation 을 지원하는지 G4 착수 시 확인. 미지원이면 headless `ask` 는 거절로 동작.
+4. **elicitation** — headless 에서 사람에게 묻는 경로. G4 는 창 카드만 구현하고 headless `ask` 는 CLI 가 거부한다. 클라이언트의 elicitation 지원을 확인한 뒤 붙일지 결정.

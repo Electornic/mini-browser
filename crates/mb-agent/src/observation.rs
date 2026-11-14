@@ -138,6 +138,9 @@ pub struct Observation {
     /// `alert`/`confirm`/`prompt`/`window.open` calls since the previous
     /// observation.
     pub dialogs: Vec<DialogRecord>,
+    /// The document changed between the agent's previous result and this
+    /// call without the agent doing it — the person used the window.
+    pub changed_by_person: bool,
 }
 
 /// Before/after summary of one action (browser-computed, trusted).
@@ -316,6 +319,7 @@ pub fn observe(input: &ObserveInput<'_>, options: &ObserveOptions) -> Observatio
         changed: None,
         console: Vec::new(),
         dialogs: Vec::new(),
+        changed_by_person: false,
     }
 }
 
@@ -723,6 +727,11 @@ impl Observation {
             self.viewport_width.round() as i64,
             self.viewport_height.round() as i64,
         );
+        if self.changed_by_person {
+            out.push_str(
+                "note: the page changed since your last result without you — the person used the window. Ids from before are invalid; read this observation first.\n",
+            );
+        }
         if let Some(changed) = &self.changed {
             let _ = writeln!(out, "changed: {}", changed.summary());
         }

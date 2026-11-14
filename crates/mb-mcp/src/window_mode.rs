@@ -32,6 +32,8 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
     let mut worker = Worker::new(options);
     let mut wake_registered = false;
     let mut client_gone = false;
+    // Card buttons painted last frame, for hit-testing this frame's click.
+    let mut buttons: Vec<overlay::Button> = Vec::new();
 
     let result = mb_shell::window::run(
         "mini-browser — agent view",
@@ -51,14 +53,27 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
             let page_height = window_height.saturating_sub(CHROME_HEIGHT as usize);
             worker.browser().set_viewport(page_width, page_height);
 
-            // 1. Agent jobs. Each runs to completion (action + settle) before
-            //    the frame is painted.
+            // 1. The person's answer to a question card, if they clicked one.
+            //    Clicks in the panel never reach the page.
+            let mut page_input = input.clone();
+            if let Some((x, y)) = input.mouse_position
+                && x >= page_width as f32
+            {
+                if input.left_mouse_pressed
+                    && let Some(button) = buttons.iter().find(|b| b.contains(x, y))
+                {
+                    worker.answer(button.answer);
+                }
+                page_input.mouse_position = None;
+                page_input.left_mouse_pressed = false;
+                page_input.left_mouse_held = false;
+            }
+
+            // 2. Agent jobs. Each runs to completion (action + settle), or
+            //    parks if it needs the person, before the frame is painted.
             loop {
                 match jobs.try_recv() {
-                    Ok(job) => {
-                        let reply = worker.process(&job.request);
-                        let _ = job.reply.send(reply);
-                    }
+                    Ok(job) => worker.submit(job),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         client_gone = true;
@@ -73,9 +88,11 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
                 std::process::exit(0);
             }
 
-            // 2 + 3. The page as the person drives it, with what the agent
-            //        sees drawn over it.
-            let commands = compose(&mut worker, input, window_width, window_height);
+            // 3. The page as the person drives it, with what the agent sees
+            //    drawn over it.
+            let (commands, card_buttons) =
+                compose(&mut worker, &page_input, window_width, window_height);
+            buttons = card_buttons;
             frame.present(&commands);
             worker.browser().state().wants_continuous_redraw()
         },
@@ -99,7 +116,7 @@ fn compose(
     input: &WindowInput,
     window_width: usize,
     window_height: usize,
-) -> Vec<DisplayCommand> {
+) -> (Vec<DisplayCommand>, Vec<overlay::Button>) {
     let (page_width, panel_width) = overlay::layout(window_width);
     let page_height = window_height.saturating_sub(CHROME_HEIGHT as usize);
     worker.browser().set_viewport(page_width, page_height);
@@ -113,20 +130,24 @@ fn compose(
         scroll_y,
         window_height as f32,
     ));
+    let mut buttons = Vec::new();
     if panel_width > 0 {
         let agent = &worker.options().agent;
-        commands.extend(overlay::panel(
+        let (panel_commands, panel_buttons) = overlay::panel(
             &overlay::PanelInfo {
                 approve: agent.approve,
                 allow_origins: &agent.allow_origins,
                 timeline: worker.timeline(),
+                waiting: worker.waiting(),
             },
             page_width as f32,
             panel_width as f32,
             window_height as f32,
-        ));
+        );
+        commands.extend(panel_commands);
+        buttons = panel_buttons;
     }
-    commands
+    (commands, buttons)
 }
 
 /// `--preview PATH`: render the frame the observation window would show
@@ -145,13 +166,19 @@ pub fn preview(options: Options, path: &std::path::Path, clicks: &[String]) -> R
         });
     }
     for id in clicks {
-        worker.process(&worker::Request::Click { id: id.clone() });
+        // Through `submit`, as in the window: an action that needs the
+        // person parks, and the preview shows its card.
+        let (reply, _pending) = tokio::sync::oneshot::channel();
+        worker.submit(Job {
+            request: worker::Request::Click { id: id.clone() },
+            reply,
+        });
     }
     // Two frames: the first lays out at the window size, the second paints
     // with the hover/focus state that settled.
     let input = WindowInput::default();
     let _ = compose(&mut worker, &input, width, height);
-    let commands = compose(&mut worker, &input, width, height);
+    let (commands, _) = compose(&mut worker, &input, width, height);
     // Same path as a HiDPI window: lay out in CSS px, paint scaled.
     let commands = scale_display_list(&commands, scale);
     let (pw, ph) = (

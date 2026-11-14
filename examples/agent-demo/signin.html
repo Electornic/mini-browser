@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head><title>Sign in</title></head>
+<body>
+  <h1>Sign in</h1>
+  <p>The password field is for the person, not the agent: with the
+     observation window open, the agent's <code>type</code> waits while you
+     type it yourself.</p>
+  <form id="f">
+    <label for="email">Email</label> <input id="email" type="email">
+    <label for="pw">Password</label> <input id="pw" type="password">
+    <button type="submit">Sign in</button>
+  </form>
+  <p id="result"></p>
+  <p><a href="index.html">Back to the list</a></p>
+  <script>
+    // No server-side form handling in this static demo: show the result
+    // in the page instead of submitting.
+    document.getElementById('f').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var email = document.getElementById('email').value || '(no email)';
+      var pw = document.getElementById('pw').value || '';
+      document.getElementById('result').textContent =
+        pw.length > 0 ? 'Signed in as ' + email : 'Enter a password first';
+    });
+  </script>
+</body>
+</html>

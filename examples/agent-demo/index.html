@@ -20,7 +20,10 @@
     <li><label><input type="checkbox" class="item" checked> Read the concept doc</label></li>
   </ul>
   <p id="summary"></p>
-  <p><a href="about.html">About this demo</a></p>
+  <p><a href="about.html">About this demo</a> · <a href="signin.html">Sign in</a></p>
+  <p><a href="http://localhost:8765/about.html">About, via localhost</a>
+     (same server, but a different origin: in <code>--approve ask</code> mode
+     the person watching is asked first)</p>
   <script>
     function refresh() {
       var boxes = document.querySelectorAll('.item');

@@ -36,13 +36,14 @@ impl BrowserState {
 
         // Unparseable input falls through to the loader, which turns it
         // into the usual error page; there's nothing to gate.
+        let request = NavigationRequest::get(target.clone());
         if let Ok(url) = net::Url::parse(&target)
-            && !self.gate(GatedKind::Navigate, "GET", &url)
+            && !self.gate(GatedKind::Navigate, &url, &request, "load failed")
         {
             return;
         }
 
-        self.spawn_navigation(NavigationRequest::get(target), "load failed");
+        self.spawn_navigation(request, "load failed");
     }
 
     // Synthesise a `submit` event on `form_id` and, if no handler
@@ -121,16 +122,14 @@ impl BrowserState {
                 return;
             }
         };
-        if !self.gate(GatedKind::Submit, "POST", &resolved) {
+        let request = NavigationRequest::form_post(resolved.to_string(), body);
+        if !self.gate(GatedKind::Submit, &resolved, &request, "form failed") {
             return;
         }
         self.address_input = resolved.to_string();
         self.address_bar_selected = false;
         self.address_bar_focused = false;
-        self.spawn_navigation(
-            NavigationRequest::form_post(resolved.to_string(), body),
-            "form failed",
-        );
+        self.spawn_navigation(request, "form failed");
     }
 
     pub(super) fn navigate_to_href(&mut self, href: &str) {
@@ -150,7 +149,8 @@ impl BrowserState {
             }
         };
 
-        if !self.gate(GatedKind::Navigate, "GET", &resolved) {
+        let request = NavigationRequest::get(resolved.to_string());
+        if !self.gate(GatedKind::Navigate, &resolved, &request, "link failed") {
             return;
         }
 
@@ -161,10 +161,14 @@ impl BrowserState {
         self.address_input = resolved.to_string();
         self.address_bar_selected = false;
         self.address_bar_focused = false;
-        self.spawn_navigation(NavigationRequest::get(resolved.to_string()), "link failed");
+        self.spawn_navigation(request, "link failed");
     }
 
-    fn spawn_navigation(&mut self, request: NavigationRequest, error_title: &'static str) {
+    pub(super) fn spawn_navigation(
+        &mut self,
+        request: NavigationRequest,
+        error_title: &'static str,
+    ) {
         // Caller already established `pending_navigation.is_none()` and
         // resolved the target string. The worker owns the blocking
         // `load_remote_document` call; the receiver lands on
