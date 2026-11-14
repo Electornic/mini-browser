@@ -1,5 +1,5 @@
 # browser (trusted)
-url: http://localhost:8000/long_page   scroll: 1500/1880   viewport: 800x600
+url: http://localhost:8000/long_page   scroll_y: 1500   page_height: 1880   viewport: 800x600
 elements: 19 shown / 19 in viewport / 60 total   next_cursor: -
 
 # page content (untrusted, origin=http://localhost:8000)

@@ -208,7 +208,8 @@ impl AgentBrowser {
         self.observe_raw(&ObserveOptions {
             scope: Scope::Full,
             max_elements: usize::MAX,
-            max_text_chars: 0,
+            // Text is needed for the `changes:` text diff.
+            max_text_chars: 100_000,
             cursor: 0,
         })
     }
@@ -478,13 +479,15 @@ impl AgentBrowser {
         action: impl FnOnce(&mut Self) -> Result<(), AgentError>,
     ) -> Result<Observation, AgentError> {
         let before = self.full_snapshot();
+        let generation_before = self.state.document_generation();
         self.state.take_policy_events();
         action(self)?;
         self.settle();
         let events = self.state.take_policy_events();
         let after = self.full_snapshot();
         let mut observation = self.observe(&ObserveOptions::default());
-        observation.changed = Some(Changes::between(&before, &after));
+        let new_document = self.state.document_generation() != generation_before;
+        observation.changed = Some(Changes::between(&before, &after, new_document));
 
         for event in events {
             let target = event.action.target.to_string();

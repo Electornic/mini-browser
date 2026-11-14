@@ -30,6 +30,6 @@ pub use error::AgentError;
 pub use mb_runtime::state::policy::ApproveMode;
 pub use observation::{
     Changes, ElementObservation, ElementValue, Flag, Observation, ObserveInput, ObserveOptions,
-    Scope, observe,
+    Scope, ValueChange, observe,
 };
 pub use role::Role;

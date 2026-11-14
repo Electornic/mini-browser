@@ -145,14 +145,39 @@ pub struct Observation {
 pub struct Changes {
     pub url_before: Option<String>,
     pub url_after: Option<String>,
+    /// The action ended on a freshly installed document (navigation, back /
+    /// forward, reload). Element ids were issued anew, page scripts started
+    /// over, and in-memory page state is gone — so the per-element diffs
+    /// below are left empty (ids from two documents aren't comparable).
+    pub new_document: bool,
+    /// Elements in the document after the action.
+    pub elements_now: usize,
     pub elements_added: usize,
     pub elements_removed: usize,
     /// Elements present before and after whose value / checked state moved.
-    pub values_changed: Vec<NodeId>,
+    pub values_changed: Vec<ValueChange>,
+    /// Text blocks that appeared / disappeared (capped, page-authored).
+    pub text_added: Vec<String>,
+    pub text_removed: Vec<String>,
 }
 
+/// One element's state before and after an action.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValueChange {
+    pub id: NodeId,
+    pub value_before: Option<ElementValue>,
+    pub value_after: Option<ElementValue>,
+    pub checked_before: Option<bool>,
+    pub checked_after: Option<bool>,
+}
+
+/// How many added / removed text blocks a `changes:` section lists.
+const MAX_TEXT_CHANGES: usize = 5;
+
 impl Changes {
-    pub fn between(before: &Observation, after: &Observation) -> Self {
+    /// `before` / `after` should be full-scope snapshots so elements that
+    /// scrolled in or out of view don't count as added / removed.
+    pub fn between(before: &Observation, after: &Observation, new_document: bool) -> Self {
         use std::collections::BTreeMap;
         let state = |o: &Observation| -> BTreeMap<NodeId, (Option<ElementValue>, Option<bool>)> {
             o.elements
@@ -162,18 +187,71 @@ impl Changes {
         };
         let a = state(before);
         let b = state(after);
-        Self {
+        let mut changes = Self {
             url_before: before.url.clone(),
             url_after: after.url.clone(),
-            elements_added: b.keys().filter(|id| !a.contains_key(id)).count(),
-            elements_removed: a.keys().filter(|id| !b.contains_key(id)).count(),
-            values_changed: b
-                .iter()
-                .filter(|(id, v)| a.get(id).is_some_and(|old| old != *v))
-                .map(|(id, _)| *id)
-                .collect(),
+            new_document,
+            elements_now: b.len(),
+            elements_added: 0,
+            elements_removed: 0,
+            values_changed: Vec::new(),
+            text_added: Vec::new(),
+            text_removed: Vec::new(),
+        };
+        if new_document {
+            return changes;
         }
+        changes.elements_added = b.keys().filter(|id| !a.contains_key(id)).count();
+        changes.elements_removed = a.keys().filter(|id| !b.contains_key(id)).count();
+        changes.values_changed = b
+            .iter()
+            .filter_map(|(id, (value, checked))| {
+                let (old_value, old_checked) = a.get(id)?;
+                (old_value != value || old_checked != checked).then(|| ValueChange {
+                    id: *id,
+                    value_before: old_value.clone(),
+                    value_after: value.clone(),
+                    checked_before: *old_checked,
+                    checked_after: *checked,
+                })
+            })
+            .collect();
+        let (added, removed) = multiset_diff(&before.text, &after.text);
+        changes.text_added = added.into_iter().take(MAX_TEXT_CHANGES).collect();
+        changes.text_removed = removed.into_iter().take(MAX_TEXT_CHANGES).collect();
+        changes
     }
+}
+
+// Blocks in `after` but not `before` (counting duplicates), and vice versa,
+// each in document order.
+fn multiset_diff(before: &[String], after: &[String]) -> (Vec<String>, Vec<String>) {
+    fn counts(blocks: &[String]) -> std::collections::BTreeMap<&str, usize> {
+        let mut map = std::collections::BTreeMap::new();
+        for b in blocks {
+            *map.entry(b.as_str()).or_default() += 1;
+        }
+        map
+    }
+    fn missing_from(
+        from: &[String],
+        mut budget: std::collections::BTreeMap<&str, usize>,
+    ) -> Vec<String> {
+        from.iter()
+            .filter(|b| match budget.get_mut(b.as_str()) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    false
+                }
+                _ => true,
+            })
+            .cloned()
+            .collect()
+    }
+    (
+        missing_from(after, counts(before)),
+        missing_from(before, counts(after)),
+    )
 }
 
 pub fn observe(input: &ObserveInput<'_>, options: &ObserveOptions) -> Observation {
@@ -639,7 +717,7 @@ impl Observation {
         }
         let _ = writeln!(
             out,
-            "   scroll: {}/{}   viewport: {}x{}",
+            "   scroll_y: {}   page_height: {}   viewport: {}x{}",
             self.scroll_y.round() as i64,
             self.document_height.round() as i64,
             self.viewport_width.round() as i64,
@@ -689,6 +767,11 @@ impl Observation {
                 let _ = writeln!(out, "  {}", quote(block));
             }
         }
+        if let Some(changed) = &self.changed
+            && !changed.new_document
+        {
+            changed.write_details(&mut out);
+        }
         for dialog in &self.dialogs {
             let answer = match dialog.kind.as_str() {
                 "confirm" => " → false",
@@ -737,6 +820,7 @@ impl Observation {
 }
 
 impl Changes {
+    // Trusted one-liner: only browser-computed facts (urls, counts, ids).
     fn summary(&self) -> String {
         let path = |u: &Option<String>| u.clone().unwrap_or_else(|| "(none)".into());
         let url = if self.url_before == self.url_after {
@@ -744,6 +828,12 @@ impl Changes {
         } else {
             format!("url {} → {}", path(&self.url_before), path(&self.url_after))
         };
+        if self.new_document {
+            return format!(
+                "{url} · new document: element ids were re-issued and page scripts restarted (earlier in-memory page state is gone) · {} elements",
+                self.elements_now
+            );
+        }
         let mut out = format!(
             "{url} · +{} / -{} elements",
             self.elements_added, self.elements_removed
@@ -752,11 +842,61 @@ impl Changes {
             let ids: Vec<String> = self
                 .values_changed
                 .iter()
-                .map(|id| format!("e{}", id.raw()))
+                .map(|c| format!("e{}", c.id.raw()))
                 .collect();
             out.push_str(&format!(" · values: {}", ids.join(" ")));
         }
+        if !self.text_added.is_empty() || !self.text_removed.is_empty() {
+            out.push_str(&format!(
+                " · text: +{} / -{}",
+                self.text_added.len(),
+                self.text_removed.len()
+            ));
+        }
         out
+    }
+
+    // Untrusted details (values and text are page strings), written into
+    // the page block.
+    fn write_details(&self, out: &mut String) {
+        if self.values_changed.is_empty()
+            && self.text_added.is_empty()
+            && self.text_removed.is_empty()
+        {
+            return;
+        }
+        out.push_str("changes:\n");
+        let show = |v: &Option<ElementValue>| match v {
+            Some(ElementValue::Text(text)) => quote(&truncate_chars(text, 120)),
+            Some(ElementValue::Hidden { chars }) => format!("(hidden, {chars} chars)"),
+            None => "(none)".into(),
+        };
+        for change in &self.values_changed {
+            if change.checked_before != change.checked_after {
+                let _ = writeln!(
+                    out,
+                    "  e{} checked {} → {}",
+                    change.id.raw(),
+                    change.checked_before.unwrap_or(false),
+                    change.checked_after.unwrap_or(false)
+                );
+            }
+            if change.value_before != change.value_after {
+                let _ = writeln!(
+                    out,
+                    "  e{} value {} → {}",
+                    change.id.raw(),
+                    show(&change.value_before),
+                    show(&change.value_after)
+                );
+            }
+        }
+        for text in &self.text_added {
+            let _ = writeln!(out, "  text + {}", quote(&truncate_chars(text, 120)));
+        }
+        for text in &self.text_removed {
+            let _ = writeln!(out, "  text - {}", quote(&truncate_chars(text, 120)));
+        }
     }
 }
 

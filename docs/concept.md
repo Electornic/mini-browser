@@ -165,7 +165,7 @@ G0 실제 출력 ([signup_form.observation.txt](../crates/mb-agent/tests/fixture
 
 ```text
 # browser (trusted)
-url: http://localhost:8000/signup_form   scroll: 0/422   viewport: 800x600
+url: http://localhost:8000/signup_form   scroll_y: 0   page_height: 245   viewport: 800x600
 elements: 12 shown / 12 in viewport / 12 total   next_cursor: -
 
 # page content (untrusted, origin=http://localhost:8000)
@@ -188,7 +188,25 @@ text:
   "Already have an account? Log in or read the external terms."
 ```
 
-G1 이후 추가될 줄: `# browser` 블록의 `settled: true`(settle 루프가 채움), 행동 직후 관찰의 `changed: url /signup → /welcome · +3 / -5 elements`, 페이지 블록 끝의 `console: 1 warning (...)`.
+행동 직후 관찰에는 더 붙는다 (실제 데모 출력, todo 페이지에서 Add 클릭):
+
+```text
+# browser (trusted)
+url: http://127.0.0.1:8766/index.html   settled: true   scroll_y: 0   page_height: 352   viewport: 800x600
+changed: url same (http://127.0.0.1:8766/index.html) · +1 / -0 elements · values: e22 · text: +1 / -1
+...
+# page content (untrusted, origin=http://127.0.0.1:8766)
+...
+changes:
+  e22 value "buy milk" → ""
+  text + "1 of 3 done"
+  text - "1 of 2 done"
+```
+
+- `changed:` (trusted) 는 브라우저가 계산한 것만: URL, 요소 증감, 값이 바뀐 **id**, 텍스트 블록 증감 **개수**.
+- `changes:` (untrusted 블록 끝) 는 페이지 문자열이 들어가는 상세: 값 이전 → 이후, checked 변화, 나타나고 사라진 텍스트 블록(각 5개까지).
+- **새 문서**로 끝난 행동(이동·뒤로·앞으로·새로고침)은 `changed: … new document: element ids were re-issued and page scripts restarted (earlier in-memory page state is gone) · N elements` 로 표시하고 `changes:` 는 생략 — 두 문서의 id 는 비교할 수 없다. (G2 실연결 테스트 피드백: 뒤로 가기 후 같은 번호 id 가 다시 나와 헷갈리고, 메모리 상태가 사라진 이유가 안 보였음.)
+- 그 밖에 `settled:`, 페이지 블록 끝의 `dialog:` / `console:` 줄.
 
 - **ID**: `e` + `NodeId`. 노드가 살아 있는 동안 관찰이 바뀌어도 같은 ID (재번호 없음). 삭제되면 `stale_element`.
 - **trusted / untrusted 분리**: `# browser` 블록은 브라우저가 계산한 사실. `# page content` 블록 안의 모든 문자열(이름·값·텍스트·제목)은 페이지 출처. role(`textbox`/`button`…)과 `⚠` 플래그는 브라우저가 계산하지만 페이지 블록 안에서 해당 요소 옆에 붙인다. MCP 응답에서도 두 블록을 별도 content item 으로 나눈다.
@@ -595,6 +613,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-10 | 연결 = MCP 서버 (rmcp, stdio 먼저) | 앱에 API 키 불필요, Claude Code 를 에이전트로 재사용. 앱 내장 LLM 루프는 하지 않음 |
 | 2026-11-11 | G0: 관찰은 layout 트리에서 rect 를 직접 수집, `LinkTarget` 미사용 | 모든 노드가 LayoutBox 를 가져서 별도 인라인 수집 불필요 (검토 때 오판 정정) |
 | 2026-11-11 | G0: `text:` 에 링크 텍스트 포함, 폼 크롬 제외, 이름 없는 컨트롤은 `field=` | 링크를 빼면 문장이 끊김 ("or read the ."). 라벨·버튼은 요소 목록과 중복. 이름 없는 `select` 는 `name=""` 만으론 용도를 알 수 없음 |
+| 2026-11-14 | 실연결 테스트 피드백 반영: 새 문서 표시, 값 이전→이후·텍스트 증감은 untrusted `changes:` 섹션, `scroll_y`/`page_height` 표기 | 에이전트가 ID 재사용·상태 초기화·변화 내용을 관찰만으로 알 수 있게. 페이지 문자열은 trusted 블록에 넣지 않는다 |
 | 2026-11-14 | G2 후속(보안 리뷰): `wait_for(id)` 는 ID 를 발급하지 않고, 발급 안 된 ID 면 `stale_element` | 추측·이전 페이지 ID 를 `wait_for` 로 "세탁"해 stale 가드를 우회할 수 있었음 |
 | 2026-11-14 | G2 후속: 스크린샷 결과는 untrusted 라벨(origin 포함)을 이미지 앞에 붙이고, instructions 규칙 3 이 이미지 속 글자도 포함 | 이미지에 렌더된 페이지 글자도 인젝션 경로 |
 | 2026-11-14 | G2 후속: 로그에 입력 텍스트를 남기지 않음 — `Request` Debug 에서 `type` 텍스트 가림, 정책 로그는 origin+path 만(쿼리 제외) | 로컬 auto 모드의 테스트 비밀번호, GET 폼 쿼리의 입력값이 stderr 에 남았음 |

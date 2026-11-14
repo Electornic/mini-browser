@@ -250,7 +250,24 @@ fn signup_form_posts_and_follows_the_redirect() {
         .type_text(email, "dev@example.test", false, false)
         .unwrap();
     assert!(after.to_text().contains("value=\"dev@example.test\""));
-    assert_eq!(after.changed.as_ref().unwrap().values_changed, vec![email]);
+    let changed = after.changed.as_ref().unwrap();
+    assert!(!changed.new_document);
+    assert_eq!(
+        changed
+            .values_changed
+            .iter()
+            .map(|c| c.id)
+            .collect::<Vec<_>>(),
+        vec![email]
+    );
+    // Before → after, in the untrusted page block (it's a page string).
+    let (trusted, page_block) = after.to_blocks();
+    let detail = format!("e{} value \"\" → \"dev@example.test\"", email.raw());
+    assert!(page_block.contains(&detail), "{page_block}");
+    assert!(
+        !trusted.contains("dev@example.test"),
+        "values stay out of the trusted block"
+    );
 
     // 127.0.0.1 + auto-approve: test credentials may be typed.
     let after = b.type_text(password, "hunter22", false, false).unwrap();
@@ -260,12 +277,26 @@ fn signup_form_posts_and_follows_the_redirect() {
     let after = b.click(terms).unwrap();
     let terms_now = after.elements.iter().find(|e| e.id == terms).unwrap();
     assert_eq!(terms_now.checked, Some(true));
+    assert!(
+        after
+            .to_text()
+            .contains(&format!("e{} checked false → true", terms.raw()))
+    );
 
     let done = b.click(submit).unwrap();
     assert_eq!(path_of(&done), "/welcome");
     assert!(done.text.iter().any(|t| t == "Account created"));
     let changed = done.changed.as_ref().unwrap();
     assert_ne!(changed.url_before, changed.url_after);
+    // Landing on another document: flagged, and no cross-document diff.
+    assert!(changed.new_document);
+    assert!(changed.values_changed.is_empty());
+    let text = done.to_text();
+    assert!(
+        text.contains("new document: element ids were re-issued"),
+        "{text}"
+    );
+    assert!(!text.contains("changes:"), "{text}");
 
     let posts = server.posts();
     assert_eq!(posts.len(), 1);
@@ -362,6 +393,9 @@ fn listener_only_elements_are_clickable_and_dialogs_are_reported() {
     let after = b.click(button).unwrap();
     // confirm() answered false without blocking, and the page saw it.
     assert!(after.text.iter().any(|t| t == "kept"));
+    let changed = after.changed.as_ref().unwrap();
+    assert_eq!(changed.text_added, vec!["kept".to_string()]);
+    assert_eq!(changed.text_removed, vec!["loaded later".to_string()]);
     assert_eq!(after.dialogs.len(), 1);
     assert_eq!(after.dialogs[0].kind, "confirm");
     let text = after.to_text();

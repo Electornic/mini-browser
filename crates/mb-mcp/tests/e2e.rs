@@ -232,6 +232,12 @@ fn navigate_and_click_through_the_protocol() {
     let link = id_of(&blocks[1], "Next page");
     let result = client.call("click", json!({ "id": link }));
     let blocks = texts(&result);
+    // Every observation is exactly two items, trusted first — even for
+    // in-page actions — so a client can't blur the trust boundary.
+    assert_eq!(blocks.len(), 2);
+    assert!(blocks[0].starts_with("# browser (trusted)"));
+    assert!(blocks[1].starts_with("# page content (untrusted"));
+    assert!(blocks[0].contains("new document"), "{}", blocks[0]);
     assert!(
         blocks[0].contains(&format!("url: {base}/next")),
         "{}",
@@ -241,7 +247,10 @@ fn navigate_and_click_through_the_protocol() {
     assert!(blocks[1].contains("Second page"));
 
     let result = client.call("back", json!({}));
-    assert!(texts(&result)[1].contains("Hello agent"));
+    let blocks = texts(&result);
+    assert_eq!(blocks.len(), 2);
+    assert!(blocks[1].contains("Hello agent"));
+    assert!(blocks[0].contains("new document"));
 
     assert!(client.close().success());
 }
