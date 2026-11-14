@@ -13,8 +13,9 @@ use mb_runtime::input::WindowInput;
 use mb_runtime::js::{FixedClock, JsOptions};
 use mb_runtime::layout::Rect;
 use mb_runtime::net::Url;
-use mb_runtime::state::BrowserState;
+use mb_runtime::render::rasterize;
 use mb_runtime::state::policy::{AgentPolicy, ApproveMode, GatedKind, PolicyDecision};
+use mb_runtime::state::{BrowserState, install_fonts};
 
 use crate::error::AgentError;
 use crate::index::find_rect;
@@ -51,6 +52,10 @@ pub struct AgentConfig {
     pub seed: u32,
     /// Wall-clock cap on one settle (network loads run on real time).
     pub settle_timeout: Duration,
+    /// Load system (and page) fonts like the window does. Real text metrics
+    /// and readable screenshots, but layout then depends on the machine's
+    /// fonts — so off by default, and off in the golden/determinism tests.
+    pub system_fonts: bool,
 }
 
 impl Default for AgentConfig {
@@ -63,6 +68,7 @@ impl Default for AgentConfig {
             clock: ClockMode::Virtual,
             seed: 1,
             settle_timeout: Duration::from_secs(5),
+            system_fonts: false,
         }
     }
 }
@@ -77,6 +83,25 @@ pub struct AgentBrowser {
     // an id is only accepted if this page's observations listed it.
     issued_generation: u64,
     issued: BTreeSet<NodeId>,
+    // Page font count last installed (system_fonts only); `None` = never.
+    installed_fonts: Option<usize>,
+}
+
+/// What `wait_for` waits for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitCondition {
+    /// This text appears in the page text or an element name / value.
+    Text(String),
+    /// This element is rendered (and was handed out earlier, or appears now).
+    Element(NodeId),
+}
+
+/// A rendered frame of the page area (no browser chrome), row-major
+/// `0x00RRGGBB` pixels.
+pub struct Screenshot {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<u32>,
 }
 
 /// Keys `press` accepts.
@@ -116,6 +141,7 @@ impl AgentBrowser {
             last_settled: None,
             issued_generation: 0,
             issued: BTreeSet::new(),
+            installed_fonts: None,
         };
         browser.settle();
         browser
@@ -340,6 +366,98 @@ impl AgentBrowser {
         })
     }
 
+    /// Keep the page running until `condition` holds or `timeout` passes
+    /// (virtual time under `ClockMode::Virtual`, wall time otherwise).
+    /// Unlike settle, this lets slow timers fire: it's how an agent waits
+    /// for "the toast that appears after 2 seconds".
+    pub fn wait_for(
+        &mut self,
+        condition: WaitCondition,
+        timeout: Duration,
+    ) -> Result<Observation, AgentError> {
+        let started = Instant::now();
+        let start_clock = self.state.js.clock_now_ms();
+        let timeout_ms = timeout.as_millis() as u64;
+        loop {
+            self.settle();
+            if self.condition_holds(&condition) {
+                let observation = self.observe(&ObserveOptions::default());
+                if let WaitCondition::Element(id) = condition {
+                    self.issued.insert(id);
+                }
+                return Ok(observation);
+            }
+            let elapsed = match self.clock {
+                Some(_) => self.state.js.clock_now_ms().saturating_sub(start_clock),
+                None => started.elapsed().as_millis() as u64,
+            };
+            if elapsed >= timeout_ms || started.elapsed() > timeout + self.config.settle_timeout {
+                return Err(AgentError::WaitTimeout {
+                    waited_ms: elapsed,
+                    observation: Box::new(self.observe(&ObserveOptions::default())),
+                });
+            }
+            // Let time pass even when the page is "quiet": the thing we're
+            // waiting for may sit behind a timer beyond settle's horizon.
+            for _ in 0..8 {
+                if let Some(clock) = &self.clock {
+                    clock.advance(FRAME_MS);
+                } else {
+                    std::thread::sleep(Duration::from_millis(FRAME_MS));
+                }
+                self.frame(WindowInput::default());
+            }
+        }
+    }
+
+    fn condition_holds(&mut self, condition: &WaitCondition) -> bool {
+        let snapshot = self.observe_raw(&ObserveOptions {
+            scope: Scope::Full,
+            max_elements: usize::MAX,
+            max_text_chars: usize::MAX,
+            cursor: 0,
+        });
+        match condition {
+            WaitCondition::Text(needle) => {
+                snapshot.text.iter().any(|t| t.contains(needle.as_str()))
+                    || snapshot.title.as_deref().is_some_and(|t| t.contains(needle.as_str()))
+                    || snapshot.elements.iter().any(|e| {
+                        e.name.contains(needle.as_str())
+                            || matches!(&e.value, Some(crate::ElementValue::Text(v)) if v.contains(needle.as_str()))
+                    })
+            }
+            WaitCondition::Element(id) => {
+                let view = self.state.current_view();
+                self.state.parsed_document.borrow().get(*id).is_some()
+                    && view
+                        .and_then(|v| find_rect(&v.layout_root, *id))
+                        .is_some_and(|r| r.width > 0.0 && r.height > 0.0)
+            }
+        }
+    }
+
+    /// Render the page area as it looks now.
+    pub fn screenshot(&mut self) -> Screenshot {
+        self.sync_fonts();
+        let width = self.config.viewport_width;
+        let chrome = CHROME_HEIGHT as usize;
+        let window_height = self.config.viewport_height + chrome;
+        let commands = self.state.display_list(
+            width,
+            window_height,
+            &WindowInput {
+                from_agent: true,
+                ..WindowInput::default()
+            },
+        );
+        let full = rasterize(&commands, width, window_height);
+        Screenshot {
+            width,
+            height: self.config.viewport_height,
+            pixels: full[chrome * width..].to_vec(),
+        }
+    }
+
     // Shared action envelope: snapshot → act → settle → policy verdict →
     // observation with a `changed:` summary.
     fn act(
@@ -478,7 +596,20 @@ impl AgentBrowser {
                 .is_some_and(|url| is_local_dev_host(&url.host))
     }
 
+    // Same rule as the shell: (re)install when the page's font set changes.
+    fn sync_fonts(&mut self) {
+        if !self.config.system_fonts {
+            return;
+        }
+        let count = self.state.font_data.len();
+        if self.installed_fonts != Some(count) {
+            install_fonts(&self.state.font_data);
+            self.installed_fonts = Some(count);
+        }
+    }
+
     fn frame(&mut self, mut input: WindowInput) {
+        self.sync_fonts();
         input.from_agent = true;
         let width = self.config.viewport_width;
         let height = self.config.viewport_height + CHROME_HEIGHT as usize;

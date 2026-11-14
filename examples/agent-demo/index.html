@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head>
+  <title>Todo demo</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; }
+    li { margin: 4px 0; }
+    .done { color: #888; text-decoration: line-through; }
+  </style>
+</head>
+<body>
+  <h1>Todo demo</h1>
+  <p>A tiny page for driving mini-browser from an agent. Static files only:
+     serve this folder with <code>python3 -m http.server 8765</code>.</p>
+  <label for="new">New item</label>
+  <input id="new" placeholder="What needs doing?">
+  <button id="add">Add</button>
+  <ul id="list">
+    <li><label><input type="checkbox" class="item"> Water the plants</label></li>
+    <li><label><input type="checkbox" class="item" checked> Read the concept doc</label></li>
+  </ul>
+  <p id="summary"></p>
+  <p><a href="about.html">About this demo</a></p>
+  <script>
+    function refresh() {
+      var boxes = document.querySelectorAll('.item');
+      var done = 0;
+      for (var i = 0; i < boxes.length; i++) {
+        if (boxes[i].getAttribute('checked') !== null) done = done + 1;
+      }
+      document.getElementById('summary').textContent =
+        done + ' of ' + boxes.length + ' done';
+    }
+    document.getElementById('add').addEventListener('click', function () {
+      var input = document.getElementById('new');
+      var text = (input.value || '').trim();
+      if (!text) return;
+      var li = document.createElement('li');
+      li.innerHTML = '<label><input type="checkbox" class="item"> </label>';
+      li.firstChild.appendChild(document.createTextNode(text));
+      document.getElementById('list').appendChild(li);
+      input.value = '';
+      refresh();
+    });
+    document.getElementById('list').addEventListener('change', refresh);
+    refresh();
+  </script>
+</body>
+</html>

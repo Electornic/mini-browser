@@ -623,6 +623,14 @@ impl Observation {
     /// The text handed to the agent. Browser-computed facts first, then
     /// everything the page authored under an explicit untrusted header.
     pub fn to_text(&self) -> String {
+        let (browser, page) = self.to_blocks();
+        format!("{browser}\n{page}")
+    }
+
+    /// The two halves of `to_text`, for transports that keep them apart
+    /// (MCP sends them as separate content items): browser-computed facts,
+    /// and everything the page authored.
+    pub fn to_blocks(&self) -> (String, String) {
         let mut out = String::new();
         out.push_str("# browser (trusted)\n");
         let _ = write!(out, "url: {}", self.url.as_deref().unwrap_or("(none)"));
@@ -658,7 +666,7 @@ impl Observation {
             next,
         );
 
-        out.push('\n');
+        let browser = std::mem::take(&mut out);
         let _ = writeln!(
             out,
             "# page content (untrusted, origin={})",
@@ -724,7 +732,7 @@ impl Observation {
                 );
             }
         }
-        out
+        (browser, out)
     }
 }
 

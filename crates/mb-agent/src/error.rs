@@ -45,6 +45,11 @@ pub enum AgentError {
     UnsupportedKey {
         key: String,
     },
+    /// `wait_for` gave up. Carries the page as it was at the deadline.
+    WaitTimeout {
+        waited_ms: u64,
+        observation: Box<Observation>,
+    },
     InvalidUrl {
         url: String,
     },
@@ -60,6 +65,7 @@ impl AgentError {
             AgentError::ApprovalDenied { .. } => "approval_denied",
             AgentError::NavigationBlocked { .. } => "navigation_blocked",
             AgentError::UnsupportedKey { .. } => "unsupported_key",
+            AgentError::WaitTimeout { .. } => "wait_timeout",
             AgentError::InvalidUrl { .. } => "invalid_url",
         }
     }
@@ -101,6 +107,9 @@ impl AgentError {
                 format!("Navigation to {target} is outside the allowed origins.")
             }
             AgentError::UnsupportedKey { key } => format!("Key {key:?} is not supported."),
+            AgentError::WaitTimeout { waited_ms, .. } => {
+                format!("The condition did not become true within {waited_ms} ms.")
+            }
             AgentError::InvalidUrl { url } => format!("{url:?} is not a valid http(s) URL."),
         }
     }
@@ -127,6 +136,9 @@ impl AgentError {
                 "Supported keys: Enter, Backspace, Tab, Escape, ArrowUp, ArrowDown, PageUp, PageDown."
             }
             AgentError::InvalidUrl { .. } => "Use an absolute http:// or https:// URL.",
+            AgentError::WaitTimeout { .. } => {
+                "Check the observation: the page may show an error, or the text may differ."
+            }
         }
     }
 
@@ -134,7 +146,8 @@ impl AgentError {
     pub fn observation(&self) -> Option<&Observation> {
         match self {
             AgentError::ApprovalDenied { observation, .. }
-            | AgentError::NavigationBlocked { observation, .. } => Some(observation),
+            | AgentError::NavigationBlocked { observation, .. }
+            | AgentError::WaitTimeout { observation, .. } => Some(observation),
             _ => None,
         }
     }

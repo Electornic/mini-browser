@@ -4,7 +4,7 @@
 
 ## Project Goal
 
-학습용 토이 브라우저 → **에이전트용 브라우저** ([docs/concept.md](docs/concept.md)). 5-crate Cargo workspace (mb-dom / mb-engine / mb-runtime / mb-agent / mb-shell) 위에 mature crate 들 (html5ever, taffy, cosmic-text, tiny-skia, rquickjs, ...) 을 글루로 엮는다. 작업의 무게중심은 "from-scratch 구현" 이 아니라 **글루 + 기능 보강**.
+학습용 토이 브라우저 → **에이전트용 브라우저** ([docs/concept.md](docs/concept.md)). 6-crate Cargo workspace (mb-dom / mb-engine / mb-runtime / mb-agent / mb-mcp / mb-shell) 위에 mature crate 들 (html5ever, taffy, cosmic-text, tiny-skia, rquickjs, ...) 을 글루로 엮는다. 작업의 무게중심은 "from-scratch 구현" 이 아니라 **글루 + 기능 보강**.
 
 ## Workspace Layout
 
@@ -46,6 +46,13 @@
 │   - error            AgentError (code / message / hint)
 │   - text             페이지 문자열 정규화·따옴표 (위조 방지)
 │
+├── crates/mb-mcp      (binary [[bin]] mb-mcp)  rmcp 3.x, tokio, image(png), base64
+│   - main             tokio 스레드 = rmcp stdio 서버, 메인 스레드 = 브라우저
+│   - cli              --viewport / --start-url / --allow-origin / --approve / --clock / --seed
+│   - prompts          서버 instructions + tool 설명 (LLM 이 읽는 텍스트, 영어)
+│   - worker           Job 채널 처리, repeat_count, 패닉 시 AgentBrowser 재생성
+│   - server           #[tool_router] tool 10개 → worker::Request, 결과 → CallToolResult
+│
 └── crates/mb-shell    (binary [[bin]] mb-shell)  anyhow, softbuffer, winit
     - main.rs          진입점 — install_fonts → window::run(closure)
     - window.rs        winit 이벤트 루프 + softbuffer 프레임 출력
@@ -62,6 +69,10 @@ cargo build --workspace 2>&1 | tail -10
 # 테스트
 cargo test --workspace 2>&1 | grep "test result"
 
+# mb-mcp: 실제 바이너리 e2e (JSON-RPC over stdio) + release 빌드
+cargo test -p mb-mcp --test e2e
+cargo build --release -p mb-mcp      # → target/release/mb-mcp (claude mcp add 대상)
+
 # mb-agent 관찰 골든 (의도한 변경이면 UPDATE_GOLDEN=1 로 갱신 후 diff 를 눈으로 확인)
 cargo test -p mb-agent --test golden
 UPDATE_GOLDEN=1 cargo test -p mb-agent --test golden
@@ -75,7 +86,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 642 (workspace 합계, 2026-11-12 G1 + 리다이렉트 게이트). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 653 (workspace 합계, 2026-11-14 G2 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 

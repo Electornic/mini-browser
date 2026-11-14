@@ -131,6 +131,11 @@ fn route(
             "<html><head><title>Welcome</title></head><body><h1>Account created</h1><a href=\"/signup\">Back</a></body></html>".into(),
         ),
         ("GET", "/timers") => ("200 OK", String::new(), TIMERS_PAGE.into()),
+        ("GET", "/delayed") => (
+            "200 OK",
+            String::new(),
+            "<html><body><p id=\"s\">waiting</p><script>setTimeout(function () { document.getElementById('s').textContent = 'ready now'; }, 1500);</script></body></html>".into(),
+        ),
         // Same-origin URLs that bounce somewhere else: the redirect hop
         // must go through the policy gate too.
         ("GET", "/bounce") => (
@@ -478,4 +483,47 @@ fn allow_list_also_blocks_redirect_hops_and_keeps_post_bodies_home() {
     assert_eq!(posts.len(), 1, "{posts:?}");
     assert_eq!(posts[0].path, "/bounce-post");
     assert!(!server.paths().contains(&"POST /collect".to_string()));
+}
+
+#[test]
+fn wait_for_lets_slow_timers_fire_and_times_out_otherwise() {
+    use std::time::Duration;
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/delayed")).unwrap();
+    // 1.5s is far beyond settle's horizon: navigate returns before it fires.
+    assert!(page.text.iter().any(|t| t == "waiting"));
+    let ready = b
+        .wait_for(
+            mb_agent::WaitCondition::Text("ready now".into()),
+            Duration::from_secs(3),
+        )
+        .unwrap();
+    assert!(ready.text.iter().any(|t| t == "ready now"));
+    let err = b
+        .wait_for(
+            mb_agent::WaitCondition::Text("never".into()),
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), "wait_timeout");
+}
+
+#[test]
+fn screenshot_renders_the_page_area_without_chrome() {
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    b.navigate(&server.url("/signup")).unwrap();
+    let shot = b.screenshot();
+    assert_eq!((shot.width, shot.height), (800, 600));
+    assert_eq!(shot.pixels.len(), 800 * 600);
+    let non_white = shot
+        .pixels
+        .iter()
+        .filter(|&&p| p & 0x00FF_FFFF != 0x00FF_FFFF)
+        .count();
+    assert!(
+        non_white > 100,
+        "the form should paint something ({non_white} px)"
+    );
 }

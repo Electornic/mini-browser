@@ -11,7 +11,7 @@
 
 브라우저 내부를 직접 짜보는 학습용 토이 프로젝트. URL 또는 정적 입력에서 HTML/CSS/JS 를 읽어 DOM/스타일/레이아웃을 거쳐 화면에 그리고, JS 가 DOM 을 mutate 하면 같은 프레임에서 재반영한다.
 
-핵심 의존성: `html5ever` / `cssparser` + `selectors` / `taffy` / `cosmic-text` / `tiny-skia` / `winit` + `softbuffer` / `ureq` + `url` / `rquickjs`. 코드는 5-crate Cargo workspace.
+핵심 의존성: `html5ever` / `cssparser` + `selectors` / `taffy` / `cosmic-text` / `tiny-skia` / `winit` + `softbuffer` / `ureq` + `url` / `rquickjs`. 코드는 6-crate Cargo workspace.
 
 ## Workspace Layout
 
@@ -25,6 +25,7 @@
 │                        rquickjs / ureq / tokio / state/
 ├── crates/mb-agent    → 에이전트 인터페이스 (mb-runtime 위)
 │                        observe: 요소 목록 + 페이지 텍스트 (docs/concept.md)
+├── crates/mb-mcp      → MCP 서버 바이너리 (mb-agent 위, rmcp stdio)
 └── crates/mb-shell    → 바이너리 (mb-runtime 위)
                          winit / softbuffer
 ```
@@ -71,6 +72,21 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
+
+## Claude Code 에서 쓰기 (MCP)
+
+```sh
+cargo build --release -p mb-mcp
+claude mcp add mini-browser -- "$(pwd)/target/release/mb-mcp"
+```
+
+다음 Claude Code 세션부터 `navigate` / `observe` / `click` / `type` / `press` / `scroll` / `back` / `forward` / `screenshot` / `wait_for` 도구가 생긴다. 기본은 안전 모드(`--approve deny`: POST 제출·다른 origin 이동은 거절). 로컬 테스트 사이트라면:
+
+```sh
+claude mcp add mini-browser -- "$(pwd)/target/release/mb-mcp" --approve auto --allow-origin http://localhost:3000
+```
+
+데모 페이지: `cd examples/agent-demo && python3 -m http.server 8765` 후 "http://127.0.0.1:8765/ 에서 'buy milk' 할 일을 추가하고 완료 처리해줘". 추천 skill: [examples/claude-skill/mini-browser-testing](examples/claude-skill/mini-browser-testing/SKILL.md). 설계: [docs/concept.md](docs/concept.md).
 
 ## What Works
 

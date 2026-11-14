@@ -1,6 +1,6 @@
 # Concept — 에이전트용 브라우저
 
-> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ (2026-11-12, `crates/mb-agent` `AgentBrowser`)** · 다음 = G2 MCP · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
+> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ (2026-11-14, `crates/mb-mcp`)** · 다음 = G3 관전 UI · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
 
 ## 한 줄
 
@@ -119,7 +119,7 @@
 
 ## MCP 연결 (확정)
 
-- **SDK**: 공식 [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) (2026-11 기준 3.9.0, MSRV 1.88 — 우리 1.94.1 핀과 호환). features: `server`, `macros`, `transport-io`, `schemars` (+ G3 `transport-streamable-http-server`, G4 `elicitation` 검토).
+- **SDK**: 공식 [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) (G2 구현 시 3.10.0, MSRV 1.88 — 우리 1.94.1 핀과 호환. `#[tool_router]` + `#[tool_handler(router = self.tool_router)]`, `serve(rmcp::transport::stdio())`). features: `server`, `macros`, `transport-io`, `schemars` (+ G3 `transport-streamable-http-server`, G4 `elicitation` 검토).
 - **스레드 모델**: `rmcp` 는 tokio async, `BrowserState` 는 rquickjs `Runtime` 을 들고 있어 한 스레드에 묶어 둔다. MCP 서버는 tokio 런타임 스레드, 브라우저는 자기 스레드(headless) 또는 winit 메인 스레드(window)에서 돌고, 둘은 `AgentCommand` 채널 + 응답 oneshot 으로만 대화한다. 브라우저 쪽은 명령을 받으면 실행 → settle → 응답.
 - **API 키 없음**: 에이전트(LLM)는 클라이언트 쪽에 있다. 브라우저는 관찰과 행동만 제공한다. 앱 안에 LLM 루프를 넣지 않는다.
 
@@ -134,8 +134,8 @@
 | `press` | `key` | Observation | 지원 키는 [키 입력](#키-입력) 표. 그 외는 `unsupported_key` |
 | `scroll` | `dy` (px) | Observation | 음수 = 위 |
 | `back` / `forward` | — | Observation | |
-| `screenshot` | — | PNG (페이지 뷰포트만, 크롬 UI 제외) | |
-| `wait_for` | `text?`, `id?`, `timeout_ms?` | Observation | 조건이 참이 되거나 타임아웃까지 settle 반복 |
+| `screenshot` | — | PNG (페이지 뷰포트만, 크롬 UI 제외) + 크기 안내 text | `AgentBrowser::screenshot` 이 창 높이로 래스터 후 크롬 102px 행을 잘라냄 |
+| `wait_for` | `text?` 또는 `id?` (정확히 하나), `timeout_ms?` (기본 5000, 최대 60000) | Observation | settle 과 달리 **시간을 흘려보낸다**: 조용해도 8프레임씩 계속 진행(가상 시계면 16ms×8) → 50ms 지평 밖 타이머(토스트·지연 로딩)도 기다림. text 는 본문·제목·요소 이름·값의 부분 문자열 |
 
 모든 행동 tool 은 실행 후 settle 하고 **새 Observation 을 같이 돌려준다** (에이전트가 매번 `observe` 를 따로 부르지 않게). 행동 직후 관찰에는 맨 위에 `changed:` 요약 줄(URL·요소 증감·새 텍스트 위치)이 붙는다 (→ [LLM 오류 다루기](#llm-오류-다루기)). 에러는 [에러 응답 형식](#에러-응답-형식)을 따른다.
 
@@ -146,6 +146,9 @@
 | `stale_element` | ID 의 노드가 삭제됨(tombstone), **또는 현재 문서의 관찰에서 내준 적 없는 ID** — NodeId 는 문서마다 0 부터 다시 매겨지므로, 이전 페이지의 `e21` 이 새 페이지의 다른 요소를 가리킬 수 있다. `AgentBrowser` 가 문서 세대(`document_generation`)별로 내준 ID 집합을 들고 판정 |
 | `not_a_text_field` | `type` 대상이 텍스트 칸이 아님 |
 | `invalid_url` | `navigate` 인자가 http(s) URL 이 아님 |
+| `invalid_id` | `e21` 형식이 아닌 id (mb-mcp 에서 파싱 단계) |
+| `invalid_arguments` | 인자 조합 오류 (`wait_for` 에 text·id 둘 다/둘 다 없음, `scope` 오타, `dy` 무한대) |
+| `wait_timeout` | `wait_for` 시간 초과 — 그 시점 관찰을 함께 반환 |
 | `not_interactable` | 노드는 있지만 rect 가 없거나 크기 0 (display:none 등) |
 | `handoff_required` | 비밀번호 필드 입력 등 사람이 해야 하는 단계 |
 | `approval_denied` | 사람이(또는 `--approve deny` 가) 위험 행동을 거절 |
@@ -372,7 +375,7 @@ LLM 은 틀린다 — 이건 감안한다. 목표는 "안 틀리게"가 아니�
 
 유저 쪽 자리는 우리가 통제하지 않는다. 대신 저장소에 **추천 skill 예시**(`examples/claude-skill/mini-browser-testing/SKILL.md`)를 제공한다 (G2).
 
-모든 프롬프트 텍스트(instructions, tool 설명, 에러 힌트)는 LLM 이 읽는 것이므로 **영어**로 쓰고, `crates/mb-mcp/src/prompts.rs` 한 파일에 모아 둔다 — 바꾼 이력이 diff 로 보이고 `mb-eval` 결과와 짝지을 수 있게.
+모든 프롬프트 텍스트는 LLM 이 읽는 것이므로 **영어**로 쓴다. 서버 instructions 와 tool 설명은 [`crates/mb-mcp/src/prompts.rs`](../crates/mb-mcp/src/prompts.rs) 한 파일, 에러 메시지·힌트는 에러와 함께 [`mb_agent::AgentError`](../crates/mb-agent/src/error.rs) (`message()`/`hint()`) 에 둔다 — MCP 말고 다른 운전자(테스트 코드, 재생기)도 같은 힌트를 쓰게. 둘 다 바꾸면 diff 로 보이고 `mb-eval` 결과와 짝지을 수 있다.
 
 ### 서버 instructions 초안 (G2)
 
@@ -511,7 +514,8 @@ claude mcp add --scope project mini-browser -- /abs/path/to/target/release/mb-mc
 | `--start-url URL` | `about:blank` | 시작 페이지 |
 | `--allow-origin ORIGIN` (반복) | 없음 | 이동 가능한 origin 화이트리스트. 지정하면 목록 밖 이동은 즉시 `navigation_blocked`. 미지정이면 모든 origin 가능하되 origin 이동은 승인 대상 |
 | `--approve auto\|ask\|deny` | `ask` | 위험 행동 처리 ([정책 게이트](#정책-게이트)) |
-| `--log PATH` | 없음 | 관찰·행동 세션 로그(JSONL) 저장 → G5 재생 입력. 비밀번호는 `<redacted>` |
+| `--log PATH` | 없음 | 관찰·행동 세션 로그(JSONL) 저장 → G5 재생 입력. 비밀번호는 `<redacted>` (**G5**, 아직 없음) |
+| `--settle-timeout-ms N` | `5000` | settle 한 번의 벽시계 상한 |
 | `--clock virtual\|system` | headless=`virtual`, window=`system` | 가상 시계(결정적) / 실제 시계 |
 | `--seed N` | 고정 기본값 | `Math.random` 시드 |
 
@@ -574,7 +578,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 |---|---|---|---|
 | **G0** 관찰 ✅ | `mb-agent::observe` — Observation (trusted/untrusted 분리, `e{NodeId}` ID, viewport scope, 상한·cursor, 문서 순서 고정, `field=` 힌트) | 불필요했음 (인라인 rect 이미 존재) | L2 골든 5개 + 결정성·위조 방지·비밀번호 은닉 테스트 (609 green) |
 | **G1** 행동 ✅ | `AgentBrowser` ([browser.rs](../crates/mb-agent/src/browser.rs)): `navigate`/`click`/`type_text`/`press`/`scroll`/`back`/`forward`, settle, `changed:` 요약, 에러 코드([error.rs](../crates/mb-agent/src/error.rs)), 문서 세대별 ID 검증, 리스너 기반 clickable. 정책 게이트 [policy.rs](../crates/mb-runtime/src/state/policy.rs)(`Auto`/`Deny`, allow-list, 거절 기억) | POST 폼, 컨트롤 인라인화, password 마스킹, checkbox/radio 토글·`<label>`, Tab·Escape, 타이머 마감 API, 대화상자 shim, console 버퍼, 가상 시계·시드 난수 연결, **인라인 `on*` 핸들러**, **hover/포커스 경로 버그 수정**. 보류: ←→/Home/End/Delete(캐럿 모델), `<select>` 고르기, `new Date()`/`performance.now` | L3 12개 (fixture 서버 POST 회원가입·303 리다이렉트, Deny/거절 기억, 비밀번호 넘겨받기, allow-list, **리다이렉트 hop 게이트·307 body**, settle, 대화상자, 스크롤, stale, Tab, 결정성) |
-| **G2** MCP | `mb-mcp` (stdio, headless), tools·에러 코드, `prompts.rs`(서버 instructions·tool 설명·에러 힌트), `repeat_count`, 추천 skill 예시 | — | **Claude Code 가 이 브라우저로 로컬 페이지를 조작** ← 첫 데모. L4 e2e |
+| **G2** MCP ✅ | [`crates/mb-mcp`](../crates/mb-mcp): `cli.rs`(옵션), `prompts.rs`, `worker.rs`(브라우저 스레드·`Job` 채널·`repeat_count`·패닉 시 재생성), `server.rs`(rmcp tool 10개, 관찰=텍스트 2개 / 에러=JSON+관찰 / 스크린샷=PNG image). mb-agent 에 `screenshot`·`wait_for`·`to_blocks`·`system_fonts` 추가. 추천 skill [`examples/claude-skill/mini-browser-testing`](../examples/claude-skill/mini-browser-testing/SKILL.md), 데모 페이지 [`examples/agent-demo`](../examples/agent-demo) | `--window`(G3), `--approve ask`(G4), `--log`(G5) 는 아직 — 넘기면 명확한 에러 | L4 e2e 4개(실제 바이너리 + JSON-RPC: tools/list, navigate→click→back, 에러·repeat_count, PNG), CLI·worker 단위 테스트. **Claude Code 실연결 데모는 사용자 등록 후 확인 필요** (중첩 `claude -p` 는 이 환경에서 401) |
 | **G3** 관전 UI | `mb-mcp --window`: ID 배지 오버레이·에이전트 패널·액션 타임라인. `mb-shell --mcp-http` (토큰·Host·Origin 검사) | `mb-shell` lib 화 | 창에서 에이전트가 누르는 걸 실시간으로 봄 |
 | **G4** 안전장치 | `policy.rs` 게이트 + 승인 카드 + 넘겨받기(`handoff_required`), elicitation, `--allow-origin`, 거절 기억(같은 대상 즉시 거절) | — | POST 제출 직전 멈춤 → 승인 후 진행. L5 |
 | **G5** 기록·재생 | 세션 로그(JSONL, redact, role+name 함께 기록), `mb-replay`(LLM 없는 결정적 재생 + 회귀 지점 보고), 단계별 재생 뷰, `mb-eval`(N회 실행 성공률 집계, 안전 지표 포함, `prompts.rs` 해시 기록) | — | 한 번 탐색한 경로가 회귀 테스트가 됨. 프롬프트 변경을 숫자로 비교. L6·L7 |
@@ -591,6 +595,9 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-10 | 연결 = MCP 서버 (rmcp, stdio 먼저) | 앱에 API 키 불필요, Claude Code 를 에이전트로 재사용. 앱 내장 LLM 루프는 하지 않음 |
 | 2026-11-11 | G0: 관찰은 layout 트리에서 rect 를 직접 수집, `LinkTarget` 미사용 | 모든 노드가 LayoutBox 를 가져서 별도 인라인 수집 불필요 (검토 때 오판 정정) |
 | 2026-11-11 | G0: `text:` 에 링크 텍스트 포함, 폼 크롬 제외, 이름 없는 컨트롤은 `field=` | 링크를 빼면 문장이 끊김 ("or read the ."). 라벨·버튼은 요소 목록과 중복. 이름 없는 `select` 는 `name=""` 만으론 용도를 알 수 없음 |
+| 2026-11-14 | G2: 관찰 tool 결과 = text content 2개(browser / page), 에러 = `isError` + JSON 1개 (+관찰 2개) | 신뢰 경계를 MCP 응답 구조에서도 유지. 에러는 기계가 읽을 JSON, 관찰은 사람이 읽는 텍스트 |
+| 2026-11-14 | G2: mb-mcp 는 시스템 폰트를 켬, 테스트용 `AgentBrowser` 기본은 끔 | 실제 세션은 진짜 텍스트 폭·읽을 수 있는 스크린샷이 필요, 골든·결정성 테스트는 머신 독립이어야 함 |
+| 2026-11-14 | G2: 에러 힌트는 mb-agent, tool 설명은 mb-mcp `prompts.rs` | 힌트는 MCP 밖 운전자도 씀 |
 | 2026-11-12 | 리다이렉트는 hop 마다 게이트, 거절 hop 은 요청하지 않음 | ureq 자동 리다이렉트로는 게이트가 첫 URL 만 봄 → allow-list·승인 우회, 307 POST body 유출 |
 | 2026-11-12 | G1: 엔진 기본 승인 모드 = `Deny` | 아무도 설정 안 한 에이전트는 안전한 쪽. 사람 입력엔 영향 없음 |
 | 2026-11-12 | G1: `stale_element` 를 "현재 문서 관찰에서 내준 ID 집합"으로 판정 | NodeId 가 문서마다 재사용됨 — 세대 카운터만으론 "새 페이지를 본 뒤 옛 ID 사용"을 못 잡음 |
