@@ -11,6 +11,7 @@ mb-mcp — mini-browser as an MCP server (stdio, or HTTP with --http)
 
 USAGE:
     mb-mcp [OPTIONS]
+    mb-mcp replay FILE [--secret NAME=VALUE]...
 
 OPTIONS:
     --viewport WxH          Page viewport in CSS px            [default: 1280x800]
@@ -32,11 +33,24 @@ OPTIONS:
                             Needs `Authorization: Bearer TOKEN`; the token is
                             random per launch unless MB_MCP_TOKEN is set
     --port N                Port for --http (0 = any free)     [default: 7333]
+    --log PATH              Write a session log (JSONL): one line per tool
+                            call, for `mb-mcp replay`. Typed text is kept
+                            except in password fields
     --preview PATH          Render one observation-window frame (after
                             --start-url) to a PNG and exit — no window, no MCP
     --preview-click ID      Click this element before --preview (repeatable)
     --preview-scale N       Device pixel ratio for --preview, e.g. 2 for Retina
     -h, --help              Print this help (to stderr)
+
+REPLAY:
+    mb-mcp replay FILE      Re-run a session log without an LLM (headless,
+                            virtual clock) and report the first step whose
+                            result differs. Exit 0 = same, 1 = differs,
+                            2 = bad log/arguments, 3 = needs the person
+    --secret NAME=VALUE     Value the person typed into the field with
+                            accessible name NAME (password handoffs)
+    --ignore-text           Compare elements only, not the page text (for
+                            pages that show clocks or random values)
 
 With stdio, stdout carries the MCP protocol only; logs always go to stderr.
 ";
@@ -59,11 +73,52 @@ pub struct Options {
     pub http_port: Option<u16>,
     /// Filled in by `main` once the HTTP listener is bound.
     pub attach: Option<crate::http::Attach>,
+    /// `--log PATH`: session log for `mb-mcp replay` (G5a).
+    pub log: Option<std::path::PathBuf>,
+}
+
+/// `mb-mcp replay FILE ...`
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplayOptions {
+    pub file: std::path::PathBuf,
+    /// (accessible name, value) for fields the person filled in.
+    pub secrets: Vec<(String, String)>,
+    /// Don't compare page text (pages that show clocks, random ids…).
+    pub ignore_text: bool,
 }
 
 pub enum Parsed {
     Run(Options),
+    Replay(ReplayOptions),
     Help,
+}
+
+fn parse_replay(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
+    let mut file = None;
+    let mut secrets = Vec::new();
+    let mut ignore_text = false;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(Parsed::Help),
+            "--ignore-text" => ignore_text = true,
+            "--secret" => {
+                let raw = args.next().ok_or("--secret needs NAME=VALUE")?;
+                let (name, value) = raw.split_once('=').ok_or("--secret expects NAME=VALUE")?;
+                secrets.push((name.to_string(), value.to_string()));
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown replay option {other:?} (see --help)"));
+            }
+            path if file.is_none() => file = Some(std::path::PathBuf::from(path)),
+            extra => return Err(format!("unexpected argument {extra:?}")),
+        }
+    }
+    let file = file.ok_or("replay needs a session log FILE")?;
+    Ok(Parsed::Replay(ReplayOptions {
+        file,
+        secrets,
+        ignore_text,
+    }))
 }
 
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> {
@@ -76,7 +131,12 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut preview_scale = 1.0_f32;
     let mut http = false;
     let mut port: Option<u16> = None;
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
+    if args.peek().is_some_and(|a| a == "replay") {
+        args.next();
+        return parse_replay(args);
+    }
+    let mut log = None;
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
         match arg.as_str() {
@@ -126,6 +186,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
                 agent.settle_timeout = Duration::from_millis(ms);
             }
             "--window" => window = true,
+            "--log" => log = Some(std::path::PathBuf::from(value("--log")?)),
             "--http" => http = true,
             "--port" => {
                 let raw = value("--port")?;
@@ -170,6 +231,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         preview_scale,
         http_port: http.then(|| port.unwrap_or(DEFAULT_PORT)),
         attach: None,
+        log,
     }))
 }
 
@@ -196,7 +258,7 @@ mod tests {
     fn run(args: &[&str]) -> Options {
         match parse(args.iter().map(|s| s.to_string())).unwrap() {
             Parsed::Run(options) => options,
-            Parsed::Help => panic!("unexpected help"),
+            Parsed::Help | Parsed::Replay(_) => panic!("expected a run"),
         }
     }
 
@@ -265,6 +327,24 @@ mod tests {
         assert!(both.window && both.http_port.is_some());
         assert!(parse(["--port", "9000"].map(String::from)).is_err());
         assert!(parse(["--http", "--port", "99999"].map(String::from)).is_err());
+    }
+
+    #[test]
+    fn replay_is_a_subcommand_with_secrets() {
+        let Ok(Parsed::Replay(replay)) =
+            parse(["replay", "run.jsonl", "--secret", "Password=a=b"].map(String::from))
+        else {
+            panic!("expected replay")
+        };
+        assert_eq!(replay.file, std::path::PathBuf::from("run.jsonl"));
+        assert_eq!(replay.secrets, vec![("Password".into(), "a=b".into())]);
+        assert!(!replay.ignore_text);
+        assert!(parse(["replay"].map(String::from)).is_err());
+        assert!(parse(["replay", "a", "b"].map(String::from)).is_err());
+        assert_eq!(
+            run(&["--log", "out.jsonl"]).log,
+            Some(std::path::PathBuf::from("out.jsonl"))
+        );
     }
 
     #[test]

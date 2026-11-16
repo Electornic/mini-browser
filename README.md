@@ -116,6 +116,21 @@ claude mcp add mini-browser -- "$(pwd)/target/release/mb-mcp" --window --approve
 
 ![붙기 모드 패널](docs/images/g3b-attach-panel.png)
 
+### 기록·재생
+
+`--log` 를 붙이면 tool 호출마다 결과를 JSONL 로 남기고, `mb-mcp replay` 가 LLM 없이 그대로 다시 돌려 **처음 달라진 단계**를 알려 준다. 에이전트가 한 번 성공한 경로가 회귀 테스트가 된다:
+
+```sh
+claude mcp add mini-browser -- "$(pwd)/target/release/mb-mcp" --log /tmp/signup.jsonl
+# … 에이전트에게 회원가입 테스트를 시킨 뒤 …
+./target/release/mb-mcp replay /tmp/signup.jsonl --secret "Password=test-password"
+# ✓ 1 navigate
+# ✗ 4 click button "Sign up": result differs from the recording (regression point)
+#   - link "Welcome"
+```
+
+exit 0 = 전부 일치, 1 = 달라진 단계 있음, 2 = 로그·인자 오류, 3 = 사람 입력 없이는 재현 불가 (비밀번호는 `--secret 이름=값`). 비교는 요소 목록 + 보이는 텍스트 — 시계처럼 저절로 바뀌는 문구가 있으면 `--ignore-text`.
+
 데모 페이지: `cd examples/agent-demo && python3 -m http.server 8765` 후 "http://127.0.0.1:8765/ 에서 'buy milk' 할 일을 추가하고 완료 처리해줘". 추천 skill: [examples/claude-skill/mini-browser-testing](examples/claude-skill/mini-browser-testing/SKILL.md). 설계: [docs/concept.md](docs/concept.md).
 
 ## What Works

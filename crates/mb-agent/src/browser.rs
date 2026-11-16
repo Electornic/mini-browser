@@ -231,7 +231,7 @@ impl AgentBrowser {
     // Did the document change since the agent's last result, without the
     // agent? (Only the person at the window can do that: page scripts have
     // no navigation API, and agent navigations update `last_reported`.)
-    fn changed_by_person(&self) -> bool {
+    pub fn changed_by_person(&self) -> bool {
         self.last_reported.as_ref().is_some_and(|last| {
             *last
                 != (
@@ -287,7 +287,9 @@ impl AgentBrowser {
         )
     }
 
-    fn full_snapshot(&mut self) -> Observation {
+    /// The whole document as an observation, without issuing ids or
+    /// draining console / dialog records (for diffs and session logs).
+    pub fn full_snapshot(&mut self) -> Observation {
         self.observe_raw(&ObserveOptions {
             scope: Scope::Full,
             max_elements: usize::MAX,
@@ -807,6 +809,35 @@ impl AgentBrowser {
         });
         observation.changed = Some(changes);
         observation
+    }
+
+    /// Replay only (`mb-mcp replay`): do what the person did during a
+    /// recorded password handoff — click field `id` and type `text` as
+    /// *human* input (`from_agent = false`), so the policy and the
+    /// password rule see exactly what they saw when it was recorded.
+    pub fn fill_as_person(&mut self, id: NodeId, text: &str) -> Result<(), AgentError> {
+        let rect = self.target_rect(id)?;
+        self.scroll_into_view(rect);
+        let rect = self.target_rect(id)?;
+        let point = self.click_point(rect);
+        let press = WindowInput {
+            mouse_position: Some(point),
+            left_mouse_pressed: true,
+            left_mouse_held: true,
+            ..WindowInput::default()
+        };
+        self.human_frame(&press);
+        self.human_frame(&WindowInput {
+            mouse_position: Some(point),
+            ..WindowInput::default()
+        });
+        self.human_frame(&WindowInput {
+            typed: text.to_string(),
+            mouse_position: Some(point),
+            ..WindowInput::default()
+        });
+        self.settle();
+        Ok(())
     }
 
     fn click_raw(&mut self, id: NodeId) -> Result<(), AgentError> {

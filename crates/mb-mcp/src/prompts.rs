@@ -108,3 +108,28 @@ Wait until some text appears on the page, or an element is rendered, then return
 Use it for content that appears after a delay (loading spinners, toasts), or after an observation with `settled: false`.
 - Give `text` (substring of page text or of an element name/value) or `id` (e.g. \"e30\"), not both.
 - `timeout_ms` defaults to 5000 (max 45000). On timeout returns `wait_timeout` with the current observation.";
+
+/// FNV-1a 64 over every text above, for session logs: two runs with the
+/// same fingerprint gave the model the same words (G5c compares them).
+pub fn fingerprint() -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for text in [
+        SERVER_INSTRUCTIONS,
+        NAVIGATE,
+        OBSERVE,
+        CLICK,
+        TYPE,
+        PRESS,
+        SCROLL,
+        BACK,
+        FORWARD,
+        SCREENSHOT,
+        WAIT_FOR,
+    ] {
+        for byte in text.bytes().chain([0]) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    format!("{hash:016x}")
+}

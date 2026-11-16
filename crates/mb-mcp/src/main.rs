@@ -18,7 +18,9 @@ mod cli;
 mod http;
 mod overlay;
 mod prompts;
+mod replay;
 mod server;
+mod session_log;
 mod window_mode;
 mod worker;
 
@@ -30,6 +32,7 @@ use rmcp::ServiceExt;
 fn main() -> ExitCode {
     let mut options = match cli::parse(std::env::args().skip(1)) {
         Ok(cli::Parsed::Run(options)) => options,
+        Ok(cli::Parsed::Replay(replay)) => return replay::run(&replay),
         Ok(cli::Parsed::Help) => {
             eprint!("{}", cli::USAGE);
             return ExitCode::SUCCESS;

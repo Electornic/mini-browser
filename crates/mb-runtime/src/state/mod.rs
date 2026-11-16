@@ -697,8 +697,16 @@ impl BrowserState {
                 // Origin + path only: a GET form puts field values (maybe a
                 // password) in the query string.
                 let path = target.path.split(['?', '#']).next().unwrap_or("");
+                let what = match decision {
+                    policy::PolicyDecision::Denied { remembered: true } => {
+                        "refused (refused before)"
+                    }
+                    policy::PolicyDecision::Denied { .. } => "refused",
+                    policy::PolicyDecision::Blocked => "blocked (not an allowed origin)",
+                    _ => "held for the person's answer",
+                };
                 eprintln!(
-                    "[policy] {decision:?}: {method} {}{path}",
+                    "[policy] agent action {what}: {method} {}{path}",
                     policy::origin_of(target)
                 );
             }

@@ -54,6 +54,8 @@
 │   - worker           Job 처리, repeat_count, 패닉 시 재생성, 창 모드의 park(승인·넘겨받기 대기)/answer
 │   - server           #[tool_router] tool 10개 → worker::Request, 결과 → CallToolResult
 │   - window_mode      --window: 메인 스레드 winit 루프 + 프레임마다 Job 처리, --preview PNG
+│   - session_log      --log: 세션 로그(JSONL) 기록 형식 — target·결과 요소 목록·redact
+│   - replay           mb-mcp replay FILE: worker::execute 로 결정적 재생 + 회귀 지점 diff
 │   - overlay          ID 배지·대상 테두리·에이전트 패널 (DisplayCommand 순수 함수)
 │
 └── crates/mb-shell    (lib + [[bin]] mb-shell)  anyhow, softbuffer, winit
@@ -76,6 +78,7 @@ cargo test --workspace 2>&1 | grep "test result"
 # mb-mcp: 실제 바이너리 e2e (JSON-RPC over stdio / HTTP) + release 빌드
 cargo test -p mb-mcp --test e2e
 cargo test -p mb-mcp --test http
+cargo test -p mb-mcp --test replay   # --log 기록 → mb-mcp replay
 cargo build --release -p mb-mcp      # → target/release/mb-mcp (claude mcp add 대상)
 # 관전 창 한 프레임을 PNG 로 (GUI 없이 오버레이 확인)
 ./target/debug/mb-mcp --start-url http://127.0.0.1:8765/ --preview-click e31 --preview /tmp/frame.png
@@ -93,7 +96,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 689 (workspace 합계, 2026-11-17 G3b 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 699 (workspace 합계, 2026-11-17 G5a 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -201,7 +204,8 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - **에이전트 전용 DOM 조작 API 금지**: 에이전트 행동은 합성 `WindowInput` 으로만. 편의를 위해 DOM 을 직접 바꾸는 단축로를 만들지 않는다.
 - **`WindowInput::from_agent` 는 mb-agent 만 켠다**: 셸(사람 입력)은 항상 false. 정책 게이트는 이 플래그로 판정 대상을 가른다.
 - **trusted 블록의 `note:` 는 브라우저만 쓴다**: `Observation::notes` 에는 우리가 만든 문장만. 페이지 문자열(이름·텍스트·URL 일부라도)을 넣으면 위조 방지가 깨진다.
-- **비밀번호 값은 어디에도 남기지 않는다**: 관찰(길이만)·로그(`<redacted>`)·화면(마스킹). 에이전트가 입력한 텍스트도 로그에 남기지 않는다(`worker::Request` 의 Debug 가 가림), URL 로그는 쿼리 제외.
+- **비밀번호 값은 어디에도 남기지 않는다**: 관찰(길이만)·로그(`<redacted>`)·화면(마스킹). 에이전트가 입력한 텍스트도 stderr 로그에 남기지 않는다(`worker::Request` 의 Debug 가 가림), URL 로그는 쿼리 제외. 예외는 사용자가 켜는 `--log` 세션 로그뿐 — 재생에 필요해 텍스트를 남기되 비밀번호 칸 입력은 `<redacted>`, 값은 재생 때 `--secret` 으로만.
+- **재생은 MCP 와 같은 경로**: `replay` 는 `worker::execute` 를 그대로 쓴다. 재생 전용 단축 행동을 만들지 말 것 (사람 행동 재현 `fill_as_person` 만 예외 — 사람 경로 입력).
 - **ID 는 관찰만 발급한다**: `AgentBrowser` 의 발급 집합(`issued`)에 넣는 건 관찰을 돌려줄 때뿐. 다른 경로(wait_for 등)가 ID 를 유효하게 만들면 stale 가드가 무너진다.
 - **HTTP 는 127.0.0.1 + 토큰 + Origin 거절**: `--http` 의 모든 요청은 `http::gate`(경로·Origin·Bearer)와 rmcp `allowed_hosts`(Host)를 지난다. 외부 인터페이스 바인딩·토큰 없는 경로·Origin 허용을 만들지 말 것. 토큰 원문은 실행 시 stderr 한 번과 클립보드에만 — 화면·`Debug`·타임라인에는 가린 형태로.
 - **`panic = "abort"` 로 바꾸지 말 것**: 엔진 패닉 복구가 unwind 에 의존한다.

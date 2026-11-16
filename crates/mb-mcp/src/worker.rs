@@ -16,6 +16,7 @@ use mb_runtime::dom::NodeId;
 use tokio::sync::oneshot;
 
 use crate::cli::Options;
+use crate::session_log::{SessionLog, Target, resolved_by, result_record, target_of};
 
 // Debug is hand-written below: `Type.text` may be a (test) password, and
 // requests end up in logs and in the repeat-tracker key.
@@ -187,18 +188,33 @@ pub struct Worker {
     parked: Option<Parked>,
     // Window mode: a `wait_for` the frames are checking (it must not block
     // the window), and jobs that arrived meanwhile, in order.
-    page_wait: Option<(Job, PendingWait)>,
+    page_wait: Option<(Job, PendingWait, StepContext)>,
     deferred: VecDeque<Job>,
     // The person answered while no call was attached: the reply waits for
     // the agent's next identical call.
     unclaimed: Option<(Request, Reply)>,
     // How long a call stays parked before it returns `still_waiting`.
     park_reply_after: Duration,
+    // `--log`: one line per finished call (G5a).
+    log: Option<SessionLog>,
+}
+
+/// What a session-log line needs from before the action ran.
+#[derive(Debug, Clone, Default)]
+struct StepContext {
+    target: Option<Target>,
+    person_moved: bool,
 }
 
 impl Worker {
     pub fn new(options: Options) -> Self {
         let browser = new_browser(&options);
+        let log = options.log.as_ref().map(|path| {
+            SessionLog::create(path, &options).unwrap_or_else(|error| {
+                eprintln!("mb-mcp: --log {}: {error}", path.display());
+                std::process::exit(2);
+            })
+        });
         Self {
             options,
             browser,
@@ -209,6 +225,7 @@ impl Worker {
             deferred: VecDeque::new(),
             unclaimed: None,
             park_reply_after: PARK_REPLY_AFTER,
+            log,
         }
     }
 
@@ -227,8 +244,11 @@ impl Worker {
     /// Headless: run one request and reply. Nothing ever waits for a
     /// person here (`--approve ask` requires the window).
     pub fn process(&mut self, request: &Request) -> Reply {
+        let context = self.begin_step(request);
         let result = self.execute_guarded(request, |browser| execute(browser, request));
-        self.conclude(request, result, None)
+        let reply = self.conclude(request, result, None);
+        self.log_step(request, &context, None, &reply);
+        reply
     }
 
     /// Window mode: like `process`, but an action that needs the person
@@ -256,15 +276,17 @@ impl Worker {
             && self.parked.is_none()
         {
             let timeout = Duration::from_millis(*timeout_ms);
+            let context = self.begin_step(&job.request);
             let begun = wait_condition(text, id).and_then(|condition| {
                 self.browser
                     .begin_wait(condition, timeout)
                     .map_err(ToolError::from)
             });
             match begun {
-                Ok(wait) => self.page_wait = Some((job, wait)),
+                Ok(wait) => self.page_wait = Some((job, wait, context)),
                 Err(error) => {
                     let reply = self.conclude(&job.request, Err(error), None);
+                    self.log_step(&job.request, &context, None, &reply);
                     let _ = job.reply.send(reply);
                 }
             }
@@ -283,6 +305,7 @@ impl Worker {
             let _ = job.reply.send(reply);
             return;
         }
+        let context = self.begin_step(&job.request);
         let result = self.execute_guarded(&job.request, |browser| execute(browser, &job.request));
         let waiting = match &result {
             Err(ToolError::Agent(AgentError::ApprovalPending { action })) => {
@@ -308,10 +331,12 @@ impl Worker {
                     reply: Some(job.reply),
                     waiting,
                     since: std::time::Instant::now(),
+                    context,
                 });
             }
             None => {
                 let reply = self.conclude(&job.request, result, None);
+                self.log_step(&job.request, &context, None, &reply);
                 let _ = job.reply.send(reply);
             }
         }
@@ -369,6 +394,7 @@ impl Worker {
             (Waiting::Approval { .. }, _) => (Err(ToolError::HandoffDeclined), "declined"),
         };
         let reply = self.conclude(&parked.request, result, Some(outcome));
+        self.log_step(&parked.request, &parked.context, Some(outcome), &reply);
         match parked.reply {
             Some(sender) if !sender.is_closed() => {
                 let _ = sender.send(reply);
@@ -382,23 +408,21 @@ impl Worker {
     /// finish the pending `wait_for` if its condition holds or time is up.
     pub fn tick(&mut self) {
         self.release_long_parks();
-        let Some((job, wait)) = self.page_wait.take() else {
+        let Some((job, wait, context)) = self.page_wait.take() else {
             return;
         };
-        match self.execute_guarded(&job.request, |b| Ok(b.poll_wait(&wait))) {
-            Ok(None) => self.page_wait = Some((job, wait)),
-            Ok(Some(result)) => {
-                let result = result.map(observation_reply).map_err(ToolError::from);
-                let reply = self.conclude(&job.request, result, None);
-                let _ = job.reply.send(reply);
-                self.run_deferred();
+        let result = match self.execute_guarded(&job.request, |b| Ok(b.poll_wait(&wait))) {
+            Ok(None) => {
+                self.page_wait = Some((job, wait, context));
+                return;
             }
-            Err(error) => {
-                let reply = self.conclude(&job.request, Err(error), None);
-                let _ = job.reply.send(reply);
-                self.run_deferred();
-            }
-        }
+            Ok(Some(result)) => result.map(observation_reply).map_err(ToolError::from),
+            Err(error) => Err(error),
+        };
+        let reply = self.conclude(&job.request, result, None);
+        self.log_step(&job.request, &context, None, &reply);
+        let _ = job.reply.send(reply);
+        self.run_deferred();
     }
 
     /// When the attached parked call is due its `still_waiting` reply (the
@@ -414,7 +438,48 @@ impl Worker {
     pub fn page_wait(&self) -> Option<(&WaitCondition, Duration)> {
         self.page_wait
             .as_ref()
-            .map(|(_, wait)| (wait.condition(), wait.remaining()))
+            .map(|(_, wait, _)| (wait.condition(), wait.remaining()))
+    }
+
+    // Before an action: what the session log needs to know about it.
+    fn begin_step(&mut self, request: &Request) -> StepContext {
+        if self.log.is_none() {
+            return StepContext::default();
+        }
+        let id = match request {
+            Request::Click { id } | Request::Type { id, .. } => Some(id),
+            Request::WaitFor { id: Some(id), .. } => Some(id),
+            _ => None,
+        };
+        StepContext {
+            target: id
+                .and_then(|id| parse_id(id).ok())
+                .and_then(|id| target_of(&mut self.browser, id)),
+            person_moved: self.browser.changed_by_person(),
+        }
+    }
+
+    // After a call's final result (not `still_waiting` or a busy reply).
+    fn log_step(
+        &mut self,
+        request: &Request,
+        context: &StepContext,
+        outcome: Option<&str>,
+        reply: &Reply,
+    ) {
+        if self.log.is_none() {
+            return;
+        }
+        let result = result_record(&mut self.browser, reply);
+        if let Some(log) = &mut self.log {
+            log.step(
+                request,
+                context.target.as_ref(),
+                context.person_moved,
+                outcome.and_then(resolved_by),
+                result,
+            );
+        }
     }
 
     // A parked call answers `still_waiting` after `park_reply_after` (or
@@ -433,7 +498,7 @@ impl Worker {
         if self
             .page_wait
             .as_ref()
-            .is_some_and(|(job, _)| job.reply.is_closed())
+            .is_some_and(|(job, _, _)| job.reply.is_closed())
         {
             self.page_wait = None;
         }
@@ -453,7 +518,7 @@ impl Worker {
     /// The window closed: everything still waiting gets `browser_closed`.
     pub fn close(&mut self) {
         let parked = self.parked.take().and_then(|p| p.reply);
-        let waiting = self.page_wait.take().map(|(job, _)| job.reply);
+        let waiting = self.page_wait.take().map(|(job, _, _)| job.reply);
         for reply in parked
             .into_iter()
             .chain(waiting)
@@ -553,6 +618,7 @@ struct Parked {
     reply: Option<oneshot::Sender<Reply>>,
     waiting: Waiting,
     since: std::time::Instant,
+    context: StepContext,
 }
 
 impl Request {
@@ -627,7 +693,7 @@ fn new_browser(options: &Options) -> AgentBrowser {
 
 /// Parse a client error before it reaches the browser.
 #[derive(Debug)]
-enum ToolError {
+pub(crate) enum ToolError {
     Agent(AgentError),
     InvalidId(String),
     InvalidArguments(&'static str),
@@ -736,7 +802,7 @@ impl ToolError {
     }
 }
 
-fn error_reply(error: &ToolError, repeat_count: u32) -> Reply {
+pub(crate) fn error_reply(error: &ToolError, repeat_count: u32) -> Reply {
     let hint = if repeat_count >= REPEAT_LIMIT && !error.is_waiting() {
         STOP_REPEATING.to_string()
     } else {
@@ -773,12 +839,12 @@ fn parse_id(raw: &str) -> Result<NodeId, ToolError> {
         .map_err(|_| ToolError::InvalidId(raw.to_string()))
 }
 
-fn observation_reply(observation: Observation) -> Reply {
+pub(crate) fn observation_reply(observation: Observation) -> Reply {
     let (browser, page) = observation.to_blocks();
     Reply::Observation { browser, page }
 }
 
-fn execute(browser: &mut AgentBrowser, request: &Request) -> Result<Reply, ToolError> {
+pub(crate) fn execute(browser: &mut AgentBrowser, request: &Request) -> Result<Reply, ToolError> {
     let observation = match request {
         Request::Navigate { url } => browser.navigate(url)?,
         Request::Observe { full, cursor } => browser.observe(&ObserveOptions {
@@ -920,6 +986,14 @@ mod tests {
     }
 
     fn worker_on(base: &str, approve: mb_agent::ApproveMode) -> (Worker, String, String) {
+        worker_logging(base, approve, None)
+    }
+
+    fn worker_logging(
+        base: &str,
+        approve: mb_agent::ApproveMode,
+        log: Option<std::path::PathBuf>,
+    ) -> (Worker, String, String) {
         let mut agent = mb_agent::AgentConfig {
             viewport_width: 800,
             viewport_height: 600,
@@ -936,6 +1010,7 @@ mod tests {
             preview_scale: 1.0,
             http_port: None,
             attach: None,
+            log,
         });
         let Reply::Observation { page, .. } = worker.process(&Request::Navigate {
             url: format!("{base}/"),
@@ -1190,6 +1265,7 @@ mod tests {
             preview_scale: 1.0,
             http_port: None,
             attach: None,
+            log: None,
         });
         // The person follows the link before any agent call.
         let link = worker
@@ -1224,6 +1300,59 @@ mod tests {
             !browser.contains("note:"),
             "first result has nothing to compare: {browser}"
         );
+    }
+
+    #[test]
+    fn a_window_session_with_the_person_replays_with_the_secret() {
+        let base = serve_page();
+        let path = std::env::temp_dir().join(format!("mb-person-{}.jsonl", std::process::id()));
+        let (mut worker, pw, link) =
+            worker_logging(&base, mb_agent::ApproveMode::Ask, Some(path.clone()));
+        // The person types the password the agent handed over…
+        let mut typed = submit(
+            &mut worker,
+            Request::Type {
+                id: pw.clone(),
+                text: "x".into(),
+                clear: false,
+                submit: false,
+            },
+        );
+        let at = person_click(&mut worker, &pw);
+        worker.browser().human_frame(&WindowInput {
+            typed: "hunter2".into(),
+            mouse_position: Some(at),
+            ..WindowInput::default()
+        });
+        worker.answer(Answer::HandoffDone);
+        assert!(matches!(typed.try_recv(), Ok(Reply::Observation { .. })));
+        // …and approves the move to the other origin.
+        let mut moved = submit(&mut worker, Request::Click { id: link });
+        worker.answer(Answer::Approve);
+        assert!(matches!(moved.try_recv(), Ok(Reply::Observation { .. })));
+        drop(worker);
+
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(log.contains(r#""resolved_by":"person_filled""#), "{log}");
+        assert!(log.contains(r#""resolved_by":"person_approved""#), "{log}");
+        assert!(log.contains("<7 chars>"), "{log}");
+        assert!(!log.contains("hunter2"), "no password in the log");
+
+        let mut options = crate::cli::ReplayOptions {
+            file: path.clone(),
+            secrets: Vec::new(),
+            ignore_text: false,
+        };
+        let stop = crate::replay::replay(&options).unwrap_err();
+        assert_eq!(stop.code, 3, "{}", stop.message);
+        assert!(
+            stop.message.contains("--secret \"Password="),
+            "{}",
+            stop.message
+        );
+        options.secrets.push(("Password".into(), "hunter2".into()));
+        assert_eq!(crate::replay::replay(&options).unwrap(), 3);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
