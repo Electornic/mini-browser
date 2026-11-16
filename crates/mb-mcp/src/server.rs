@@ -84,12 +84,14 @@ pub struct WaitForParams {
     pub text: Option<String>,
     #[schemars(description = "Or: wait until this element id is rendered")]
     pub id: Option<String>,
-    #[schemars(description = "Give up after this many ms (default 5000, max 60000)")]
+    #[schemars(description = "Give up after this many ms (default 5000, max 45000)")]
     pub timeout_ms: Option<u64>,
 }
 
 const DEFAULT_WAIT_MS: u64 = 5_000;
-const MAX_WAIT_MS: u64 = 60_000;
+// Below the ~60 s at which HTTP clients give up on a tool call, so the
+// server's own `wait_timeout` (with the observation) arrives first.
+const MAX_WAIT_MS: u64 = 45_000;
 
 #[tool_router]
 impl BrowserServer {

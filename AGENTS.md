@@ -46,9 +46,10 @@
 │   - error            AgentError (code / message / hint)
 │   - text             페이지 문자열 정규화·따옴표 (위조 방지)
 │
-├── crates/mb-mcp      (binary [[bin]] mb-mcp)  rmcp 3.x, tokio, image(png), base64
-│   - main             tokio 스레드 = rmcp stdio 서버, 메인 스레드 = 브라우저
-│   - cli              --viewport / --start-url / --allow-origin / --approve auto|deny|ask / --clock / --seed / --window / --preview
+├── crates/mb-mcp      (binary [[bin]] mb-mcp)  rmcp 3.x, tokio, hyper, image(png), base64, arboard
+│   - main             tokio 스레드 = rmcp stdio 또는 HTTP 서버, 메인 스레드 = 브라우저
+│   - cli              --viewport / --start-url / --allow-origin / --approve auto|deny|ask / --clock / --seed / --window / --http --port / --preview
+│   - http             --http: 127.0.0.1 바인딩, Bearer 토큰·Origin·경로 게이트 → rmcp StreamableHttpService
 │   - prompts          서버 instructions + tool 설명 (LLM 이 읽는 텍스트, 영어)
 │   - worker           Job 처리, repeat_count, 패닉 시 재생성, 창 모드의 park(승인·넘겨받기 대기)/answer
 │   - server           #[tool_router] tool 10개 → worker::Request, 결과 → CallToolResult
@@ -72,8 +73,9 @@ cargo build --workspace 2>&1 | tail -10
 # 테스트
 cargo test --workspace 2>&1 | grep "test result"
 
-# mb-mcp: 실제 바이너리 e2e (JSON-RPC over stdio) + release 빌드
+# mb-mcp: 실제 바이너리 e2e (JSON-RPC over stdio / HTTP) + release 빌드
 cargo test -p mb-mcp --test e2e
+cargo test -p mb-mcp --test http
 cargo build --release -p mb-mcp      # → target/release/mb-mcp (claude mcp add 대상)
 # 관전 창 한 프레임을 PNG 로 (GUI 없이 오버레이 확인)
 ./target/debug/mb-mcp --start-url http://127.0.0.1:8765/ --preview-click e31 --preview /tmp/frame.png
@@ -91,7 +93,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 673 (workspace 합계, 2026-11-14 G4 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 689 (workspace 합계, 2026-11-17 G3b 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -198,8 +200,10 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - **이동은 반드시 정책 게이트를 지난다**: 새 이동 경로(`location.href =`, `window.open`, meta refresh 등)를 추가할 때 `navigate` / `navigate_to_href` / `try_submit_form` 과 같은 `policy::check` 를 통과시킨다. 우회 경로를 만들지 말 것.
 - **에이전트 전용 DOM 조작 API 금지**: 에이전트 행동은 합성 `WindowInput` 으로만. 편의를 위해 DOM 을 직접 바꾸는 단축로를 만들지 않는다.
 - **`WindowInput::from_agent` 는 mb-agent 만 켠다**: 셸(사람 입력)은 항상 false. 정책 게이트는 이 플래그로 판정 대상을 가른다.
+- **trusted 블록의 `note:` 는 브라우저만 쓴다**: `Observation::notes` 에는 우리가 만든 문장만. 페이지 문자열(이름·텍스트·URL 일부라도)을 넣으면 위조 방지가 깨진다.
 - **비밀번호 값은 어디에도 남기지 않는다**: 관찰(길이만)·로그(`<redacted>`)·화면(마스킹). 에이전트가 입력한 텍스트도 로그에 남기지 않는다(`worker::Request` 의 Debug 가 가림), URL 로그는 쿼리 제외.
 - **ID 는 관찰만 발급한다**: `AgentBrowser` 의 발급 집합(`issued`)에 넣는 건 관찰을 돌려줄 때뿐. 다른 경로(wait_for 등)가 ID 를 유효하게 만들면 stale 가드가 무너진다.
+- **HTTP 는 127.0.0.1 + 토큰 + Origin 거절**: `--http` 의 모든 요청은 `http::gate`(경로·Origin·Bearer)와 rmcp `allowed_hosts`(Host)를 지난다. 외부 인터페이스 바인딩·토큰 없는 경로·Origin 허용을 만들지 말 것. 토큰 원문은 실행 시 stderr 한 번과 클립보드에만 — 화면·`Debug`·타임라인에는 가린 형태로.
 - **`panic = "abort"` 로 바꾸지 말 것**: 엔진 패닉 복구가 unwind 에 의존한다.
 - **브라우저는 결정적이어야 한다**: 관찰·행동·정책 출력에 `HashMap` 순회 순서, 벽시계, 비시드 난수가 새어 나가면 안 된다. 시간은 엔진 시계(`ClockSource`)만, 순서는 문서 순서로. 비결정성은 LLM 판단에만 허용 ([concept.md#결정성](docs/concept.md#결정성)).
 

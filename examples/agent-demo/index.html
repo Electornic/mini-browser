@@ -11,7 +11,7 @@
 <body>
   <h1>Todo demo</h1>
   <p>A tiny page for driving mini-browser from an agent. Static files only:
-     serve this folder with <code>python3 -m http.server 8765</code>.</p>
+     serve this folder with <code>python3 -m http.server</code> (any port).</p>
   <label for="new">New item</label>
   <input id="new" placeholder="What needs doing?">
   <button id="add">Add</button>
@@ -21,10 +21,15 @@
   </ul>
   <p id="summary"></p>
   <p><a href="about.html">About this demo</a> · <a href="signin.html">Sign in</a></p>
-  <p><a href="http://localhost:8765/about.html">About, via localhost</a>
+  <p><a id="other-origin" href="http://localhost:8765/about.html">About, via localhost</a>
      (same server, but a different origin: in <code>--approve ask</code> mode
      the person watching is asked first)</p>
   <script>
+    // Same server, other origin: whatever port this page was served on.
+    var port = location.host.split(':')[1];
+    document.getElementById('other-origin').setAttribute(
+      'href', 'http://localhost' + (port ? ':' + port : '') + '/about.html');
+
     function refresh() {
       var boxes = document.querySelectorAll('.item');
       var done = 0;

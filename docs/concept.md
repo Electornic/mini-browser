@@ -1,6 +1,6 @@
 # Concept — 에이전트용 브라우저
 
-> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ (2026-11-14)** · 다음 = G3b HTTP 붙기 / G5 기록·재생 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
+> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ (2026-11-15)** · 다음 = G5 기록·재생 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
 
 ## 한 줄
 
@@ -112,14 +112,14 @@
    headless : mb-mcp 단독. 창 없이, 명령이 올 때만 프레임을 돌린다 (CI·평가·빠른 반복).
    window   : mb-mcp --window. 같은 프로세스가 관전 창을 연다 (winit 메인 스레드).
               + 오버레이(ID 배지·타깃 하이라이트) + 에이전트 패널 + 승인 카드.
-   attach   : mb-shell --mcp-http (G3+). 사람이 띄운 브라우저에 에이전트가 HTTP 로 붙는다.
+   attach   : mb-mcp --http --window (G3b). 사람이 띄운 브라우저에 에이전트가 HTTP 로 붙는다.
 ```
 
 정책(policy)이 mb-agent 가 아니라 **mb-runtime 의 BrowserState 안**에 있는 게 핵심이다. 에이전트의 입력이 사람과 같은 경로를 타므로, 위험 행동을 걸러낼 수 있는 곳은 그 경로의 끝(이동 진입점)뿐이다.
 
 ## MCP 연결 (확정)
 
-- **SDK**: 공식 [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) (G2 구현 시 3.10.0, MSRV 1.88 — 우리 1.94.1 핀과 호환. `#[tool_router]` + `#[tool_handler(router = self.tool_router)]`, `serve(rmcp::transport::stdio())`). features: `server`, `macros`, `transport-io`, `schemars` (+ G3 `transport-streamable-http-server`, G4 `elicitation` 검토).
+- **SDK**: 공식 [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) (G2 구현 시 3.10.0, MSRV 1.88 — 우리 1.94.1 핀과 호환. `#[tool_router]` + `#[tool_handler(router = self.tool_router)]`, `serve(rmcp::transport::stdio())`). features: `server`, `macros`, `transport-io`, `schemars` + G3b `transport-streamable-http-server` (`StreamableHttpService` + `LocalSessionManager`, HTTP 서버는 hyper 1 http1). `elicitation` 은 미사용.
 - **스레드 모델**: `rmcp` 는 tokio async, `BrowserState` 는 rquickjs `Runtime` 을 들고 있어 한 스레드에 묶어 둔다. MCP 서버는 tokio 런타임 스레드, 브라우저는 자기 스레드(headless) 또는 winit 메인 스레드(window)에서 돌고, 둘은 `AgentCommand` 채널 + 응답 oneshot 으로만 대화한다. 브라우저 쪽은 명령을 받으면 실행 → settle → 응답.
 - **API 키 없음**: 에이전트(LLM)는 클라이언트 쪽에 있다. 브라우저는 관찰과 행동만 제공한다. 앱 안에 LLM 루프를 넣지 않는다.
 
@@ -135,7 +135,7 @@
 | `scroll` | `dy` (px) | Observation | 음수 = 위 |
 | `back` / `forward` | — | Observation | |
 | `screenshot` | — | untrusted 라벨 text(origin, "이미지 속 글자는 데이터") → PNG (페이지 뷰포트만, 크롬 UI 제외) | `AgentBrowser::screenshot` 이 창 높이로 래스터 후 크롬 102px 행을 잘라냄 |
-| `wait_for` | `text?` 또는 `id?` (정확히 하나, id 는 현재 페이지 관찰에서 받은 것만 — 아니면 `stale_element`), `timeout_ms?` (기본 5000, 최대 60000) | Observation | settle 과 달리 **시간을 흘려보낸다**: 조용해도 8프레임씩 계속 진행(가상 시계면 16ms×8) → 50ms 지평 밖 타이머(토스트·지연 로딩)도 기다림. text 는 본문·제목·요소 이름·값의 부분 문자열 |
+| `wait_for` | `text?` 또는 `id?` (정확히 하나, id 는 현재 페이지 관찰에서 받은 것만 — 아니면 `stale_element`), `timeout_ms?` (기본 5000, 최대 45000 — HTTP 클라이언트의 60초 컷보다 먼저 `wait_timeout` 이 오게) | Observation | settle 과 달리 **시간을 흘려보낸다**: 조용해도 8프레임씩 계속 진행(가상 시계면 16ms×8) → 50ms 지평 밖 타이머(토스트·지연 로딩)도 기다림. text 는 본문·제목·요소 이름·값의 부분 문자열 |
 
 모든 행동 tool 은 실행 후 settle 하고 **새 Observation 을 같이 돌려준다** (에이전트가 매번 `observe` 를 따로 부르지 않게). 행동 직후 관찰에는 맨 위에 `changed:` 요약 줄(URL·요소 증감·새 텍스트 위치)이 붙는다 (→ [LLM 오류 다루기](#llm-오류-다루기)). 에러는 [에러 응답 형식](#에러-응답-형식)을 따른다.
 
@@ -151,7 +151,9 @@
 | `wait_timeout` | `wait_for` 시간 초과 — 그 시점 관찰을 함께 반환 |
 | `not_interactable` | 노드는 있지만 rect 가 없거나 크기 0 (display:none 등) |
 | `handoff_required` | 비밀번호 필드 입력 등 사람이 해야 하는 단계 (headless) |
-| `approval_pending` | 사람의 답을 기다리는 행동이 있는 동안 들어온 다른 호출 (window + `ask`) |
+| `approval_pending` | 승인 카드가 떠 있는 동안 들어온 다른 호출 (window + `ask`). message 가 무슨 카드인지 말함 |
+| `handoff_pending` | 사람이 비밀번호를 입력 중(넘겨받기 카드)인 동안 들어온 다른 호출 |
+| `still_waiting` | park 된 호출이 45초 동안 답을 못 받음 — 카드는 그대로, 아무것도 실행 안 됨. **같은 tool·같은 인자로 다시 부르면 이어서 기다린다** |
 | `taken_over` | 승인 카드에서 사람이 "Do it myself" 를 고름 — 다시 시도하지 말 것 |
 | `handoff_declined` | 넘겨받기 카드에서 사람이 Cancel |
 | `approval_denied` | 사람이(또는 `--approve deny` 가) 위험 행동을 거절 |
@@ -289,10 +291,12 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
     - **Approve** → `BrowserState::resolve_held(true)` 가 보관한 요청을 **에이전트 출처로** 시작(리다이렉트 hop 도 계속 게이트) → settle → 원래 행동의 결과 관찰로 응답.
     - **Deny** → 거절 기억에 넣고 `approval_denied`.
     - **Do it myself** → 거절 기억에 넣고 `taken_over` (+현재 관찰). 사람이 창에서 직접 하면 된다 (사람 입력은 게이트 밖).
-    - 기다리는 동안 들어온 다른 tool 호출은 줄 세우지 않고 `approval_pending` 으로 즉시 거절.
+    - 기다리는 동안 들어온 다른 tool 호출은 줄 세우지 않고 `approval_pending`(넘겨받기면 `handoff_pending`) 으로 즉시 거절 — message 에 무슨 카드인지, hint 에 "기다리던 호출을 다시 하라".
+    - **긴 대기 (G3b 실연결 후)**: park 는 45초(`PARK_REPLY_AFTER`)가 지나면 `still_waiting` 으로 먼저 답하고 카드는 그대로 둔다. 에이전트가 **같은 요청**(같은 tool·인자)을 다시 보내면 그 카드에 다시 붙는다(`Parked.reply` 교체). 클라이언트가 먼저 끊어도(응답 채널 닫힘) 마찬가지로 떼어 두기만 한다. 아무도 붙어 있지 않을 때 사람이 답하면 결과를 `unclaimed` 에 두고 **다음 같은 요청**에 돌려준다 — 다른 요청이 오면 버린다(에이전트가 넘어간 것, 페이지 변화는 다음 관찰에 보임). 창은 마감 시각에 깨우기 스레드를 걸어 아무도 창을 안 만져도 45초 답이 나가게 한다.
+    - 기다림 관련 코드(`approval_pending`·`handoff_pending`·`still_waiting`·`wait_timeout`)는 반복해도 "Stop repeating" 힌트로 바꾸지 않는다 — 다시 부르는 게 맞는 행동이므로.
     - 리다이렉트 hop 은 로더 스레드에서 판정돼 물어볼 수 없으므로 `ask` 모드에서도 다른 origin hop 은 **거절** (`approval_denied`). 사람이 직접 따라가면 된다.
     - headless 에서 `ask` 는 CLI 가 거부한다. MCP elicitation(클라이언트 쪽 사람에게 질의)은 미구현 — 아래 열린 결정 4.
-    - MCP 클라이언트의 tool 호출 타임아웃이 사람의 결정보다 짧으면 클라이언트 쪽이 먼저 포기할 수 있다 (Claude Code 는 `MCP_TOOL_TIMEOUT` 로 조정).
+    - MCP 클라이언트의 tool 호출 타임아웃이 사람의 결정보다 짧으면 클라이언트 쪽이 먼저 포기한다 — 실측: Claude Code 의 HTTP 연결은 60초, stdio 는 G4 테스트에서 15분도 기다림. 그래서 위의 45초 `still_waiting` + 재부착.
   - `auto`: 전부 승인. 로컬 fixture 를 쓰는 테스트·평가 전용.
   - `deny`: 전부 거절 (읽기 전용 에이전트).
 - 보류 중엔 해당 tool 호출이 응답을 기다린다 (타임아웃 없음, 사람이 고를 때까지). 거절되면 `approval_denied` + 이동 전 상태의 Observation.
@@ -469,7 +473,8 @@ Returns the observation after typing (and after submit, if requested).
 
 - `message` = 무슨 일이 있었나 (브라우저 관점, trusted). 페이지 문자열을 섞을 땐 untrusted 표시.
 - `hint` = 다음에 할 일 한 문장.
-- `repeat_count` = 같은 행동이 같은 에러를 낸 연속 횟수. **3 이상이면 hint 가 "Stop repeating this action. Try a different approach or ask the user." 로 바뀐다.**
+- `repeat_count` = 같은 행동이 같은 에러를 낸 연속 횟수. **3 이상이면 hint 가 "Stop repeating this action. Try a different approach or ask the user." 로 바뀐다** (기다림 코드는 예외 — 위 정책 게이트 참고).
+- 에러에 딸린 관찰이 "사람이 창에서 페이지를 바꿈" 이면 message 끝에도 그 사실을 붙인다 — 에러는 코드부터 읽히므로 관찰 블록의 `note:` 만으로는 묻힐 수 있음.
 
 ### 흔한 LLM 실수와 대응
 
@@ -499,25 +504,27 @@ Returns the observation after typing (and after submit, if requested).
 
 ## 실행·연결 방식
 
-MCP 서버는 **상주 웹서버가 아니라 클라이언트가 띄우는 프로그램**이다. 사람이 직접 서버를 켜 둘 필요가 없다 (stdio). 사람이 먼저 띄워 두고 에이전트가 붙는 방식(HTTP)은 G3에서 추가한다.
+MCP 서버는 **상주 웹서버가 아니라 클라이언트가 띄우는 프로그램**이다. 사람이 직접 서버를 켜 둘 필요가 없다 (stdio). 사람이 먼저 띄워 두고 에이전트가 붙는 방식(HTTP)은 G3b 의 `mb-mcp --http`.
 
 ### 두 가지 transport
 
 | | stdio (G2) | streamable HTTP (G3+) |
 |---|---|---|
-| 누가 띄우나 | MCP 클라이언트 (Claude Code 등) 가 자식 프로세스로 실행 | 사람이 `mb-shell --mcp-http` 로 직접 실행 |
-| 수명 | 클라이언트 세션과 같음. stdin EOF → 종료 | 사람이 창을 닫을 때까지 |
+| 누가 띄우나 | MCP 클라이언트 (Claude Code 등) 가 자식 프로세스로 실행 | 사람이 `mb-mcp --http --window` 로 직접 실행 (headless `--http` 도 가능 — 오래 사는 브라우저) |
+| 수명 | 클라이언트 세션과 같음. stdin EOF → 종료 | 사람이 창을 닫을 때까지 (headless 면 kill 할 때까지). 클라이언트가 끊겨도 페이지·발급 ID 유지 |
 | 통신 | stdin/stdout JSON-RPC (줄 단위) | `http://127.0.0.1:<port>/mcp` |
 | 어울리는 장면 | "이 페이지 테스트해줘" — 맡기고 끝 | "지금 보고 있는 이 화면 같이 봐줘" — 사람이 쓰던 브라우저에 에이전트가 끼어듦 |
-| 동시 접속 | 1 클라이언트 (프로세스당) | 1 클라이언트만 허용 (두 번째 연결은 거절) |
+| 동시 접속 | 1 클라이언트 (프로세스당) | 토큰을 가진 클라이언트 여럿이 **같은 브라우저를 공유** — 호출은 worker 큐에서 하나씩. 사람을 기다리는 동안 다른 호출은 `approval_pending` |
 
 ### HTTP 보안 (G3)
 
 `127.0.0.1` 에만 바인딩해도 브라우저의 DNS rebinding 으로 악성 웹페이지가 로컬 포트에 요청을 보낼 수 있다. 그래서:
 
 - `127.0.0.1` 에만 바인딩 (외부 인터페이스 금지).
-- 시작할 때 랜덤 토큰 생성 → 창에 표시 + 클립보드 복사 버튼. 모든 요청은 `Authorization: Bearer <token>` 필수.
-- `Host` 헤더가 `127.0.0.1:<port>` / `localhost:<port>` 가 아니면 거절. `Origin` 헤더가 있으면 거절 (MCP 클라이언트는 브라우저가 아니므로 Origin 을 보내지 않는다).
+- 시작할 때 랜덤 토큰(32바이트 hex) 생성, 또는 `MB_MCP_TOKEN`(32자 이상, 등록을 고정하고 싶을 때). 모든 요청은 `Authorization: Bearer <token>` 필수 — 아니면 401 + `WWW-Authenticate: Bearer`. 비교는 길이 내 상수 시간.
+- 토큰 전달: 실행한 터미널(stderr)에 `claude mcp add --transport http … --header "Authorization: Bearer …"` 를 한 번 찍고, 창 패널에는 **가린 토큰**(`3f2a…9c1b`)과 **Copy setup command** 버튼(arboard 클립보드). 토큰 원문은 화면·`Debug`·타임라인에 나오지 않는다. 스크린샷 tool 은 페이지 영역만 찍으므로 패널도 안 보인다.
+- `Host` 헤더가 `127.0.0.1:<port>` / `localhost:<port>` 가 아니면 403 (rmcp `allowed_hosts`). `Origin` 헤더가 있으면 403 (우리 게이트 + rmcp `enforce_origin_validation`) — MCP 클라이언트는 브라우저가 아니므로 Origin 을 보내지 않는다. 토큰을 알아낸 웹 페이지도 이 때문에 못 쓴다.
+- 경로는 `/mcp` 만 (그 외 404). 구현: `crates/mb-mcp/src/http.rs` (`gate` → rmcp `StreamableHttpService::handle`).
 
 ### 등록 (stdio)
 
@@ -539,6 +546,8 @@ claude mcp add --scope project mini-browser -- /abs/path/to/target/release/mb-mc
 | 플래그 | 기본값 | 의미 |
 |---|---|---|
 | `--window` | off (headless) | 관전 창을 연다: 페이지 + 요소 ID 배지 + 마지막 대상 테두리 + 에이전트 패널(정책·행동 타임라인). 시계 기본값이 `system` 으로 바뀐다 (`--clock` 으로 덮어쓰기). 승인 카드는 G4 |
+| `--http` | off (stdio) | MCP 를 `http://127.0.0.1:<port>/mcp` (streamable HTTP) 로 연다 — 붙기 모드 (G3b). 보통 `--window` 와 같이. [HTTP 보안](#http-보안-g3) |
+| `--port N` | `7333` | `--http` 포트 (`0` = 빈 포트 아무거나, 테스트용) |
 | `--preview PATH` | — | 창을 열지 않고 관전 창 한 프레임을 PNG 로 렌더하고 종료 (`--start-url` 후). 오버레이 확인·문서 이미지용 |
 | `--preview-click ID` (반복) | — | `--preview` 전에 클릭할 요소 |
 | `--preview-scale N` | `1` | `--preview` 의 기기 배율 (2 = Retina). 창과 같은 경로: CSS px 레이아웃 후 확대 |
@@ -588,7 +597,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 - 정책 게이트는 `crates/mb-runtime/src/state/policy.rs` (BrowserState 안).
 - `crates/mb-mcp` (bin) — rmcp 서버 + CLI. headless 루프 내장. LLM 이 읽는 텍스트는 전부 `src/prompts.rs` 에.
 - `--window` 를 위해 `mb-shell` 의 `window.rs` 를 lib 로 노출 (`mb-shell` = lib + bin) 하고 `mb-mcp` 가 그걸 쓴다. → 창 코드가 한 곳에만 있다.
-- G3의 `mb-shell --mcp-http` 는 반대 방향: 사람이 쓰는 mb-shell 에 HTTP MCP 서버 스레드를 붙인다. 두 경로 모두 `mb-agent` 를 공유한다.
+- G3b 의 붙기 모드도 `mb-mcp` 안에 있다 (`--http`): 패널·카드·Worker 가 전부 mb-mcp 에 있고 mb-mcp 가 이미 mb-shell(창)을 쓰므로, mb-shell 에 서버를 붙이면 의존 방향이 뒤집힌다. 사람용 `mb-shell` 은 에이전트 없는 순수 브라우저로 남는다.
 
 ## 테스트 전략
 
@@ -612,7 +621,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | **G1** 행동 ✅ | `AgentBrowser` ([browser.rs](../crates/mb-agent/src/browser.rs)): `navigate`/`click`/`type_text`/`press`/`scroll`/`back`/`forward`, settle, `changed:` 요약, 에러 코드([error.rs](../crates/mb-agent/src/error.rs)), 문서 세대별 ID 검증, 리스너 기반 clickable. 정책 게이트 [policy.rs](../crates/mb-runtime/src/state/policy.rs)(`Auto`/`Deny`, allow-list, 거절 기억) | POST 폼, 컨트롤 인라인화, password 마스킹, checkbox/radio 토글·`<label>`, Tab·Escape, 타이머 마감 API, 대화상자 shim, console 버퍼, 가상 시계·시드 난수 연결, **인라인 `on*` 핸들러**, **hover/포커스 경로 버그 수정**. 보류: ←→/Home/End/Delete(캐럿 모델), `<select>` 고르기, `new Date()`/`performance.now` | L3 12개 (fixture 서버 POST 회원가입·303 리다이렉트, Deny/거절 기억, 비밀번호 넘겨받기, allow-list, **리다이렉트 hop 게이트·307 body**, settle, 대화상자, 스크롤, stale, Tab, 결정성) |
 | **G2** MCP ✅ | [`crates/mb-mcp`](../crates/mb-mcp): `cli.rs`(옵션), `prompts.rs`, `worker.rs`(브라우저 스레드·`Job` 채널·`repeat_count`·패닉 시 재생성), `server.rs`(rmcp tool 10개, 관찰=텍스트 2개 / 에러=JSON+관찰 / 스크린샷=PNG image). mb-agent 에 `screenshot`·`wait_for`·`to_blocks`·`system_fonts` 추가. 추천 skill [`examples/claude-skill/mini-browser-testing`](../examples/claude-skill/mini-browser-testing/SKILL.md), 데모 페이지 [`examples/agent-demo`](../examples/agent-demo) | `--window`(G3), `--approve ask`(G4), `--log`(G5) 는 아직 — 넘기면 명확한 에러 | L4 e2e 4개(실제 바이너리 + JSON-RPC: tools/list, navigate→click→back, 에러·repeat_count, PNG), CLI·worker 단위 테스트. **Claude Code 실연결 데모는 사용자 등록 후 확인 필요** (중첩 `claude -p` 는 이 환경에서 401) |
 | **G3a** 관전 창 ✅ | `mb-mcp --window` ([window_mode.rs](../crates/mb-mcp/src/window_mode.rs), [overlay.rs](../crates/mb-mcp/src/overlay.rs)): 메인 스레드 winit 루프가 프레임마다 에이전트 Job 을 처리(MCP 스레드가 큐에 넣고 wake), 사람 입력은 `human_frame`(게이트 대상 아님), ID 배지(요소 왼쪽 여백, 자리 없으면 모서리)·마지막 대상 주황 테두리·오른쪽 300px 패널(정책·타임라인, 700px 미만이면 생략). 창 닫힘 → 이후 호출 `browser_closed`, 클라이언트 종료 → 프로세스 종료. `--preview` PNG 렌더 | `mb-shell` = lib + bin, `Worker` 구조체(헤드리스·창 공용, 타임라인), `AgentBrowser::{set_viewport, human_frame, element_boxes, last_target}` | ![관전 창](images/g3-observation-window.png) — 오버레이·패널 단위 테스트 5개. **실제 창은 사용자 확인 필요** (GUI) |
-| **G3b** 붙기 모드 | `mb-shell --mcp-http` (토큰·Host·Origin 검사) — 사람이 띄운 브라우저에 에이전트가 붙음 | — | G4 다음 |
+| **G3b** 붙기 모드 ✅ | `mb-mcp --http [--port N]` (`http.rs`: 127.0.0.1 바인딩, Bearer 토큰·Origin·경로 게이트 + rmcp Host 검사, hyper http1), `MB_MCP_TOKEN`, 패널의 붙기 섹션(URL·가린 토큰·Copy setup command), 창 닫으면 종료, 클라이언트는 브라우저 공유 | 동시 접속 제한 없음(결정 기록) · **실연결 확인 (2026-11-17)**: Claude Code `--transport http` 로 붙어 todo 추가·45초 `still_waiting` 재부착(승인 2분 10초·비밀번호 2분 22초)·비차단 `wait_for`·`note:` 동작. 1차 테스트에서 창 멈춤·60초 잠김을 찾아 고침 | ![붙기 패널](images/g3b-attach-panel.png) — L4 HTTP e2e 2개(실 바이너리: 401·403(Origin)·403(Host)·404, 두 클라이언트가 같은 페이지), gate·토큰 단위 3, 패널 1, CLI 1 + 실연결 수정 테스트 (689 green) |
 | **G4** 승인·넘겨받기 ✅ | `ApproveMode::Ask` + `PolicyDecision::Held`, `BrowserState::{held_action, resolve_held}`, `AgentBrowser::{pending_approval, resolve_approval}`, `Worker::{submit, waiting, answer}`(응답 park), 패널의 승인 카드(Approve / Deny / Do it myself)·넘겨받기 카드(Done / Cancel), 데모 `signin.html`·localhost 링크 | elicitation 은 미구현(headless ask 거부) | ![승인 카드](images/g4-approval-card.png) — 정책 2·AgentBrowser 통합 2·Worker 2·카드 3·CLI 1 테스트 + 실연결 피드백 2건(사람이 바꾼 페이지 표시, 넘겨받기 `changed:`) — AgentBrowser 통합 1 + Worker 넘겨받기 테스트 보강 (673 green). **실연결 확인**: 승인 카드 Approve → POST·리다이렉트, 비밀번호 넘겨받기 → "Signed in", 관찰에 비밀번호 없음 |
 | **G5** 기록·재생 | 세션 로그(JSONL, redact, role+name 함께 기록), `mb-replay`(LLM 없는 결정적 재생 + 회귀 지점 보고), 단계별 재생 뷰, `mb-eval`(N회 실행 성공률 집계, 안전 지표 포함, `prompts.rs` 해시 기록) | — | 한 번 탐색한 경로가 회귀 테스트가 됨. 프롬프트 변경을 숫자로 비교. L6·L7 |
 
@@ -630,6 +639,13 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-11 | G0: 관찰은 layout 트리에서 rect 를 직접 수집, `LinkTarget` 미사용 | 모든 노드가 LayoutBox 를 가져서 별도 인라인 수집 불필요 (검토 때 오판 정정) |
 | 2026-11-11 | G0: `text:` 에 링크 텍스트 포함, 폼 크롬 제외, 이름 없는 컨트롤은 `field=` | 링크를 빼면 문장이 끊김 ("or read the ."). 라벨·버튼은 요소 목록과 중복. 이름 없는 `select` 는 `name=""` 만으론 용도를 알 수 없음 |
 | 2026-11-14 | G4: 승인은 "보관 후 재개" — 게이트가 요청을 보관하고 tool 응답을 park, 카드 답에 따라 재개/거절 | 창 루프 안에서 에이전트 행동이 동기 실행되므로 그 자리에서 기다리면 창이 멈춤. 승인된 요청은 에이전트 출처로 시작해 hop 게이트 유지 |
+| 2026-11-17 | 재테스트 피드백: trusted 블록에 브라우저가 쓰는 `note:` 목록(`Observation::notes`) — 승인 결과에 "the person approved this action", 넘겨받기 Done 에 "typed into field eN" / **"pressed Done but field eN did not change"** / "submitted the form themselves". `stale_element` message 에 사람 변경 표시(`by_person`). `--start-url` 은 에이전트가 본 결과가 아니므로 기준에서 제외(`forget_reported`). `wait_for` 결과에도 `changed:` | G3b 재테스트(실제 Claude Code): 비밀번호 없이 Done → 결과가 성공처럼 보여 에이전트는 Sign in 을 눌러서야 알았음. 즉시 온 결과가 자동 허용인지 사람 승인인지 구분 불가. 첫 호출에 엉뚱한 `note:`. 기다리는 동안 URL 이 바뀐 걸 diff 없이 알 수 없음. 사람의 페이지 안 변경(체크 토글)은 `note:` 대상 아님 — 다음 관찰에 값으로 보이고, 표시는 문서 변경에만 |
+| 2026-11-17 | 긴 park 는 45초에 `still_waiting` 으로 답하고 카드는 유지, 같은 요청이 다시 오면 재부착, 아무도 없을 때 나온 답은 다음 같은 요청에 전달 (`unclaimed`) | G3b 실연결 테스트: Claude Code HTTP 는 tool 호출을 60초에 끊는데 서버는 계속 park → 이후 모든 호출이 `approval_pending` 으로 잠김. 처음엔 "끊기면 카드 회수" 로 막았지만 사람이 비밀번호를 60초 안에 못 치면 넘겨받기가 늘 실패 → 사람 속도를 기다릴 수 있는 재부착 방식으로 교체. 늦게 누른 Approve 는 에이전트가 요청했고 사람이 허락한 것이라 실행하고, 결과는 재호출 또는 다음 관찰로 전달 |
+| 2026-11-17 | 실연결 피드백: `handoff_pending` 코드 신설(대기 문구가 승인/비밀번호를 구분), 기다림 코드는 repeat 경고 제외, 에러 message 에 "사람이 페이지를 바꿈" 추가, `changed:` 에 새 요소 ID(`+1 (e63)`, 최대 8개), `wait_for` 최대 45초, 데모의 localhost 링크는 서빙 포트를 따라감 | 테스트 세션(에이전트 입장) 제안 7개 중 6개. 나머지(제출 후 입력칸이 비워진 걸 `changes` 가 안 보여줌)는 정상: `type … submit` 은 타이핑 전과 제출 후를 비교하는데 둘 다 빈 값 |
+| 2026-11-17 | 창 모드의 `wait_for` 는 프레임을 막지 않는다: `Worker` 가 `PendingWait` 로 들고 프레임마다 `poll_wait`, 그 사이 온 호출은 순서대로 대기열(`deferred`), 패널에 "Agent waits for … Ns left" | G3b 실연결 테스트: 동기 `wait_for`(60초)가 창 루프를 막아 사람이 "About" 링크를 못 눌렀음 — "사람이 바꾼 페이지" 를 기다리는 장면에서 정확히 필요한 입력이 막힘. 다른 행동의 settle(≤5초)은 여전히 동기. 기다리는 동안 바뀐 문서는 사람 것이므로 결과에 `note:` |
+| 2026-11-15 | G3b 붙기 모드는 `mb-shell --mcp-http` 가 아니라 `mb-mcp --http` | 패널·승인 카드·Worker 가 mb-mcp 에 있고 mb-mcp → mb-shell 의존이라, mb-shell 에 넣으면 순환. "사람이 띄운다" 는 실행 주체의 문제지 바이너리의 문제가 아님 |
+| 2026-11-15 | HTTP 동시 접속은 막지 않고 공유 (초안: 두 번째 연결 거절) | streamable HTTP 는 연결이 아니라 요청 단위라 "끊김" 을 확실히 알 수 없음 — 거절하면 재시작한 클라이언트가 영영 못 붙을 수 있음. 게이트는 토큰, 호출은 worker 큐에서 직렬, 사람 대기 중엔 `approval_pending` |
+| 2026-11-15 | 토큰은 실행마다 랜덤, `MB_MCP_TOKEN` 으로 고정 가능. 창에는 가려서 + 복사 버튼 | 매번 재등록은 번거로움 ↔ 고정 토큰은 유출 시 오래 유효. 기본은 안전 쪽, 선택은 사용자 |
 | 2026-11-14 | 사람이 창에서 페이지를 바꾸면(링크·뒤로 등) 다음 결과의 trusted 블록에 `note: the page changed since your last result without you — the person used the window` 한 번 표시 (`Observation::changed_by_person`, 기준 = 마지막으로 내준 관찰의 문서 세대·URL) | ask 모드 실연결 테스트: 사람의 이동이 에이전트에게 안 보여 이전 ID·가정으로 행동할 수 있었음. 페이지 스크립트는 이동 API 가 없어 "에이전트가 안 한 문서 변경 = 사람" 으로 판정 가능 |
 | 2026-11-14 | 넘겨받기 Done 응답에 `changed:` 요약 (`AgentBrowser::{begin_handoff, finish_handoff}`) | 실연결 테스트: 사람이 무엇을 했는지(값 입력·제출로 새 문서) 에이전트가 관찰을 diff 하지 않고 알 수 있게 |
 | 2026-11-14 | G4: "Do it myself" 는 거절 기억에 포함 | 사람이 직접 하기로 한 행동을 에이전트가 다른 경로로 다시 시도하지 않게 |
@@ -637,7 +653,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-14 | 창은 논리 크기(CSS px)로 레이아웃하고 그릴 때만 배율 적용 (`window::Frame`, `render::scale_display_list`) | 관전 창 실연결 테스트에서 Retina 물리 픽셀(2620×1702)이 CSS px 로 쓰여 글자가 반 크기, 에이전트 레이아웃도 headless 와 달랐음. 명령 좌표·글자 크기를 곱해서 글리프를 큰 크기로 래스터 → 선명. mb-shell 도 같이 고쳐짐. 스프라이트(source offset) 이미지는 1:1 로 남는 한계 |
 | 2026-11-14 | 체크박스 = 파란 채움 + 흰 ✓(회전 막대 2개), 라디오 = 둥근 점 | 작은 채운 사각형은 체크 여부가 잘 안 보였음 (실연결 테스트) |
 | 2026-11-14 | G3 을 G3a(관전 창) → G4(승인 카드) → G3b(HTTP 붙기) 순으로 | 승인 카드·넘겨받기는 관전 창 위에 얹는 게 자연스럽고, HTTP 붙기는 보안 작업이 따로 큼 |
-| 2026-11-14 | 관전 창: winit 이 메인 스레드, 에이전트 행동은 프레임 안에서 동기 실행 | macOS 제약. 행동(+settle) 중엔 창이 갱신되지 않지만 단순하고 결정적 — 행동 중 애니메이션은 필요해지면 |
+| 2026-11-14 | 관전 창: winit 이 메인 스레드, 에이전트 행동은 프레임 안에서 동기 실행 | macOS 제약. 행동(+settle) 중엔 창이 갱신되지 않지만 단순하고 결정적 — 행동 중 애니메이션은 필요해지면. **예외: `wait_for` 는 비차단 (2026-11-17)** |
 | 2026-11-14 | 관전 창 패널은 페이지 옆(오버레이 아님), 배지는 요소 왼쪽 여백 우선 | 패널이 페이지를 가리지 않게. 배지가 작은 체크박스·링크 첫 글자를 덮던 문제(미리보기로 확인) |
 | 2026-11-14 | 실연결 테스트 피드백 반영: 새 문서 표시, 값 이전→이후·텍스트 증감은 untrusted `changes:` 섹션, `scroll_y`/`page_height` 표기 | 에이전트가 ID 재사용·상태 초기화·변화 내용을 관찰만으로 알 수 있게. 페이지 문자열은 trusted 블록에 넣지 않는다 |
 | 2026-11-14 | G2 후속(보안 리뷰): `wait_for(id)` 는 ID 를 발급하지 않고, 발급 안 된 ID 면 `stale_element` | 추측·이전 페이지 ID 를 `wait_for` 로 "세탁"해 stale 가드를 우회할 수 있었음 |

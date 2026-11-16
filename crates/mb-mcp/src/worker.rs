@@ -3,12 +3,14 @@
 // so the MCP server (tokio, other thread) sends it `Job`s over a channel and
 // awaits each reply on a oneshot. Jobs run strictly one at a time.
 
+use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use mb_agent::{
-    AgentBrowser, AgentError, Observation, ObserveOptions, Scope, Screenshot, WaitCondition,
+    AgentBrowser, AgentError, Observation, ObserveOptions, PendingWait, Scope, Screenshot,
+    WaitCondition,
 };
 use mb_runtime::dom::NodeId;
 use tokio::sync::oneshot;
@@ -168,6 +170,12 @@ pub struct TimelineEntry {
 
 const TIMELINE_LEN: usize = 50;
 
+/// A parked call returns `still_waiting` after this long and the agent
+/// calls again to keep waiting: HTTP clients give up on a tool call at
+/// about 60 s (Claude Code), people take longer than that to type a
+/// password.
+const PARK_REPLY_AFTER: Duration = Duration::from_secs(45);
+
 /// The browser plus everything that survives across requests: repeat
 /// tracking, the timeline, and how to rebuild after a panic. Both the
 /// headless loop (`run`) and the observation window drive it.
@@ -177,6 +185,15 @@ pub struct Worker {
     repeats: RepeatTracker,
     timeline: Vec<TimelineEntry>,
     parked: Option<Parked>,
+    // Window mode: a `wait_for` the frames are checking (it must not block
+    // the window), and jobs that arrived meanwhile, in order.
+    page_wait: Option<(Job, PendingWait)>,
+    deferred: VecDeque<Job>,
+    // The person answered while no call was attached: the reply waits for
+    // the agent's next identical call.
+    unclaimed: Option<(Request, Reply)>,
+    // How long a call stays parked before it returns `still_waiting`.
+    park_reply_after: Duration,
 }
 
 impl Worker {
@@ -188,6 +205,10 @@ impl Worker {
             repeats: RepeatTracker::default(),
             timeline: Vec::new(),
             parked: None,
+            page_wait: None,
+            deferred: VecDeque::new(),
+            unclaimed: None,
+            park_reply_after: PARK_REPLY_AFTER,
         }
     }
 
@@ -214,10 +235,50 @@ impl Worker {
     /// watching — approval in Ask mode, or a password handoff — is parked
     /// with its reply channel until `answer`. Only one can wait at a time.
     pub fn submit(&mut self, job: Job) {
-        if let Some(parked) = &self.parked {
-            let busy = ToolError::Agent(AgentError::ApprovalPending {
-                action: parked.waiting.describe(),
+        // The person answered while the agent was away: this call gets it
+        // if it repeats the request; any other call means it moved on.
+        if let Some((request, reply)) = self.unclaimed.take()
+            && request == job.request
+        {
+            let _ = job.reply.send(reply);
+            return;
+        }
+        if self.page_wait.is_some() {
+            // Runs once the wait ends (`tick`).
+            self.deferred.push_back(job);
+            return;
+        }
+        if let Request::WaitFor {
+            text,
+            id,
+            timeout_ms,
+        } = &job.request
+            && self.parked.is_none()
+        {
+            let timeout = Duration::from_millis(*timeout_ms);
+            let begun = wait_condition(text, id).and_then(|condition| {
+                self.browser
+                    .begin_wait(condition, timeout)
+                    .map_err(ToolError::from)
             });
+            match begun {
+                Ok(wait) => self.page_wait = Some((job, wait)),
+                Err(error) => {
+                    let reply = self.conclude(&job.request, Err(error), None);
+                    let _ = job.reply.send(reply);
+                }
+            }
+            return;
+        }
+        if let Some(parked) = &mut self.parked {
+            // The same call again: wait on (re-attach to) the question.
+            if parked.request == job.request && parked.reply.as_ref().is_none_or(|r| r.is_closed())
+            {
+                parked.reply = Some(job.reply);
+                parked.since = std::time::Instant::now();
+                return;
+            }
+            let busy = ToolError::Busy(parked.waiting.clone());
             let reply = self.conclude(&job.request, Err(busy), None);
             let _ = job.reply.send(reply);
             return;
@@ -233,7 +294,7 @@ impl Worker {
                 if matches!(job.request, Request::Type { .. }) =>
             {
                 self.browser.highlight(*id);
-                self.browser.begin_handoff();
+                self.browser.begin_handoff(*id);
                 Some(Waiting::Handoff {
                     id: format!("e{}", id.raw()),
                 })
@@ -244,8 +305,9 @@ impl Worker {
             Some(waiting) => {
                 self.parked = Some(Parked {
                     request: job.request,
-                    reply: job.reply,
+                    reply: Some(job.reply),
                     waiting,
+                    since: std::time::Instant::now(),
                 });
             }
             None => {
@@ -269,7 +331,13 @@ impl Worker {
             (Waiting::Approval { .. }, Answer::Approve) => (
                 self.execute_guarded(&parked.request, |b| {
                     b.resolve_approval(true)
-                        .map(observation_reply)
+                        .map(|mut observation| {
+                            // Instant or after minutes, it was the person.
+                            observation
+                                .notes
+                                .push("the person approved this action in the window".into());
+                            observation_reply(observation)
+                        })
                         .map_err(ToolError::from)
                 }),
                 "approved",
@@ -301,16 +369,107 @@ impl Worker {
             (Waiting::Approval { .. }, _) => (Err(ToolError::HandoffDeclined), "declined"),
         };
         let reply = self.conclude(&parked.request, result, Some(outcome));
-        let _ = parked.reply.send(reply);
+        match parked.reply {
+            Some(sender) if !sender.is_closed() => {
+                let _ = sender.send(reply);
+            }
+            _ => self.unclaimed = Some((parked.request, reply)),
+        }
+        self.run_deferred();
+    }
+
+    /// Window mode, once per frame (after the person's input was applied):
+    /// finish the pending `wait_for` if its condition holds or time is up.
+    pub fn tick(&mut self) {
+        self.release_long_parks();
+        let Some((job, wait)) = self.page_wait.take() else {
+            return;
+        };
+        match self.execute_guarded(&job.request, |b| Ok(b.poll_wait(&wait))) {
+            Ok(None) => self.page_wait = Some((job, wait)),
+            Ok(Some(result)) => {
+                let result = result.map(observation_reply).map_err(ToolError::from);
+                let reply = self.conclude(&job.request, result, None);
+                let _ = job.reply.send(reply);
+                self.run_deferred();
+            }
+            Err(error) => {
+                let reply = self.conclude(&job.request, Err(error), None);
+                let _ = job.reply.send(reply);
+                self.run_deferred();
+            }
+        }
+    }
+
+    /// When the attached parked call is due its `still_waiting` reply (the
+    /// window schedules a frame for then).
+    pub fn park_deadline(&self) -> Option<std::time::Instant> {
+        self.parked
+            .as_ref()
+            .filter(|p| p.reply.is_some())
+            .map(|p| p.since + self.park_reply_after)
+    }
+
+    /// The agent's pending `wait_for`, for the panel: what and time left.
+    pub fn page_wait(&self) -> Option<(&WaitCondition, Duration)> {
+        self.page_wait
+            .as_ref()
+            .map(|(_, wait)| (wait.condition(), wait.remaining()))
+    }
+
+    // A parked call answers `still_waiting` after `park_reply_after` (or
+    // detaches once its client gave up) while the question stays on
+    // screen; the agent's identical next call re-attaches (`submit`).
+    fn release_long_parks(&mut self) {
+        if let Some(parked) = &mut self.parked
+            && let Some(sender) = parked
+                .reply
+                .take_if(|r| r.is_closed() || parked.since.elapsed() >= self.park_reply_after)
+            && !sender.is_closed()
+        {
+            let waiting = ToolError::StillWaiting(parked.waiting.clone());
+            let _ = sender.send(error_reply(&waiting, 1));
+        }
+        if self
+            .page_wait
+            .as_ref()
+            .is_some_and(|(job, _)| job.reply.is_closed())
+        {
+            self.page_wait = None;
+        }
+        self.deferred.retain(|job| !job.reply.is_closed());
+    }
+
+    // Jobs that queued behind a wait, until one of them waits again.
+    fn run_deferred(&mut self) {
+        while self.page_wait.is_none()
+            && self.parked.is_none()
+            && let Some(job) = self.deferred.pop_front()
+        {
+            self.submit(job);
+        }
+    }
+
+    /// The window closed: everything still waiting gets `browser_closed`.
+    pub fn close(&mut self) {
+        let parked = self.parked.take().and_then(|p| p.reply);
+        let waiting = self.page_wait.take().map(|(job, _)| job.reply);
+        for reply in parked
+            .into_iter()
+            .chain(waiting)
+            .chain(self.deferred.drain(..).map(|job| job.reply))
+        {
+            let _ = reply.send(browser_closed());
+        }
     }
 
     // Run `op` on the browser, surviving engine panics: a panic throws the
     // state away and starts over on the same URL (concept.md "엔진 패닉").
-    fn execute_guarded(
+    fn execute_guarded<T>(
         &mut self,
         request: &Request,
-        op: impl FnOnce(&mut AgentBrowser) -> Result<Reply, ToolError>,
-    ) -> Result<Reply, ToolError> {
+        op: impl FnOnce(&mut AgentBrowser) -> Result<T, ToolError>,
+    ) -> Result<T, ToolError> {
         match catch_unwind(AssertUnwindSafe(|| op(&mut self.browser))) {
             Ok(result) => result,
             Err(_) => {
@@ -346,35 +505,26 @@ impl Worker {
             }
             Err(error) => {
                 let repeat_count = self.repeats.failure(request, error.code());
-                let hint = if repeat_count >= REPEAT_LIMIT {
-                    STOP_REPEATING.to_string()
-                } else {
-                    error.hint().to_string()
-                };
-                Reply::Error(ErrorReport {
-                    code: error.code().to_string(),
-                    message: error.message(),
-                    hint,
-                    repeat_count,
-                    observation: error.observation_blocks(),
-                })
+                error_reply(&error, repeat_count)
             }
         };
         let label = match outcome {
             Some(outcome) => format!("{} ({outcome})", request.label()),
             None => request.label(),
         };
-        self.timeline.push(TimelineEntry {
-            label,
-            error: match &reply {
-                Reply::Error(report) => Some(report.code.clone()),
-                _ => None,
-            },
-        });
+        let error = match &reply {
+            Reply::Error(report) => Some(report.code.clone()),
+            _ => None,
+        };
+        self.push_timeline(label, error);
+        reply
+    }
+
+    fn push_timeline(&mut self, label: String, error: Option<String>) {
+        self.timeline.push(TimelineEntry { label, error });
         if self.timeline.len() > TIMELINE_LEN {
             self.timeline.remove(0);
         }
-        reply
     }
 }
 
@@ -385,15 +535,6 @@ pub enum Waiting {
     Approval { action: String },
     /// A password field the person has to fill in themselves.
     Handoff { id: String },
-}
-
-impl Waiting {
-    fn describe(&self) -> String {
-        match self {
-            Waiting::Approval { action } => action.clone(),
-            Waiting::Handoff { id } => format!("Typing into password field {id}"),
-        }
-    }
 }
 
 /// The person's answer from the window.
@@ -408,8 +549,10 @@ pub enum Answer {
 
 struct Parked {
     request: Request,
-    reply: oneshot::Sender<Reply>,
+    // None while no call is attached (it returned `still_waiting`).
+    reply: Option<oneshot::Sender<Reply>>,
     waiting: Waiting,
+    since: std::time::Instant,
 }
 
 impl Request {
@@ -476,6 +619,9 @@ fn new_browser(options: &Options) -> AgentBrowser {
     {
         eprintln!("[mb-mcp] --start-url {url}: {error}");
     }
+    // No agent saw the start page: the first result must not call the
+    // person's moves since then "changes since your last result".
+    browser.forget_reported();
     browser
 }
 
@@ -491,6 +637,10 @@ enum ToolError {
     HandoffDeclined,
     /// The engine panicked; the browser was rebuilt.
     Crashed,
+    /// Another call is waiting for the person (approval / password).
+    Busy(Waiting),
+    /// This call waited a while; the question is still on screen.
+    StillWaiting(Waiting),
 }
 
 impl ToolError {
@@ -502,6 +652,9 @@ impl ToolError {
             ToolError::TakenOver(_) => "taken_over",
             ToolError::HandoffDeclined => "handoff_declined",
             ToolError::Crashed => "engine_crashed",
+            ToolError::Busy(Waiting::Approval { .. }) => "approval_pending",
+            ToolError::Busy(Waiting::Handoff { .. }) => "handoff_pending",
+            ToolError::StillWaiting(_) => "still_waiting",
         }
     }
 
@@ -519,6 +672,22 @@ impl ToolError {
             ToolError::Crashed => {
                 "The browser engine crashed and was restarted on the same URL.".into()
             }
+            ToolError::Busy(waiting) | ToolError::StillWaiting(waiting) => {
+                let prefix = if matches!(self, ToolError::Busy(_)) {
+                    "Another call is waiting for the person: "
+                } else {
+                    "The person hasn't answered yet: "
+                };
+                let what = match waiting {
+                    Waiting::Approval { action } => format!(
+                        "an approval card for \"{action}\" is shown in the browser window (Approve / Deny / Do it myself)."
+                    ),
+                    Waiting::Handoff { id } => format!(
+                        "they are typing the password into field {id} in the browser window and press Done when finished."
+                    ),
+                };
+                format!("{prefix}{what}")
+            }
         }
     }
 
@@ -534,6 +703,12 @@ impl ToolError {
             }
             ToolError::HandoffDeclined => "Ask the user how they want to proceed.",
             ToolError::Crashed => "Call `observe` to see the reloaded page; form input was lost.",
+            ToolError::Busy(_) => {
+                "Repeat the call that is waiting (same tool, same arguments) to keep waiting for the answer, or tell the user what they need to do in the window."
+            }
+            ToolError::StillWaiting(_) => {
+                "Call the same tool with the same arguments again to keep waiting (nothing was done yet), or tell the user what they need to do in the window."
+            }
         }
     }
 
@@ -544,6 +719,44 @@ impl ToolError {
             _ => None,
         }
     }
+}
+
+impl ToolError {
+    // Waiting for the person or the page: repeating the call is the
+    // right move, so the repeat warning doesn't apply.
+    fn is_waiting(&self) -> bool {
+        matches!(
+            self.code(),
+            "approval_pending" | "handoff_pending" | "still_waiting" | "wait_timeout"
+        )
+    }
+
+    fn person_changed_page(&self) -> bool {
+        matches!(self, ToolError::Agent(e) if e.observation().is_some_and(|o| o.changed_by_person))
+    }
+}
+
+fn error_reply(error: &ToolError, repeat_count: u32) -> Reply {
+    let hint = if repeat_count >= REPEAT_LIMIT && !error.is_waiting() {
+        STOP_REPEATING.to_string()
+    } else {
+        error.hint().to_string()
+    };
+    let mut message = error.message();
+    if error.person_changed_page() {
+        // Errors are read by code first; don't let this hide in the
+        // observation block.
+        message.push_str(
+            " Meanwhile the person changed the page in the window: read the observation below (earlier ids are invalid).",
+        );
+    }
+    Reply::Error(ErrorReport {
+        code: error.code().to_string(),
+        message,
+        hint,
+        repeat_count,
+        observation: error.observation_blocks(),
+    })
 }
 
 impl From<AgentError> for ToolError {
@@ -602,19 +815,21 @@ fn execute(browser: &mut AgentBrowser, request: &Request) -> Result<Reply, ToolE
             id,
             timeout_ms,
         } => {
-            let condition = match (text, id) {
-                (Some(text), None) if !text.is_empty() => WaitCondition::Text(text.clone()),
-                (None, Some(id)) => WaitCondition::Element(parse_id(id)?),
-                _ => {
-                    return Err(ToolError::InvalidArguments(
-                        "wait_for needs exactly one of `text` or `id`.",
-                    ));
-                }
-            };
+            let condition = wait_condition(text, id)?;
             browser.wait_for(condition, Duration::from_millis(*timeout_ms))?
         }
     };
     Ok(observation_reply(observation))
+}
+
+fn wait_condition(text: &Option<String>, id: &Option<String>) -> Result<WaitCondition, ToolError> {
+    match (text, id) {
+        (Some(text), None) if !text.is_empty() => Ok(WaitCondition::Text(text.clone())),
+        (None, Some(id)) => Ok(WaitCondition::Element(parse_id(id)?)),
+        _ => Err(ToolError::InvalidArguments(
+            "wait_for needs exactly one of `text` or `id`.",
+        )),
+    }
 }
 
 fn encode_png(shot: &Screenshot) -> Vec<u8> {
@@ -679,15 +894,21 @@ mod tests {
             for stream in listener.incoming().flatten() {
                 let mut stream = stream;
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                let _ = reader.read_line(&mut request_line);
                 loop {
                     let mut line = String::new();
                     if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
                         break;
                     }
                 }
-                let body = format!(
-                    "<html><body><label for=\"pw\">Password</label><input id=\"pw\" type=\"password\"><a href=\"{other}/x\">Elsewhere</a></body></html>"
-                );
+                let body = if request_line.contains(" /x ") {
+                    "<html><body><p>Arrived</p></body></html>".to_string()
+                } else {
+                    format!(
+                        "<html><body><label for=\"pw\">Password</label><input id=\"pw\" type=\"password\"><a href=\"{other}/x\">Elsewhere</a></body></html>"
+                    )
+                };
                 let _ = write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -713,6 +934,8 @@ mod tests {
             preview: None,
             preview_clicks: Vec::new(),
             preview_scale: 1.0,
+            http_port: None,
+            attach: None,
         });
         let Reply::Observation { page, .. } = worker.process(&Request::Navigate {
             url: format!("{base}/"),
@@ -731,6 +954,295 @@ mod tests {
         let (reply, rx) = oneshot::channel();
         worker.submit(Job { request, reply });
         rx
+    }
+
+    // The person clicks element `id` in the window; returns where.
+    fn person_click(worker: &mut Worker, id: &str) -> (f32, f32) {
+        let rect = worker
+            .browser()
+            .element_boxes()
+            .into_iter()
+            .find(|e| format!("e{}", e.id.raw()) == id)
+            .unwrap()
+            .rect;
+        let at = (
+            rect.x + rect.width / 2.0,
+            rect.y + rect.height / 2.0 + mb_runtime::chrome::CHROME_HEIGHT,
+        );
+        worker.browser().human_frame(&WindowInput {
+            mouse_position: Some(at),
+            left_mouse_pressed: true,
+            left_mouse_held: true,
+            ..WindowInput::default()
+        });
+        worker.browser().human_frame(&WindowInput {
+            mouse_position: Some(at),
+            ..WindowInput::default()
+        });
+        at
+    }
+
+    // Window frames until `rx` has a reply (the loop `window_mode` runs).
+    fn frames_until_reply(
+        worker: &mut Worker,
+        rx: &mut tokio::sync::oneshot::Receiver<Reply>,
+    ) -> Reply {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            worker.browser().human_frame(&WindowInput::default());
+            worker.tick();
+            if let Ok(reply) = rx.try_recv() {
+                return reply;
+            }
+            assert!(std::time::Instant::now() < deadline, "no reply");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn window_wait_for_keeps_the_window_live_and_notes_the_person() {
+        let base = serve_page();
+        let (mut worker, _, link) = worker_on(&base, mb_agent::ApproveMode::Deny);
+        let mut rx = submit(
+            &mut worker,
+            Request::WaitFor {
+                text: Some("Arrived".into()),
+                id: None,
+                timeout_ms: 30_000,
+            },
+        );
+        worker.tick();
+        assert!(rx.try_recv().is_err(), "submit returns at once");
+        assert!(worker.page_wait().is_some());
+        // Another call meanwhile queues behind the wait (not refused).
+        let mut queued = submit(
+            &mut worker,
+            Request::Observe {
+                full: false,
+                cursor: 0,
+            },
+        );
+        assert!(queued.try_recv().is_err());
+
+        // The person follows the link while the agent waits.
+        person_click(&mut worker, &link);
+        let Reply::Observation { browser, page } = frames_until_reply(&mut worker, &mut rx) else {
+            panic!("expected the observation")
+        };
+        assert!(page.contains("Arrived"), "{page}");
+        assert!(browser.contains("the person used the window"), "{browser}");
+        // What happened during the wait, like any action's result.
+        let changed = browser.lines().find(|l| l.starts_with("changed:")).unwrap();
+        assert!(changed.contains("new document"), "{changed}");
+        assert!(worker.page_wait().is_none());
+        // Then the queued call ran, without repeating the note.
+        let Ok(Reply::Observation { browser, .. }) = queued.try_recv() else {
+            panic!("queued observe should have run")
+        };
+        assert!(!browser.contains("the person used the window"));
+    }
+
+    #[test]
+    fn a_long_park_returns_still_waiting_and_the_same_call_reattaches() {
+        let base = serve_page();
+        let (mut worker, _, link) = worker_on(&base, mb_agent::ApproveMode::Ask);
+        worker.park_reply_after = Duration::ZERO;
+        let click = Request::Click { id: link.clone() };
+        let mut first = submit(&mut worker, click.clone());
+        worker.tick();
+        let Ok(Reply::Error(report)) = first.try_recv() else {
+            panic!("expected still_waiting")
+        };
+        assert_eq!(report.code, "still_waiting");
+        assert!(report.hint.contains("same arguments"), "{}", report.hint);
+        // The card stays up; nothing was decided.
+        assert!(matches!(worker.waiting(), Some(Waiting::Approval { .. })));
+
+        // Another call is told what is pending, and repeating that is fine
+        // (no "stop repeating" escalation).
+        for _ in 0..4 {
+            let mut other = submit(&mut worker, Request::Scroll { dy: 10.0 });
+            let Ok(Reply::Error(busy)) = other.try_recv() else {
+                panic!("expected approval_pending")
+            };
+            assert_eq!(busy.code, "approval_pending");
+            assert!(!busy.hint.starts_with("Stop repeating"), "{}", busy.hint);
+        }
+
+        // The same call again waits on the same card.
+        worker.park_reply_after = Duration::from_secs(60);
+        let mut again = submit(&mut worker, click);
+        assert!(again.try_recv().is_err());
+        worker.answer(Answer::Deny);
+        let Ok(Reply::Error(report)) = again.try_recv() else {
+            panic!("expected approval_denied")
+        };
+        assert_eq!(report.code, "approval_denied");
+    }
+
+    #[test]
+    fn an_answer_given_while_the_agent_was_away_waits_for_its_next_call() {
+        let base = serve_page();
+        let (mut worker, _, link) = worker_on(&base, mb_agent::ApproveMode::Ask);
+        let click = Request::Click { id: link };
+        let rx = submit(&mut worker, click.clone());
+        drop(rx); // the client timed out
+        worker.tick();
+        assert!(worker.waiting().is_some(), "the card stays up");
+        worker.answer(Answer::TakeOver);
+        assert!(worker.waiting().is_none());
+
+        // The agent repeats its call and gets the person's answer.
+        let mut again = submit(&mut worker, click.clone());
+        let Ok(Reply::Error(report)) = again.try_recv() else {
+            panic!("expected taken_over")
+        };
+        assert_eq!(report.code, "taken_over");
+        // Only once: the next identical call runs normally (and is refused
+        // from memory, since "do it myself" counts as a refusal).
+        let mut third = submit(&mut worker, click);
+        let Ok(Reply::Error(report)) = third.try_recv() else {
+            panic!("expected approval_denied")
+        };
+        assert_eq!(report.code, "approval_denied");
+    }
+
+    #[test]
+    fn an_error_says_when_the_person_changed_the_page() {
+        let base = serve_page();
+        let (mut worker, _, link) = worker_on(&base, mb_agent::ApproveMode::Deny);
+        let mut rx = submit(
+            &mut worker,
+            Request::WaitFor {
+                text: Some("never there".into()),
+                id: None,
+                timeout_ms: 1_500,
+            },
+        );
+        person_click(&mut worker, &link);
+        let Reply::Error(report) = frames_until_reply(&mut worker, &mut rx) else {
+            panic!("expected wait_timeout")
+        };
+        assert_eq!(report.code, "wait_timeout");
+        assert!(
+            report.message.contains("the person changed the page"),
+            "{}",
+            report.message
+        );
+    }
+
+    #[test]
+    fn done_without_typing_is_reported() {
+        let base = serve_page();
+        let (mut worker, pw, _) = worker_on(&base, mb_agent::ApproveMode::Deny);
+        let mut rx = submit(
+            &mut worker,
+            Request::Type {
+                id: pw.clone(),
+                text: "x".into(),
+                clear: false,
+                submit: false,
+            },
+        );
+        worker.answer(Answer::HandoffDone);
+        let Ok(Reply::Observation { browser, .. }) = rx.try_recv() else {
+            panic!("expected the observation")
+        };
+        assert!(
+            browser.contains(&format!(
+                "note: the person pressed Done but field {pw} did not change"
+            )),
+            "{browser}"
+        );
+    }
+
+    #[test]
+    fn an_approved_action_says_the_person_approved_it() {
+        let base = serve_page();
+        let (mut worker, _, link) = worker_on(&base, mb_agent::ApproveMode::Ask);
+        let mut rx = submit(&mut worker, Request::Click { id: link });
+        worker.answer(Answer::Approve);
+        let Ok(Reply::Observation { browser, page }) = rx.try_recv() else {
+            panic!("expected the observation")
+        };
+        assert!(page.contains("Arrived"), "{page}");
+        assert!(
+            browser.contains("note: the person approved this action in the window"),
+            "{browser}"
+        );
+    }
+
+    #[test]
+    fn the_start_page_is_not_mistaken_for_the_agents_last_result() {
+        let base = serve_page();
+        let mut agent = mb_agent::AgentConfig {
+            viewport_width: 800,
+            viewport_height: 600,
+            ..mb_agent::AgentConfig::default()
+        };
+        agent.system_fonts = false;
+        let mut worker = Worker::new(Options {
+            agent,
+            start_url: Some(format!("{base}/")),
+            window: true,
+            preview: None,
+            preview_clicks: Vec::new(),
+            preview_scale: 1.0,
+            http_port: None,
+            attach: None,
+        });
+        // The person follows the link before any agent call.
+        let link = worker
+            .browser()
+            .element_boxes()
+            .into_iter()
+            .find(|e| e.name == "Elsewhere")
+            .map(|e| format!("e{}", e.id.raw()))
+            .unwrap();
+        person_click(&mut worker, &link);
+        for _ in 0..200 {
+            worker.browser().human_frame(&WindowInput::default());
+            if worker
+                .browser()
+                .state()
+                .current_url
+                .as_ref()
+                .is_some_and(|u| u.path == "/x")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let Reply::Observation { browser, page } = worker.process(&Request::Observe {
+            full: false,
+            cursor: 0,
+        }) else {
+            panic!("expected the observation")
+        };
+        assert!(page.contains("Arrived"), "{page}");
+        assert!(
+            !browser.contains("note:"),
+            "first result has nothing to compare: {browser}"
+        );
+    }
+
+    #[test]
+    fn window_wait_for_times_out_without_blocking() {
+        let base = serve_page();
+        let (mut worker, _, _) = worker_on(&base, mb_agent::ApproveMode::Deny);
+        let mut rx = submit(
+            &mut worker,
+            Request::WaitFor {
+                text: Some("never there".into()),
+                id: None,
+                timeout_ms: 30,
+            },
+        );
+        let Reply::Error(report) = frames_until_reply(&mut worker, &mut rx) else {
+            panic!("expected wait_timeout")
+        };
+        assert_eq!(report.code, "wait_timeout");
+        assert!(report.observation.is_some());
     }
 
     #[test]
@@ -753,31 +1265,11 @@ mod tests {
         let Ok(Reply::Error(busy)) = other.try_recv() else {
             panic!("expected busy error")
         };
-        assert_eq!(busy.code, "approval_pending");
+        assert_eq!(busy.code, "handoff_pending");
+        assert!(busy.message.contains("press Done"), "{}", busy.message);
 
         // The person clicks the field in the window and types.
-        let field = worker
-            .browser()
-            .element_boxes()
-            .into_iter()
-            .find(|e| format!("e{}", e.id.raw()) == pw)
-            .unwrap()
-            .rect;
-        let at = (
-            field.x + field.width / 2.0,
-            field.y + field.height / 2.0 + mb_runtime::chrome::CHROME_HEIGHT,
-        );
-        let click = WindowInput {
-            mouse_position: Some(at),
-            left_mouse_pressed: true,
-            left_mouse_held: true,
-            ..WindowInput::default()
-        };
-        worker.browser().human_frame(&click);
-        worker.browser().human_frame(&WindowInput {
-            mouse_position: Some(at),
-            ..WindowInput::default()
-        });
+        let at = person_click(&mut worker, &pw);
         worker.browser().human_frame(&WindowInput {
             typed: "hunter2".into(),
             mouse_position: Some(at),
@@ -791,6 +1283,10 @@ mod tests {
         // What the person changed is summarised; the value never shows.
         let changed = browser.lines().find(|l| l.starts_with("changed:")).unwrap();
         assert!(changed.contains(&format!("values: {pw}")), "{changed}");
+        assert!(
+            browser.contains(&format!("note: the person typed into field {pw}")),
+            "{browser}"
+        );
         assert!(!browser.contains("hunter2") && !page.contains("hunter2"));
         assert!(!browser.contains("the person used the window"));
         assert!(worker.waiting().is_none());

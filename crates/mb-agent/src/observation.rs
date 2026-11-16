@@ -141,6 +141,9 @@ pub struct Observation {
     /// The document changed between the agent's previous result and this
     /// call without the agent doing it — the person used the window.
     pub changed_by_person: bool,
+    /// Browser-written remarks for the trusted block (who resolved a
+    /// parked action, an empty handoff…). Never page-authored text.
+    pub notes: Vec<String>,
 }
 
 /// Before/after summary of one action (browser-computed, trusted).
@@ -157,6 +160,9 @@ pub struct Changes {
     pub elements_now: usize,
     pub elements_added: usize,
     pub elements_removed: usize,
+    /// The ids of the added elements, in document order — the agent
+    /// usually wants to act on what just appeared.
+    pub added_ids: Vec<NodeId>,
     /// Elements present before and after whose value / checked state moved.
     pub values_changed: Vec<ValueChange>,
     /// Text blocks that appeared / disappeared (capped, page-authored).
@@ -197,6 +203,7 @@ impl Changes {
             elements_now: b.len(),
             elements_added: 0,
             elements_removed: 0,
+            added_ids: Vec::new(),
             values_changed: Vec::new(),
             text_added: Vec::new(),
             text_removed: Vec::new(),
@@ -204,6 +211,12 @@ impl Changes {
         if new_document {
             return changes;
         }
+        changes.added_ids = after
+            .elements
+            .iter()
+            .map(|e| e.id)
+            .filter(|id| !a.contains_key(id))
+            .collect();
         changes.elements_added = b.keys().filter(|id| !a.contains_key(id)).count();
         changes.elements_removed = a.keys().filter(|id| !b.contains_key(id)).count();
         changes.values_changed = b
@@ -320,6 +333,7 @@ pub fn observe(input: &ObserveInput<'_>, options: &ObserveOptions) -> Observatio
         console: Vec::new(),
         dialogs: Vec::new(),
         changed_by_person: false,
+        notes: Vec::new(),
     }
 }
 
@@ -732,6 +746,9 @@ impl Observation {
                 "note: the page changed since your last result without you — the person used the window. Ids from before are invalid; read this observation first.\n",
             );
         }
+        for note in &self.notes {
+            let _ = writeln!(out, "note: {note}");
+        }
         if let Some(changed) = &self.changed {
             let _ = writeln!(out, "changed: {}", changed.summary());
         }
@@ -843,10 +860,21 @@ impl Changes {
                 self.elements_now
             );
         }
-        let mut out = format!(
-            "{url} · +{} / -{} elements",
-            self.elements_added, self.elements_removed
-        );
+        let mut out = format!("{url} · +{}", self.elements_added);
+        if !self.added_ids.is_empty() {
+            const SHOWN: usize = 8;
+            let mut ids: Vec<String> = self
+                .added_ids
+                .iter()
+                .take(SHOWN)
+                .map(|id| format!("e{}", id.raw()))
+                .collect();
+            if self.added_ids.len() > SHOWN {
+                ids.push("…".into());
+            }
+            out.push_str(&format!(" ({})", ids.join(" ")));
+        }
+        out.push_str(&format!(" / -{} elements", self.elements_removed));
         if !self.values_changed.is_empty() {
             let ids: Vec<String> = self
                 .values_changed

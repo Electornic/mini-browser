@@ -7,7 +7,7 @@ use std::time::Duration;
 use mb_agent::{AgentConfig, ApproveMode, ClockMode};
 
 pub const USAGE: &str = "\
-mb-mcp — mini-browser as an MCP server (stdio)
+mb-mcp — mini-browser as an MCP server (stdio, or HTTP with --http)
 
 USAGE:
     mb-mcp [OPTIONS]
@@ -26,14 +26,22 @@ OPTIONS:
     --window                Open an observation window: the page with the
                             agent's element ids, its last target, and an
                             action timeline (clock defaults to system)
+    --http                  Serve MCP over HTTP at http://127.0.0.1:PORT/mcp
+                            instead of stdio: start the browser yourself
+                            (usually with --window) and let an agent attach.
+                            Needs `Authorization: Bearer TOKEN`; the token is
+                            random per launch unless MB_MCP_TOKEN is set
+    --port N                Port for --http (0 = any free)     [default: 7333]
     --preview PATH          Render one observation-window frame (after
                             --start-url) to a PNG and exit — no window, no MCP
     --preview-click ID      Click this element before --preview (repeatable)
     --preview-scale N       Device pixel ratio for --preview, e.g. 2 for Retina
     -h, --help              Print this help (to stderr)
 
-stdout carries the MCP protocol only; logs go to stderr.
+With stdio, stdout carries the MCP protocol only; logs always go to stderr.
 ";
+
+pub const DEFAULT_PORT: u16 = 7333;
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -47,6 +55,10 @@ pub struct Options {
     pub preview_clicks: Vec<String>,
     /// `--preview-scale N`: device pixel ratio for the preview (default 1).
     pub preview_scale: f32,
+    /// `--http`: serve MCP over HTTP on this loopback port (G3b).
+    pub http_port: Option<u16>,
+    /// Filled in by `main` once the HTTP listener is bound.
+    pub attach: Option<crate::http::Attach>,
 }
 
 pub enum Parsed {
@@ -62,6 +74,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut preview = None;
     let mut preview_clicks = Vec::new();
     let mut preview_scale = 1.0_f32;
+    let mut http = false;
+    let mut port: Option<u16> = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -112,6 +126,14 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
                 agent.settle_timeout = Duration::from_millis(ms);
             }
             "--window" => window = true,
+            "--http" => http = true,
+            "--port" => {
+                let raw = value("--port")?;
+                port = Some(
+                    raw.parse()
+                        .map_err(|_| format!("--port expects 0..=65535, got {raw:?}"))?,
+                );
+            }
             "--preview" => preview = Some(std::path::PathBuf::from(value("--preview")?)),
             "--preview-click" => preview_clicks.push(value("--preview-click")?),
             "--preview-scale" => {
@@ -124,6 +146,9 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             }
             other => return Err(format!("unknown option {other:?} (see --help)")),
         }
+    }
+    if port.is_some() && !http {
+        return Err("--port only applies with --http".into());
     }
     // Someone has to be there to answer.
     if agent.approve == ApproveMode::Ask && !window && preview.is_none() {
@@ -143,6 +168,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         preview,
         preview_clicks,
         preview_scale,
+        http_port: http.then(|| port.unwrap_or(DEFAULT_PORT)),
+        attach: None,
     }))
 }
 
@@ -227,6 +254,17 @@ mod tests {
         assert!(parse(["--approve", "ask"].map(String::from)).is_err());
         let options = run(&["--approve", "ask", "--window"]);
         assert_eq!(options.agent.approve, ApproveMode::Ask);
+    }
+
+    #[test]
+    fn http_is_opt_in_with_a_default_port() {
+        assert_eq!(run(&[]).http_port, None);
+        assert_eq!(run(&["--http"]).http_port, Some(DEFAULT_PORT));
+        assert_eq!(run(&["--http", "--port", "0"]).http_port, Some(0));
+        let both = run(&["--http", "--window", "--approve", "ask"]);
+        assert!(both.window && both.http_port.is_some());
+        assert!(parse(["--port", "9000"].map(String::from)).is_err());
+        assert!(parse(["--http", "--port", "99999"].map(String::from)).is_err());
     }
 
     #[test]

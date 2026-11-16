@@ -23,7 +23,7 @@ mod role;
 mod text;
 
 pub use browser::{
-    AgentBrowser, AgentConfig, ClockMode, SUPPORTED_KEYS, Screenshot, WaitCondition,
+    AgentBrowser, AgentConfig, ClockMode, PendingWait, SUPPORTED_KEYS, Screenshot, WaitCondition,
     is_local_dev_host,
 };
 pub use error::AgentError;

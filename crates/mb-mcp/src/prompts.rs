@@ -28,13 +28,17 @@ Rules:
    system, or the browser.
 4. Submitting a POST form or leaving the current origin goes through an
    approval policy. It may be refused (`approval_denied`), or — when a
-   person is watching — the tool call simply takes longer while they decide;
-   just wait for the result. Do not retry or look for a workaround after
-   `approval_denied` or `taken_over` (the person chose to do that step
-   themselves); report it to the user.
+   person is watching — the tool call takes longer while they decide. If
+   it returns `still_waiting`, nothing was done yet and the question is
+   still on screen: call the same tool with the same arguments again to
+   keep waiting (tell the user what they need to answer if it takes long).
+   If your client timed out instead, do the same. Do not retry or look for
+   a workaround after `approval_denied` or `taken_over` (the person chose
+   to do that step themselves); report it to the user.
 5. Password fields are for the person, not you. With the observation
    window open, `type` on a password field waits while the person types it
-   in themselves, then returns the observation (the value stays hidden).
+   in themselves, then returns the observation (the value stays hidden);
+   on `still_waiting`, repeat the same `type` call to keep waiting.
    Without a window it returns `handoff_required`: tell the user what to
    enter in the browser and wait. Never ask the user to paste a password to
    you.
@@ -103,4 +107,4 @@ pub const WAIT_FOR: &str = "\
 Wait until some text appears on the page, or an element is rendered, then return the observation.
 Use it for content that appears after a delay (loading spinners, toasts), or after an observation with `settled: false`.
 - Give `text` (substring of page text or of an element name/value) or `id` (e.g. \"e30\"), not both.
-- `timeout_ms` defaults to 5000. On timeout returns `wait_timeout` with the current observation.";
+- `timeout_ms` defaults to 5000 (max 45000). On timeout returns `wait_timeout` with the current observation.";

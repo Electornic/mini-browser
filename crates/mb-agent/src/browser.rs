@@ -92,8 +92,9 @@ pub struct AgentBrowser {
     pending_approval: Option<PendingApproval>,
     // (document generation, url) of the last observation handed out.
     last_reported: Option<(u64, Option<String>)>,
-    // A password handoff in progress: the page before the person typed.
-    handoff_before: Option<(Observation, u64)>,
+    // A password handoff in progress: the page before the person typed,
+    // its document generation, and the field handed over.
+    handoff_before: Option<(Observation, u64, NodeId)>,
 }
 
 /// An agent action held for approval, with what's needed to report its
@@ -111,6 +112,32 @@ fn describe_action(action: &mb_runtime::state::policy::GatedAction) -> String {
     match action.kind {
         GatedKind::Submit => format!("{} {}", action.method, action.target),
         GatedKind::Navigate => format!("Navigation to {}", action.target),
+    }
+}
+
+/// A `wait_for` in progress in the observation window: `poll_wait`
+/// checks it once per frame, so the window keeps drawing and taking the
+/// person's input while the agent waits.
+#[derive(Debug, Clone)]
+pub struct PendingWait {
+    condition: WaitCondition,
+    // The person had changed the page before the wait began.
+    moved: bool,
+    // The page when the wait began, for the result's `changed:` line.
+    before: Observation,
+    generation_before: u64,
+    started: Instant,
+    timeout: Duration,
+}
+
+impl PendingWait {
+    pub fn condition(&self) -> &WaitCondition {
+        &self.condition
+    }
+
+    /// Time left before `wait_timeout`.
+    pub fn remaining(&self) -> Duration {
+        self.timeout.saturating_sub(self.started.elapsed())
     }
 }
 
@@ -490,9 +517,12 @@ impl AgentBrowser {
             return Err(AgentError::StaleElement {
                 id,
                 page_changed: true,
+                by_person: self.changed_by_person(),
             });
         }
         let moved = self.changed_by_person();
+        let before = self.full_snapshot();
+        let generation_before = self.state.document_generation();
         let started = Instant::now();
         let start_clock = self.state.js.clock_now_ms();
         let timeout_ms = timeout.as_millis() as u64;
@@ -501,16 +531,18 @@ impl AgentBrowser {
             if self.condition_holds(&condition) {
                 // The returned observation issues whatever ids are on the
                 // page now, through the normal path.
-                return Ok(self.report(&ObserveOptions::default(), moved));
+                let moved = moved || self.changed_by_person();
+                return Ok(self.finish_wait(&before, generation_before, moved));
             }
             let elapsed = match self.clock {
                 Some(_) => self.state.js.clock_now_ms().saturating_sub(start_clock),
                 None => started.elapsed().as_millis() as u64,
             };
             if elapsed >= timeout_ms || started.elapsed() > timeout + self.config.settle_timeout {
+                let moved = moved || self.changed_by_person();
                 return Err(AgentError::WaitTimeout {
                     waited_ms: elapsed,
-                    observation: Box::new(self.report(&ObserveOptions::default(), moved)),
+                    observation: Box::new(self.finish_wait(&before, generation_before, moved)),
                 });
             }
             // Let time pass even when the page is "quiet": the thing we're
@@ -524,6 +556,68 @@ impl AgentBrowser {
                 self.frame(WindowInput::default());
             }
         }
+    }
+
+    // A `wait_for` result: the observation plus what changed while
+    // waiting (the agent did nothing meanwhile, so it's the page or the
+    // person).
+    fn finish_wait(
+        &mut self,
+        before: &Observation,
+        generation_before: u64,
+        moved: bool,
+    ) -> Observation {
+        let after = self.full_snapshot();
+        let new_document = self.state.document_generation() != generation_before;
+        let mut observation = self.report(&ObserveOptions::default(), moved);
+        observation.changed = Some(Changes::between(before, &after, new_document));
+        observation
+    }
+
+    /// Window mode: start a wait without blocking. The window's frames
+    /// move the page along; `poll_wait` checks after each one.
+    pub fn begin_wait(
+        &mut self,
+        condition: WaitCondition,
+        timeout: Duration,
+    ) -> Result<PendingWait, AgentError> {
+        if let WaitCondition::Element(id) = condition
+            && !self.is_issued(id)
+        {
+            return Err(AgentError::StaleElement {
+                id,
+                page_changed: true,
+                by_person: self.changed_by_person(),
+            });
+        }
+        Ok(PendingWait {
+            condition,
+            moved: self.changed_by_person(),
+            before: self.full_snapshot(),
+            generation_before: self.state.document_generation(),
+            started: Instant::now(),
+            timeout,
+        })
+    }
+
+    /// `None` while still waiting; the result once the condition holds or
+    /// the time is up. Any page change during the wait was the person's
+    /// (the agent is waiting), so the result notes it.
+    pub fn poll_wait(&mut self, wait: &PendingWait) -> Option<Result<Observation, AgentError>> {
+        let moved = wait.moved || self.changed_by_person();
+        let done = self.condition_holds(&wait.condition);
+        if !done && wait.started.elapsed() < wait.timeout {
+            return None;
+        }
+        let observation = self.finish_wait(&wait.before, wait.generation_before, moved);
+        Some(if done {
+            Ok(observation)
+        } else {
+            Err(AgentError::WaitTimeout {
+                waited_ms: wait.started.elapsed().as_millis() as u64,
+                observation: Box::new(observation),
+            })
+        })
     }
 
     fn condition_holds(&mut self, condition: &WaitCondition) -> bool {
@@ -672,25 +766,46 @@ impl AgentBrowser {
         )
     }
 
+    /// Forget what the agent was last shown, so the next result doesn't
+    /// count earlier changes as the person's (e.g. after `--start-url`,
+    /// which no agent saw).
+    pub fn forget_reported(&mut self) {
+        self.last_reported = None;
+    }
+
     /// A password handoff begins (window mode): remember the page so the
     /// result can say what the person changed.
-    pub fn begin_handoff(&mut self) {
+    pub fn begin_handoff(&mut self, field: NodeId) {
         let before = self.full_snapshot();
-        self.handoff_before = Some((before, self.state.document_generation()));
+        self.handoff_before = Some((before, self.state.document_generation(), field));
     }
 
     /// The person says they're done: the observation now, with a
     /// `changed:` summary since `begin_handoff` (values stay hidden).
     pub fn finish_handoff(&mut self) -> Observation {
         let moved = self.changed_by_person();
-        let Some((before, generation_before)) = self.handoff_before.take() else {
+        let Some((before, generation_before, field)) = self.handoff_before.take() else {
             return self.observe(&ObserveOptions::default());
         };
         self.settle();
         let after = self.full_snapshot();
         let new_document = self.state.document_generation() != generation_before;
         let mut observation = self.report(&ObserveOptions::default(), moved && new_document);
-        observation.changed = Some(Changes::between(&before, &after, new_document));
+        let changes = Changes::between(&before, &after, new_document);
+        // Done doesn't prove anything was typed: say so when the field the
+        // person was handed didn't change (and they didn't submit).
+        let filled = changes.values_changed.iter().any(|c| c.id == field);
+        observation.notes.push(if new_document {
+            "the person filled in the field and submitted the form themselves".into()
+        } else if filled {
+            format!("the person typed into field e{} and pressed Done", field.raw())
+        } else {
+            format!(
+                "the person pressed Done but field e{} did not change — the password was probably not entered",
+                field.raw()
+            )
+        });
+        observation.changed = Some(changes);
         observation
     }
 
@@ -733,12 +848,14 @@ impl AgentBrowser {
             return Err(AgentError::StaleElement {
                 id,
                 page_changed: true,
+                by_person: self.changed_by_person(),
             });
         }
         if self.state.parsed_document.borrow().get(id).is_none() {
             return Err(AgentError::StaleElement {
                 id,
                 page_changed: false,
+                by_person: self.changed_by_person(),
             });
         }
         if self.state.current_view().is_none() {

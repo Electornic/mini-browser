@@ -16,6 +16,7 @@ use mb_runtime::dom::NodeId;
 use mb_runtime::layout::Rect;
 use mb_runtime::render::{DisplayCommand, TextCommand, measure_text_width};
 
+use crate::http::Attach;
 use crate::worker::{Answer, TimelineEntry, Waiting};
 
 /// Width of the agent panel on the right. Below `MIN_WINDOW_FOR_PANEL` the
@@ -218,13 +219,28 @@ pub struct PanelInfo<'a> {
     pub timeline: &'a [TimelineEntry],
     /// A request waiting for the person (approval / password handoff).
     pub waiting: Option<&'a Waiting>,
+    /// The agent's pending `wait_for`: (what, seconds left).
+    pub page_wait: Option<(String, u64)>,
+    /// `--http`: where an agent attaches (G3b).
+    pub attach: Option<&'a Attach>,
+    /// The setup command was copied (the button says so).
+    pub copied: bool,
+}
+
+/// What a panel button does.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PanelAction {
+    /// Answer the parked request.
+    Answer(Answer),
+    /// Copy the `claude mcp add ...` command for `--http`.
+    CopySetup,
 }
 
 /// A clickable button in the panel, in window coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Button {
     pub rect: Rect,
-    pub answer: Answer,
+    pub action: PanelAction,
 }
 
 impl Button {
@@ -337,25 +353,33 @@ fn card(
             width: button_width,
             height: BUTTON_HEIGHT,
         };
-        let (bg, fg) = if primary {
-            (BUTTON_PRIMARY, BADGE_FG)
-        } else {
-            (BUTTON_BG, INK)
-        };
-        commands.extend(outline(rect, 1.0, PANEL_RULE));
-        commands.push(DisplayCommand::SolidRect(bg, rect));
-        let label_width = measure_text_width(label, PANEL_FONT);
-        commands.push(text(
-            label,
-            rect.x + (rect.width - label_width).max(0.0) / 2.0,
-            rect.y + 6.0,
-            PANEL_FONT,
-            fg,
-            primary,
-        ));
-        hit.push(Button { rect, answer });
+        commands.extend(button(rect, label, primary));
+        hit.push(Button {
+            rect,
+            action: PanelAction::Answer(answer),
+        });
     }
     (commands, hit, height)
+}
+
+fn button(rect: Rect, label: &str, primary: bool) -> Vec<DisplayCommand> {
+    let (bg, fg) = if primary {
+        (BUTTON_PRIMARY, BADGE_FG)
+    } else {
+        (BUTTON_BG, INK)
+    };
+    let mut commands = outline(rect, 1.0, PANEL_RULE).to_vec();
+    commands.push(DisplayCommand::SolidRect(bg, rect));
+    let label_width = measure_text_width(label, PANEL_FONT);
+    commands.push(text(
+        label.to_string(),
+        rect.x + (rect.width - label_width).max(0.0) / 2.0,
+        rect.y + 6.0,
+        PANEL_FONT,
+        fg,
+        primary,
+    ));
+    commands
 }
 
 // Split on spaces into lines of at most `max` chars, `limit` lines.
@@ -478,11 +502,62 @@ pub fn panel(
     );
     y += PANEL_LINE / 2.0;
     let mut buttons = Vec::new();
+    if let Some(attach) = info.attach {
+        line(
+            &mut commands,
+            &mut y,
+            "Agents attach over HTTP".into(),
+            INK,
+            true,
+        );
+        line(&mut commands, &mut y, attach.url.clone(), MUTED, false);
+        line(
+            &mut commands,
+            &mut y,
+            format!("token: {}", crate::http::masked(&attach.token)),
+            MUTED,
+            false,
+        );
+        let rect = Rect {
+            x: left,
+            y,
+            width: width - PANEL_PAD * 2.0,
+            height: BUTTON_HEIGHT,
+        };
+        let label = if info.copied {
+            "Copied — paste it in a terminal"
+        } else {
+            "Copy setup command"
+        };
+        commands.extend(button(rect, label, false));
+        buttons.push(Button {
+            rect,
+            action: PanelAction::CopySetup,
+        });
+        y += BUTTON_HEIGHT + PANEL_LINE;
+    }
     if let Some(waiting) = info.waiting {
         let (card_commands, card_buttons, card_height) = card(waiting, x, width, y);
         commands.extend(card_commands);
-        buttons = card_buttons;
+        buttons.extend(card_buttons);
         y += card_height + PANEL_LINE / 2.0;
+    }
+    if let Some((what, left)) = &info.page_wait {
+        line(
+            &mut commands,
+            &mut y,
+            format!("Agent waits for {what}"),
+            INK,
+            true,
+        );
+        line(
+            &mut commands,
+            &mut y,
+            format!("  {left}s left · you can keep using the page"),
+            MUTED,
+            false,
+        );
+        y += PANEL_LINE / 2.0;
     }
     line(&mut commands, &mut y, "Agent actions".into(), INK, true);
 
@@ -618,6 +693,9 @@ mod tests {
                 allow_origins: &[],
                 timeline: &timeline,
                 waiting: None,
+                page_wait: None,
+                attach: None,
+                copied: false,
             },
             900.0,
             300.0,
@@ -644,6 +722,9 @@ mod tests {
                 allow_origins: &[],
                 timeline: &[],
                 waiting: Some(&waiting),
+                page_wait: None,
+                attach: None,
+                copied: false,
             },
             900.0,
             300.0,
@@ -655,10 +736,10 @@ mod tests {
             "{texts:?}"
         );
         assert!(texts.iter().any(|t| t.contains("/signup")), "{texts:?}");
-        let answers: Vec<Answer> = buttons.iter().map(|b| b.answer).collect();
+        let answers: Vec<PanelAction> = buttons.iter().map(|b| b.action).collect();
         assert_eq!(
             answers,
-            vec![Answer::Approve, Answer::Deny, Answer::TakeOver]
+            [Answer::Approve, Answer::Deny, Answer::TakeOver].map(PanelAction::Answer)
         );
         // Buttons sit inside the panel and don't overlap.
         for b in &buttons {
@@ -687,13 +768,19 @@ mod tests {
                 allow_origins: &[],
                 timeline: &[],
                 waiting: Some(&waiting),
+                page_wait: None,
+                attach: None,
+                copied: false,
             },
             900.0,
             300.0,
             700.0,
         );
-        let answers: Vec<Answer> = buttons.iter().map(|b| b.answer).collect();
-        assert_eq!(answers, vec![Answer::HandoffDone, Answer::HandoffCancel]);
+        let answers: Vec<PanelAction> = buttons.iter().map(|b| b.action).collect();
+        assert_eq!(
+            answers,
+            [Answer::HandoffDone, Answer::HandoffCancel].map(PanelAction::Answer)
+        );
     }
 
     #[test]
@@ -711,5 +798,37 @@ mod tests {
     fn narrow_windows_drop_the_panel() {
         assert_eq!(layout(1280), (980, 300));
         assert_eq!(layout(600), (600, 0));
+    }
+
+    #[test]
+    fn attach_section_shows_the_url_masked_token_and_copy_button() {
+        let attach = Attach {
+            url: "http://127.0.0.1:7333/mcp".into(),
+            token: "0123456789abcdef0123456789abcdef".into(),
+        };
+        let waiting = Waiting::Handoff { id: "e7".into() };
+        let (commands, buttons) = panel(
+            &PanelInfo {
+                approve: ApproveMode::Ask,
+                allow_origins: &[],
+                timeline: &[],
+                waiting: Some(&waiting),
+                page_wait: Some(("\"This page\"".into(), 42)),
+                attach: Some(&attach),
+                copied: false,
+            },
+            900.0,
+            300.0,
+            700.0,
+        );
+        let texts = badge_texts(&commands);
+        assert!(texts.iter().any(|t| t.contains("127.0.0.1:7333/mcp")));
+        assert!(texts.iter().any(|t| t == "token: 0123…cdef"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains(&attach.token)));
+        assert!(texts.contains(&"Agent waits for \"This page\"".to_string()));
+        // Copy button first, then the card's answers below it.
+        assert_eq!(buttons[0].action, PanelAction::CopySetup);
+        assert_eq!(buttons.len(), 3);
+        assert!(buttons[1].rect.y > buttons[0].rect.y + buttons[0].rect.height);
     }
 }

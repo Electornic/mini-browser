@@ -25,7 +25,7 @@
 │                        rquickjs / ureq / tokio / state/
 ├── crates/mb-agent    → 에이전트 인터페이스 (mb-runtime 위)
 │                        observe: 요소 목록 + 페이지 텍스트 (docs/concept.md)
-├── crates/mb-mcp      → MCP 서버 바이너리 (mb-agent 위, rmcp stdio)
+├── crates/mb-mcp      → MCP 서버 바이너리 (mb-agent 위, rmcp stdio / HTTP)
 └── crates/mb-shell    → 바이너리 (mb-runtime 위)
                          winit / softbuffer
 ```
@@ -101,6 +101,20 @@ claude mcp add mini-browser -- "$(pwd)/target/release/mb-mcp" --window --approve
 ```
 
 ![승인 카드](docs/images/g4-approval-card.png)
+
+### 붙기 모드 (HTTP)
+
+브라우저를 **내가 먼저 띄워 두고** 에이전트가 거기에 붙게 할 수도 있다. 창을 닫을 때까지 살아 있고, 에이전트가 끊겼다 다시 붙어도 페이지가 그대로다:
+
+```sh
+./target/release/mb-mcp --http --window --approve ask
+# [mb-mcp] ready (http) at http://127.0.0.1:7333/mcp
+# [mb-mcp] attach with: claude mcp add --transport http mini-browser http://127.0.0.1:7333/mcp --header "Authorization: Bearer …"
+```
+
+출력된 `claude mcp add …` 를 실행하면 끝 (창 패널의 **Copy setup command** 버튼도 같은 명령을 클립보드로 복사). 토큰은 실행마다 새로 만들어지므로, 등록을 고정하고 싶으면 `MB_MCP_TOKEN` (32자 이상) 을 지정한다. 127.0.0.1 에만 열리고, 토큰 없는 요청·웹 페이지발(`Origin`) 요청·다른 `Host` 요청은 거절한다.
+
+![붙기 모드 패널](docs/images/g3b-attach-panel.png)
 
 데모 페이지: `cd examples/agent-demo && python3 -m http.server 8765` 후 "http://127.0.0.1:8765/ 에서 'buy milk' 할 일을 추가하고 완료 처리해줘". 추천 skill: [examples/claude-skill/mini-browser-testing](examples/claude-skill/mini-browser-testing/SKILL.md). 설계: [docs/concept.md](docs/concept.md).
 

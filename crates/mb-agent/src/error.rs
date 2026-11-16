@@ -15,6 +15,9 @@ pub enum AgentError {
     StaleElement {
         id: NodeId,
         page_changed: bool,
+        /// The person changed the page in the window since the agent's
+        /// last result (that's why the id went stale).
+        by_person: bool,
     },
     /// The element exists but has no box to click (display:none, 0×0).
     NotInteractable {
@@ -81,8 +84,12 @@ impl AgentError {
 
     pub fn message(&self) -> String {
         match self {
-            AgentError::StaleElement { id, page_changed } => {
-                if *page_changed {
+            AgentError::StaleElement {
+                id,
+                page_changed,
+                by_person,
+            } => {
+                let mut message = if *page_changed {
                     format!(
                         "Element e{} isn't on the current page: it wasn't listed in any observation since the last navigation (ids from a previous page don't carry over).",
                         id.raw()
@@ -92,7 +99,13 @@ impl AgentError {
                         "Element e{} no longer exists (it was removed from the page).",
                         id.raw()
                     )
+                };
+                if *by_person {
+                    message.push_str(
+                        " The person changed the page in the window since your last result.",
+                    );
                 }
+                message
             }
             AgentError::NotInteractable { id, reason } => {
                 format!("Element e{} can't be acted on: {reason}.", id.raw())

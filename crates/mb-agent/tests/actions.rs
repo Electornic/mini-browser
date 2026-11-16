@@ -131,6 +131,11 @@ fn route(
             "<html><head><title>Welcome</title></head><body><h1>Account created</h1><a href=\"/signup\">Back</a></body></html>".into(),
         ),
         ("GET", "/timers") => ("200 OK", String::new(), TIMERS_PAGE.into()),
+        ("GET", "/adder") => (
+            "200 OK",
+            String::new(),
+            "<html><body><div id=\"list\"></div><button onclick=\"var c = document.createElement('input'); c.setAttribute('type', 'checkbox'); document.getElementById('list').appendChild(c);\">Add</button></body></html>".into(),
+        ),
         ("GET", "/delayed") => (
             "200 OK",
             String::new(),
@@ -656,11 +661,40 @@ fn a_page_the_person_changed_is_flagged_once() {
     b.settle();
 
     // The next tool call says so — its ids from before are gone.
-    assert_eq!(b.click(stale).unwrap_err().code(), "stale_element");
+    let err = b.click(stale).unwrap_err();
+    assert_eq!(err.code(), "stale_element");
+    assert!(
+        err.message().contains("The person changed the page"),
+        "{}",
+        err.message()
+    );
     let now = b.observe(&Default::default());
     assert_eq!(path_of(&now), "/signup");
     assert!(now.changed_by_person);
     assert!(now.to_text().contains("the person used the window"));
     // Only once: after that the agent has seen the page.
     assert!(!b.observe(&Default::default()).changed_by_person);
+}
+
+#[test]
+fn changed_names_the_elements_that_appeared() {
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/adder")).unwrap();
+    let add = find(&page, Role::Button, "Add");
+    let after = b.click(add).unwrap();
+    let changed = after.changed.as_ref().unwrap();
+    assert_eq!(changed.elements_added, 1);
+    let new = changed.added_ids[0];
+    assert!(
+        after
+            .elements
+            .iter()
+            .any(|e| e.id == new && e.role == Role::Checkbox)
+    );
+    let text = after.to_text();
+    assert!(
+        text.contains(&format!("+1 (e{}) / -0 elements", new.raw())),
+        "{text}"
+    );
 }
