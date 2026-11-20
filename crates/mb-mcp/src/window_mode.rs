@@ -70,6 +70,7 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
                 {
                     match button.action {
                         overlay::PanelAction::Answer(answer) => worker.answer(answer),
+                        overlay::PanelAction::Replay(_) => {}
                         overlay::PanelAction::CopySetup => {
                             if let Some(attach) = &worker.options().attach {
                                 copied = copy_to_clipboard(&attach.setup_command());

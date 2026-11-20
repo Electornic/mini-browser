@@ -19,14 +19,17 @@ use crate::session_log::{REDACTED, Target, find_target, request_from_json, resul
 use crate::worker::{self, Reply, Request, ToolError};
 
 /// Exit codes (also in `--help`).
-const SAME: u8 = 0;
-const DIFFERS: u8 = 1;
-const BAD_INPUT: u8 = 2;
-const NEEDS_PERSON: u8 = 3;
+pub const SAME: u8 = 0;
+pub const DIFFERS: u8 = 1;
+pub const BAD_INPUT: u8 = 2;
+pub const NEEDS_PERSON: u8 = 3;
 
 const DIFF_LINES: usize = 20;
 
 pub fn run(options: &ReplayOptions) -> ExitCode {
+    if options.window || options.preview.is_some() {
+        return crate::replay_window::run(options);
+    }
     match replay(options) {
         Ok(steps) => {
             eprintln!("replay: {steps} steps, all results match the recording");
@@ -39,7 +42,7 @@ pub fn run(options: &ReplayOptions) -> ExitCode {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Stop {
     pub code: u8,
     pub message: String,
@@ -54,58 +57,246 @@ fn stop(code: u8, message: impl Into<String>) -> Stop {
 
 /// Replays every step; `Ok(step count)` when all results match.
 pub fn replay(options: &ReplayOptions) -> Result<usize, Stop> {
-    let raw = std::fs::read_to_string(&options.file).map_err(|e| {
-        stop(
-            BAD_INPUT,
-            format!("replay: {}: {e}", options.file.display()),
+    let mut replayer = Replayer::open(options)?;
+    while !replayer.finished() {
+        match replayer.step() {
+            Some(StepOutcome::Matched(line)) => eprintln!("{line}"),
+            Some(StepOutcome::Stopped(stopped)) => {
+                let mut stopped = stopped.clone();
+                stopped
+                    .message
+                    .push_str(&format!("\n{}", replayer.summary()));
+                return Err(stopped);
+            }
+            None => break,
+        }
+    }
+    Ok(replayer.position())
+}
+
+/// How one replayed step ended.
+#[derive(Debug)]
+pub enum StepOutcome {
+    /// `✓ …` line: the result matched the recording.
+    Matched(String),
+    /// Differs (the regression point), needs the person, or a bad line.
+    Stopped(Stop),
+}
+
+/// A replay in progress, one step at a time: the headless `replay` and
+/// the replay window both drive it.
+pub struct Replayer {
+    options: ReplayOptions,
+    header: Value,
+    steps: Vec<Value>,
+    browser: AgentBrowser,
+    done: Vec<StepOutcome>,
+}
+
+impl Replayer {
+    pub fn open(options: &ReplayOptions) -> Result<Self, Stop> {
+        let raw = std::fs::read_to_string(&options.file).map_err(|e| {
+            stop(
+                BAD_INPUT,
+                format!("replay: {}: {e}", options.file.display()),
+            )
+        })?;
+        let mut lines = raw.lines().filter(|l| !l.trim().is_empty()).enumerate();
+        let header: Value = match lines.next() {
+            Some((_, line)) => serde_json::from_str(line)
+                .map_err(|e| stop(BAD_INPUT, format!("replay: header: {e}")))?,
+            None => return Err(stop(BAD_INPUT, "replay: empty log")),
+        };
+        if header["type"] != "session" || header["version"] != crate::session_log::VERSION {
+            return Err(stop(
+                BAD_INPUT,
+                "replay: not a mb-mcp session log (version 1)",
+            ));
+        }
+        if header["prompts"] != crate::prompts::fingerprint() {
+            eprintln!(
+                "replay: note: recorded with different prompts (only matters for G5c comparisons)"
+            );
+        }
+        let steps = lines
+            .map(|(index, line)| {
+                serde_json::from_str(line)
+                    .map_err(|e| stop(BAD_INPUT, format!("replay: line {}: {e}", index + 1)))
+            })
+            .collect::<Result<Vec<Value>, Stop>>()?;
+        let browser = start_browser(&header, options)?;
+        Ok(Replayer {
+            options: options.clone(),
+            header,
+            steps,
+            browser,
+            done: Vec::new(),
+        })
+    }
+
+    /// The recorded viewport (the replay window's page area).
+    pub fn viewport(&self) -> (usize, usize) {
+        let v = &self.header["viewport"];
+        (
+            v[0].as_u64().unwrap_or(1280) as usize,
+            v[1].as_u64().unwrap_or(800) as usize,
         )
-    })?;
-    let mut lines = raw.lines().filter(|l| !l.trim().is_empty()).enumerate();
-    let header: Value = match lines.next() {
-        Some((_, line)) => serde_json::from_str(line)
-            .map_err(|e| stop(BAD_INPUT, format!("replay: header: {e}")))?,
-        None => return Err(stop(BAD_INPUT, "replay: empty log")),
-    };
-    if header["type"] != "session" || header["version"] != crate::session_log::VERSION {
-        return Err(stop(
-            BAD_INPUT,
-            "replay: not a mb-mcp session log (version 1)",
-        ));
     }
-    if header["prompts"] != crate::prompts::fingerprint() {
-        eprintln!(
-            "replay: note: recorded with different prompts (only matters for G5c comparisons)"
-        );
+
+    pub fn total(&self) -> usize {
+        self.steps.len()
     }
-    let mut browser = AgentBrowser::new(config_from(&header)?);
+
+    /// Steps run so far (the next one is `steps[position]`).
+    pub fn position(&self) -> usize {
+        self.done.len()
+    }
+
+    pub fn matched(&self) -> usize {
+        self.done
+            .iter()
+            .filter(|o| matches!(o, StepOutcome::Matched(_)))
+            .count()
+    }
+
+    /// All steps ran, or one stopped the replay.
+    pub fn finished(&self) -> bool {
+        self.position() == self.total() || matches!(self.done.last(), Some(StepOutcome::Stopped(_)))
+    }
+
+    pub fn outcomes(&self) -> &[StepOutcome] {
+        &self.done
+    }
+
+    pub fn browser(&mut self) -> &mut AgentBrowser {
+        &mut self.browser
+    }
+
+    pub fn file_name(&self) -> String {
+        self.options
+            .file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// `3 click button "Sign up"` for step `index` (0-based).
+    pub fn label(&self, index: usize) -> String {
+        self.steps.get(index).map(step_label).unwrap_or_default()
+    }
+
+    /// Run the next step; `None` when finished.
+    pub fn step(&mut self) -> Option<&StepOutcome> {
+        if self.finished() {
+            return None;
+        }
+        let step = &self.steps[self.position()];
+        let outcome = match replay_step(
+            &mut self.browser,
+            step,
+            &self.options.secrets,
+            self.options.ignore_text,
+        ) {
+            Ok(line) => StepOutcome::Matched(line),
+            Err(mut stopped) => {
+                // A page may echo what was typed: never print a secret.
+                for (_, value) in &self.options.secrets {
+                    if !value.is_empty() {
+                        stopped.message = stopped.message.replace(value.as_str(), REDACTED);
+                    }
+                }
+                StepOutcome::Stopped(stopped)
+            }
+        };
+        self.done.push(outcome);
+        self.done.last()
+    }
+
+    /// Back to before step 1 (a fresh browser on the start URL).
+    pub fn restart(&mut self) {
+        if let Ok(browser) = start_browser(&self.header, &self.options) {
+            self.browser = browser;
+        }
+        self.done.clear();
+    }
+
+    /// Re-run from the start up to `steps` steps: the replay is
+    /// deterministic, so this is how the window goes back.
+    pub fn go_to(&mut self, steps: usize) {
+        self.restart();
+        while self.position() < steps && !self.finished() {
+            self.step();
+        }
+    }
+
+    /// The element the next step will act on, if it has one on the page
+    /// (for the window's outline). Issues ids like the step itself would.
+    pub fn next_target(&mut self) -> Option<NodeId> {
+        if self.finished() {
+            return None;
+        }
+        let target = self.steps[self.position()]
+            .get("target")
+            .and_then(Target::from_json)?;
+        let snapshot = self.browser.observe(&full_observation());
+        find_target(&snapshot, &target)
+    }
+
+    /// `replay: stopped at step 10 of 10 (9 matched): needs the person`
+    pub fn summary(&self) -> String {
+        let (total, matched) = (self.total(), self.matched());
+        match self.done.last() {
+            Some(StepOutcome::Stopped(stopped)) => {
+                let why = match stopped.code {
+                    DIFFERS => "a result differs",
+                    NEEDS_PERSON => "needs the person",
+                    _ => "bad log",
+                };
+                format!(
+                    "replay: stopped at step {} of {total} ({matched} matched): {why}",
+                    self.position()
+                )
+            }
+            _ if self.position() == total => {
+                format!("replay: {total} steps, all results match the recording")
+            }
+            _ => format!(
+                "replay: step {} of {total} ({matched} matched)",
+                self.position()
+            ),
+        }
+    }
+}
+
+fn start_browser(header: &Value, options: &ReplayOptions) -> Result<AgentBrowser, Stop> {
+    let mut config = config_from(header)?;
+    // Real text for a person to read; the comparison doesn't depend on
+    // fonts (no rects in the log).
+    config.system_fonts = options.window || options.preview.is_some();
+    let mut browser = AgentBrowser::new(config);
     if let Some(url) = header["start_url"].as_str() {
         let _ = browser.navigate(url);
         browser.forget_reported();
     }
+    Ok(browser)
+}
 
-    let steps: Vec<(usize, &str)> = lines.collect();
-    let total = steps.len();
-    let mut count = 0;
-    for (index, line) in steps {
-        let step: Value = serde_json::from_str(line)
-            .map_err(|e| stop(BAD_INPUT, format!("replay: line {}: {e}", index + 1)))?;
-        if let Err(mut stopped) =
-            replay_step(&mut browser, &step, &options.secrets, options.ignore_text)
-        {
-            let why = match stopped.code {
-                DIFFERS => "a result differs",
-                NEEDS_PERSON => "needs the person",
-                _ => "bad log",
-            };
-            stopped.message.push_str(&format!(
-                "\nreplay: stopped at step {} of {total} ({count} matched): {why}",
-                count + 1
-            ));
-            return Err(stopped);
-        }
-        count += 1;
+fn full_observation() -> ObserveOptions {
+    ObserveOptions {
+        scope: Scope::Full,
+        max_elements: usize::MAX,
+        max_text_chars: 0,
+        cursor: 0,
     }
-    Ok(count)
+}
+
+fn step_label(step: &Value) -> String {
+    let n = step["n"].as_u64().unwrap_or(0);
+    let tool = step["tool"].as_str().unwrap_or("");
+    match step.get("target").and_then(Target::from_json) {
+        Some(target) => format!("{n} {tool} {}", target.describe()),
+        None => format!("{n} {tool}"),
+    }
 }
 
 fn config_from(header: &Value) -> Result<AgentConfig, Stop> {
@@ -142,16 +333,13 @@ fn replay_step(
     step: &Value,
     secrets: &[(String, String)],
     ignore_text: bool,
-) -> Result<(), Stop> {
+) -> Result<String, Stop> {
     let n = step["n"].as_u64().unwrap_or(0);
     let tool = step["tool"].as_str().unwrap_or("");
     let mut request = request_from_json(tool, &step["args"])
         .map_err(|e| stop(BAD_INPUT, format!("replay: step {n}: {e}")))?;
     let target = step.get("target").and_then(Target::from_json);
-    let label = match &target {
-        Some(target) => format!("{n} {tool} {}", target.describe()),
-        None => format!("{n} {tool}"),
-    };
+    let label = step_label(step);
 
     if step["person_moved"] == true {
         return Err(stop(
@@ -164,12 +352,7 @@ fn replay_step(
 
     // Ids are only accepted once an observation listed them, and the
     // recorded id may belong to a different element now.
-    let snapshot = browser.observe(&ObserveOptions {
-        scope: Scope::Full,
-        max_elements: usize::MAX,
-        max_text_chars: 0,
-        cursor: 0,
-    });
+    let snapshot = browser.observe(&full_observation());
     if let Some(target) = &target {
         let id = find_target(&snapshot, target).ok_or_else(|| {
             stop(
@@ -183,9 +366,28 @@ fn replay_step(
         set_id(&mut request, id);
     }
 
-    // A password: the value isn't in the log.
+    // A password: the value isn't in the log. A log is input from
+    // whoever wrote it, so a secret only ever goes into a real password
+    // field on a local development host — never wherever a log points.
+    let local = browser
+        .state()
+        .current_url
+        .as_ref()
+        .is_some_and(|u| mb_agent::is_local_dev_host(&u.host));
+    let field = request_id(&request);
+    let password_field = snapshot.elements.iter().any(|e| {
+        Some(e.id) == field && matches!(e.value, Some(mb_agent::ElementValue::Hidden { .. }))
+    });
     let secret = |target: &Option<Target>| -> Result<String, Stop> {
         let name = target.as_ref().map(|t| t.name.as_str()).unwrap_or("");
+        if !local || !password_field {
+            return Err(stop(
+                NEEDS_PERSON,
+                format!(
+                    "✗ {label}: won't type a --secret here: secrets go only into password fields on local development hosts"
+                ),
+            ));
+        }
         secrets
             .iter()
             .find(|(field, _)| field == name)
@@ -193,7 +395,10 @@ fn replay_step(
             .ok_or_else(|| {
                 stop(
                     NEEDS_PERSON,
-                    format!("✗ {label}: needs the password for field {name:?}: pass --secret \"{name}=…\""),
+                    format!(
+                        "✗ {label}: needs the password for field {name:?}: pass --secret \"{name}\" with {} set",
+                        crate::cli::secret_env_var(name)
+                    ),
                 )
             })
     };
@@ -278,7 +483,7 @@ fn compare(
     reply: &Reply,
     label: &str,
     ignore_text: bool,
-) -> Result<(), Stop> {
+) -> Result<String, Stop> {
     let got = result_record(browser, reply);
     let mut recorded = step["result"].clone();
     let mut got = got;
@@ -293,10 +498,7 @@ fn compare(
         None => String::new(),
     };
     match difference(&recorded, &got) {
-        None => {
-            eprintln!("✓ {label}{expected_error}");
-            Ok(())
-        }
+        None => Ok(format!("✓ {label}{expected_error}")),
         Some(diff) => Err(stop(
             DIFFERS,
             format!("✗ {label}: result differs from the recording (regression point)\n{diff}"),
@@ -309,6 +511,15 @@ fn outcome(result: Result<mb_agent::Observation, AgentError>) -> Reply {
         Ok(observation) => worker::observation_reply(observation),
         Err(error) => worker::error_reply(&ToolError::Agent(error), 1),
     }
+}
+
+fn request_id(request: &Request) -> Option<NodeId> {
+    let id = match request {
+        Request::Click { id } | Request::Type { id, .. } => id,
+        Request::WaitFor { id: Some(id), .. } => id,
+        _ => return None,
+    };
+    id.strip_prefix('e')?.parse().ok().map(NodeId::from_raw)
 }
 
 fn set_id(request: &mut Request, id: NodeId) {
@@ -508,6 +719,10 @@ mod tests {
             file: path.to_path_buf(),
             secrets: Vec::new(),
             ignore_text: false,
+            window: false,
+            preview: None,
+            preview_steps: 0,
+            preview_scale: 1.0,
         }
     }
 
@@ -573,6 +788,87 @@ mod tests {
         let mut ignoring = options(&path);
         ignoring.ignore_text = true;
         assert_eq!(replay(&ignoring).unwrap(), 6);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_doctored_log_cannot_aim_a_secret_at_a_plain_field() {
+        let base = server(Arc::new(Mutex::new(home("Add"))));
+        let path = log_path("doctored");
+        record(&base, &path);
+        // Someone edits the log so the "Name" step types a secret.
+        let log = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace(r#""text":"hello""#, r#""text":"<redacted>""#);
+        std::fs::write(&path, log).unwrap();
+        let mut options = options(&path);
+        options
+            .secrets
+            .push(("Name".into(), "real-password".into()));
+        let stop = replay(&options).unwrap_err();
+        assert_eq!(stop.code, NEEDS_PERSON);
+        assert!(
+            stop.message.contains("won't type a --secret here"),
+            "{}",
+            stop.message
+        );
+        assert!(!stop.message.contains("real-password"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_log_is_private_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = server(Arc::new(Mutex::new(home("Add"))));
+        let path = log_path("mode");
+        // An old, world-readable file at that path gets tightened too.
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        record(&base, &path);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stepping_back_reaches_the_same_state() {
+        let base = server(Arc::new(Mutex::new(home("Add"))));
+        let path = log_path("back");
+        record(&base, &path);
+        let mut replayer = Replayer::open(&options(&path)).unwrap();
+        assert_eq!((replayer.position(), replayer.total()), (0, 6));
+        // Step 4 (click Add) is next after three steps: its target exists.
+        for _ in 0..3 {
+            assert!(matches!(replayer.step(), Some(StepOutcome::Matched(_))));
+        }
+        let target = replayer.next_target();
+        assert!(target.is_some());
+        let page = |r: &mut Replayer| {
+            let snapshot = r.browser().full_snapshot();
+            snapshot
+                .elements
+                .iter()
+                .map(crate::session_log::element_line)
+                .collect::<Vec<_>>()
+        };
+        replayer.step();
+        let after_four = page(&mut replayer);
+        // Back one, then forward again: same page, same next target.
+        replayer.go_to(3);
+        assert_eq!(replayer.position(), 3);
+        assert_eq!(replayer.next_target(), target);
+        replayer.step();
+        assert_eq!(page(&mut replayer), after_four);
+        while replayer.step().is_some() {}
+        assert!(replayer.finished());
+        assert_eq!(replayer.matched(), 6);
+        assert_eq!(
+            replayer.summary(),
+            "replay: 6 steps, all results match the recording"
+        );
+        replayer.restart();
+        assert_eq!(replayer.position(), 0);
         let _ = std::fs::remove_file(&path);
     }
 

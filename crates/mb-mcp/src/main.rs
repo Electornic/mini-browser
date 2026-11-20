@@ -19,6 +19,7 @@ mod http;
 mod overlay;
 mod prompts;
 mod replay;
+mod replay_window;
 mod server;
 mod session_log;
 mod window_mode;

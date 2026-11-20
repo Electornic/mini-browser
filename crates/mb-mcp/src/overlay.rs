@@ -234,6 +234,41 @@ pub enum PanelAction {
     Answer(Answer),
     /// Copy the `claude mcp add ...` command for `--http`.
     CopySetup,
+    /// `mb-mcp replay --window` controls (G5b).
+    Replay(ReplayControl),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayControl {
+    Back,
+    Next,
+    RunAll,
+    Restart,
+}
+
+/// How a step in the replay list is marked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepMark {
+    Matched,
+    Differs,
+    NeedsPerson,
+    Next,
+    Pending,
+}
+
+/// What the replay panel shows.
+pub struct ReplayPanelInfo {
+    pub file: String,
+    /// Steps run, steps in the log, steps that matched.
+    pub position: usize,
+    pub total: usize,
+    pub matched: usize,
+    pub steps: Vec<(StepMark, String)>,
+    /// The next step, and whether its target is outlined on the page.
+    pub next: Option<(String, bool)>,
+    /// The last step run: its label and result lines (`- …` / `+ …` for
+    /// a diff).
+    pub last: Option<(String, Vec<String>)>,
 }
 
 /// A clickable button in the panel, in window coordinates.
@@ -383,7 +418,7 @@ fn button(rect: Rect, label: &str, primary: bool) -> Vec<DisplayCommand> {
 }
 
 // Split on spaces into lines of at most `max` chars, `limit` lines.
-fn wrap(s: &str, max: usize, limit: usize) -> Vec<String> {
+pub fn wrap(s: &str, max: usize, limit: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
     for word in s.split(' ') {
@@ -589,6 +624,159 @@ pub fn panel(
                 FAIL,
                 false,
             ),
+        }
+    }
+    (commands, buttons)
+}
+
+/// The replay panel (`mb-mcp replay --window`) at `[x, x + width)`.
+pub fn replay_panel(
+    info: &ReplayPanelInfo,
+    x: f32,
+    width: f32,
+    height: f32,
+) -> (Vec<DisplayCommand>, Vec<Button>) {
+    let mut commands = vec![
+        DisplayCommand::SolidRect(
+            PANEL_BG,
+            Rect {
+                x,
+                y: 0.0,
+                width,
+                height,
+            },
+        ),
+        DisplayCommand::SolidRect(
+            PANEL_RULE,
+            Rect {
+                x,
+                y: 0.0,
+                width: 1.0,
+                height,
+            },
+        ),
+    ];
+    let left = x + PANEL_PAD;
+    let inner = width - PANEL_PAD * 2.0;
+    let max_chars = (inner / 7.0) as usize;
+    let mut y = PANEL_PAD;
+    let line =
+        |commands: &mut Vec<DisplayCommand>, y: &mut f32, s: String, color: Color, bold: bool| {
+            commands.push(text(clip(&s, max_chars), left, *y, PANEL_FONT, color, bold));
+            *y += PANEL_LINE;
+        };
+
+    line(
+        &mut commands,
+        &mut y,
+        format!("Replay · {}", info.file),
+        INK,
+        true,
+    );
+    line(
+        &mut commands,
+        &mut y,
+        format!(
+            "step {} of {} · {} matched",
+            info.position, info.total, info.matched
+        ),
+        MUTED,
+        false,
+    );
+    y += 4.0;
+
+    // Back / Next / Run all / Restart
+    let controls = [
+        ("Back", ReplayControl::Back, false),
+        // Nothing to step when the replay is over or stopped.
+        ("Next", ReplayControl::Next, info.next.is_some()),
+        ("Run all", ReplayControl::RunAll, false),
+        ("Restart", ReplayControl::Restart, false),
+    ];
+    let gap = 6.0;
+    let button_width = (inner - gap * 3.0) / 4.0;
+    let mut buttons = Vec::new();
+    for (i, (label, control, primary)) in controls.into_iter().enumerate() {
+        let rect = Rect {
+            x: left + i as f32 * (button_width + gap),
+            y,
+            width: button_width,
+            height: BUTTON_HEIGHT,
+        };
+        commands.extend(button(rect, label, primary));
+        buttons.push(Button {
+            rect,
+            action: PanelAction::Replay(control),
+        });
+    }
+    y += BUTTON_HEIGHT + PANEL_LINE / 2.0;
+
+    // The result section is drawn last but needs its room reserved.
+    let result_lines = info
+        .last
+        .as_ref()
+        .map_or(0, |(_, lines)| lines.len().min(14) + 1);
+    let next_lines = if info.next.is_some() { 2 } else { 0 };
+    let reserved = (result_lines + next_lines + 2) as f32 * PANEL_LINE;
+    let rows = (((height - y - PANEL_PAD - reserved) / PANEL_LINE).max(3.0)) as usize;
+
+    line(&mut commands, &mut y, "Steps".into(), INK, true);
+    // A window of rows around the next step.
+    let focus = info.position.min(info.steps.len().saturating_sub(1));
+    let start = focus
+        .saturating_sub(rows / 2)
+        .min(info.steps.len().saturating_sub(rows));
+    for (mark, label) in info.steps.iter().skip(start).take(rows) {
+        let (symbol, color) = match mark {
+            StepMark::Matched => ("✓", OK),
+            StepMark::Differs => ("✗", FAIL),
+            StepMark::NeedsPerson => ("⏸", FAIL),
+            StepMark::Next => ("▶", INK),
+            StepMark::Pending => ("·", MUTED),
+        };
+        line(
+            &mut commands,
+            &mut y,
+            format!("{symbol} {label}"),
+            color,
+            *mark == StepMark::Next,
+        );
+    }
+    y += PANEL_LINE / 2.0;
+
+    if let Some((label, outlined)) = &info.next {
+        line(&mut commands, &mut y, format!("Next: {label}"), INK, true);
+        if *outlined {
+            line(
+                &mut commands,
+                &mut y,
+                "  its target is outlined on the page".into(),
+                MUTED,
+                false,
+            );
+        }
+    }
+    if let Some((label, lines)) = &info.last {
+        line(&mut commands, &mut y, format!("── {label} ──"), INK, true);
+        let extra = lines.len().saturating_sub(14);
+        for result in lines.iter().take(14) {
+            let color = if result.trim_start().starts_with("- ") {
+                FAIL
+            } else if result.trim_start().starts_with("+ ") {
+                OK
+            } else {
+                INK
+            };
+            line(&mut commands, &mut y, result.clone(), color, false);
+        }
+        if extra > 0 {
+            line(
+                &mut commands,
+                &mut y,
+                format!("  … {extra} more"),
+                MUTED,
+                false,
+            );
         }
     }
     (commands, buttons)
@@ -830,5 +1018,56 @@ mod tests {
         assert_eq!(buttons[0].action, PanelAction::CopySetup);
         assert_eq!(buttons.len(), 3);
         assert!(buttons[1].rect.y > buttons[0].rect.y + buttons[0].rect.height);
+    }
+
+    #[test]
+    fn replay_panel_marks_steps_and_colors_the_diff() {
+        let info = ReplayPanelInfo {
+            file: "run.jsonl".into(),
+            position: 2,
+            total: 3,
+            matched: 1,
+            steps: vec![
+                (StepMark::Matched, "1 navigate".into()),
+                (StepMark::Differs, "2 click button \"Add\"".into()),
+                (StepMark::Pending, "3 back".into()),
+            ],
+            next: None,
+            last: Some((
+                "step 2".into(),
+                vec![
+                    "✗ 2 click".into(),
+                    "  - button \"Add\"".into(),
+                    "  + button \"Add item\"".into(),
+                ],
+            )),
+        };
+        let (commands, buttons) = replay_panel(&info, 900.0, 300.0, 700.0);
+        let actions: Vec<PanelAction> = buttons.iter().map(|b| b.action).collect();
+        assert_eq!(
+            actions,
+            [
+                ReplayControl::Back,
+                ReplayControl::Next,
+                ReplayControl::RunAll,
+                ReplayControl::Restart
+            ]
+            .map(PanelAction::Replay)
+        );
+        let texts = badge_texts(&commands);
+        assert!(
+            texts.contains(&"step 2 of 3 · 1 matched".to_string()),
+            "{texts:?}"
+        );
+        assert!(texts.contains(&"✓ 1 navigate".to_string()));
+        assert!(texts.contains(&"✗ 2 click button \"Add\"".to_string()));
+        let color_of = |needle: &str| {
+            commands.iter().find_map(|c| match c {
+                DisplayCommand::Text(t) if t.text.contains(needle) => Some(t.color),
+                _ => None,
+            })
+        };
+        assert_eq!(color_of("- button"), Some(FAIL));
+        assert_eq!(color_of("+ button"), Some(OK));
     }
 }

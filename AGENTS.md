@@ -55,7 +55,8 @@
 │   - server           #[tool_router] tool 10개 → worker::Request, 결과 → CallToolResult
 │   - window_mode      --window: 메인 스레드 winit 루프 + 프레임마다 Job 처리, --preview PNG
 │   - session_log      --log: 세션 로그(JSONL) 기록 형식 — target·결과 요소 목록·redact
-│   - replay           mb-mcp replay FILE: worker::execute 로 결정적 재생 + 회귀 지점 diff
+│   - replay           mb-mcp replay FILE: Replayer(한 단계씩) — worker::execute 로 결정적 재생 + 회귀 지점 diff
+│   - replay_window    replay --window: 단계별 재생 뷰 (Next/Back/Run all/Restart), --preview PNG
 │   - overlay          ID 배지·대상 테두리·에이전트 패널 (DisplayCommand 순수 함수)
 │
 └── crates/mb-shell    (lib + [[bin]] mb-shell)  anyhow, softbuffer, winit
@@ -96,7 +97,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 699 (workspace 합계, 2026-11-17 G5a 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 704 (workspace 합계, 2026-11-17 G5b 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 

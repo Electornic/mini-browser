@@ -34,7 +34,11 @@ pub struct Target {
 
 impl Target {
     pub fn to_json(&self) -> Value {
-        json!({"role": self.role, "name": self.name, "nth": self.nth})
+        let mut value = json!({"role": self.role, "name": self.name, "nth": self.nth});
+        if self.password {
+            value["password"] = json!(true);
+        }
+        value
     }
 
     pub fn from_json(value: &Value) -> Option<Self> {
@@ -42,7 +46,7 @@ impl Target {
             role: value.get("role")?.as_str()?.to_string(),
             name: value.get("name")?.as_str()?.to_string(),
             nth: value.get("nth")?.as_u64()? as usize,
-            password: false,
+            password: value.get("password").and_then(Value::as_bool) == Some(true),
         })
     }
 
@@ -71,7 +75,7 @@ pub struct SessionLog {
 impl SessionLog {
     pub fn create(path: &Path, options: &Options) -> std::io::Result<Self> {
         let mut log = SessionLog {
-            out: BufWriter::new(File::create(path)?),
+            out: BufWriter::new(create_private(path)?),
             steps: 0,
         };
         let agent = &options.agent;
@@ -127,6 +131,25 @@ impl SessionLog {
         // A crash should still leave every finished step on disk.
         self.out.flush()
     }
+}
+
+// The log holds what the agent typed and saw: owner-only on Unix.
+fn create_private(path: &Path) -> std::io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    // `mode` only applies to a new file; an old log keeps its bits.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
 }
 
 /// The element `id` points at right now (no ids issued).
@@ -217,7 +240,9 @@ pub fn request_json(request: &Request, target: Option<&Target>) -> (&'static str
             clear,
             submit,
         } => {
-            let text = if target.is_some_and(|t| t.password) {
+            // Fail closed: if we couldn't tell which field it was, it might
+            // have been a password field.
+            let text = if target.is_none_or(|t| t.password) {
                 REDACTED
             } else {
                 text.as_str()
@@ -325,8 +350,14 @@ mod tests {
                 timeout_ms: 3_000,
             },
         ];
+        let plain = Target {
+            role: "textbox".into(),
+            name: "New item".into(),
+            nth: 0,
+            password: false,
+        };
         for request in requests {
-            let (tool, args) = request_json(&request, None);
+            let (tool, args) = request_json(&request, Some(&plain));
             assert_eq!(request_from_json(tool, &args).unwrap(), request);
         }
     }
@@ -350,5 +381,17 @@ mod tests {
         );
         assert_eq!(args["text"], REDACTED);
         assert!(!args.to_string().contains("hunter2"));
+        // Unknown field: assume it could be a password.
+        let (_, args) = request_json(
+            &Request::Type {
+                id: "e999".into(),
+                text: "hunter2".into(),
+                clear: false,
+                submit: false,
+            },
+            None,
+        );
+        assert_eq!(args["text"], REDACTED);
+        assert_eq!(Target::from_json(&target.to_json()), Some(target));
     }
 }

@@ -1,6 +1,6 @@
 # Concept — 에이전트용 브라우저
 
-> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ (2026-11-17)** · 다음 = G5b 재생 뷰 / G5c `mb-eval` · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
+> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ (2026-11-17)** · 다음 = G5c `mb-eval` · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
 
 ## 한 줄
 
@@ -407,11 +407,13 @@ G5 를 셋으로 나눈다: **G5a** 세션 로그 + `mb-mcp replay`(결정적 �
 - **`result.elements`**: 행동 **후** 전체 문서(`Scope::Full`)의 상호작용 요소를 문서 순서로 `role "name"[ = "value" | = <N chars>][ [x]|[ ]]` 한 줄씩. 레이아웃·뷰포트·폰트와 무관한 것만 담아서, 창+시스템 폰트로 기록한 세션을 headless 로 재생해도 비교가 된다 (rect·스크롤·`settled` 는 넣지 않음). 비밀번호는 길이만 (관찰과 같은 규칙).
 - **텍스트**: `type` 의 `text` 는 남긴다 — 재생에 필요하고 `--log` 는 사용자가 켜는 산출물이다. 단 대상이 비밀번호 칸이면 `"<redacted>"`. (stderr 로그에는 여전히 어떤 타이핑 텍스트도 안 남긴다 — AGENTS.md 규칙과 구분.)
 - 시각·소요 시간은 넣지 않는다 (같은 실행 두 번이 바이트 단위로 같아야 L6 결정성 테스트가 된다).
+- 파일은 소유자만 읽기·쓰기(0600) — 에이전트가 친 텍스트와 본 페이지가 들어 있다. 대상 칸을 확인 못 한 `type` 은 비밀번호일 수도 있으므로 `<redacted>` (fail closed).
 
 ### 재생 (`mb-mcp replay run.jsonl`)
 
 LLM 없이 로그의 단계를 그대로 다시 실행하고, 각 단계 후 결과를 기록과 비교해 **처음 달라진 단계(회귀 지점)** 를 보고한다.
 
+- **신뢰**: 로그는 **스크립트처럼 실행된다** — 이동·승인·입력을 로그대로 한다. 믿을 수 있는 로그만 재생한다. 그래서 `--secret` 은 로그가 가리키는 곳이 아니라 **로컬 개발 호스트**(localhost·127.0.0.1·`*.localhost`·`*.test`)의 **실제 비밀번호 칸**에만 입력하고, 출력(diff 포함)에 secret 값이 나오면 `<redacted>` 로 바꾼다. `--secret NAME` 만 주면 값은 `MB_SECRET_<NAME>` 환경 변수에서 (`ps`·셸 기록에 안 남게).
 - **환경**: headless, 가상 시계, 헤더의 viewport·seed·allow_origins. 페이지는 기록 때와 같은 서버(URL)를 다시 연다 — 재생은 *브라우저·페이지가 그대로인지* 를 보는 도구라서 서버를 흉내 내지 않는다.
 - **요소 찾기**: 단계마다 먼저 전체 관찰(ID 발급)을 하고, 기록된 `id` 가 지금 같은 role·이름이면 그대로, 아니면 `target` 의 role·이름·`nth` 로 찾은 요소의 id 로 바꿔 실행. 못 찾으면 그 단계가 회귀 지점 ("target `button "Sign up"` not found").
 - **사람이 끼어든 단계**:
@@ -423,6 +425,35 @@ LLM 없이 로그의 단계를 그대로 다시 실행하고, 각 단계 후 결
 - **비교**: `ok`/에러 코드, URL, 제목, `elements` 목록, `text`. 기록된 에러가 그대로 나오면 `✓ 7 click link "…" (approval_denied, as recorded)` 처럼 기대한 에러임을 표시. 다르면 diff(사라진 줄 `-`, 생긴 줄 `+`, 최대 20줄)와 함께 회귀 지점 보고, 기본은 거기서 멈춤.
 - **출력·종료 코드**: 단계마다 `✓ 3 click button "Sign up"` 한 줄(stderr), 끝에 요약 — 중간에 멈춰도 `replay: stopped at step 10 of 10 (9 matched): needs the person`. exit 0 = 전부 일치, 1 = 회귀 지점 발견, 2 = 로그·인자 오류, 3 = 사람 입력 없이는 재현 불가.
 - `screenshot` 은 실행만 하고 비교하지 않는다 (픽셀은 폰트·배율에 달림).
+
+### 재생 뷰 (G5b, `mb-mcp replay FILE --window`)
+
+같은 재생을 창에서 **한 단계씩** 넘기며 본다. 실패한 단계에서 그때 무슨 일이 있었는지(기록 vs 지금)를 화면과 같이 확인하는 디버깅 도구.
+
+```
+┌──────────────────────────────── page (재생 중인 브라우저) ───────┬── replay panel ───────────────┐
+│                                                                 │ Replay · signup.jsonl         │
+│   [e19] Email ┌────────────┐                                    │ step 4 of 10 · 4 matched      │
+│               └────────────┘                                    │ [Back] [Next] [Run all] [⟲]   │
+│   [e24] Password ┏━━━━━━━━━━┓  ← 다음 단계의 대상 (주황 테두리)  │ ✓ 1 navigate                  │
+│                  ┗━━━━━━━━━━┛                                    │ ✓ 2 type textbox "Email"      │
+│   [e26] [Sign in]                                               │ ✓ 3 click link "Sign in"      │
+│                                                                 │ ✓ 4 type textbox "Email"      │
+│                                                                 │ ▶ 5 type textbox "Password"   │
+│                                                                 │ · 6 click button "Sign in"    │
+│                                                                 │ Next: type textbox "Password" │
+│                                                                 │ (outlined on the page)        │
+│                                                                 │ ── step 4 ──                  │
+│                                                                 │ matches the recording         │
+└─────────────────────────────────────────────────────────────────┴───────────────────────────────┘
+```
+
+- **페이지**: 재생기 브라우저를 그대로 그린다 (`human_frame`, ID 배지). **다음 단계가 누를 요소**를 주황 테두리로 미리 표시 (대상 해석 = 재생과 같은 role+이름+nth).
+- **읽기 전용**: 페이지에서의 클릭·타이핑·호버는 전달하지 않는다 (재생 상태를 바꾸면 기록과 비교할 의미가 없음). 스크롤만 허용. 가상 시계라 단계 사이에 페이지 시간이 흐르지 않는다.
+- **패널**: 진행(단계 n / 전체, 일치 수), 버튼 — **Back**(처음부터 n-1 단계까지 다시 실행: 결정적이라 같은 상태가 됨), **Next**(한 단계, Enter 도 같음), **Run all**(끝까지 또는 처음 달라지는 단계까지), **⟲ Restart**. 단계 목록(✓ 일치 / ✗ 다름 / ⏸ 사람 필요 / ▶ 다음 / · 남음, 넘치면 현재 단계 주변만), 다음 단계 설명, 마지막으로 실행한 단계의 결과 — 일치 / 기록된 에러 / diff(`- …` `+ …`, 빨강·초록).
+- **멈춘 단계**(✗ 또는 ⏸)에서 Next 는 아무것도 안 하고, Back·Restart 로 돌아갈 수 있다.
+- `--preview PATH [--preview-steps N]`: 창 없이 N 단계 진행한 화면을 PNG 로 (문서·테스트용, G3a 의 `--preview` 와 같은 방식).
+- 구조: `replay.rs` 의 단계 실행을 `Replayer`(열기·한 단계·처음부터·n 단계로) 로 묶고, headless 재생과 창 재생이 그걸 같이 쓴다. 창은 `replay_window.rs`, 패널 그리기는 `overlay::replay_panel`.
 
 ### 바이너리
 
@@ -675,7 +706,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | **G3b** 붙기 모드 ✅ | `mb-mcp --http [--port N]` (`http.rs`: 127.0.0.1 바인딩, Bearer 토큰·Origin·경로 게이트 + rmcp Host 검사, hyper http1), `MB_MCP_TOKEN`, 패널의 붙기 섹션(URL·가린 토큰·Copy setup command), 창 닫으면 종료, 클라이언트는 브라우저 공유 | 동시 접속 제한 없음(결정 기록) · **실연결 확인 (2026-11-17)**: Claude Code `--transport http` 로 붙어 todo 추가·45초 `still_waiting` 재부착(승인 2분 10초·비밀번호 2분 22초)·비차단 `wait_for`·`note:` 동작. 1차 테스트에서 창 멈춤·60초 잠김을 찾아 고침 | ![붙기 패널](images/g3b-attach-panel.png) — L4 HTTP e2e 2개(실 바이너리: 401·403(Origin)·403(Host)·404, 두 클라이언트가 같은 페이지), gate·토큰 단위 3, 패널 1, CLI 1 + 실연결 수정 테스트 (689 green) |
 | **G4** 승인·넘겨받기 ✅ | `ApproveMode::Ask` + `PolicyDecision::Held`, `BrowserState::{held_action, resolve_held}`, `AgentBrowser::{pending_approval, resolve_approval}`, `Worker::{submit, waiting, answer}`(응답 park), 패널의 승인 카드(Approve / Deny / Do it myself)·넘겨받기 카드(Done / Cancel), 데모 `signin.html`·localhost 링크 | elicitation 은 미구현(headless ask 거부) | ![승인 카드](images/g4-approval-card.png) — 정책 2·AgentBrowser 통합 2·Worker 2·카드 3·CLI 1 테스트 + 실연결 피드백 2건(사람이 바꾼 페이지 표시, 넘겨받기 `changed:`) — AgentBrowser 통합 1 + Worker 넘겨받기 테스트 보강 (673 green). **실연결 확인**: 승인 카드 Approve → POST·리다이렉트, 비밀번호 넘겨받기 → "Signed in", 관찰에 비밀번호 없음 |
 | **G5a** 기록·재생 ✅ | `session_log.rs`(`--log`: 헤더 + 최종 결과마다 한 줄, target role·name·nth, 결과 요소 목록, 비밀번호 칸 입력 `<redacted>`, `prompts::fingerprint`), `replay.rs`(`mb-mcp replay FILE [--secret NAME=VALUE]`: headless·가상 시계, `worker::execute` 그대로, 요소 재해석, 기록대로 승인 재현, 넘겨받기는 `AgentBrowser::fill_as_person` 로 사람 경로 입력, 회귀 지점 diff, exit 0/1/2/3) | **실사용 확인 (2026-11-17)**: 실제 Claude Code 세션 10단계 기록 → 재생 10/10 일치, 페이지 변경 시 회귀 지점 보고 | session_log 2 · replay 5(일치, 회귀 지점, 문구만 변경, **L6 같은 실행 = 같은 바이트**, diff) · 창 세션(승인+비밀번호) 재생 1 · 실 바이너리 e2e 1 · CLI 1 (699 green) |
-| **G5b** 재생 뷰 | `mb-mcp replay --window`: 단계별로 넘겨 보며 그때의 관찰과 화면 확인 | — | — |
+| **G5b** 재생 뷰 ✅ | `replay_window.rs` + `overlay::replay_panel` ([재생 뷰](#재생-뷰-g5b-mb-mcp-replay-file---window)): `Replayer`(열기·한 단계·처음부터·n 단계로, headless 재생과 공유), Next(Enter)/Back/Run all/Restart, 다음 대상 주황 테두리, 단계 목록 ✓✗⏸▶·, 마지막 단계 결과(일치 / diff 빨강·초록), 페이지 읽기 전용(스크롤만), 창·미리보기는 시스템 폰트, `--preview PATH --preview-steps N` | 실제 창 클릭은 사용자 확인 필요 | ![재생 뷰](images/g5b-replay-window.png) ![회귀 지점](images/g5b-replay-regression.png) — Replayer 뒤로·다시 같은 상태 1 · 패널 1 · 읽기 전용 입력 1 · 보안 2 (704 green) |
 | **G5c** `mb-eval` | 시나리오 정의 + N회 실행 + 성공률·단계 수·실패 단계 분포, 안전 지표, `prompts` 해시로 버전 비교 | LLM 실행 주체(클라이언트) 정해야 함 | 프롬프트 변경을 숫자로 비교. L7 |
 
 - G4 의 게이트 **판정 로직**은 G1 에서 입력 출처 태그와 함께 먼저 들어간다 (`--approve auto|deny` 만). G4 는 사람에게 묻는 UI(`ask`)·넘겨받기·elicitation 을 붙이는 단계.
@@ -692,6 +723,8 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-11 | G0: 관찰은 layout 트리에서 rect 를 직접 수집, `LinkTarget` 미사용 | 모든 노드가 LayoutBox 를 가져서 별도 인라인 수집 불필요 (검토 때 오판 정정) |
 | 2026-11-11 | G0: `text:` 에 링크 텍스트 포함, 폼 크롬 제외, 이름 없는 컨트롤은 `field=` | 링크를 빼면 문장이 끊김 ("or read the ."). 라벨·버튼은 요소 목록과 중복. 이름 없는 `select` 는 `name=""` 만으론 용도를 알 수 없음 |
 | 2026-11-14 | G4: 승인은 "보관 후 재개" — 게이트가 요청을 보관하고 tool 응답을 park, 카드 답에 따라 재개/거절 | 창 루프 안에서 에이전트 행동이 동기 실행되므로 그 자리에서 기다리면 창이 멈춤. 승인된 요청은 에이전트 출처로 시작해 hop 게이트 유지 |
+| 2026-11-17 | 재생 뷰의 Back = 처음부터 n-1 단계까지 다시 실행, 페이지는 읽기 전용(스크롤만), 창에서만 시스템 폰트 | 재생이 결정적이라 상태 스냅숏 없이 되돌릴 수 있음. 사람이 페이지를 만지면 기록과 비교할 의미가 사라짐. 비교는 rect 를 안 보므로 폰트가 달라도 결과가 같음 |
+| 2026-11-17 | G5a 보안 리뷰 반영: `--secret` 은 로컬 개발 호스트의 실제 비밀번호 칸에만, 출력의 secret 값 가림, `--secret NAME` + `MB_SECRET_<NAME>`, 로그 0600, 대상 미상 `type` 은 redact. 승인을 로그대로 재현하는 건 유지(로그 = 스크립트, 믿는 로그만 재생) | 자동 보안 리뷰: 조작된 로그가 재생을 외부 사이트로 보내 `--secret` 비밀번호를 거기 입력시킬 수 있었음, 명령행 비밀번호 노출, 로그 권한, redaction fail-open. 승인 재현을 막으면 기록된 세션을 재생할 수 없어서 "실행 = 신뢰" 로 문서화 |
 | 2026-11-17 | G5a 실사용 피드백: `--secret` 은 실제로 입력됐던 비밀번호 단계만, `stale_element` 단계는 재실행 없이 페이지만 비교, 기록된 에러는 "(code, as recorded)" 표시, 중간 멈춤 요약, 결과에 보이는 텍스트(`--ignore-text`), 정책 stderr 줄을 사람이 읽는 문장으로 | 실제 Claude Code 세션(10단계, 의도적 실수 포함) 로그가 마지막 `handoff_required` 단계에서 exit 3 — 입력된 적 없는 비밀번호를 요구. 수정 후 같은 로그 10/10 일치, 링크 이름만 바꾼 페이지에선 `✗ 1 navigate` + diff 로 회귀 지점 정확히 보고 |
 | 2026-11-17 | G5 를 G5a(로그+재생) → G5b(재생 뷰) → G5c(`mb-eval`) 로 나눔. 재생은 별도 `mb-replay` 가 아니라 `mb-mcp replay` 하위 명령 | G5b·G5c 가 G5a 로그 형식 위에 선다. 재생이 MCP 와 **같은 `worker::execute`** 를 타야 "에이전트가 한 그대로" 가 보장되는데, 별도 crate 면 그 경로를 lib 으로 열어야 함 |
 | 2026-11-17 | 세션 로그 비교 단위 = 행동 후 전체 문서의 요소 목록(role·이름·값·체크) + URL·제목·성공/에러 코드. rect·스크롤·`settled`·시각은 넣지 않음 | 창+시스템 폰트+실시간 시계로 기록한 세션을 headless·가상 시계로 재생해도 비교가 성립해야 함. 시각을 빼서 같은 실행 두 번이 바이트 단위로 같음(L6) |

@@ -42,15 +42,23 @@ OPTIONS:
     --preview-scale N       Device pixel ratio for --preview, e.g. 2 for Retina
     -h, --help              Print this help (to stderr)
 
-REPLAY:
+REPLAY (a log runs like a script — replay only logs you trust):
     mb-mcp replay FILE      Re-run a session log without an LLM (headless,
                             virtual clock) and report the first step whose
                             result differs. Exit 0 = same, 1 = differs,
                             2 = bad log/arguments, 3 = needs the person
-    --secret NAME=VALUE     Value the person typed into the field with
-                            accessible name NAME (password handoffs)
+    --secret NAME[=VALUE]   Password for the field with accessible name NAME
+                            (from MB_SECRET_<NAME> if no VALUE: keeps it out
+                            of ps / shell history). Typed only into password
+                            fields on local dev hosts (localhost, 127.0.0.1,
+                            *.localhost, *.test)
     --ignore-text           Compare elements only, not the page text (for
                             pages that show clocks or random values)
+    --window                Step through it in a window: Next / Back /
+                            Run all / Restart, the next target outlined,
+                            recorded vs now for each step
+    --preview PATH          Render that window after --preview-steps N
+                            steps to a PNG (no window)
 
 With stdio, stdout carries the MCP protocol only; logs always go to stderr.
 ";
@@ -85,6 +93,13 @@ pub struct ReplayOptions {
     pub secrets: Vec<(String, String)>,
     /// Don't compare page text (pages that show clocks, random ids…).
     pub ignore_text: bool,
+    /// `--window`: step through the replay in a window (G5b).
+    pub window: bool,
+    /// `--preview PATH`: render the replay window after `preview_steps`
+    /// steps to a PNG instead of opening it.
+    pub preview: Option<std::path::PathBuf>,
+    pub preview_steps: usize,
+    pub preview_scale: f32,
 }
 
 pub enum Parsed {
@@ -93,18 +108,66 @@ pub enum Parsed {
     Help,
 }
 
+/// `--secret Password` reads `MB_SECRET_PASSWORD`.
+pub fn secret_env_var(name: &str) -> String {
+    let upper: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("MB_SECRET_{upper}")
+}
+
 fn parse_replay(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     let mut file = None;
     let mut secrets = Vec::new();
     let mut ignore_text = false;
+    let mut window = false;
+    let mut preview = None;
+    let mut preview_steps = 0;
+    let mut preview_scale = 1.0_f32;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
             "--ignore-text" => ignore_text = true,
+            "--window" => window = true,
+            "--preview" => {
+                preview = Some(std::path::PathBuf::from(
+                    args.next().ok_or("--preview needs a PATH")?,
+                ));
+            }
+            "--preview-steps" => {
+                let raw = args.next().ok_or("--preview-steps needs N")?;
+                preview_steps = raw
+                    .parse()
+                    .map_err(|_| format!("--preview-steps expects a number, got {raw:?}"))?;
+            }
+            "--preview-scale" => {
+                let raw = args.next().ok_or("--preview-scale needs N")?;
+                preview_scale = raw
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|s| (0.5..=4.0).contains(s))
+                    .ok_or_else(|| format!("--preview-scale expects 0.5..=4, got {raw:?}"))?;
+            }
             "--secret" => {
-                let raw = args.next().ok_or("--secret needs NAME=VALUE")?;
-                let (name, value) = raw.split_once('=').ok_or("--secret expects NAME=VALUE")?;
-                secrets.push((name.to_string(), value.to_string()));
+                let raw = args.next().ok_or("--secret needs NAME or NAME=VALUE")?;
+                let (name, value) = match raw.split_once('=') {
+                    Some((name, value)) => (name.to_string(), value.to_string()),
+                    // Keeps the value out of `ps` and shell history.
+                    None => {
+                        let var = secret_env_var(&raw);
+                        let value = std::env::var(&var)
+                            .map_err(|_| format!("--secret {raw}: set {var}"))?;
+                        (raw, value)
+                    }
+                };
+                secrets.push((name, value));
             }
             other if other.starts_with('-') => {
                 return Err(format!("unknown replay option {other:?} (see --help)"));
@@ -118,6 +181,10 @@ fn parse_replay(mut args: impl Iterator<Item = String>) -> Result<Parsed, String
         file,
         secrets,
         ignore_text,
+        window,
+        preview,
+        preview_steps,
+        preview_scale,
     }))
 }
 
@@ -339,6 +406,7 @@ mod tests {
         assert_eq!(replay.file, std::path::PathBuf::from("run.jsonl"));
         assert_eq!(replay.secrets, vec![("Password".into(), "a=b".into())]);
         assert!(!replay.ignore_text);
+        assert_eq!(secret_env_var("New password"), "MB_SECRET_NEW_PASSWORD");
         assert!(parse(["replay"].map(String::from)).is_err());
         assert!(parse(["replay", "a", "b"].map(String::from)).is_err());
         assert_eq!(

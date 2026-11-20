@@ -1342,11 +1342,16 @@ mod tests {
             file: path.clone(),
             secrets: Vec::new(),
             ignore_text: false,
+            window: false,
+            preview: None,
+            preview_steps: 0,
+            preview_scale: 1.0,
         };
         let stop = crate::replay::replay(&options).unwrap_err();
         assert_eq!(stop.code, 3, "{}", stop.message);
         assert!(
-            stop.message.contains("--secret \"Password="),
+            stop.message
+                .contains("--secret \"Password\" with MB_SECRET_PASSWORD set"),
             "{}",
             stop.message
         );
