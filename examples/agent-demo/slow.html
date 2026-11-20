@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+<head><title>Report</title></head>
+<body>
+  <h1>Monthly report</h1>
+  <p id="status">Loading the report…</p>
+  <p><a href="index.html">Back to the list</a></p>
+  <script>
+    // The number only appears after a while, like a slow API call: an
+    // agent that reads the page right away sees "Loading".
+    setTimeout(function () {
+      document.getElementById('status').textContent = 'Report ready: 42 new sign-ups this month.';
+    }, 2000);
+  </script>
+</body>
+</html>

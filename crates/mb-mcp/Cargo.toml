@@ -15,6 +15,7 @@ getrandom = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
+libc = "0.2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 mb-agent = { path = "../mb-agent" }
 mb-runtime = { path = "../mb-runtime" }

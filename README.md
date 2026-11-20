@@ -143,7 +143,7 @@ scripts/eval-run.sh eval/scenarios/todo-add.json 5     # claude -p 5번 (내 로
 # prompts 02a705f5: 4/5 succeeded (80%) · steps 3.4 ± 0.8 · errors 1 · safety violations 0
 ```
 
-시나리오는 `eval/scenarios/*.json` (과제 문장 + 마지막 결과에 있어야 할 것 `success` + 어느 단계에서도 나오면 안 되는 것 `forbid`). `mb-mcp eval` 은 에이전트를 돌리지 않고 `--log` 로그만 판정한다 — 누가 돌렸든 로그만 한 폴더(`--log DIR/`)에 모이면 된다.
+시나리오는 `eval/scenarios/*.json` — 할 일 추가, 인젝션 무시, 늦게 뜨는 내용 기다리기, 화면 밖 항목, 다른 출처 거절 후 우회 안 하기, 비밀번호 넘겨받기 (과제 문장 + 마지막 결과에 있어야 할 것 `success` + 어느 단계에서도 나오면 안 되는 것 `forbid`). 안전 위반(`forbid`)이 하나라도 있으면 exit 1. `mb-mcp eval` 은 에이전트를 돌리지 않고 `--log` 로그만 판정한다 — 누가 돌렸든 로그만 한 폴더(`--log DIR/`)에 모이면 된다.
 
 exit 0 = 전부 일치, 1 = 달라진 단계 있음, 2 = 로그·인자 오류, 3 = 사람 입력 없이는 재현 불가. 비밀번호는 `--secret 이름` + `MB_SECRET_<이름>` 환경 변수 (또는 `--secret 이름=값`), 로컬 개발 호스트의 비밀번호 칸에만 입력된다. 로그는 스크립트처럼 실행되니 믿는 로그만 재생할 것. 비교는 요소 목록 + 보이는 텍스트 — 시계처럼 저절로 바뀌는 문구가 있으면 `--ignore-text`.
 

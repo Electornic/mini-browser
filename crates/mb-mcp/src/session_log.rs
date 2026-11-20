@@ -80,14 +80,13 @@ pub struct SessionLog {
 impl SessionLog {
     pub fn create(path: &Path, options: &Options) -> std::io::Result<Self> {
         // Fail at startup, not at the first step, if the place is unusable.
-        let is_dir = path.as_os_str().to_string_lossy().ends_with('/') || path.is_dir();
-        let parent = if is_dir {
+        let dir = if is_dir_path(path) {
             Some(path)
         } else {
             path.parent().filter(|p| !p.as_os_str().is_empty())
         };
-        if let Some(dir) = parent {
-            std::fs::create_dir_all(dir)?;
+        if let Some(dir) = dir {
+            create_private_dir(dir)?;
         }
         let agent = &options.agent;
         let header = json!({
@@ -143,7 +142,7 @@ impl SessionLog {
 
     fn write(&mut self, value: &Value) -> std::io::Result<()> {
         if self.out.is_none() {
-            let mut out = BufWriter::new(create_private(&run_path(&self.path)?)?);
+            let mut out = BufWriter::new(open_run_log(&self.path)?.0);
             serde_json::to_writer(&mut out, &self.header)?;
             out.write_all(b"\n")?;
             self.out = Some(out);
@@ -156,35 +155,57 @@ impl SessionLog {
     }
 }
 
-/// `--log DIR/` (ends with `/` or is a directory): a new
-/// `run-<pid>-<n>.jsonl` in it per process, so several runs sharing one
-/// MCP registration (G5c) don't overwrite each other. A file path is used
-/// as is.
-pub fn run_path(path: &Path) -> std::io::Result<std::path::PathBuf> {
-    let is_dir = path.as_os_str().to_string_lossy().ends_with('/') || path.is_dir();
-    if !is_dir {
-        return Ok(path.to_path_buf());
-    }
-    std::fs::create_dir_all(path)?;
-    let pid = std::process::id();
-    let mut n = 1;
-    loop {
-        let candidate = path.join(format!("run-{pid}-{n}.jsonl"));
-        if !candidate.exists() {
-            return Ok(candidate);
-        }
-        n += 1;
-    }
+fn is_dir_path(path: &Path) -> bool {
+    path.as_os_str().to_string_lossy().ends_with('/') || path.is_dir()
 }
 
-// The log holds what the agent typed and saw: owner-only on Unix.
-fn create_private(path: &Path) -> std::io::Result<File> {
+/// Open the log for writing. `--log DIR/` (ends with `/` or is a
+/// directory): a new `run-<pid>-<n>.jsonl` in it per process, so several
+/// runs sharing one MCP registration (G5c) don't overwrite each other —
+/// created atomically (`create_new`), retrying on a taken name, never
+/// "check then create". A file path is used as is.
+pub fn open_run_log(path: &Path) -> std::io::Result<(File, std::path::PathBuf)> {
+    if !is_dir_path(path) {
+        return Ok((open_private(path, false)?, path.to_path_buf()));
+    }
+    create_private_dir(path)?;
+    let pid = std::process::id();
+    for n in 1.. {
+        let candidate = path.join(format!("run-{pid}-{n}.jsonl"));
+        match open_private(&candidate, true) {
+            Ok(file) => return Ok((file, candidate)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("ran out of run numbers")
+}
+
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+// The log holds what the agent typed and saw: owner-only on Unix, and a
+// symlink planted at the path is refused rather than followed.
+fn open_private(path: &Path, new: bool) -> std::io::Result<File> {
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true);
+    if new {
+        options.create_new(true);
+    } else {
+        options.create(true).truncate(true);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     let file = options.open(path)?;
     // `mode` only applies to a new file; an old log keeps its bits.
@@ -444,9 +465,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mb-logdir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let as_dir = std::path::PathBuf::from(format!("{}/", dir.display()));
-        let first = run_path(&as_dir).unwrap();
-        std::fs::write(&first, "").unwrap();
-        let second = run_path(&dir).unwrap();
+        let (_, first) = open_run_log(&as_dir).unwrap();
+        let (_, second) = open_run_log(&dir).unwrap();
         assert_ne!(first, second);
         assert_eq!(first.parent(), Some(dir.as_path()));
         assert!(
@@ -456,8 +476,19 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("run-")
         );
-        let file = dir.join("x.jsonl");
-        assert_eq!(run_path(&file).unwrap(), file);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+            // A symlink planted where the log goes is refused, not followed.
+            let target = dir.join("elsewhere.txt");
+            std::fs::write(&target, "keep").unwrap();
+            let link = dir.join("x.jsonl");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(open_run_log(&link).is_err());
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

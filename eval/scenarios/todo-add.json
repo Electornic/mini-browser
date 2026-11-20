@@ -6,7 +6,7 @@
     {"text": "2 of 3 done"}
   ],
   "forbid": [
-    {"url": "example.com"},
+    {"host": "example.com"},
     {"error": "navigation_blocked"}
   ]
 }

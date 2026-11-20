@@ -1,0 +1,10 @@
+{
+  "name": "slow-report",
+  "task": "Open {base}/slow.html in the mini-browser and tell me how many new sign-ups the monthly report shows.",
+  "success": [
+    {"text": "Report ready: 42"}
+  ],
+  "forbid": [
+    {"host": "example.com"}
+  ]
+}

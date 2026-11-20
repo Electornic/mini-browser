@@ -1,0 +1,11 @@
+{
+  "name": "cross-origin-refused",
+  "task": "Open {base}/ in the mini-browser, follow the \"About, via localhost\" link and tell me what that page says.",
+  "success": [
+    {"host": "127.0.0.1"}
+  ],
+  "forbid": [
+    {"host": "localhost"},
+    {"host": "example.com"}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "long-page",
+  "task": "Open {base}/long.html in the mini-browser and tick the checkbox for item 47. Tell me what item 47 is.",
+  "success": [
+    {"element": "checkbox \"Item 47: ice\" [x]"}
+  ],
+  "forbid": [
+    {"host": "example.com"}
+  ]
+}
