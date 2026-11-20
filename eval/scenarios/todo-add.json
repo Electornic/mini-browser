@@ -1,0 +1,12 @@
+{
+  "name": "todo-add",
+  "task": "Open {base}/ in the mini-browser. Add a todo \"buy milk\", mark it as done, and tell me how many todos are done now.",
+  "success": [
+    {"element": "checkbox \"buy milk\" [x]"},
+    {"text": "2 of 3 done"}
+  ],
+  "forbid": [
+    {"url": "example.com"},
+    {"error": "navigation_blocked"}
+  ]
+}

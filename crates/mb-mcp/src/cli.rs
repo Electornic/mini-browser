@@ -12,6 +12,7 @@ mb-mcp — mini-browser as an MCP server (stdio, or HTTP with --http)
 USAGE:
     mb-mcp [OPTIONS]
     mb-mcp replay FILE [--secret NAME=VALUE]...
+    mb-mcp eval SCENARIO LOG_OR_DIR... [--json PATH] [--min-success RATE]
 
 OPTIONS:
     --viewport WxH          Page viewport in CSS px            [default: 1280x800]
@@ -60,6 +61,16 @@ REPLAY (a log runs like a script — replay only logs you trust):
     --preview PATH          Render that window after --preview-steps N
                             steps to a PNG (no window)
 
+EVAL (judge and aggregate session logs; it runs no agent):
+    mb-mcp eval SCENARIO LOG_OR_DIR...
+                            Judge each log against SCENARIO (JSON: task,
+                            success and forbid checks), then report success
+                            rate, steps, error codes, where failed runs
+                            ended and safety violations, per prompts
+                            version. Directories expand to their *.jsonl
+    --json PATH             Also write the report as JSON
+    --min-success RATE      Exit 1 if the success rate is below RATE (0..1)
+
 With stdio, stdout carries the MCP protocol only; logs always go to stderr.
 ";
 
@@ -105,7 +116,56 @@ pub struct ReplayOptions {
 pub enum Parsed {
     Run(Options),
     Replay(ReplayOptions),
+    Eval(EvalOptions),
     Help,
+}
+
+/// `mb-mcp eval SCENARIO LOG_OR_DIR...`
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvalOptions {
+    pub scenario: std::path::PathBuf,
+    pub logs: Vec<std::path::PathBuf>,
+    pub json: Option<std::path::PathBuf>,
+    pub min_success: Option<f64>,
+}
+
+fn parse_eval(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
+    let mut paths = Vec::new();
+    let mut json = None;
+    let mut min_success = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(Parsed::Help),
+            "--json" => {
+                json = Some(std::path::PathBuf::from(
+                    args.next().ok_or("--json needs a PATH")?,
+                ));
+            }
+            "--min-success" => {
+                let raw = args.next().ok_or("--min-success needs RATE")?;
+                min_success = Some(
+                    raw.parse::<f64>()
+                        .ok()
+                        .filter(|r| (0.0..=1.0).contains(r))
+                        .ok_or_else(|| format!("--min-success expects 0..1, got {raw:?}"))?,
+                );
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown eval option {other:?} (see --help)"));
+            }
+            path => paths.push(std::path::PathBuf::from(path)),
+        }
+    }
+    if paths.len() < 2 {
+        return Err("eval needs a SCENARIO and at least one session log or directory".into());
+    }
+    let scenario = paths.remove(0);
+    Ok(Parsed::Eval(EvalOptions {
+        scenario,
+        logs: paths,
+        json,
+        min_success,
+    }))
 }
 
 /// `--secret Password` reads `MB_SECRET_PASSWORD`.
@@ -202,6 +262,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     if args.peek().is_some_and(|a| a == "replay") {
         args.next();
         return parse_replay(args);
+    }
+    if args.peek().is_some_and(|a| a == "eval") {
+        args.next();
+        return parse_eval(args);
     }
     let mut log = None;
     while let Some(arg) = args.next() {
@@ -325,7 +389,7 @@ mod tests {
     fn run(args: &[&str]) -> Options {
         match parse(args.iter().map(|s| s.to_string())).unwrap() {
             Parsed::Run(options) => options,
-            Parsed::Help | Parsed::Replay(_) => panic!("expected a run"),
+            Parsed::Help | Parsed::Replay(_) | Parsed::Eval(_) => panic!("expected a run"),
         }
     }
 
@@ -413,6 +477,28 @@ mod tests {
             run(&["--log", "out.jsonl"]).log,
             Some(std::path::PathBuf::from("out.jsonl"))
         );
+    }
+
+    #[test]
+    fn eval_takes_a_scenario_and_logs() {
+        let Ok(Parsed::Eval(eval)) = parse(
+            [
+                "eval",
+                "s.json",
+                "runs/",
+                "one.jsonl",
+                "--min-success",
+                "0.8",
+            ]
+            .map(String::from),
+        ) else {
+            panic!("expected eval")
+        };
+        assert_eq!(eval.scenario, std::path::PathBuf::from("s.json"));
+        assert_eq!(eval.logs.len(), 2);
+        assert_eq!(eval.min_success, Some(0.8));
+        assert!(parse(["eval", "s.json"].map(String::from)).is_err());
+        assert!(parse(["eval", "s.json", "r", "--min-success", "80"].map(String::from)).is_err());
     }
 
     #[test]

@@ -68,18 +68,29 @@ pub fn resolved_by(outcome: &str) -> Option<&'static str> {
 }
 
 pub struct SessionLog {
-    out: BufWriter<File>,
+    path: std::path::PathBuf,
+    header: Value,
+    // Opened on the first step: a server that never got a tool call (a
+    // health check, an unused registration) leaves no empty run behind
+    // for `mb-mcp eval` to count as a failure.
+    out: Option<BufWriter<File>>,
     steps: u64,
 }
 
 impl SessionLog {
     pub fn create(path: &Path, options: &Options) -> std::io::Result<Self> {
-        let mut log = SessionLog {
-            out: BufWriter::new(create_private(path)?),
-            steps: 0,
+        // Fail at startup, not at the first step, if the place is unusable.
+        let is_dir = path.as_os_str().to_string_lossy().ends_with('/') || path.is_dir();
+        let parent = if is_dir {
+            Some(path)
+        } else {
+            path.parent().filter(|p| !p.as_os_str().is_empty())
         };
+        if let Some(dir) = parent {
+            std::fs::create_dir_all(dir)?;
+        }
         let agent = &options.agent;
-        log.write(&json!({
+        let header = json!({
             "type": "session",
             "version": VERSION,
             "mb_mcp": env!("CARGO_PKG_VERSION"),
@@ -91,8 +102,13 @@ impl SessionLog {
             "clock": format!("{:?}", agent.clock).to_lowercase(),
             "window": options.window,
             "start_url": options.start_url,
-        }))?;
-        Ok(log)
+        });
+        Ok(SessionLog {
+            path: path.to_path_buf(),
+            header,
+            out: None,
+            steps: 0,
+        })
     }
 
     pub fn step(
@@ -126,10 +142,38 @@ impl SessionLog {
     }
 
     fn write(&mut self, value: &Value) -> std::io::Result<()> {
-        serde_json::to_writer(&mut self.out, value)?;
-        self.out.write_all(b"\n")?;
+        if self.out.is_none() {
+            let mut out = BufWriter::new(create_private(&run_path(&self.path)?)?);
+            serde_json::to_writer(&mut out, &self.header)?;
+            out.write_all(b"\n")?;
+            self.out = Some(out);
+        }
+        let out = self.out.as_mut().expect("opened above");
+        serde_json::to_writer(&mut *out, value)?;
+        out.write_all(b"\n")?;
         // A crash should still leave every finished step on disk.
-        self.out.flush()
+        out.flush()
+    }
+}
+
+/// `--log DIR/` (ends with `/` or is a directory): a new
+/// `run-<pid>-<n>.jsonl` in it per process, so several runs sharing one
+/// MCP registration (G5c) don't overwrite each other. A file path is used
+/// as is.
+pub fn run_path(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    let is_dir = path.as_os_str().to_string_lossy().ends_with('/') || path.is_dir();
+    if !is_dir {
+        return Ok(path.to_path_buf());
+    }
+    std::fs::create_dir_all(path)?;
+    let pid = std::process::id();
+    let mut n = 1;
+    loop {
+        let candidate = path.join(format!("run-{pid}-{n}.jsonl"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+        n += 1;
     }
 }
 
@@ -393,5 +437,47 @@ mod tests {
         );
         assert_eq!(args["text"], REDACTED);
         assert_eq!(Target::from_json(&target.to_json()), Some(target));
+    }
+
+    #[test]
+    fn a_directory_log_path_gets_one_file_per_run() {
+        let dir = std::env::temp_dir().join(format!("mb-logdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let as_dir = std::path::PathBuf::from(format!("{}/", dir.display()));
+        let first = run_path(&as_dir).unwrap();
+        std::fs::write(&first, "").unwrap();
+        let second = run_path(&dir).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), Some(dir.as_path()));
+        assert!(
+            second
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("run-")
+        );
+        let file = dir.join("x.jsonl");
+        assert_eq!(run_path(&file).unwrap(), file);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_server_that_did_nothing_leaves_no_log() {
+        let dir = std::env::temp_dir().join(format!("mb-lazy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let options = crate::cli::parse(["--log".to_string(), format!("{}/", dir.display())])
+            .map(|p| match p {
+                crate::cli::Parsed::Run(options) => options,
+                _ => unreachable!(),
+            })
+            .unwrap();
+        let log = SessionLog::create(options.log.as_ref().unwrap(), &options).unwrap();
+        drop(log);
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "no empty run file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

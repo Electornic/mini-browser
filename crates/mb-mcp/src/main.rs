@@ -15,6 +15,7 @@
 #![deny(clippy::print_stdout)]
 
 mod cli;
+mod eval;
 mod http;
 mod overlay;
 mod prompts;
@@ -34,6 +35,7 @@ fn main() -> ExitCode {
     let mut options = match cli::parse(std::env::args().skip(1)) {
         Ok(cli::Parsed::Run(options)) => options,
         Ok(cli::Parsed::Replay(replay)) => return replay::run(&replay),
+        Ok(cli::Parsed::Eval(eval)) => return eval::run(&eval),
         Ok(cli::Parsed::Help) => {
             eprint!("{}", cli::USAGE);
             return ExitCode::SUCCESS;

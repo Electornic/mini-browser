@@ -133,6 +133,18 @@ MB_SECRET_PASSWORD=test-password ./target/release/mb-mcp replay /tmp/signup.json
 
 ![재생 뷰 — 회귀 지점](docs/images/g5b-replay-regression.png)
 
+### 평가 (성공률)
+
+같은 과제를 에이전트에게 N번 시키고 로그를 모아 성공률·에러·실패 지점·안전 위반을 집계한다. 서버 안내문이나 tool 설명을 바꾼 전후를 숫자로 비교할 때:
+
+```sh
+scripts/eval-run.sh eval/scenarios/todo-add.json 5     # claude -p 5번 (내 로그인) → eval/runs/todo-add/
+./target/release/mb-mcp eval eval/scenarios/todo-add.json eval/runs/todo-add/ --min-success 0.8
+# prompts 02a705f5: 4/5 succeeded (80%) · steps 3.4 ± 0.8 · errors 1 · safety violations 0
+```
+
+시나리오는 `eval/scenarios/*.json` (과제 문장 + 마지막 결과에 있어야 할 것 `success` + 어느 단계에서도 나오면 안 되는 것 `forbid`). `mb-mcp eval` 은 에이전트를 돌리지 않고 `--log` 로그만 판정한다 — 누가 돌렸든 로그만 한 폴더(`--log DIR/`)에 모이면 된다.
+
 exit 0 = 전부 일치, 1 = 달라진 단계 있음, 2 = 로그·인자 오류, 3 = 사람 입력 없이는 재현 불가. 비밀번호는 `--secret 이름` + `MB_SECRET_<이름>` 환경 변수 (또는 `--secret 이름=값`), 로컬 개발 호스트의 비밀번호 칸에만 입력된다. 로그는 스크립트처럼 실행되니 믿는 로그만 재생할 것. 비교는 요소 목록 + 보이는 텍스트 — 시계처럼 저절로 바뀌는 문구가 있으면 `--ignore-text`.
 
 데모 페이지: `cd examples/agent-demo && python3 -m http.server 8765` 후 "http://127.0.0.1:8765/ 에서 'buy milk' 할 일을 추가하고 완료 처리해줘". 추천 skill: [examples/claude-skill/mini-browser-testing](examples/claude-skill/mini-browser-testing/SKILL.md). 설계: [docs/concept.md](docs/concept.md).

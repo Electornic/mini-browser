@@ -57,6 +57,7 @@
 │   - session_log      --log: 세션 로그(JSONL) 기록 형식 — target·결과 요소 목록·redact
 │   - replay           mb-mcp replay FILE: Replayer(한 단계씩) — worker::execute 로 결정적 재생 + 회귀 지점 diff
 │   - replay_window    replay --window: 단계별 재생 뷰 (Next/Back/Run all/Restart), --preview PNG
+│   - eval             mb-mcp eval SCENARIO LOGS: 시나리오 판정 + 성공률·에러·실패 지점·안전 위반 집계 (에이전트는 안 돌림)
 │   - overlay          ID 배지·대상 테두리·에이전트 패널 (DisplayCommand 순수 함수)
 │
 └── crates/mb-shell    (lib + [[bin]] mb-shell)  anyhow, softbuffer, winit
@@ -80,6 +81,8 @@ cargo test --workspace 2>&1 | grep "test result"
 cargo test -p mb-mcp --test e2e
 cargo test -p mb-mcp --test http
 cargo test -p mb-mcp --test replay   # --log 기록 → mb-mcp replay
+# 평가: 시나리오를 claude -p 로 N번 (사용자 터미널) → mb-mcp eval 집계
+scripts/eval-run.sh eval/scenarios/todo-add.json 5
 cargo build --release -p mb-mcp      # → target/release/mb-mcp (claude mcp add 대상)
 # 관전 창 한 프레임을 PNG 로 (GUI 없이 오버레이 확인)
 ./target/debug/mb-mcp --start-url http://127.0.0.1:8765/ --preview-click e31 --preview /tmp/frame.png
@@ -97,7 +100,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 704 (workspace 합계, 2026-11-17 G5b 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 710 (workspace 합계, 2026-11-20 G5c 완료 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 

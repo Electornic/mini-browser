@@ -290,7 +290,7 @@ fn full_observation() -> ObserveOptions {
     }
 }
 
-fn step_label(step: &Value) -> String {
+pub(crate) fn step_label(step: &Value) -> String {
     let n = step["n"].as_u64().unwrap_or(0);
     let tool = step["tool"].as_str().unwrap_or("");
     match step.get("target").and_then(Target::from_json) {
