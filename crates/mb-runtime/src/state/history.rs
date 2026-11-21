@@ -54,7 +54,14 @@ impl BrowserState {
         self.restore_entry(entry);
     }
 
+    // Back/forward walk the document's own same-document entries
+    // (pushState, fragment links) first, like a browser's joint session
+    // history; only past them do they swap documents.
     pub fn go_back(&mut self) {
+        if self.js.traverse_history(-1) {
+            self.sync_url_from_js();
+            return;
+        }
         if let Some(previous) = self.back_stack.pop() {
             self.forward_stack.push(self.snapshot());
             self.restore_entry(previous);
@@ -62,6 +69,10 @@ impl BrowserState {
     }
 
     pub fn go_forward(&mut self) {
+        if self.js.traverse_history(1) {
+            self.sync_url_from_js();
+            return;
+        }
         if let Some(next) = self.forward_stack.pop() {
             self.back_stack.push(self.snapshot());
             self.restore_entry(next);
@@ -69,11 +80,11 @@ impl BrowserState {
     }
 
     pub(super) fn can_go_back(&self) -> bool {
-        !self.back_stack.is_empty()
+        !self.back_stack.is_empty() || self.js.can_traverse_history(-1)
     }
 
     pub(super) fn can_go_forward(&self) -> bool {
-        !self.forward_stack.is_empty()
+        !self.forward_stack.is_empty() || self.js.can_traverse_history(1)
     }
 
     pub(super) fn error_entry(&self, title: &str, message: &str) -> HistoryEntry {

@@ -77,6 +77,17 @@ const CONSOLE_BOOT: &str = r#"
         warn: make(sinks.warn),
         error: make(sinks.error),
     };
+    // Uncaught exceptions in listeners / timers: browsers keep going and
+    // report them to the console, so do we (the agent sees them as
+    // `console:` errors). Bound to the captured sink, so a page that
+    // replaces `console` can't hide them.
+    var reportError = make(sinks.error);
+    Object.defineProperty(globalThis, '__mb_report_error', {
+        value: function (where, err) {
+            reportError('Uncaught in ' + where + ': ' + String(err));
+        },
+        enumerable: false,
+    });
     delete globalThis.__mb_console_log;
     delete globalThis.__mb_console_warn;
     delete globalThis.__mb_console_error;

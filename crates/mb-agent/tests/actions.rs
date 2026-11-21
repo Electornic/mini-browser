@@ -136,6 +136,8 @@ fn route(
             String::new(),
             "<html><body><div id=\"list\"></div><button onclick=\"var c = document.createElement('input'); c.setAttribute('type', 'checkbox'); document.getElementById('list').appendChild(c);\">Add</button></body></html>".into(),
         ),
+        ("GET", "/props") => ("200 OK", String::new(), PROPS_PAGE.into()),
+        ("GET", "/router") => ("200 OK", String::new(), ROUTER_PAGE.into()),
         ("GET", "/delayed") => (
             "200 OK",
             String::new(),
@@ -154,6 +156,7 @@ fn route(
             String::new(),
         ),
         ("GET", "/long") => ("200 OK", String::new(), long_page()),
+        ("GET", demo) if demo.starts_with("/demo/") => demo_file(&demo["/demo/".len()..]),
         _ => {
             let _ = body;
             ("404 Not Found", String::new(), "<html><body>not found</body></html>".into())
@@ -206,6 +209,57 @@ fn long_page() -> String {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// Builds its controls the way frameworks do — IDL property assignment, no
+// setAttribute — and reads state back through properties.
+const PROPS_PAGE: &str = r#"<html><body><div id="root"></div><p id="out">-</p><script>
+var root = document.getElementById('root');
+var box = document.createElement('input');
+box.type = 'checkbox';
+box.id = 'agree';
+box.checked = true;
+var label = document.createElement('label');
+label.htmlFor = 'agree';
+label.textContent = 'I agree';
+var off = document.createElement('button');
+off.textContent = 'Locked';
+off.disabled = true;
+root.appendChild(box);
+root.appendChild(label);
+root.appendChild(off);
+box.addEventListener('change', function () {
+  document.getElementById('out').textContent =
+    'type=' + box.type + ' checked=' + box.checked + ' disabled=' + off.disabled;
+});
+</script></body></html>"#;
+
+// A hash router plus a pushState link: in-memory state (`clicks`) must
+// survive both, which only holds if neither reloads the document.
+const ROUTER_PAGE: &str = r##"<html><body><nav><a href="#/done">Done</a> <a href="#/all">All</a> <a id="push" href="/router/about">About</a></nav>
+<button id="bump">Bump</button><p id="view">-</p><script>
+var clicks = 0, events = [];
+function show() {
+  document.getElementById('view').textContent =
+    'route=' + (location.hash || '#/all') + ' path=' + location.pathname + ' clicks=' + clicks + ' events=' + events.join(',');
+}
+document.getElementById('bump').addEventListener('click', function () { clicks++; show(); });
+document.getElementById('push').addEventListener('click', function (e) {
+  e.preventDefault(); history.pushState({}, '', '/router/about'); events.push('push'); show();
+});
+window.addEventListener('popstate', function () { events.push('pop'); show(); });
+window.addEventListener('hashchange', function () { events.push('hash'); show(); });
+show();
+</script></body></html>"##;
+
+/// Serves `examples/agent-demo/<name>` as is — the demo pages double as
+/// capstone fixtures.
+fn demo_file(name: &str) -> (&'static str, String, String) {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/agent-demo/");
+    match std::fs::read_to_string(format!("{dir}{name}")) {
+        Ok(body) if !name.contains("..") => ("200 OK", String::new(), body),
+        _ => ("404 Not Found", String::new(), String::new()),
+    }
+}
 
 fn browser(approve: ApproveMode) -> AgentBrowser {
     AgentBrowser::new(AgentConfig {
@@ -696,5 +750,146 @@ fn changed_names_the_elements_that_appeared() {
     assert!(
         text.contains(&format!("+1 (e{}) / -0 elements", new.raw())),
         "{text}"
+    );
+}
+
+#[test]
+fn controls_built_with_property_setters_render_and_toggle() {
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/props")).unwrap();
+    let text = page.to_text();
+    assert!(
+        text.contains("checkbox  name=\"I agree\" checked=true"),
+        "{text}"
+    );
+    assert!(text.contains("name=\"Locked\"  (disabled)"), "{text}");
+    let after = b.click(find(&page, Role::Checkbox, "I agree")).unwrap();
+    assert!(
+        after
+            .text
+            .iter()
+            .any(|t| t == "type=checkbox checked=false disabled=true"),
+        "{}",
+        after.to_text()
+    );
+}
+
+#[test]
+fn hash_links_and_push_state_stay_in_the_same_document() {
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/router")).unwrap();
+    let page = b.click(find(&page, Role::Button, "Bump")).unwrap();
+    let view = |o: &Observation| {
+        o.text
+            .iter()
+            .find(|t| t.starts_with("route="))
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(view(&page), "route=#/all path=/router clicks=1 events=");
+
+    // A fragment link: no reload (clicks survives), popstate + hashchange.
+    let done = b.click(find(&page, Role::Link, "Done")).unwrap();
+    assert_eq!(
+        view(&done),
+        "route=#/done path=/router clicks=1 events=pop,hash"
+    );
+    assert_eq!(
+        done.url.as_deref(),
+        Some(server.url("/router#/done").as_str())
+    );
+    assert!(
+        !done.to_text().contains("new document"),
+        "{}",
+        done.to_text()
+    );
+
+    // pushState: the trusted url follows the page's same-origin URL.
+    let about = b.click(find(&done, Role::Link, "About")).unwrap();
+    assert_eq!(
+        view(&about),
+        "route=#/all path=/router/about clicks=1 events=pop,hash,push"
+    );
+    assert_eq!(
+        about.url.as_deref(),
+        Some(server.url("/router/about").as_str())
+    );
+
+    // Back walks the same-document entries first, still without a reload.
+    let back = b.back().unwrap();
+    assert_eq!(
+        view(&back),
+        "route=#/done path=/router clicks=1 events=pop,hash,push,pop"
+    );
+    let back = b.back().unwrap();
+    assert_eq!(
+        view(&back),
+        "route=#/all path=/router clicks=1 events=pop,hash,push,pop,pop,hash"
+    );
+    assert_eq!(back.url.as_deref(), Some(server.url("/router").as_str()));
+    let fwd = b.forward().unwrap();
+    assert_eq!(
+        fwd.url.as_deref(),
+        Some(server.url("/router#/done").as_str())
+    );
+}
+
+/// Capstone for SPA Tier 1.5: the Preact + hooks demo (classic UMD bundles,
+/// no build) driven end to end with agent actions — controlled input,
+/// keyed list, checkbox props, a hash router, and back through it.
+#[test]
+fn preact_demo_adds_toggles_filters_and_goes_back() {
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/demo/preact.html")).unwrap();
+    assert!(
+        page.text.iter().any(|t| t == "1 of 2 done"),
+        "{}",
+        page.to_text()
+    );
+
+    let page = b
+        .type_text(
+            find(&page, Role::Textbox, "New item"),
+            "buy milk",
+            false,
+            true,
+        )
+        .unwrap();
+    let page = b.click(find(&page, Role::Checkbox, "buy milk")).unwrap();
+    assert!(
+        page.text.iter().any(|t| t == "2 of 3 done"),
+        "{}",
+        page.to_text()
+    );
+    assert!(page.console.is_empty(), "{}", page.to_text());
+
+    let done = b.click(find(&page, Role::Link, "Done")).unwrap();
+    assert!(
+        done.url
+            .as_deref()
+            .unwrap()
+            .ends_with("/demo/preact.html#/done")
+    );
+    let names: Vec<_> = done
+        .elements
+        .iter()
+        .filter(|e| e.role == Role::Checkbox)
+        .map(|e| e.name.as_str())
+        .collect();
+    assert_eq!(names, ["Read the concept doc", "buy milk"]);
+
+    let all = b.back().unwrap();
+    assert!(all.url.as_deref().unwrap().ends_with("/demo/preact.html"));
+    assert_eq!(
+        all.elements
+            .iter()
+            .filter(|e| e.role == Role::Checkbox)
+            .count(),
+        3,
+        "back to the unfiltered list, state kept: {}",
+        all.to_text()
     );
 }

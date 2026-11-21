@@ -285,6 +285,73 @@ pub(super) fn uses_inline_flow(node: &StyledNode) -> bool {
     visible.peek().is_some() && visible.all(is_inline_node)
 }
 
+/// One in-flow slot of a block-flow parent: either a child laid out on its
+/// own, or a run of consecutive inline-level children that share anonymous
+/// line boxes (CSS 2.1 §9.2.1.1 — inline content beside block siblings is
+/// wrapped in an anonymous block).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum BlockChild {
+    Single(usize),
+    InlineRun(std::ops::Range<usize>),
+}
+
+/// Splits a block-flow parent's children into [`BlockChild`] slots, in
+/// document order. Whitespace-only text at the edges of a run is trimmed and
+/// an all-whitespace run is dropped (inter-element whitespace between block
+/// siblings renders as nothing); whitespace *inside* a run stays so words
+/// keep their separating spaces. `display: none` children never start a run
+/// and are dropped; inside a run they are kept (inline layout skips them).
+/// Floats and absolute/fixed children are not inline-level: they end a run
+/// and stay `Single` so the block algorithm places them.
+pub(super) fn group_block_children(children: &[StyledNode]) -> Vec<BlockChild> {
+    let is_run_member =
+        |child: &StyledNode| is_inline_node(child) && !has_float(child) && !is_out_of_flow(child);
+    let mut groups = Vec::new();
+    let mut i = 0;
+    while i < children.len() {
+        let child = &children[i];
+        if is_display_none(child) {
+            i += 1;
+            continue;
+        }
+        if !is_run_member(child) {
+            groups.push(BlockChild::Single(i));
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < children.len() && (is_run_member(&children[i]) || is_display_none(&children[i])) {
+            i += 1;
+        }
+        let skippable = |c: &StyledNode| super::is_layout_whitespace_text(c) || is_display_none(c);
+        let mut run = start..i;
+        while run.start < run.end && skippable(&children[run.start]) {
+            run.start += 1;
+        }
+        while run.end > run.start && skippable(&children[run.end - 1]) {
+            run.end -= 1;
+        }
+        if !run.is_empty() {
+            groups.push(BlockChild::InlineRun(run));
+        }
+    }
+    groups
+}
+
+/// Lays out an anonymous block holding one inline run: line boxes packed at
+/// `(x, y)` across `width`. Returns the boxes (flattened — there is no
+/// anonymous wrapper in the layout tree, so layout children stay 1:1 with
+/// styled children) and the run's height.
+pub(super) fn layout_inline_run(
+    run: &[StyledNode],
+    x: f32,
+    y: f32,
+    width: f32,
+    align: InlineAlign,
+) -> (Vec<LayoutBox>, f32) {
+    layout_inline_children(run, x, y, width, align)
+}
+
 fn is_inline_node(node: &StyledNode) -> bool {
     match node.value("display") {
         Some(Value::Keyword(keyword)) if keyword == "block" => return false,

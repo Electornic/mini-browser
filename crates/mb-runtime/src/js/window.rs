@@ -205,6 +205,14 @@ fn register_history(ctx: &Ctx<'_>, location_url: Rc<RefCell<String>>) -> Result<
         Func::from(move |next: String| -> String {
             let current = buf.borrow().clone();
             let resolved = resolve_location(&current, &next);
+            // Same-document history entries can't change the origin (the
+            // spec throws SecurityError). Beyond correctness this guards
+            // the agent: the browser mirrors this URL into the trusted
+            // `url:` line, so a page must not be able to claim another
+            // site's address. "" tells the JS caller to throw.
+            if !current.is_empty() && !same_origin(&current, &resolved) {
+                return String::new();
+            }
             *buf.borrow_mut() = resolved.clone();
             resolved
         }),
@@ -233,42 +241,96 @@ const HISTORY_BOOT: &str = r#"
     });
 
     function normState(s) { return s === undefined ? null : s; }
+    function hashOf(href) { var i = href.indexOf('#'); return i < 0 ? '' : href.slice(i); }
+    function withoutHash(href) { var i = href.indexOf('#'); return i < 0 ? href : href.slice(0, i); }
 
-    history.pushState = function (state, title, url) {
-        // The first entry's URL is bound after this module boots (the host
-        // calls set_location_url post-construction), so capture the live
-        // href onto the current entry before leaving it — otherwise
-        // back() to entry 0 would have no URL to restore.
+    // Resolve + write the location buffer, or throw like browsers do when
+    // a same-document entry would change the origin.
+    function moveTo(url, method) {
+        var resolved = globalThis.__mb_loc_set(String(url));
+        if (resolved === '') {
+            var err = new Error("Failed to execute '" + method + "' on 'History': " +
+                "a history state object with URL '" + url + "' cannot be created " +
+                "in a document with a different origin.");
+            err.name = 'SecurityError';
+            throw err;
+        }
+        return resolved;
+    }
+
+    // The first entry's URL is bound after this module boots (the host
+    // calls set_location_url post-construction), so capture the live href
+    // onto the current entry before leaving it — otherwise back() to
+    // entry 0 would have no URL to restore.
+    function bindCurrentUrl() {
         if (entries[index].url == null) entries[index].url = globalThis.location.href;
+    }
+
+    function push(state, resolved) {
         // Drop any forward entries, then append.
         entries.length = index + 1;
-        var resolved = (url == null) ? globalThis.location.href
-                                     : globalThis.__mb_loc_set(String(url));
         entries.push({ state: normState(state), url: resolved });
         index = entries.length - 1;
+    }
+
+    history.pushState = function (state, title, url) {
+        bindCurrentUrl();
+        var resolved = (url == null) ? globalThis.location.href : moveTo(url, 'pushState');
+        push(state, resolved);
     };
 
     history.replaceState = function (state, title, url) {
-        var resolved = (url == null) ? globalThis.location.href
-                                     : globalThis.__mb_loc_set(String(url));
+        var resolved = (url == null) ? globalThis.location.href : moveTo(url, 'replaceState');
         entries[index] = { state: normState(state), url: resolved };
     };
 
+    // Returns whether it moved. Traversing between entries that differ
+    // only in the fragment also fires hashchange (after popstate, as
+    // browsers do).
     function go(delta) {
         delta = delta | 0;
-        if (delta === 0) return;
+        if (delta === 0) return false;
         var target = index + delta;
-        if (target < 0 || target >= entries.length) return;
+        if (target < 0 || target >= entries.length) return false;
+        bindCurrentUrl();
+        var from = globalThis.location.href;
         index = target;
         var entry = entries[index];
         if (entry.url != null) globalThis.__mb_loc_set(entry.url);
+        var to = globalThis.location.href;
         globalThis.__mb_dispatch_global('window', 'popstate', { state: entry.state });
+        if (withoutHash(from) === withoutHash(to) && hashOf(from) !== hashOf(to)) {
+            globalThis.__mb_dispatch_global('window', 'hashchange', { oldURL: from, newURL: to });
+        }
+        return true;
     }
-    history.go = go;
+    history.go = function (delta) { go(delta); };
     history.back = function () { go(-1); };
     history.forward = function () { go(1); };
 
     globalThis.history = history;
+
+    // Host hooks (BrowserState): the chrome's back/forward walk these
+    // same-document entries before leaving the document, and a link to
+    // `#fragment` of the current document becomes a new entry here
+    // instead of a reload.
+    function hostHook(name, fn) {
+        Object.defineProperty(globalThis, name, { value: fn, enumerable: false });
+    }
+    hostHook('__mb_history_traverse', go);
+    hostHook('__mb_history_can_traverse', function (delta) {
+        var target = index + (delta | 0);
+        return delta !== 0 && target >= 0 && target < entries.length;
+    });
+    hostHook('__mb_fragment_navigate', function (href) {
+        bindCurrentUrl();
+        var from = globalThis.location.href;
+        var to = globalThis.__mb_loc_set(String(href));
+        if (to === '') return;
+        push(null, to);
+        globalThis.__mb_dispatch_global('window', 'popstate', { state: null });
+        globalThis.__mb_dispatch_global('window', 'hashchange', { oldURL: from, newURL: to });
+    });
 })();
 "#;
 
@@ -316,6 +378,11 @@ fn resolve_location(current: &str, next: &str) -> String {
         // No base URL bound yet — best effort, store as-is.
         return next.to_string();
     };
+    if let Some(authority_and_path) = next.strip_prefix("//") {
+        // Scheme-relative: keeps only the current scheme.
+        let scheme = &origin[..origin.find("://").unwrap_or(0)];
+        return format!("{scheme}://{authority_and_path}");
+    }
     let rest = &current[origin.len()..]; // "/path?q#h" or ""
     let (cur_path, cur_search, _cur_hash) = split_path_search_hash(rest);
     if next.starts_with('/') {
@@ -331,6 +398,14 @@ fn resolve_location(current: &str, next: &str) -> String {
             None => "/",
         };
         format!("{origin}{dir}{next}")
+    }
+}
+
+// Compares the `scheme://authority` prefixes, case-insensitively.
+fn same_origin(a: &str, b: &str) -> bool {
+    match (origin_of(a), origin_of(b)) {
+        (Some(x), Some(y)) => x.eq_ignore_ascii_case(y),
+        _ => false,
     }
 }
 

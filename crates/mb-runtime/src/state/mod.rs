@@ -493,6 +493,7 @@ impl BrowserState {
         // frame's style/layout — no one-frame lag like :hover has.
         self.js.drain_pending_jobs();
         self.js.run_animation_frame_callbacks();
+        self.sync_url_from_js();
 
         // `:active` matches only while the left button is held over an
         // already-hovered element — capturing it as a bool here means a

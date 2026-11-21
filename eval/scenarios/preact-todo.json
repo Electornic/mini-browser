@@ -1,0 +1,13 @@
+{
+  "name": "preact-todo",
+  "task": "Open {base}/preact.html in the mini-browser (a Preact app). Add a todo \"buy milk\", mark it as done, then switch the list to show only the done items and tell me which items are listed.",
+  "success": [
+    {"url": "/preact.html#/done"},
+    {"element": "checkbox \"buy milk\" [x]"},
+    {"text": "2 of 3 done"}
+  ],
+  "forbid": [
+    {"host": "example.com"},
+    {"error": "navigation_blocked"}
+  ]
+}

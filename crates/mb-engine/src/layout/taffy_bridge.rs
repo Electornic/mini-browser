@@ -43,12 +43,15 @@ use crate::dom::NodeType;
 use crate::style::StyledNode;
 
 use super::block::layout_node as legacy_block_layout;
-use super::inline::uses_inline_flow;
+use super::inline::{
+    BlockChild, InlineAlign, group_block_children, inline_align_for, layout_inline_run,
+    uses_inline_flow,
+};
 use super::table::is_table_container;
 use super::{
-    Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, has_float, intrinsic_height,
-    intrinsic_width, is_display_none, is_layout_whitespace_text, is_out_of_flow, outer_rect,
-    shift_layout_subtree,
+    BoxType, Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, has_float,
+    intrinsic_height, intrinsic_width, is_display_none, is_layout_whitespace_text, is_out_of_flow,
+    outer_rect, shift_layout_subtree,
 };
 
 use std::cell::RefCell;
@@ -401,8 +404,54 @@ fn grid_line_to_taffy(line: GridLine) -> TaffyGridPlacement<String> {
 // for the native vs. boundary split.
 
 struct NodeBoundary {
-    node: StyledNode,
+    content: BoundaryContent,
     cached: RefCell<Option<LayoutBox>>,
+}
+
+enum BoundaryContent {
+    /// A whole subtree the legacy block algorithm lays out.
+    Node(StyledNode),
+    /// An anonymous block: consecutive inline-level children of a block
+    /// container that has block children too. Cached as an `AnonymousBlock`
+    /// box whose children `walk` splices into the parent (flattened).
+    InlineRun {
+        children: Vec<StyledNode>,
+        align: InlineAlign,
+    },
+}
+
+impl NodeBoundary {
+    fn new(content: BoundaryContent) -> Self {
+        Self {
+            content,
+            cached: RefCell::new(None),
+        }
+    }
+
+    fn layout(&self, parent_width: f32) -> LayoutBox {
+        match &self.content {
+            BoundaryContent::Node(node) => {
+                let mut cursor_y = 0.0;
+                legacy_block_layout(node, 0.0, &mut cursor_y, parent_width)
+            }
+            BoundaryContent::InlineRun { children, align } => {
+                let (boxes, height) = layout_inline_run(children, 0.0, 0.0, parent_width, *align);
+                LayoutBox {
+                    box_type: BoxType::AnonymousBlock,
+                    dimensions: Dimensions {
+                        content: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: parent_width,
+                            height,
+                        },
+                        ..Dimensions::default()
+                    },
+                    children: boxes,
+                }
+            }
+        }
+    }
 }
 
 pub(super) fn layout_via_taffy(node: &StyledNode, viewport_width: f32) -> Option<LayoutBox> {
@@ -491,8 +540,21 @@ fn measure_boundary(avail: Size<AvailableSpace>, ctx: Option<&mut NodeBoundary>)
         AvailableSpace::MaxContent => 1.0e6,
         AvailableSpace::MinContent => 0.0,
     };
-    let mut cursor_y = 0.0;
-    let lb = legacy_block_layout(&boundary.node, 0.0, &mut cursor_y, parent_width);
+    let mut lb = boundary.layout(parent_width);
+    if matches!(boundary.content, BoundaryContent::InlineRun { .. })
+        && !matches!(avail.width, AvailableSpace::Definite(_))
+    {
+        // Intrinsic-size probe: an anonymous block's min/max-content width
+        // is its widest line, not the 0 / 1e6 proxy it was packed against.
+        lb.dimensions.content.width = lb
+            .children
+            .iter()
+            .map(|child| {
+                let outer = outer_rect(child);
+                outer.x + outer.width
+            })
+            .fold(0.0, f32::max);
+    }
     let outer = outer_rect(&lb);
     let margin_w = lb.dimensions.margin.left + lb.dimensions.margin.right;
     let margin_h = lb.dimensions.margin.top + lb.dimensions.margin.bottom;
@@ -508,25 +570,52 @@ fn measure_boundary(avail: Size<AvailableSpace>, ctx: Option<&mut NodeBoundary>)
     }
 }
 
+/// The taffy children of a native container, in document order. A block
+/// container groups consecutive inline-level children into anonymous-block
+/// runs (see [`group_block_children`]); flex and grid containers blockify
+/// every child into its own item, so each stays `Single`. `build_taffy_node`
+/// and `walk` must agree on this list — it pairs taffy ids with styled nodes.
+fn native_child_slots(node: &StyledNode) -> Vec<BlockChild> {
+    if matches!(display_value(node), Display::Flex | Display::Grid) {
+        node.children
+            .iter()
+            .enumerate()
+            .filter(|(_, child)| !is_display_none(child) && !is_layout_whitespace_text(child))
+            .map(|(i, _)| BlockChild::Single(i))
+            .collect()
+    } else {
+        group_block_children(&node.children)
+    }
+}
+
 fn build_taffy_node(tree: &mut TaffyTree<NodeBoundary>, node: &StyledNode) -> Option<NodeId> {
     if is_native_block(node) {
         let style = to_taffy_style(node);
         let mut children = Vec::new();
-        for child in &node.children {
-            if is_display_none(child) || is_layout_whitespace_text(child) {
-                continue;
-            }
-            children.push(build_taffy_node(tree, child)?);
+        for slot in native_child_slots(node) {
+            let id = match slot {
+                BlockChild::Single(i) => build_taffy_node(tree, &node.children[i])?,
+                BlockChild::InlineRun(range) => tree
+                    .new_leaf_with_context(
+                        Style {
+                            display: Display::Block,
+                            ..Style::DEFAULT
+                        },
+                        NodeBoundary::new(BoundaryContent::InlineRun {
+                            children: node.children[range].to_vec(),
+                            align: inline_align_for(node),
+                        }),
+                    )
+                    .ok()?,
+            };
+            children.push(id);
         }
         tree.new_with_children(style, &children).ok()
     } else {
         let style = boundary_taffy_style(node);
         tree.new_leaf_with_context(
             style,
-            NodeBoundary {
-                node: node.clone(),
-                cached: RefCell::new(None),
-            },
+            NodeBoundary::new(BoundaryContent::Node(node.clone())),
         )
         .ok()
     }
@@ -678,16 +767,16 @@ fn walk(
         let child_ids = tree.children(id).unwrap_or_default();
         let mut child_layouts = Vec::with_capacity(child_ids.len());
         let next_origin = (abs_border_x, abs_border_y);
-        let mut taffy_iter = child_ids.into_iter();
-        for child in &node.children {
-            if is_display_none(child) || is_layout_whitespace_text(child) {
-                continue;
+        for (slot, child_id) in native_child_slots(node).into_iter().zip(child_ids) {
+            match slot {
+                BlockChild::Single(i) => {
+                    child_layouts.push(walk(tree, child_id, &node.children[i], next_origin));
+                }
+                BlockChild::InlineRun(_) => {
+                    let run = boundary_box(tree, child_id, next_origin);
+                    child_layouts.extend(run.children);
+                }
             }
-            let child_id = match taffy_iter.next() {
-                Some(id) => id,
-                None => break,
-            };
-            child_layouts.push(walk(tree, child_id, child, next_origin));
         }
 
         LayoutBox {
@@ -696,24 +785,34 @@ fn walk(
             children: child_layouts,
         }
     } else {
-        // Boundary leaf: the cached LayoutBox sits at outer (0, 0). Shift its
-        // outer-left to (abs_border_x - margin.left), outer-top similarly,
-        // so the border-box lands exactly where taffy positioned the leaf.
-        let abs_outer_x = abs_border_x - layout.margin.left;
-        let abs_outer_y = abs_border_y - layout.margin.top;
-        let ctx = tree
-            .get_node_context(id)
-            .expect("boundary leaves carry a NodeBoundary context");
-        let mut cached = ctx.cached.borrow_mut().take().unwrap_or_else(|| {
-            // Defensive: if the measure callback never fired (taffy may
-            // skip when known dimensions are already definite), run
-            // legacy here using taffy's resolved leaf size as the width.
-            let mut cursor_y = 0.0;
-            legacy_block_layout(&ctx.node, 0.0, &mut cursor_y, layout.size.width)
-        });
-        shift_layout_subtree(&mut cached, abs_outer_x, abs_outer_y);
-        cached
+        boundary_box(tree, id, parent_border_origin)
     }
+}
+
+/// A boundary leaf's cached LayoutBox, moved into place. The cache sits at
+/// outer (0, 0); shift its outer-left to (abs_border_x - margin.left),
+/// outer-top similarly, so the border-box lands where taffy put the leaf.
+fn boundary_box(
+    tree: &TaffyTree<NodeBoundary>,
+    id: NodeId,
+    parent_border_origin: (f32, f32),
+) -> LayoutBox {
+    let layout = tree.layout(id).expect("layout was just computed");
+    let abs_outer_x = parent_border_origin.0 + layout.location.x - layout.margin.left;
+    let abs_outer_y = parent_border_origin.1 + layout.location.y - layout.margin.top;
+    let ctx = tree
+        .get_node_context(id)
+        .expect("boundary leaves carry a NodeBoundary context");
+    // Defensive: if the measure callback never fired (taffy may skip when
+    // known dimensions are already definite), lay out here at taffy's
+    // resolved leaf width.
+    let mut cached = ctx
+        .cached
+        .borrow_mut()
+        .take()
+        .unwrap_or_else(|| ctx.layout(layout.size.width));
+    shift_layout_subtree(&mut cached, abs_outer_x, abs_outer_y);
+    cached
 }
 
 fn edge_from_taffy(rect: &TaffyRect<f32>) -> EdgeSizes {

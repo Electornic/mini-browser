@@ -280,7 +280,7 @@ pub(super) fn intrinsic_height(node: &StyledNode) -> f32 {
 mod tests {
     use crate::{css, html, style};
 
-    use super::layout_tree;
+    use super::{box_styled_node, layout_tree, outer_rect};
 
     fn styled_root(html_source: &str, css_source: &str) -> style::StyledNode {
         let document = html::parse(html_source).unwrap();
@@ -450,6 +450,100 @@ mod tests {
         assert_eq!(link.dimensions.content.x, 0.0);
         assert!(span.dimensions.content.x > link.dimensions.content.x);
         assert_eq!(link.dimensions.content.y, span.dimensions.content.y);
+    }
+
+    #[test]
+    fn inline_run_beside_block_sibling_shares_one_line() {
+        // A block parent mixing a block child with label + input + button
+        // (the todo demo's form row): the inline siblings must share one
+        // anonymous line instead of each stacking as a full-width block.
+        let styled = styled_root(
+            r#"<div id="root"><h1>Todo</h1><label>New</label> <input id="new"> <button>Add</button><p>after</p></div>"#,
+            "#root { width: 600px; } h1 { font-size: 20px; }",
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let tags: Vec<_> = layout
+            .children
+            .iter()
+            .map(|b| match box_styled_node(b).map(|n| &n.node_type) {
+                Some(crate::dom::NodeType::Element(e)) => e.tag_name.clone(),
+                Some(crate::dom::NodeType::Text(_)) => "#text".to_string(),
+                None => "anon".to_string(),
+            })
+            .collect();
+        let find = |tag: &str| {
+            let i = tags.iter().position(|t| t == tag).unwrap_or_else(|| {
+                panic!("no {tag} among {tags:?}");
+            });
+            &layout.children[i]
+        };
+        let (h1, label, input, button, p) = (
+            find("h1"),
+            find("label"),
+            find("input"),
+            find("button"),
+            find("p"),
+        );
+
+        // Same line = same line-box top (the toy aligns outer tops, not
+        // baselines, so compare outer rects — input has border+padding).
+        let y = outer_rect(label).y;
+        assert!(y > h1.dimensions.content.y, "row sits below the heading");
+        assert_eq!(outer_rect(input).y, y, "input on the label's line");
+        assert_eq!(outer_rect(button).y, y, "button on the label's line");
+        assert!(input.dimensions.content.x > label.dimensions.content.x);
+        assert!(button.dimensions.content.x > input.dimensions.content.x);
+        assert!(
+            button.dimensions.content.width < 200.0,
+            "button shrink-wraps, got {}",
+            button.dimensions.content.width
+        );
+        let row_bottom = outer_rect(input).y + outer_rect(input).height;
+        assert!(
+            p.dimensions.content.y >= row_bottom,
+            "block after the run starts below it"
+        );
+    }
+
+    #[test]
+    fn inline_run_groups_on_the_legacy_block_path_too() {
+        // A float child makes the parent a taffy boundary leaf, so the
+        // legacy `block::layout_node` lays it out — it must group too.
+        let styled = styled_root(
+            r#"<div id="root"><div id="f"></div><h1>Todo</h1><input id="new"> <button>Add</button></div>"#,
+            "#root { width: 600px; } #f { float: right; width: 10px; height: 10px; }",
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let n = layout.children.len();
+        let (input, button) = (&layout.children[n - 3], &layout.children[n - 1]);
+        assert_eq!(outer_rect(input).y, outer_rect(button).y);
+        assert!(button.dimensions.content.x > input.dimensions.content.x);
+        assert!(button.dimensions.content.width < 200.0);
+    }
+
+    #[test]
+    fn text_run_beside_block_sibling_flows_inline() {
+        // `<div>Intro <b>bold</b><div>block</div></div>`: the leading text
+        // and <b> share a line; the block child goes below.
+        let styled = styled_root(
+            r#"<div id="root">Intro <b>bold</b><div>block</div></div>"#,
+            "#root { width: 400px; }",
+        );
+        let layout = layout_tree(&styled, 800.0);
+        assert_eq!(
+            layout.children.len(),
+            3,
+            "text, b, div — whitespace kept inline"
+        );
+        let (text, bold, block) = (
+            &layout.children[0],
+            &layout.children[1],
+            &layout.children[2],
+        );
+        assert_eq!(text.dimensions.content.y, bold.dimensions.content.y);
+        assert!(bold.dimensions.content.x > text.dimensions.content.x);
+        assert!(block.dimensions.content.y > bold.dimensions.content.y);
+        assert_eq!(block.dimensions.content.width, 400.0);
     }
 
     #[test]

@@ -288,6 +288,54 @@ impl JsRuntime {
         *self.location_url.borrow_mut() = url.into();
     }
 
+    /// The page's current `location.href` — moves with `pushState`,
+    /// `replaceState` and same-document traversal (always same-origin).
+    pub fn location_href(&self) -> String {
+        self.location_url.borrow().clone()
+    }
+
+    /// Same-document navigation to `href` (the current URL with a new
+    /// fragment): a new history entry, then `popstate` and `hashchange`.
+    pub fn navigate_to_fragment(&mut self, href: &str) {
+        let href = href.to_string();
+        self.context.with(|ctx| {
+            if let Ok(hook) = ctx
+                .globals()
+                .get::<_, Function<'_>>("__mb_fragment_navigate")
+            {
+                let _ = hook.call::<_, ()>((href,));
+            }
+        });
+        self.drain_pending_jobs();
+    }
+
+    /// Whether `delta` steps of same-document history exist (entries made
+    /// by `pushState` or fragment navigation in this document).
+    pub fn can_traverse_history(&self, delta: i32) -> bool {
+        self.context.with(|ctx| {
+            ctx.globals()
+                .get::<_, Function<'_>>("__mb_history_can_traverse")
+                .and_then(|hook| hook.call::<_, bool>((delta,)))
+                .unwrap_or(false)
+        })
+    }
+
+    /// Move `delta` steps through same-document history (`popstate`, plus
+    /// `hashchange` when only the fragment differs). False if there is no
+    /// such entry — the caller then leaves the document instead.
+    pub fn traverse_history(&mut self, delta: i32) -> bool {
+        let moved = self.context.with(|ctx| {
+            ctx.globals()
+                .get::<_, Function<'_>>("__mb_history_traverse")
+                .and_then(|hook| hook.call::<_, bool>((delta,)))
+                .unwrap_or(false)
+        });
+        if moved {
+            self.drain_pending_jobs();
+        }
+        moved
+    }
+
     /// Replace the layout-geometry map the element hooks serve to
     /// `getBoundingClientRect` / `offsetWidth` / `clientWidth` and friends.
     /// `BrowserState` calls this once per layout with a `NodeId -> rect`
@@ -1089,6 +1137,39 @@ mod tests {
     }
 
     #[test]
+    fn push_state_refuses_another_origin() {
+        // The browser mirrors location into the agent's trusted `url:` line,
+        // so a page must not be able to claim another site's address.
+        let mut rt = rt_with_html("<div></div>");
+        rt.set_location_url("https://example.com/home");
+        assert_eq!(
+            rt.execute(
+                "try { history.pushState({}, '', 'https://bank.example/'); 'no throw' } \
+                 catch (e) { e.name }"
+            )
+            .unwrap(),
+            "\"SecurityError\""
+        );
+        assert_eq!(
+            rt.execute(
+                "try { history.replaceState(null, '', '//bank.example/x'); 1 } catch (e) { e.name }"
+            )
+            .unwrap(),
+            "\"SecurityError\""
+        );
+        assert_eq!(rt.location_href(), "https://example.com/home");
+        assert_eq!(rt.execute("history.length").unwrap(), "1");
+        // Same origin, absolute or relative, still works.
+        rt.execute(
+            "history.pushState({}, '', 'https://EXAMPLE.com/a'); history.pushState({}, '', 'b')",
+        )
+        .unwrap();
+        assert_eq!(rt.location_href(), "https://EXAMPLE.com/b");
+        assert!(rt.can_traverse_history(-2));
+        assert!(!rt.can_traverse_history(1));
+    }
+
+    #[test]
     fn history_back_and_forward_fire_popstate_and_restore_location() {
         let mut rt = fresh();
         rt.set_location_url("https://example.com/a");
@@ -1457,6 +1538,134 @@ mod tests {
             rt.execute("document.getElementById('p').textContent")
                 .unwrap(),
             "\"new\""
+        );
+    }
+
+    #[test]
+    fn a_node_has_one_wrapper_so_identity_and_expandos_hold() {
+        // Preact keeps its listener table on the DOM node (`dom.l`) and
+        // reads it back through `this` in the event proxy; frameworks also
+        // compare nodes with ===. Both need one wrapper per node.
+        let mut rt = rt_with_html(r#"<div id="d"><p id="p">t</p></div>"#);
+        assert_eq!(
+            rt.execute(
+                "var d = document.getElementById('d'); \
+                 d === document.querySelector('#d') && \
+                 d.firstChild === document.getElementById('p') && \
+                 d.firstChild.firstChild === d.firstChild.firstChild && \
+                 d.firstChild.parentNode === d"
+            )
+            .unwrap(),
+            "true"
+        );
+        rt.execute("document.getElementById('d').l = { n: 7 }")
+            .unwrap();
+        assert_eq!(rt.execute("document.querySelector('#d').l.n").unwrap(), "7");
+        let created = rt
+            .execute("var c = document.createElement('span'); d.appendChild(c); c === d.lastChild")
+            .unwrap();
+        assert_eq!(created, "true");
+    }
+
+    #[test]
+    fn idl_properties_reflect_their_content_attributes() {
+        let mut rt = rt_with_html(
+            r#"<div><input id="i"><button id="b">x</button><label id="l">L</label></div>"#,
+        );
+        let eval = |rt: &mut JsRuntime, js: &str| rt.execute(js).unwrap();
+        assert_eq!(
+            eval(&mut rt, "document.getElementById('b').localName"),
+            "\"button\""
+        );
+        // Enumerated `type`: default state when absent, lowercased on read.
+        assert_eq!(
+            eval(&mut rt, "document.getElementById('i').type"),
+            "\"text\""
+        );
+        assert_eq!(
+            eval(&mut rt, "document.getElementById('b').type"),
+            "\"submit\""
+        );
+        eval(&mut rt, "document.getElementById('i').type = 'CheckBox'");
+        assert_eq!(
+            eval(&mut rt, "document.getElementById('i').getAttribute('type')"),
+            "\"CheckBox\""
+        );
+        assert_eq!(
+            eval(&mut rt, "document.getElementById('i').type"),
+            "\"checkbox\""
+        );
+        // Booleans: presence of the attribute; false removes it.
+        eval(&mut rt, "document.getElementById('i').checked = true");
+        assert_eq!(
+            eval(
+                &mut rt,
+                "document.getElementById('i').getAttribute('checked')"
+            ),
+            "\"\""
+        );
+        eval(&mut rt, "document.getElementById('i').checked = 0");
+        assert_eq!(
+            eval(
+                &mut rt,
+                "document.getElementById('i').hasAttribute('checked')"
+            ),
+            "false"
+        );
+        eval(&mut rt, "document.getElementById('i').readOnly = 'yes'");
+        assert_eq!(
+            eval(
+                &mut rt,
+                "document.getElementById('i').getAttribute('readonly')"
+            ),
+            "\"\""
+        );
+        assert_eq!(
+            eval(&mut rt, "document.getElementById('b').disabled"),
+            "false"
+        );
+        assert_eq!(
+            eval(
+                &mut rt,
+                "document.getElementById('b').toggleAttribute('disabled')"
+            ),
+            "true"
+        );
+        assert_eq!(
+            eval(&mut rt, "document.getElementById('b').disabled"),
+            "true"
+        );
+        assert_eq!(
+            eval(
+                &mut rt,
+                "document.getElementById('b').toggleAttribute('disabled', true)"
+            ),
+            "true"
+        );
+        assert_eq!(
+            eval(&mut rt, "document.getElementById('b').disabled"),
+            "true"
+        );
+        // Renamed reflections and plain strings.
+        eval(&mut rt, "document.getElementById('l').htmlFor = 'i'");
+        assert_eq!(
+            eval(&mut rt, "document.getElementById('l').getAttribute('for')"),
+            "\"i\""
+        );
+        assert_eq!(
+            eval(&mut rt, "document.getElementById('i').placeholder"),
+            "\"\""
+        );
+        eval(
+            &mut rt,
+            "document.getElementById('i').placeholder = 'Search'",
+        );
+        assert_eq!(
+            eval(
+                &mut rt,
+                "document.getElementById('i').getAttribute('placeholder')"
+            ),
+            "\"Search\""
         );
     }
 

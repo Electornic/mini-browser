@@ -170,7 +170,7 @@ const TIMERS_BOOT: &str = r#"
                 var entry = due[j];
                 if (cancelled[entry.id]) continue;
                 fired++;
-                try { entry.cb(); } catch (err) { /* swallow handler errors */ }
+                try { entry.cb(); } catch (err) { globalThis.__mb_report_error('timer callback', err); }
                 if (entry.repeat && !cancelled[entry.id]) {
                     queue.push({
                         id: entry.id, cb: entry.cb, delay: entry.delay, repeat: true,
@@ -205,7 +205,7 @@ const TIMERS_BOOT: &str = r#"
         for (var i = 0; i < snapshot.length; i++) {
             var entry = snapshot[i];
             if (cancelled['raf:' + entry.id]) continue;
-            try { entry.cb(timestamp); } catch (err) { /* swallow */ }
+            try { entry.cb(timestamp); } catch (err) { globalThis.__mb_report_error('animation frame callback', err); }
         }
         // A handler may have queued a new rAF or timer; resync after.
         syncPending();

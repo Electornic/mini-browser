@@ -5,7 +5,10 @@ use crate::{css::Value, style::StyledNode};
 
 use super::flex::{is_flex_container, layout_flex_children};
 use super::grid::{is_grid_container, layout_grid_children};
-use super::inline::{inline_align_for, layout_inline_children, uses_inline_flow};
+use super::inline::{
+    BlockChild, group_block_children, inline_align_for, layout_inline_children, layout_inline_run,
+    uses_inline_flow,
+};
 use super::table::{is_table_container, layout_table_children};
 use super::{
     Dimensions, EdgeSizes, LayoutBox, Rect, apply_relative_offset, child_height,
@@ -96,7 +99,27 @@ pub(super) fn layout_node(
         let mut float_bottom_left: f32 = content_y;
         let mut float_bottom_right: f32 = content_y;
         let mut children: Vec<LayoutBox> = Vec::with_capacity(node.children.len());
-        for child in &node.children {
+        let align = inline_align_for(node);
+        for group in group_block_children(&node.children) {
+            let child = match group {
+                BlockChild::Single(i) => &node.children[i],
+                BlockChild::InlineRun(range) => {
+                    // Anonymous block: no margins of its own, so the previous
+                    // child's margin-bottom (already in the cursor) stands
+                    // and ends the collapse chain.
+                    let (boxes, height) = layout_inline_run(
+                        &node.children[range],
+                        content_x,
+                        child_cursor_y,
+                        content_width,
+                        align,
+                    );
+                    children.extend(boxes);
+                    child_cursor_y += height;
+                    prev_margin_bottom = 0.0;
+                    continue;
+                }
+            };
             if is_display_none(child) {
                 continue;
             }

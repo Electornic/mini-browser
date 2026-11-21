@@ -100,7 +100,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 711 (workspace 합계, 2026-11-20 G5c 보안 반영 시점). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 720 (workspace 합계, 2026-11-21 호환성 트랙 1차 — 인라인 줄 묶기·IDL 속성 반사·Preact 실증). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -146,6 +146,15 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
 ### 테스트 HTML 과 루트
 - `html::parse` 는 `<html>`/`<body>` 가 없으면 fragment 로 파싱해서 **최상위 형제가 각각 루트**가 되고, 화면에 그리는 건 `roots().last()` 뿐이다. `<input>…<script>` 처럼 최상위에 여러 개를 두면 마지막(`<script>`)만 레이아웃 루트가 되어 클릭·getElementById 가 다 빗나간다 → 테스트 HTML 은 `<div>` 하나로 감싸거나 완전한 문서로 쓸 것.
+
+### `element.rs` 에 NUL 바이트
+- `crates/mb-runtime/src/js/element.rs` 주석에 `"\0STALE"` 이 리터럴 NUL 로 들어 있어(첫 8KB), 에디터·도구에 따라 바이너리로 취급된다 (Claude Code 의 Edit 이 거부, 일부 grep 은 조용히 건너뜀). 수정은 인코딩을 보존하는 스크립트로, 검색은 `grep -a`.
+
+### 인라인 런은 펼쳐진다
+- 블록 흐름 부모의 연속된 인라인 수준 자식(텍스트·`span`·`label`·`input`·`button`…)은 `inline::group_block_children` 가 런으로 묶어 줄 상자로 배치한다. 레이아웃 트리에 익명 래퍼는 없다 — 런의 박스들이 부모 children 에 바로 들어간다. taffy 브릿지에선 런 하나가 boundary leaf 하나(`BoundaryContent::InlineRun`)이고 `walk` 가 펼친다. `build_taffy_node` 와 `walk` 는 같은 `native_child_slots` 로 짝지어야 한다.
+
+### JS 래퍼는 노드마다 하나
+- `__mb_make_element(id)` 는 같은 id 에 항상 같은 객체를 돌려준다 (Preact 가 노드 expando 를 씀). 래퍼에 상태를 달아도 되지만, 문서가 바뀌면 런타임째 버려진다.
 
 ### 레이아웃 경로 ≠ DOM 경로
 - 레이아웃 트리는 `display:none` 자식(`<head>`, `<script>`, `<style>`)과 공백 텍스트를 뺀다. 그래서 레이아웃 자식 인덱스로 만든 경로를 DOM 에서 풀면 엉뚱한 노드가 나온다 (G1 에서 hover/포커스가 이 버그였음). 노드를 가리킬 땐 **NodeId** 를, 경로가 필요하면 `dom_path_for_node` 로 DOM 기준 경로를 만든다.

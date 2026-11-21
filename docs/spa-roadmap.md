@@ -1,6 +1,6 @@
 # SPA Rendering Roadmap
 
-> 상태: **Tier 0·1 코드 완료 (593 green, 2026-06-14)** · 다음 = **Tier 1.5 Preact 실증** → Tier 2 모듈 로더
+> 상태: **Tier 0·1 코드 완료 (593 green, 2026-06-14)** · **Tier 1.5 Preact 실증 ✅ (720 green, 2026-11-21)** · 다음 = Tier 1.5 잔여 갭(아래) 또는 Tier 2 모듈 로더 — [결정](#tier-2-결정-2026-11-21) 참고
 
 이 문서는 mini-browser가 **SPA(React/Vue/Svelte 류 client-rendered 앱)를 화면에 그리기까지**의 단계별 로드맵이다. 각 Tier는 *눈에 보이는 산출물*을 하나씩 만들도록 쪼갰다. 무게중심은 "from-scratch"가 아니라 기존 글루(rquickjs 브릿지 + mutate→재렌더 루프) 위에 빠진 표면을 메우는 것.
 
@@ -9,7 +9,7 @@
 - **mutate→같은 프레임 재렌더 루프**가 원래 동작했다 = SPA 엔진의 심장은 있었다.
 - 막혀 있던 4개 층: ① wrapper prototype 미상속 ② 읽기 API 부재 ③ 실 history 라우팅 부재 ④ `type=module` 미실행 (+ 숨은 함정: 런타임 주입 `<style>` 미반영).
 - **①②③ + `<style>` 은 Tier 0·1에서 해결 (✅)**. 남은 건 ④ 모듈 로더(Tier 2)와 Observer/CSSOM(Tier 3).
-- **단, 실제 프레임워크(Preact)를 띄워 본 적은 아직 없다** → 다음은 Tier 1.5 실증.
+- **Tier 1.5 (2026-11-21)**: 실제 Preact 10 + hooks UMD 앱([examples/agent-demo/preact.html](../examples/agent-demo/preact.html))이 렌더되고 에이전트 도구(입력·클릭·체크·해시 라우팅·뒤로)로 끝까지 조작된다. 막혔던 건 ⑤ 래퍼 정체성(`el === el`, expando) ⑥ 같은 문서 해시 이동 — 둘 다 해결. 같은 날 인라인 줄 묶기(레이아웃)와 IDL 속성 반사도 고침.
 
 ---
 
@@ -66,13 +66,46 @@
 
 ---
 
-## Tier 1.5 — Preact 실증 (다음 작업)
+## Tier 1.5 — Preact 실증 ✅ (2026-11-21, 720 green)
 
-Tier 1은 **API 갭을 메운 것**이지 실제 프레임워크를 띄워 본 건 아니다. 산출물("실제 프레임워크가 화면에 렌더 + 갱신")을 눈으로 확인하는 단계.
+Tier 1은 **API 갭을 메운 것**이지 실제 프레임워크를 띄워 본 건 아니었다. 산출물("실제 프레임워크가 화면에 렌더 + 갱신")을 눈으로 확인하는 단계.
 
-- `examples/`에 Preact + htm UMD를 vendoring한 데모(카운터 + 리스트 + 라우팅 정도) → `python3 -m http.server`로 로드.
-- 깨지는 지점이 곧 진짜 남은 갭 → 깨지는 순서대로 메우고, 데모를 capstone 테스트로 고정.
-- 통과하면 stretch로 React UMD (스케줄러가 `MessageChannel` 의존 → 미구현 시 `setTimeout` fallback 확인).
+**데모**: [examples/agent-demo/preact.html](../examples/agent-demo/preact.html) — index.html 과 같은 할 일 앱을 Preact 10.29.8 + hooks UMD(`vendor/`, MIT, 빌드·모듈 없음)로. `useState`·`useEffect`, 제어 입력(`value` + `onInput`), Enter 로 추가(`onKeyDown`), key 있는 리스트, 체크박스 `checked` prop, `hashchange` 해시 라우터(All / Active / Done). 컴포넌트는 `h()` 로 썼다 — htm 은 태그드 템플릿을 같은 `h()` 호출로 바꿀 뿐이라 엔진이 겪는 DOM 표면은 같다(로컬에 htm 이 없어 다운로드 없이 진행; 넣으려면 `vendor/htm.umd.js` 한 파일).
+
+**검증 방식**: 스크립트로 `mb-mcp` 를 stdio JSON-RPC 로 몰고(navigate → type submit → click checkbox → click "Done" → back) 관찰을 읽었다. 정답지가 필요한 지점은 같은 페이지를 실제 브라우저에 띄워 비교했다.
+
+**실측에서 깨진 것 → 고친 것** (깨진 순서대로):
+
+| # | 증상 | 원인 | 수정 |
+|---|---|---|---|
+| 17 | 첫 렌더는 되는데 Add 클릭·입력 핸들러가 아무 일도 안 함 | **래퍼 정체성 없음**: `makeElement(id)` 가 접근마다 새 객체 → `el !== el`, 노드에 단 expando 소실. Preact 는 리스너 표를 노드(`dom.l`)에 두고 이벤트 프록시에서 `this.l` 로 읽는다 | `element.rs` 부트스트랩에 `NodeId → 래퍼` 캐시(`wrapperFor`). 문서 안에서 NodeId 는 재사용되지 않고(tombstone) 문서마다 런타임이 새로 생기므로 무효화 불필요 |
+| 18 | 리스너 안 예외가 흔적 없이 사라짐 (위 버그를 찾기 어렵게 만든 원인) | `catch (err) { /* swallow */ }` (리스너·타이머·rAF) | 브라우저처럼 계속 진행하되 `console.error("Uncaught in click listener: …")` 로 보고 → 관찰의 `console:` 줄에 보임. 페이지가 `console` 을 바꿔도 못 숨기게 원래 싱크에 묶음 (`__mb_report_error`) |
+| 19 | 해시 링크(`#/done`) 클릭 = **문서 통째 재로드** → 앱 상태 소실, `hashchange` 없음, 관찰 URL 에 해시 없음 | 링크 이동이 항상 cross-document fetch | 같은 문서 프래그먼트 이동: `navigate_to_href` 가 (게이트 통과 후) 현재 URL 과 `#` 앞이 같으면 재로드 대신 JS history 항목 push + `popstate` → `hashchange` (Chrome 순서) |
+| 20 | 크롬(에이전트) 뒤로 = 해시·pushState 항목을 건너뛰고 이전 문서로 | 크롬 스택(`back_stack`)과 JS `history` 스택이 분리 | joint session history 축약판: `go_back`/`go_forward` 가 같은 문서 항목을 먼저 되돌리고(`popstate`, 해시만 다르면 `hashchange`), 없을 때만 문서 교체. `can_go_back` 도 둘 다 봄 |
+| 21 | `pushState` 후에도 주소창·관찰 `url:` 이 옛 URL | `current_url` 이 JS `location` 을 안 따라감 | 프레임마다 JS 큐를 비운 뒤 `sync_url_from_js`. **보안**: 관찰의 trusted `url:` 에 그대로 실리므로 `pushState`/`replaceState` 는 **같은 출처만** (아니면 `SecurityError`, 스펙과 동일) + Rust 쪽 출처 재확인 2중. 스킴 상대 `//host/x` 를 경로로 풀던 버그도 같이 수정 |
+| 22 | (참고) 초기 `<p>Loading…</p>` 가 안 지워짐 | **엔진 버그 아님** — Chrome 도 같음 (Preact `render` 는 컨테이너 기존 자식을 지우지 않음) | 데모에서 자리표시자 제거 |
+
+함께 메운 것: `localName`·`namespaceURI`(Preact 의 기존 노드 재사용 판정), `hasAttribute`·`toggleAttribute`, IDL 속성 반사(`type`·`checked`·`disabled`·`htmlFor` 등 — [호환성 #2](#idl-속성-반사-2026-11-21)).
+
+**고정**: capstone 통합 테스트 `preact_demo_adds_toggles_filters_and_goes_back` (mb-agent `tests/actions.rs`, 픽스처 서버가 `examples/agent-demo/` 를 그대로 서빙) + eval 시나리오 [`preact-todo`](../eval/scenarios/preact-todo.json) (스크립트로 만든 잘한 실행 ✓ / 필터 안 바꾼 실행 ✗ 를 판정이 가르는 것 확인).
+
+**남은 갭 (실측에선 안 막혔지만 다음에 막힐 것)**:
+- `location.href = …` / `location.assign` / `location.hash = …` setter 없음 — JS 발 이동. 추가 시 반드시 `policy::check` 를 지나게 (AGENTS.md 규칙). 해시 setter 는 위 #19 경로 재사용.
+- 프래그먼트 이동 시 `id`/`name` 대상 요소로 스크롤 안 함.
+- 다른 문서로 갔다 돌아오면 그 문서의 같은 문서 항목(해시·pushState)은 잃는다 (스냅숏 복원 = 새 런타임, 항목 1개).
+- `a.href` 는 절대 URL 이 아니라 속성 원문을 돌려준다 (라우터가 `a.href === location.href` 로 비교하면 틀림).
+- `el.checked = true` 로 radio 를 켤 때 같은 그룹의 다른 radio 를 끄지 않음 (클릭 경로는 끔).
+- 이벤트 완성도: capture phase, `MouseEvent.clientX/Y`, `CustomEvent`/`dispatchEvent` — Preact 데모엔 불필요했음.
+- stretch: React UMD (스케줄러 `MessageChannel` 의존), htm.
+
+### IDL 속성 반사 (2026-11-21)
+
+프레임워크는 `setAttribute` 대신 속성 대입을 쓴다(`el.type = 'checkbox'`, `el.checked = true`). 스타일 매칭·레이아웃·폼 제출·에이전트 관찰은 전부 **속성**을 읽으므로 속성 setter 가 속성으로 바로 쓰도록 반사했다: 문자열(`name`·`placeholder`·`title`·`alt`·`href`·`src`·`rel`·`target`·`lang`·`dir`·`action`·`autocomplete`·`pattern`·`accept`·`min`·`max`·`step`, `htmlFor`→`for`), 불리언(`disabled`·`hidden`·`required`·`multiple`·`autofocus`·`checked`·`selected`·`open`, `readOnly`→`readonly`, `noValidate`→`novalidate`, false 면 속성 제거), 열거형 `type`(읽을 때 소문자, 없으면 input=`text`·button=`submit`).
+- **스펙과 다른 점**: `checked`/`selected` 는 스펙에선 속성이 *기본값*일 뿐이고 현재 상태는 별도 슬롯이다. 이 엔진은 클릭 토글도 속성에 쓰므로(현재 상태 = 속성) 속성 setter 도 속성으로 맞췄다. 나중에 `defaultChecked` 를 구분해야 하면 그때 분리.
+
+### Tier 2 결정 (2026-11-21)
+
+**지금은 Tier 2(모듈 로더)를 하지 않는다.** classic/UMD 번들 프레임워크는 Tier 1.5 로 동작이 확인됐고, 에이전트 데모 대상 페이지(로컬 픽스처·데모)는 모듈을 안 쓴다. Tier 2 는 "실제 `vite build` 산출물을 에이전트로 테스트하고 싶다"는 수요가 생길 때 연다 — 그때 선행은 그대로 `features = ["macro", "loader"]` 한 줄. 그 전에 위 잔여 갭 중 `location` setter(게이트 경유)와 `a.href` 절대 URL 이 실제 SPA 에서 먼저 막힐 가능성이 높다.
 
 ---
 
@@ -107,8 +140,9 @@ Tier 1은 **API 갭을 메운 것**이지 실제 프레임워크를 띄워 본 �
 ```
 Tier 0  : ✅ #1 qsa · #2 style · #3 history · #4 win/doc 이벤트 · #15 fragment · #16 readyState
 Tier 1  : ✅ #5 prototype(6ec3c59) · #14 동적 style(f18c839) · #6 rect(a5d187c) · #7 node-level(5e2fddf)
-Tier 1.5: Preact + htm 실증                                    ← 다음
-Tier 2  : rquickjs `loader` feature → #8 모듈 로더(sync set_loader) → #9 import maps
+Tier 1.5: ✅ Preact + hooks 실증 · #17 래퍼 정체성 · #18 예외 보고 · #19 해시 이동 · #20 joint history · #21 pushState URL 동기화(같은 출처만)
+          잔여: location setter(게이트 경유) · a.href 절대 URL · 프래그먼트 스크롤 · React/htm stretch   ← 다음 후보
+Tier 2  : (보류 — 결정 참고) rquickjs `loader` feature → #8 모듈 로더(sync set_loader) → #9 import maps
 Tier 3  : #10~13 observer/CSSOM (IntersectionObserver > ResizeObserver)
 ```
 

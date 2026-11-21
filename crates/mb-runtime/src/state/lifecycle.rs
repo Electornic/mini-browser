@@ -154,6 +154,11 @@ impl BrowserState {
             return;
         }
 
+        if self.is_same_document_fragment(&resolved) {
+            self.navigate_to_fragment(resolved);
+            return;
+        }
+
         // Sync UI feedback (URL bar shows the click target, focus moves
         // off the bar) lands the same frame as the click. The actual
         // load runs on the worker thread and commits later via
@@ -162,6 +167,52 @@ impl BrowserState {
         self.address_bar_selected = false;
         self.address_bar_focused = false;
         self.spawn_navigation(request, "link failed");
+    }
+
+    /// A link to `#fragment` of the document already shown (same URL up to
+    /// the fragment) is a same-document navigation: browsers don't reload,
+    /// they add a history entry and fire `hashchange` — what hash routers
+    /// are built on.
+    fn is_same_document_fragment(&self, target: &net::Url) -> bool {
+        let Some(current) = &self.current_url else {
+            return false;
+        };
+        let (target, current) = (target.to_string(), current.to_string());
+        let without_fragment = |href: &str| href.split('#').next().unwrap_or("").to_string();
+        target.contains('#') && without_fragment(&target) == without_fragment(&current)
+    }
+
+    fn navigate_to_fragment(&mut self, target: net::Url) {
+        let href = target.to_string();
+        self.address_input = href.clone();
+        self.address_bar_selected = false;
+        self.address_bar_focused = false;
+        self.current_url = Some(target);
+        self.js.navigate_to_fragment(&href);
+    }
+
+    /// Mirror the page's `location` into `current_url` (the address bar and
+    /// the agent's trusted `url:` line) after `pushState` / `replaceState`.
+    /// The JS side only accepts same-origin URLs; the origin check here is
+    /// a second line so the trusted URL can never move to another site.
+    pub(super) fn sync_url_from_js(&mut self) {
+        let href = self.js.location_href();
+        let Some(current) = &self.current_url else {
+            return;
+        };
+        if href.is_empty() || href == current.to_string() {
+            return;
+        }
+        let Ok(next) = net::Url::parse(&href) else {
+            return;
+        };
+        if (&next.scheme, &next.host, next.port) != (&current.scheme, &current.host, current.port) {
+            return;
+        }
+        if !self.address_bar_focused {
+            self.address_input = next.to_string();
+        }
+        self.current_url = Some(next);
     }
 
     pub(super) fn spawn_navigation(

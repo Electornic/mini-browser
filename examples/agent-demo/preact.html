@@ -1,0 +1,95 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Preact todo</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; }
+    li { margin: 4px 0; }
+    .done { color: #888; text-decoration: line-through; }
+    nav a { margin-right: 8px; }
+    nav a.current { font-weight: bold; }
+  </style>
+</head>
+<body>
+  <!-- The same todo app as index.html, but rendered by a real framework:
+       Preact 10 + hooks (classic UMD bundles from vendor/, no build, no
+       modules). Components are written with h() — htm would only turn
+       tagged templates into these same h() calls. -->
+  <div id="app"></div>
+  <script src="vendor/preact.min.umd.js"></script>
+  <script src="vendor/preact-hooks.umd.js"></script>
+  <script>
+    var h = preact.h, render = preact.render;
+    var useState = preactHooks.useState, useEffect = preactHooks.useEffect;
+
+    function currentFilter() {
+      var f = location.hash.replace('#/', '');
+      return f === 'active' || f === 'done' ? f : 'all';
+    }
+
+    function App() {
+      var _items = useState([
+        { id: 1, text: 'Water the plants', done: false },
+        { id: 2, text: 'Read the concept doc', done: true }
+      ]);
+      var items = _items[0], setItems = _items[1];
+      var _draft = useState('');
+      var draft = _draft[0], setDraft = _draft[1];
+      var _filter = useState(currentFilter());
+      var filter = _filter[0], setFilter = _filter[1];
+
+      useEffect(function () {
+        function onHash() { setFilter(currentFilter()); }
+        window.addEventListener('hashchange', onHash);
+        return function () { window.removeEventListener('hashchange', onHash); };
+      }, []);
+
+      function add() {
+        var text = draft.trim();
+        if (!text) return;
+        setItems(items.concat([{ id: Date.now() + items.length, text: text, done: false }]));
+        setDraft('');
+      }
+      function toggle(id) {
+        setItems(items.map(function (it) {
+          return it.id === id ? { id: it.id, text: it.text, done: !it.done } : it;
+        }));
+      }
+
+      var shown = items.filter(function (it) {
+        return filter === 'all' || (filter === 'done') === it.done;
+      });
+      var doneCount = items.filter(function (it) { return it.done; }).length;
+
+      return h('div', null,
+        h('h1', null, 'Preact todo'),
+        h('label', { htmlFor: 'new' }, 'New item'), ' ',
+        h('input', {
+          id: 'new', placeholder: 'What needs doing?', value: draft,
+          onInput: function (e) { setDraft(e.target.value); },
+          onKeyDown: function (e) { if (e.key === 'Enter') add(); }
+        }), ' ',
+        h('button', { onClick: add }, 'Add'),
+        h('nav', null,
+          ['all', 'active', 'done'].map(function (f) {
+            return h('a', { key: f, href: '#/' + f, className: f === filter ? 'current' : '' },
+              f.charAt(0).toUpperCase() + f.slice(1));
+          })
+        ),
+        h('ul', { id: 'list' },
+          shown.map(function (it) {
+            return h('li', { key: it.id },
+              h('label', { className: it.done ? 'done' : '' },
+                h('input', { type: 'checkbox', checked: it.done, onChange: function () { toggle(it.id); } }),
+                ' ' + it.text));
+          })
+        ),
+        h('p', { id: 'summary' }, doneCount + ' of ' + items.length + ' done')
+      );
+    }
+
+    render(h(App, null), document.getElementById('app'));
+  </script>
+</body>
+</html>

@@ -116,7 +116,7 @@ const EVENT_BOOT: &str = r#"
             for (var j = 0; j < snapshot.length; j++) {
                 if (event.__immediateStopped) break;
                 try { snapshot[j].call(event.currentTarget, event); }
-                catch (err) { /* swallow handler errors — match boa */ }
+                catch (err) { globalThis.__mb_report_error('' + type + ' listener', err); }
             }
         }
         return event.defaultPrevented;
@@ -150,7 +150,7 @@ const EVENT_BOOT: &str = r#"
         var snapshot = arr.slice();
         for (var j = 0; j < snapshot.length; j++) {
             try { snapshot[j].call(event.currentTarget, event); }
-            catch (err) { /* swallow handler errors — match dispatch_chain */ }
+            catch (err) { globalThis.__mb_report_error('' + type + ' listener', err); }
         }
         return event.defaultPrevented;
     };
