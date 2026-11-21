@@ -191,12 +191,21 @@ impl Replayer {
             return None;
         }
         let step = &self.steps[self.position()];
-        let outcome = match replay_step(
-            &mut self.browser,
-            step,
-            &self.options.secrets,
-            self.options.ignore_text,
-        ) {
+        // The person may have switched the approval mode mid-session (the
+        // window's ⋮ menu): the step records the mode it ran under.
+        let mode = match step.get("approve") {
+            Some(mode) => approve_mode(mode),
+            None => approve_mode(&self.header["approve"]),
+        };
+        let outcome = match mode.and_then(|mode| {
+            self.browser.set_approve_mode(mode);
+            replay_step(
+                &mut self.browser,
+                step,
+                &self.options.secrets,
+                self.options.ignore_text,
+            )
+        }) {
             Ok(line) => StepOutcome::Matched(line),
             Err(mut stopped) => {
                 // A page may echo what was typed: never print a secret.
@@ -299,18 +308,22 @@ pub(crate) fn step_label(step: &Value) -> String {
     }
 }
 
+fn approve_mode(value: &Value) -> Result<ApproveMode, Stop> {
+    match value.as_str() {
+        Some("auto") => Ok(ApproveMode::Auto),
+        Some("ask") => Ok(ApproveMode::Ask),
+        Some("deny") | None => Ok(ApproveMode::Deny),
+        Some(other) => Err(stop(BAD_INPUT, format!("replay: approve {other:?}?"))),
+    }
+}
+
 fn config_from(header: &Value) -> Result<AgentConfig, Stop> {
     let mut config = AgentConfig::default();
     if let Some([w, h]) = header["viewport"].as_array().map(Vec::as_slice) {
         config.viewport_width = w.as_u64().unwrap_or(1280) as usize;
         config.viewport_height = h.as_u64().unwrap_or(800) as usize;
     }
-    config.approve = match header["approve"].as_str() {
-        Some("auto") => ApproveMode::Auto,
-        Some("ask") => ApproveMode::Ask,
-        Some("deny") | None => ApproveMode::Deny,
-        Some(other) => return Err(stop(BAD_INPUT, format!("replay: approve {other:?}?"))),
-    };
+    config.approve = approve_mode(&header["approve"])?;
     config.allow_origins = header["allow_origins"]
         .as_array()
         .map(|list| {
@@ -654,6 +667,8 @@ mod tests {
             preview: None,
             preview_clicks: Vec::new(),
             preview_scale: 1.0,
+            preview_menu: false,
+            preview_pause: false,
             http_port: None,
             attach: None,
             log: Some(path.to_path_buf()),

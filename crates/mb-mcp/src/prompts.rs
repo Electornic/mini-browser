@@ -32,7 +32,10 @@ Rules:
    it returns `still_waiting`, nothing was done yet and the question is
    still on screen: call the same tool with the same arguments again to
    keep waiting (tell the user what they need to answer if it takes long).
-   If your client timed out instead, do the same. Do not retry or look for
+   If your client timed out instead, do the same. `paused` means the person
+   paused you from the window: nothing was done; call the same tool with
+   the same arguments again to wait until they resume (it runs then), or
+   tell the user the browser is paused. Do not retry or look for
    a workaround after `approval_denied` or `taken_over` (the person chose
    to do that step themselves); report it to the user.
 5. Password fields are for the person, not you. With the observation

@@ -41,6 +41,9 @@ OPTIONS:
                             --start-url) to a PNG and exit — no window, no MCP
     --preview-click ID      Click this element before --preview (repeatable)
     --preview-scale N       Device pixel ratio for --preview, e.g. 2 for Retina
+    --preview-menu          Show the ⋮ menu open in --preview
+    --preview-pause         Pause the agent before --preview-click (shows the
+                            paused window, the clicks waiting to resume)
     -h, --help              Print this help (to stderr)
 
 REPLAY (a log runs like a script — replay only logs you trust):
@@ -88,6 +91,10 @@ pub struct Options {
     pub preview_clicks: Vec<String>,
     /// `--preview-scale N`: device pixel ratio for the preview (default 1).
     pub preview_scale: f32,
+    /// `--preview-menu`: the ⋮ menu open in the preview.
+    pub preview_menu: bool,
+    /// `--preview-pause`: the agent paused before the preview clicks.
+    pub preview_pause: bool,
     /// `--http`: serve MCP over HTTP on this loopback port (G3b).
     pub http_port: Option<u16>,
     /// Filled in by `main` once the HTTP listener is bound.
@@ -256,6 +263,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut preview = None;
     let mut preview_clicks = Vec::new();
     let mut preview_scale = 1.0_f32;
+    let mut preview_menu = false;
+    let mut preview_pause = false;
     let mut http = false;
     let mut port: Option<u16> = None;
     let mut args = args.into_iter().peekable();
@@ -328,6 +337,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             }
             "--preview" => preview = Some(std::path::PathBuf::from(value("--preview")?)),
             "--preview-click" => preview_clicks.push(value("--preview-click")?),
+            "--preview-menu" => preview_menu = true,
+            "--preview-pause" => preview_pause = true,
             "--preview-scale" => {
                 let raw = value("--preview-scale")?;
                 preview_scale = raw
@@ -360,6 +371,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         preview,
         preview_clicks,
         preview_scale,
+        preview_menu,
+        preview_pause,
         http_port: http.then(|| port.unwrap_or(DEFAULT_PORT)),
         attach: None,
         log,

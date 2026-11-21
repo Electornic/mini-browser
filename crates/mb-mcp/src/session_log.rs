@@ -11,7 +11,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use mb_agent::{AgentBrowser, ElementObservation, ElementValue, Observation};
+use mb_agent::{AgentBrowser, ApproveMode, ElementObservation, ElementValue, Observation};
 use mb_runtime::dom::NodeId;
 use serde_json::{Map, Value, json};
 
@@ -67,6 +67,24 @@ pub fn resolved_by(outcome: &str) -> Option<&'static str> {
     })
 }
 
+/// What a step line records besides the call and its result.
+pub struct StepRecord<'a> {
+    pub target: Option<&'a Target>,
+    pub person_moved: bool,
+    pub resolved_by: Option<&'a str>,
+    /// The approval mode the action started under.
+    pub approve: ApproveMode,
+}
+
+/// `auto` / `deny` / `ask`, as in the header and `--approve`.
+pub fn approve_name(mode: ApproveMode) -> &'static str {
+    match mode {
+        ApproveMode::Auto => "auto",
+        ApproveMode::Deny => "deny",
+        ApproveMode::Ask => "ask",
+    }
+}
+
 pub struct SessionLog {
     path: std::path::PathBuf,
     header: Value,
@@ -95,7 +113,7 @@ impl SessionLog {
             "mb_mcp": env!("CARGO_PKG_VERSION"),
             "prompts": crate::prompts::fingerprint(),
             "viewport": [agent.viewport_width, agent.viewport_height],
-            "approve": format!("{:?}", agent.approve).to_lowercase(),
+            "approve": approve_name(agent.approve),
             "allow_origins": agent.allow_origins,
             "seed": agent.seed,
             "clock": format!("{:?}", agent.clock).to_lowercase(),
@@ -110,15 +128,14 @@ impl SessionLog {
         })
     }
 
-    pub fn step(
-        &mut self,
-        request: &Request,
-        target: Option<&Target>,
-        person_moved: bool,
-        resolved_by: Option<&str>,
-        result: Value,
-    ) {
+    pub fn step(&mut self, request: &Request, context: StepRecord<'_>, result: Value) {
         self.steps += 1;
+        let StepRecord {
+            target,
+            person_moved,
+            resolved_by,
+            approve,
+        } = context;
         let (tool, args) = request_json(request, target);
         let mut line = Map::new();
         line.insert("type".into(), json!("step"));
@@ -127,6 +144,12 @@ impl SessionLog {
         line.insert("args".into(), args);
         if let Some(target) = target {
             line.insert("target".into(), target.to_json());
+        }
+        // The person switched the approval mode from the window: the step
+        // ran under that mode, and replay must too. Absent = the header's.
+        let approve = approve_name(approve);
+        if self.header["approve"] != approve {
+            line.insert("approve".into(), json!(approve));
         }
         if let Some(by) = resolved_by {
             line.insert("resolved_by".into(), json!(by));

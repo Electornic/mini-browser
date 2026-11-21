@@ -355,7 +355,7 @@ impl BrowserState {
         // record; refusals also join its memory.
         for event in result.hop_events {
             if matches!(event.decision, PolicyDecision::Denied { .. }) {
-                self.agent_policy.record_denial(&event.action);
+                self.agent_policy.record_rule_refusal(&event.action);
             }
             self.policy_events.push(event);
         }

@@ -34,10 +34,16 @@ pub struct AgentPolicy {
     /// When non-empty, agent navigation outside these origins
     /// (`scheme://host[:port]`) is blocked outright, approved or not.
     pub allow_origins: Vec<String>,
-    /// Actions refused earlier this session. Retrying the same one (from a
+    /// Actions the person refused earlier this session (Deny / Do it
+    /// myself on an approval card). Retrying the same one (from a
     /// different button, by typing the URL, ...) is refused again without
-    /// asking.
+    /// asking — whatever the mode is now.
     denied: BTreeSet<String>,
+    /// Actions refused by a rule rather than by the person: `Deny` mode,
+    /// or a redirect hop nobody could be asked about. Remembered the same
+    /// way, but only until the person changes the mode — a refusal the
+    /// old mode made must not outlive it (Deny → Ask should ask).
+    refused_by_rule: BTreeSet<String>,
 }
 
 impl AgentPolicy {
@@ -46,6 +52,18 @@ impl AgentPolicy {
             approve,
             allow_origins,
             denied: BTreeSet::new(),
+            refused_by_rule: BTreeSet::new(),
+        }
+    }
+
+    /// The person switched the approval mode from the observation window
+    /// (never an agent: no MCP tool reaches this). Applies from the next
+    /// gated action; refusals the previous mode made are forgotten,
+    /// the person's own refusals stay.
+    pub fn set_approve(&mut self, approve: ApproveMode) {
+        if self.approve != approve {
+            self.approve = approve;
+            self.refused_by_rule.clear();
         }
     }
 }
@@ -106,10 +124,15 @@ fn denial_key(action: &GatedAction) -> String {
 }
 
 impl AgentPolicy {
-    /// Fold a refusal made elsewhere (a redirect hop judged on the loader
-    /// thread against a copy of this policy) back into the session memory.
+    /// The person refused this action (approval card).
     pub fn record_denial(&mut self, action: &GatedAction) {
         self.denied.insert(denial_key(action));
+    }
+
+    /// Fold a refusal made elsewhere (a redirect hop judged on the loader
+    /// thread against a copy of this policy) back into the session memory.
+    pub fn record_rule_refusal(&mut self, action: &GatedAction) {
+        self.refused_by_rule.insert(denial_key(action));
     }
 }
 
@@ -178,13 +201,13 @@ pub fn decide(
         return PolicyDecision::Allowed;
     }
     let key = denial_key(action);
-    if policy.denied.contains(&key) {
+    if policy.denied.contains(&key) || policy.refused_by_rule.contains(&key) {
         return PolicyDecision::Denied { remembered: true };
     }
     match policy.approve {
         ApproveMode::Auto => PolicyDecision::Approved,
         ApproveMode::Deny => {
-            policy.denied.insert(key);
+            policy.refused_by_rule.insert(key);
             PolicyDecision::Denied { remembered: false }
         }
         ApproveMode::Ask => PolicyDecision::Held,
@@ -366,6 +389,40 @@ mod tests {
             decide(&mut policy, true, Some(&here), &nav("http://a.test:8080/")),
             PolicyDecision::Blocked,
             "a different port is a different origin"
+        );
+    }
+
+    #[test]
+    fn changing_the_mode_forgets_rule_refusals_but_not_the_persons() {
+        let mut policy = AgentPolicy::new(ApproveMode::Deny, vec![]);
+        let here = url("http://a.test/");
+        let signup = post("http://a.test/signup");
+        assert_eq!(
+            decide(&mut policy, true, Some(&here), &signup),
+            PolicyDecision::Denied { remembered: false }
+        );
+        // Same mode again: nothing changes, the refusal is still remembered.
+        policy.set_approve(ApproveMode::Deny);
+        assert_eq!(
+            decide(&mut policy, true, Some(&here), &signup),
+            PolicyDecision::Denied { remembered: true }
+        );
+        // Deny → Ask: what Deny mode refused is asked now.
+        policy.set_approve(ApproveMode::Ask);
+        assert_eq!(
+            decide(&mut policy, true, Some(&here), &signup),
+            PolicyDecision::Held
+        );
+        // The person refuses it; switching to Allow doesn't undo that.
+        policy.record_denial(&signup);
+        policy.set_approve(ApproveMode::Auto);
+        assert_eq!(
+            decide(&mut policy, true, Some(&here), &signup),
+            PolicyDecision::Denied { remembered: true }
+        );
+        assert_eq!(
+            decide(&mut policy, true, Some(&here), &nav("http://b.test/")),
+            PolicyDecision::Approved
         );
     }
 }

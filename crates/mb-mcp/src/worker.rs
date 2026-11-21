@@ -9,14 +9,14 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use mb_agent::{
-    AgentBrowser, AgentError, Observation, ObserveOptions, PendingWait, Scope, Screenshot,
-    WaitCondition,
+    AgentBrowser, AgentError, ApproveMode, Observation, ObserveOptions, PendingWait, Scope,
+    Screenshot, WaitCondition,
 };
 use mb_runtime::dom::NodeId;
 use tokio::sync::oneshot;
 
 use crate::cli::Options;
-use crate::session_log::{SessionLog, Target, resolved_by, result_record, target_of};
+use crate::session_log::{SessionLog, StepRecord, Target, resolved_by, result_record, target_of};
 
 // Debug is hand-written below: `Type.text` may be a (test) password, and
 // requests end up in logs and in the repeat-tracker key.
@@ -197,13 +197,32 @@ pub struct Worker {
     park_reply_after: Duration,
     // `--log`: one line per finished call (G5a).
     log: Option<SessionLog>,
+    // The person paused the agent from the window's ⋮ menu: no agent call
+    // runs until they resume. The one call holding meanwhile (parked like
+    // an approval: `paused` after `park_reply_after`, re-attach by
+    // repeating it).
+    paused: bool,
+    held: Option<Held>,
 }
+
+/// An agent call that arrived while the agent was paused.
+struct Held {
+    request: Request,
+    // None once it answered `paused` (or its client gave up).
+    reply: Option<oneshot::Sender<Reply>>,
+    since: std::time::Instant,
+}
+
+/// Trusted note on a result that waited for the person to resume.
+const RESUMED_NOTE: &str =
+    "the person paused you from the window; this call ran after they resumed";
 
 /// What a session-log line needs from before the action ran.
 #[derive(Debug, Clone, Default)]
 struct StepContext {
     target: Option<Target>,
     person_moved: bool,
+    approve: ApproveMode,
 }
 
 impl Worker {
@@ -226,6 +245,8 @@ impl Worker {
             unclaimed: None,
             park_reply_after: PARK_REPLY_AFTER,
             log,
+            paused: false,
+            held: None,
         }
     }
 
@@ -263,6 +284,63 @@ impl Worker {
             let _ = job.reply.send(reply);
             return;
         }
+        let job = match self.reattach(job) {
+            Some(job) => job,
+            None => return,
+        };
+        if self.paused {
+            self.hold(job);
+            return;
+        }
+        self.run_now(job, None);
+    }
+
+    // The same call as the parked one, after it answered `still_waiting`
+    // (or its client gave up): wait on the question again. Hands any
+    // other job back.
+    fn reattach(&mut self, job: Job) -> Option<Job> {
+        match &mut self.parked {
+            Some(parked)
+                if parked.request == job.request
+                    && parked.reply.as_ref().is_none_or(|r| r.is_closed()) =>
+            {
+                parked.reply = Some(job.reply);
+                parked.since = std::time::Instant::now();
+                None
+            }
+            _ => Some(job),
+        }
+    }
+
+    // Paused: the call waits for the person to resume. One call holds at
+    // a time — the same call again re-attaches, a different one replaces
+    // a call nobody waits on any more (the agent moved on), and a second
+    // call while one is still attached is told `paused` right away.
+    fn hold(&mut self, job: Job) {
+        let now = std::time::Instant::now();
+        let attached = |held: &Held| held.reply.as_ref().is_some_and(|r| !r.is_closed());
+        match &mut self.held {
+            Some(held) if attached(held) => {
+                let reply = self.conclude(&job.request, Err(ToolError::Paused), None);
+                let _ = job.reply.send(reply);
+            }
+            Some(held) if held.request == job.request => {
+                held.reply = Some(job.reply);
+                held.since = now;
+            }
+            _ => {
+                self.held = Some(Held {
+                    request: job.request,
+                    reply: Some(job.reply),
+                    since: now,
+                });
+            }
+        }
+    }
+
+    // Run the call now (or start its wait, or park it for the person).
+    // `note`: a trusted note for its result, when it comes right away.
+    fn run_now(&mut self, job: Job, note: Option<&'static str>) {
         if self.page_wait.is_some() {
             // Runs once the wait ends (`tick`).
             self.deferred.push_back(job);
@@ -292,14 +370,7 @@ impl Worker {
             }
             return;
         }
-        if let Some(parked) = &mut self.parked {
-            // The same call again: wait on (re-attach to) the question.
-            if parked.request == job.request && parked.reply.as_ref().is_none_or(|r| r.is_closed())
-            {
-                parked.reply = Some(job.reply);
-                parked.since = std::time::Instant::now();
-                return;
-            }
+        if let Some(parked) = &self.parked {
             let busy = ToolError::Busy(parked.waiting.clone());
             let reply = self.conclude(&job.request, Err(busy), None);
             let _ = job.reply.send(reply);
@@ -335,11 +406,82 @@ impl Worker {
                 });
             }
             None => {
-                let reply = self.conclude(&job.request, result, None);
+                let mut reply = self.conclude(&job.request, result, None);
+                if let Some(note) = note {
+                    add_note(&mut reply, note);
+                }
                 self.log_step(&job.request, &context, None, &reply);
                 let _ = job.reply.send(reply);
             }
         }
+    }
+
+    /// The person paused the agent (⋮ menu). Person-only: no MCP tool
+    /// reaches this. Calls from now on wait for `resume`; a `wait_for` in
+    /// progress ends with `paused` (its result would be the person's
+    /// page). A question card already on screen stays answerable.
+    pub fn pause(&mut self) {
+        if self.paused {
+            return;
+        }
+        self.paused = true;
+        if let Some((job, _, _)) = self.page_wait.take() {
+            let reply = self.conclude(&job.request, Err(ToolError::Paused), None);
+            let _ = job.reply.send(reply);
+        }
+        // Calls queued behind that wait now hold (or are told `paused`).
+        self.run_deferred();
+    }
+
+    /// The person resumed the agent. The held call runs now, against the
+    /// page as it is (ids are checked as usual), if its caller is still
+    /// waiting; a call that already answered `paused` and wasn't repeated
+    /// is dropped — the agent gets on with its next call.
+    pub fn resume(&mut self) {
+        if !self.paused {
+            return;
+        }
+        self.paused = false;
+        if let Some(held) = self.held.take() {
+            match held.reply {
+                Some(reply) if !reply.is_closed() => self.run_now(
+                    Job {
+                        request: held.request,
+                        reply,
+                    },
+                    Some(RESUMED_NOTE),
+                ),
+                _ => self.push_timeline(
+                    format!("{} (not run: paused)", held.request.label()),
+                    Some("paused".into()),
+                ),
+            }
+        }
+        self.run_deferred();
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    /// The call waiting for the person to resume, for the panel.
+    pub fn held_call(&self) -> Option<String> {
+        self.held.as_ref().map(|held| held.request.label())
+    }
+
+    /// The approval mode the next agent action runs under.
+    pub fn approve_mode(&self) -> ApproveMode {
+        self.options.agent.approve
+    }
+
+    /// The person switched the approval mode (⋮ menu). Person-only: no
+    /// MCP tool reaches this. Applies from the next agent action; an
+    /// approval card already on screen keeps waiting for the person's
+    /// answer (the mode change doesn't answer it). Kept in `options` too,
+    /// so a browser rebuilt after a panic gets it.
+    pub fn set_approve_mode(&mut self, mode: ApproveMode) {
+        self.options.agent.approve = mode;
+        self.browser.set_approve_mode(mode);
     }
 
     /// What the person is being asked, if anything.
@@ -428,10 +570,21 @@ impl Worker {
     /// When the attached parked call is due its `still_waiting` reply (the
     /// window schedules a frame for then).
     pub fn park_deadline(&self) -> Option<std::time::Instant> {
-        self.parked
+        let parked = self
+            .parked
             .as_ref()
             .filter(|p| p.reply.is_some())
-            .map(|p| p.since + self.park_reply_after)
+            .map(|p| p.since);
+        let held = self
+            .held
+            .as_ref()
+            .filter(|h| h.reply.is_some())
+            .map(|h| h.since);
+        parked
+            .into_iter()
+            .chain(held)
+            .min()
+            .map(|since| since + self.park_reply_after)
     }
 
     /// The agent's pending `wait_for`, for the panel: what and time left.
@@ -456,6 +609,7 @@ impl Worker {
                 .and_then(|id| parse_id(id).ok())
                 .and_then(|id| target_of(&mut self.browser, id)),
             person_moved: self.browser.changed_by_person(),
+            approve: self.options.agent.approve,
         }
     }
 
@@ -474,9 +628,12 @@ impl Worker {
         if let Some(log) = &mut self.log {
             log.step(
                 request,
-                context.target.as_ref(),
-                context.person_moved,
-                outcome.and_then(resolved_by),
+                StepRecord {
+                    target: context.target.as_ref(),
+                    person_moved: context.person_moved,
+                    resolved_by: outcome.and_then(resolved_by),
+                    approve: context.approve,
+                },
                 result,
             );
         }
@@ -494,6 +651,14 @@ impl Worker {
         {
             let waiting = ToolError::StillWaiting(parked.waiting.clone());
             let _ = sender.send(error_reply(&waiting, 1));
+        }
+        if let Some(held) = &mut self.held
+            && let Some(sender) = held
+                .reply
+                .take_if(|r| r.is_closed() || held.since.elapsed() >= self.park_reply_after)
+            && !sender.is_closed()
+        {
+            let _ = sender.send(error_reply(&ToolError::Paused, 1));
         }
         if self
             .page_wait
@@ -518,9 +683,11 @@ impl Worker {
     /// The window closed: everything still waiting gets `browser_closed`.
     pub fn close(&mut self) {
         let parked = self.parked.take().and_then(|p| p.reply);
+        let held = self.held.take().and_then(|h| h.reply);
         let waiting = self.page_wait.take().map(|(job, _, _)| job.reply);
         for reply in parked
             .into_iter()
+            .chain(held)
             .chain(waiting)
             .chain(self.deferred.drain(..).map(|job| job.reply))
         {
@@ -707,6 +874,8 @@ pub(crate) enum ToolError {
     Busy(Waiting),
     /// This call waited a while; the question is still on screen.
     StillWaiting(Waiting),
+    /// The person paused the agent from the window.
+    Paused,
 }
 
 impl ToolError {
@@ -721,6 +890,7 @@ impl ToolError {
             ToolError::Busy(Waiting::Approval { .. }) => "approval_pending",
             ToolError::Busy(Waiting::Handoff { .. }) => "handoff_pending",
             ToolError::StillWaiting(_) => "still_waiting",
+            ToolError::Paused => "paused",
         }
     }
 
@@ -737,6 +907,10 @@ impl ToolError {
             }
             ToolError::Crashed => {
                 "The browser engine crashed and was restarted on the same URL.".into()
+            }
+            ToolError::Paused => {
+                "The person watching paused the agent from the browser window; nothing was done."
+                    .into()
             }
             ToolError::Busy(waiting) | ToolError::StillWaiting(waiting) => {
                 let prefix = if matches!(self, ToolError::Busy(_)) {
@@ -775,6 +949,9 @@ impl ToolError {
             ToolError::StillWaiting(_) => {
                 "Call the same tool with the same arguments again to keep waiting (nothing was done yet), or tell the user what they need to do in the window."
             }
+            ToolError::Paused => {
+                "Call the same tool with the same arguments again to wait until they resume (it runs then), or tell the user the browser is paused."
+            }
         }
     }
 
@@ -793,7 +970,7 @@ impl ToolError {
     fn is_waiting(&self) -> bool {
         matches!(
             self.code(),
-            "approval_pending" | "handoff_pending" | "still_waiting" | "wait_timeout"
+            "approval_pending" | "handoff_pending" | "still_waiting" | "wait_timeout" | "paused"
         )
     }
 
@@ -837,6 +1014,22 @@ fn parse_id(raw: &str) -> Result<NodeId, ToolError> {
         .parse::<u32>()
         .map(NodeId::from_raw)
         .map_err(|_| ToolError::InvalidId(raw.to_string()))
+}
+
+// A browser-written note at the end of the trusted block (never page text).
+fn add_note(reply: &mut Reply, note: &'static str) {
+    let browser = match reply {
+        Reply::Observation { browser, .. } => browser,
+        Reply::Error(ErrorReport {
+            observation: Some((browser, _)),
+            ..
+        }) => browser,
+        _ => return,
+    };
+    if !browser.ends_with('\n') {
+        browser.push('\n');
+    }
+    browser.push_str(&format!("note: {note}\n"));
 }
 
 pub(crate) fn observation_reply(observation: Observation) -> Reply {
@@ -1008,6 +1201,8 @@ mod tests {
             preview: None,
             preview_clicks: Vec::new(),
             preview_scale: 1.0,
+            preview_menu: false,
+            preview_pause: false,
             http_port: None,
             attach: None,
             log,
@@ -1263,6 +1458,8 @@ mod tests {
             preview: None,
             preview_clicks: Vec::new(),
             preview_scale: 1.0,
+            preview_menu: false,
+            preview_pause: false,
             http_port: None,
             attach: None,
             log: None,
@@ -1356,6 +1553,237 @@ mod tests {
             stop.message
         );
         options.secrets.push(("Password".into(), "hunter2".into()));
+        assert_eq!(crate::replay::replay(&options).unwrap(), 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn observe() -> Request {
+        Request::Observe {
+            full: false,
+            cursor: 0,
+        }
+    }
+
+    #[test]
+    fn a_paused_agent_waits_and_its_call_runs_on_resume() {
+        let base = serve_page();
+        let (mut worker, _, link) = worker_on(&base, mb_agent::ApproveMode::Auto);
+        worker.pause();
+        let mut held = submit(&mut worker, Request::Click { id: link });
+        worker.tick();
+        assert!(held.try_recv().is_err(), "held, not run");
+        assert!(worker.held_call().unwrap().starts_with("click e"));
+        assert!(
+            !worker
+                .browser()
+                .state()
+                .current_url
+                .as_ref()
+                .unwrap()
+                .path
+                .contains("/x"),
+            "nothing ran while paused"
+        );
+        // A second call while the first is still waiting is told at once,
+        // and repeating that never escalates to "stop repeating".
+        for _ in 0..4 {
+            let mut other = submit(&mut worker, Request::Scroll { dy: 10.0 });
+            let Ok(Reply::Error(report)) = other.try_recv() else {
+                panic!("expected paused")
+            };
+            assert_eq!(report.code, "paused");
+            assert!(report.hint.contains("same arguments"), "{}", report.hint);
+            assert!(!report.hint.starts_with("Stop repeating"));
+        }
+        assert_eq!(
+            worker.timeline().last().unwrap().error.as_deref(),
+            Some("paused")
+        );
+
+        worker.resume();
+        let Ok(Reply::Observation { browser, page }) = held.try_recv() else {
+            panic!("the held click runs on resume")
+        };
+        assert!(page.contains("Arrived"), "{page}");
+        assert!(browser.contains("note: the person paused you"), "{browser}");
+        assert!(worker.held_call().is_none());
+        // Back to normal: the next call runs right away, without the note.
+        let mut next = submit(&mut worker, observe());
+        let Ok(Reply::Observation { browser, .. }) = next.try_recv() else {
+            panic!("runs at once")
+        };
+        assert!(!browser.contains("paused"), "{browser}");
+    }
+
+    #[test]
+    fn a_held_call_answers_paused_reattaches_and_is_dropped_if_not_repeated() {
+        let base = serve_page();
+        let (mut worker, _, link) = worker_on(&base, mb_agent::ApproveMode::Auto);
+        worker.park_reply_after = Duration::ZERO;
+        worker.pause();
+        let click = Request::Click { id: link };
+        let mut first = submit(&mut worker, click.clone());
+        // The window schedules a frame for the deadline.
+        assert!(worker.park_deadline().is_some());
+        worker.tick();
+        let Ok(Reply::Error(report)) = first.try_recv() else {
+            panic!("expected paused after the park time")
+        };
+        assert_eq!(report.code, "paused");
+        assert!(
+            report.message.contains("nothing was done"),
+            "{}",
+            report.message
+        );
+        assert!(worker.park_deadline().is_none(), "nobody attached");
+
+        // The same call re-attaches and runs on resume.
+        worker.park_reply_after = Duration::from_secs(60);
+        let mut again = submit(&mut worker, click.clone());
+        worker.tick();
+        assert!(again.try_recv().is_err());
+        worker.resume();
+        assert!(matches!(again.try_recv(), Ok(Reply::Observation { .. })));
+
+        // Paused again: a call that answered `paused` and wasn't repeated
+        // is dropped on resume — the agent moved on.
+        worker.process(&Request::Back);
+        worker.park_reply_after = Duration::ZERO;
+        worker.pause();
+        let mut gone = submit(&mut worker, click);
+        worker.tick();
+        assert!(matches!(gone.try_recv(), Ok(Reply::Error(_))));
+        worker.resume();
+        let last = worker.timeline().last().unwrap();
+        assert!(last.label.ends_with("(not run: paused)"), "{}", last.label);
+        assert!(
+            !worker
+                .browser()
+                .state()
+                .current_url
+                .as_ref()
+                .unwrap()
+                .path
+                .contains("/x"),
+            "the dropped click never ran"
+        );
+    }
+
+    #[test]
+    fn pausing_ends_a_wait_and_queued_calls_hold() {
+        let base = serve_page();
+        let (mut worker, _, _) = worker_on(&base, mb_agent::ApproveMode::Deny);
+        let mut wait = submit(
+            &mut worker,
+            Request::WaitFor {
+                text: Some("never there".into()),
+                id: None,
+                timeout_ms: 30_000,
+            },
+        );
+        let mut queued = submit(&mut worker, observe());
+        worker.pause();
+        let Ok(Reply::Error(report)) = wait.try_recv() else {
+            panic!("the wait ends with paused")
+        };
+        assert_eq!(report.code, "paused");
+        assert!(worker.page_wait().is_none());
+        assert!(queued.try_recv().is_err(), "the queued call now holds");
+        assert_eq!(worker.held_call().as_deref(), Some("observe"));
+        worker.resume();
+        assert!(matches!(queued.try_recv(), Ok(Reply::Observation { .. })));
+    }
+
+    #[test]
+    fn a_question_card_stays_answerable_while_paused() {
+        let base = serve_page();
+        let (mut worker, pw, _) = worker_on(&base, mb_agent::ApproveMode::Deny);
+        let mut typed = submit(
+            &mut worker,
+            Request::Type {
+                id: pw.clone(),
+                text: "x".into(),
+                clear: false,
+                submit: false,
+            },
+        );
+        worker.pause();
+        // Other calls hold for the resume, not for the card.
+        let mut other = submit(&mut worker, observe());
+        assert!(other.try_recv().is_err());
+        assert!(worker.waiting().is_some());
+        worker.answer(Answer::HandoffDone);
+        assert!(matches!(typed.try_recv(), Ok(Reply::Observation { .. })));
+        assert!(other.try_recv().is_err(), "still paused");
+        worker.resume();
+        assert!(matches!(other.try_recv(), Ok(Reply::Observation { .. })));
+    }
+
+    #[test]
+    fn the_approval_mode_switch_applies_to_the_next_action() {
+        let base = serve_page();
+        let (mut worker, _, link) = worker_on(&base, mb_agent::ApproveMode::Ask);
+        let click = Request::Click { id: link.clone() };
+        // A card already up isn't answered by switching the mode.
+        let mut asked = submit(&mut worker, click.clone());
+        worker.set_approve_mode(mb_agent::ApproveMode::Auto);
+        assert!(asked.try_recv().is_err());
+        assert!(matches!(worker.waiting(), Some(Waiting::Approval { .. })));
+        worker.answer(Answer::Approve);
+        assert!(matches!(asked.try_recv(), Ok(Reply::Observation { .. })));
+        worker.process(&Request::Back);
+        worker.process(&observe());
+
+        // Refuse: the next move is refused without asking…
+        worker.set_approve_mode(mb_agent::ApproveMode::Deny);
+        let Reply::Error(report) = worker.process(&click) else {
+            panic!("expected approval_denied")
+        };
+        assert_eq!(report.code, "approval_denied");
+        // …and back to Ask, the person is asked again (the refusal was the
+        // mode's, not theirs).
+        worker.set_approve_mode(mb_agent::ApproveMode::Ask);
+        let mut asked = submit(&mut worker, click.clone());
+        assert!(matches!(worker.waiting(), Some(Waiting::Approval { .. })));
+        worker.answer(Answer::Deny);
+        assert!(matches!(asked.try_recv(), Ok(Reply::Error(_))));
+        // A refusal by the person outlives switching to Allow.
+        worker.set_approve_mode(mb_agent::ApproveMode::Auto);
+        let Reply::Error(report) = worker.process(&click) else {
+            panic!("expected the remembered refusal")
+        };
+        assert_eq!(report.code, "approval_denied");
+        assert_eq!(worker.approve_mode(), mb_agent::ApproveMode::Auto);
+        assert_eq!(worker.options().agent.approve, mb_agent::ApproveMode::Auto);
+    }
+
+    #[test]
+    fn a_mode_switch_is_logged_per_step_and_replays() {
+        let base = serve_page();
+        let path = std::env::temp_dir().join(format!("mb-mode-{}.jsonl", std::process::id()));
+        let (mut worker, _, link) =
+            worker_logging(&base, mb_agent::ApproveMode::Deny, Some(path.clone()));
+        worker.process(&observe());
+        worker.set_approve_mode(mb_agent::ApproveMode::Auto);
+        let Reply::Observation { page, .. } = worker.process(&Request::Click { id: link }) else {
+            panic!("allowed after the switch")
+        };
+        assert!(page.contains("Arrived"));
+        drop(worker);
+        let log = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert!(lines[0].contains(r#""approve":"deny""#), "{log}");
+        assert!(!lines[2].contains(r#""approve""#), "header mode: no field");
+        assert!(lines[3].contains(r#""approve":"auto""#), "{log}");
+        let options = crate::cli::ReplayOptions {
+            file: path.clone(),
+            secrets: Vec::new(),
+            ignore_text: false,
+            window: false,
+            preview: None,
+            preview_steps: 0,
+            preview_scale: 1.0,
+        };
         assert_eq!(crate::replay::replay(&options).unwrap(), 3);
         let _ = std::fs::remove_file(&path);
     }

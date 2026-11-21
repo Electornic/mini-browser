@@ -14,7 +14,7 @@ use mb_runtime::chrome::CHROME_HEIGHT;
 use mb_runtime::css::Color;
 use mb_runtime::dom::NodeId;
 use mb_runtime::layout::Rect;
-use mb_runtime::render::{DisplayCommand, TextCommand, measure_text_width};
+use mb_runtime::render::{CornerRadii, DisplayCommand, TextCommand, measure_text_width};
 
 use crate::http::Attach;
 use crate::worker::{Answer, TimelineEntry, Waiting};
@@ -215,6 +215,9 @@ fn outline(r: Rect, w: f32, color: Color) -> [DisplayCommand; 4] {
 
 pub struct PanelInfo<'a> {
     pub approve: ApproveMode,
+    /// The person paused the agent: the call waiting for them to resume
+    /// (`Some(None)` = paused, nothing waiting).
+    pub paused: Option<Option<String>>,
     pub allow_origins: &'a [String],
     pub timeline: &'a [TimelineEntry],
     /// A request waiting for the person (approval / password handoff).
@@ -236,6 +239,17 @@ pub enum PanelAction {
     CopySetup,
     /// `mb-mcp replay --window` controls (G5b).
     Replay(ReplayControl),
+    /// Pause / resume / approval mode — the person running the agent.
+    Control(Control),
+}
+
+/// What the person can do to the agent from the ⋮ menu or the panel.
+/// Window input only: no MCP tool maps to these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    Pause,
+    Resume,
+    Approve(ApproveMode),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -504,7 +518,7 @@ pub fn panel(
     line(
         &mut commands,
         &mut y,
-        format!("approve: {approve}"),
+        format!("approve: {approve}   (change it in the menu)"),
         MUTED,
         false,
     );
@@ -537,6 +551,12 @@ pub fn panel(
     );
     y += PANEL_LINE / 2.0;
     let mut buttons = Vec::new();
+    if let Some(held) = &info.paused {
+        let (card_commands, card_buttons, card_height) = paused_card(held.as_deref(), x, width, y);
+        commands.extend(card_commands);
+        buttons.extend(card_buttons);
+        y += card_height + PANEL_LINE / 2.0;
+    }
     if let Some(attach) = info.attach {
         line(
             &mut commands,
@@ -782,6 +802,492 @@ pub fn replay_panel(
     (commands, buttons)
 }
 
+// The design's two actors (docs/concept.md, design draft "Agent
+// Browser"): blue = the agent, orange = the person.
+const AGENT_BLUE: Color = Color {
+    r: 45,
+    g: 91,
+    b: 227,
+    a: 255,
+};
+const AGENT_TINT: Color = Color {
+    r: 238,
+    g: 242,
+    b: 253,
+    a: 255,
+};
+const PERSON_ORANGE: Color = Color {
+    r: 217,
+    g: 103,
+    b: 11,
+    a: 255,
+};
+const PERSON_TINT: Color = Color {
+    r: 253,
+    g: 241,
+    b: 231,
+    a: 255,
+};
+const PERSON_BORDER: Color = Color {
+    r: 240,
+    g: 199,
+    b: 166,
+    a: 255,
+};
+const MENU_INK: Color = Color {
+    r: 21,
+    g: 23,
+    b: 28,
+    a: 255,
+};
+const MENU_MUTED: Color = Color {
+    r: 74,
+    g: 80,
+    b: 96,
+    a: 255,
+};
+const MENU_DISABLED: Color = Color {
+    r: 150,
+    g: 155,
+    b: 165,
+    a: 255,
+};
+const MENU_BORDER: Color = Color {
+    r: 213,
+    g: 216,
+    b: 222,
+    a: 255,
+};
+const MENU_RULE: Color = Color {
+    r: 226,
+    g: 228,
+    b: 232,
+    a: 255,
+};
+const SEGMENT_BG: Color = Color {
+    r: 244,
+    g: 245,
+    b: 247,
+    a: 255,
+};
+
+pub const MENU_WIDTH: f32 = 300.0;
+const MENU_PAD: f32 = 8.0;
+const MENU_ROW: f32 = 36.0;
+const MENU_FONT: f32 = 14.0;
+const MENU_SMALL: f32 = 12.0;
+const MENU_HEADER: f32 = 11.0;
+const SEGMENT_HEIGHT: f32 = 32.0;
+
+/// What the ⋮ menu shows.
+pub struct MenuInfo<'a> {
+    pub paused: bool,
+    pub approve: ApproveMode,
+    pub allow_origins: &'a [String],
+    /// The mouse, for the hover wash.
+    pub hover: Option<(f32, f32)>,
+}
+
+/// The open ⋮ menu: its commands, clickable items, and its whole rect
+/// (input over it never reaches the page).
+pub struct Menu {
+    pub commands: Vec<DisplayCommand>,
+    pub buttons: Vec<Button>,
+    pub rect: Rect,
+}
+
+fn contains(rect: &Rect, (x, y): (f32, f32)) -> bool {
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+}
+
+// A rounded box with a 1px border.
+fn framed(rect: Rect, radius: f32, border: Color, fill: Color) -> [DisplayCommand; 2] {
+    [
+        DisplayCommand::RoundedRect(border, rect, CornerRadii::uniform(radius)),
+        DisplayCommand::RoundedRect(
+            fill,
+            Rect {
+                x: rect.x + 1.0,
+                y: rect.y + 1.0,
+                width: rect.width - 2.0,
+                height: rect.height - 2.0,
+            },
+            CornerRadii::uniform((radius - 1.0).max(0.0)),
+        ),
+    ]
+}
+
+fn pause_icon(x: f32, y: f32, size: f32, color: Color) -> [DisplayCommand; 2] {
+    let bar = |dx: f32| {
+        DisplayCommand::RoundedRect(
+            color,
+            Rect {
+                x: x + dx,
+                y,
+                width: size * 0.3,
+                height: size,
+            },
+            CornerRadii::uniform(1.0),
+        )
+    };
+    [bar(size * 0.05), bar(size * 0.6)]
+}
+
+// A right-pointing triangle, one 1px strip per row.
+fn play_icon(x: f32, y: f32, size: f32, color: Color) -> Vec<DisplayCommand> {
+    let rows = size.round() as usize;
+    (0..rows)
+        .map(|i| {
+            let t = (i as f32 + 0.5) / size;
+            let width = (1.0 - (2.0 * t - 1.0).abs()) * size * 0.85;
+            DisplayCommand::SolidRect(
+                color,
+                Rect {
+                    x: x + size * 0.1,
+                    y: y + i as f32,
+                    width,
+                    height: 1.0,
+                },
+            )
+        })
+        .collect()
+}
+
+/// "Agent paused" pill at the right end of the address bar.
+pub fn paused_pill(page_width: f32) -> Vec<DisplayCommand> {
+    let label = "Agent paused";
+    let address = mb_runtime::chrome::address_bar_rect(page_width);
+    let width = 10.0 + 10.0 + 6.0 + measure_text_width(label, MENU_SMALL) + 12.0;
+    let height = 24.0;
+    let rect = Rect {
+        x: address.x + address.width - width - 6.0,
+        y: address.y + (address.height - height) / 2.0,
+        width,
+        height,
+    };
+    let mut commands = framed(rect, height / 2.0, PERSON_BORDER, PERSON_TINT).to_vec();
+    commands.extend(pause_icon(rect.x + 10.0, rect.y + 7.0, 10.0, PERSON_ORANGE));
+    commands.push(text(
+        label,
+        rect.x + 26.0,
+        rect.y + 6.0,
+        MENU_SMALL,
+        MENU_INK,
+        true,
+    ));
+    commands
+}
+
+/// The ⋮ menu, hanging under the menu button at the right of the page
+/// area. Agent section first (pause, approval mode): the controls a
+/// watcher needs. Items that aren't built yet are listed greyed out.
+pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
+    let button = mb_runtime::chrome::menu_button_rect(page_width);
+    let right = button.x + button.width;
+    let x = (right - MENU_WIDTH).max(4.0);
+    let width = MENU_WIDTH.min(page_width - 8.0).max(0.0);
+    let top = button.y + button.height + 6.0;
+    let inner_x = x + MENU_PAD;
+    let inner_width = width - 2.0 * MENU_PAD;
+    let mut commands = Vec::new();
+    let mut buttons = Vec::new();
+    let mut y = top + MENU_PAD;
+
+    let header = |commands: &mut Vec<DisplayCommand>, y: &mut f32, label: &str| {
+        commands.push(text(
+            label,
+            inner_x + 10.0,
+            *y + 8.0,
+            MENU_HEADER,
+            MENU_MUTED,
+            true,
+        ));
+        *y += 26.0;
+    };
+    // One row: hover wash (or the given tint), optional icon slot, label,
+    // a value at the right.
+    let row = |commands: &mut Vec<DisplayCommand>,
+               y: &mut f32,
+               label: &str,
+               value: &str,
+               enabled: bool,
+               tint: Option<Color>|
+     -> Rect {
+        let rect = Rect {
+            x: inner_x,
+            y: *y,
+            width: inner_width,
+            height: MENU_ROW,
+        };
+        let hovered = enabled && info.hover.is_some_and(|p| contains(&rect, p));
+        if let Some(fill) = tint.or(hovered.then_some(SEGMENT_BG)) {
+            commands.push(DisplayCommand::RoundedRect(
+                fill,
+                rect,
+                CornerRadii::uniform(8.0),
+            ));
+        }
+        let ink = if enabled { MENU_INK } else { MENU_DISABLED };
+        commands.push(text(
+            label,
+            rect.x + 34.0,
+            rect.y + (MENU_ROW - MENU_FONT) / 2.0 - 1.0,
+            MENU_FONT,
+            ink,
+            false,
+        ));
+        if !value.is_empty() {
+            let value_width = measure_text_width(value, MENU_SMALL);
+            commands.push(text(
+                value,
+                rect.x + rect.width - 10.0 - value_width,
+                rect.y + (MENU_ROW - MENU_SMALL) / 2.0 - 1.0,
+                MENU_SMALL,
+                if enabled { MENU_MUTED } else { MENU_DISABLED },
+                false,
+            ));
+        }
+        *y += MENU_ROW + 2.0;
+        rect
+    };
+    let rule = |commands: &mut Vec<DisplayCommand>, y: &mut f32| {
+        *y += 4.0;
+        commands.push(DisplayCommand::SolidRect(
+            MENU_RULE,
+            Rect {
+                x: inner_x + 4.0,
+                y: *y,
+                width: inner_width - 8.0,
+                height: 1.0,
+            },
+        ));
+        *y += 5.0;
+    };
+
+    header(&mut commands, &mut y, "AGENT");
+    // Pause / resume: the watcher's stop button, tinted with the color of
+    // whoever it hands the page to.
+    let (label, control, tint) = if info.paused {
+        ("Resume the agent", Control::Resume, PERSON_TINT)
+    } else {
+        ("Pause the agent", Control::Pause, AGENT_TINT)
+    };
+    let rect = row(&mut commands, &mut y, label, "", true, Some(tint));
+    if info.paused {
+        commands.extend(play_icon(rect.x + 11.0, rect.y + 11.0, 14.0, AGENT_BLUE));
+    } else {
+        commands.extend(pause_icon(rect.x + 11.0, rect.y + 11.0, 14.0, AGENT_BLUE));
+    }
+    buttons.push(Button {
+        rect,
+        action: PanelAction::Control(control),
+    });
+
+    // Approval mode: a segmented control, applied from the next action.
+    commands.push(text(
+        "Before POST or other origins",
+        inner_x + 10.0,
+        y + 4.0,
+        MENU_SMALL,
+        MENU_MUTED,
+        false,
+    ));
+    y += 22.0;
+    let track = Rect {
+        x: inner_x + 10.0,
+        y,
+        width: inner_width - 20.0,
+        height: SEGMENT_HEIGHT,
+    };
+    commands.push(DisplayCommand::RoundedRect(
+        SEGMENT_BG,
+        track,
+        CornerRadii::uniform(8.0),
+    ));
+    let segments = [
+        ("Ask me", ApproveMode::Ask),
+        ("Refuse", ApproveMode::Deny),
+        ("Allow", ApproveMode::Auto),
+    ];
+    let gap = 4.0;
+    let segment_width = (track.width - 6.0 - gap * 2.0) / 3.0;
+    for (i, (label, mode)) in segments.into_iter().enumerate() {
+        let rect = Rect {
+            x: track.x + 3.0 + i as f32 * (segment_width + gap),
+            y: track.y + 3.0,
+            width: segment_width,
+            height: SEGMENT_HEIGHT - 6.0,
+        };
+        let selected = info.approve == mode;
+        if selected {
+            commands.extend(framed(rect, 6.0, MENU_BORDER, BADGE_FG));
+        } else if info.hover.is_some_and(|p| contains(&rect, p)) {
+            commands.push(DisplayCommand::RoundedRect(
+                MENU_RULE,
+                rect,
+                CornerRadii::uniform(6.0),
+            ));
+        }
+        let label_width = measure_text_width(label, 13.0);
+        commands.push(text(
+            label,
+            rect.x + (rect.width - label_width).max(0.0) / 2.0,
+            rect.y + 6.0,
+            13.0,
+            if selected { MENU_INK } else { MENU_MUTED },
+            selected,
+        ));
+        buttons.push(Button {
+            rect,
+            action: PanelAction::Control(Control::Approve(mode)),
+        });
+    }
+    y += SEGMENT_HEIGHT + 8.0;
+
+    // Not built yet (design board "2b · ⋮ menu"): shown so the menu reads
+    // as the place they will live, but inert.
+    let origins = match info.allow_origins.len() {
+        0 => "any".to_string(),
+        1 => info.allow_origins[0].clone(),
+        n => format!("{n} origins"),
+    };
+    row(
+        &mut commands,
+        &mut y,
+        "Allowed sites",
+        &origins,
+        false,
+        None,
+    );
+    rule(&mut commands, &mut y);
+    row(
+        &mut commands,
+        &mut y,
+        "Record this session",
+        "soon",
+        false,
+        None,
+    );
+    row(
+        &mut commands,
+        &mut y,
+        "What the agent sees",
+        "soon",
+        false,
+        None,
+    );
+    y += MENU_PAD - 2.0;
+
+    let rect = Rect {
+        x,
+        y: top,
+        width,
+        height: y - top,
+    };
+    let mut all = vec![DisplayCommand::BoxShadow(
+        mb_runtime::render::ShadowCommand {
+            rect: Rect {
+                y: rect.y + 4.0,
+                ..rect
+            },
+            blur_radius: 12.0,
+            color: Color {
+                r: 21,
+                g: 23,
+                b: 28,
+                a: 40,
+            },
+        },
+    )];
+    all.extend(framed(rect, 12.0, MENU_BORDER, BADGE_FG));
+    all.extend(commands);
+    Menu {
+        commands: all,
+        buttons,
+        rect,
+    }
+}
+
+// The panel card while the agent is paused: the person has the page, and
+// the one call waiting for them, with the Resume button.
+fn paused_card(
+    held: Option<&str>,
+    x: f32,
+    width: f32,
+    top: f32,
+) -> (Vec<DisplayCommand>, Vec<Button>, f32) {
+    let inner_left = x + PANEL_PAD;
+    let inner_width = width - 2.0 * PANEL_PAD;
+    let max_chars = (inner_width / 6.5) as usize;
+    let mut lines: Vec<(String, Color, bool)> = wrap(
+        "The agent's calls wait until you resume — nothing it asks for happens meanwhile. The page is yours.",
+        max_chars,
+        3,
+    )
+    .into_iter()
+    .map(|l| (l, INK, false))
+    .collect();
+    match held {
+        Some(call) => {
+            lines.push(("1 call is waiting for you:".into(), INK, true));
+            lines.push((format!("  {}", clip(call, max_chars - 2)), INK, false));
+            lines.push(("It runs on resume, on the page as it".into(), MUTED, false));
+            lines.push(("is then (ids are checked first).".into(), MUTED, false));
+        }
+        None => lines.push(("No call is waiting.".into(), MUTED, false)),
+    }
+    let height = 12.0 + PANEL_LINE * (1 + lines.len()) as f32 + 8.0 + BUTTON_HEIGHT + 12.0;
+    let card = Rect {
+        x: inner_left - 4.0,
+        y: top,
+        width: inner_width + 8.0,
+        height,
+    };
+    let mut commands = framed(card, 10.0, PERSON_BORDER, PERSON_TINT).to_vec();
+    let mut y = top + 12.0;
+    commands.extend(pause_icon(inner_left + 2.0, y + 1.0, 10.0, PERSON_ORANGE));
+    commands.push(text(
+        "Agent paused · you have the wheel",
+        inner_left + 18.0,
+        y,
+        PANEL_FONT,
+        INK,
+        true,
+    ));
+    y += PANEL_LINE;
+    for (line, color, bold) in lines {
+        commands.push(text(line, inner_left, y, PANEL_FONT, color, bold));
+        y += PANEL_LINE;
+    }
+    y += 8.0;
+    let rect = Rect {
+        x: inner_left,
+        y,
+        width: inner_width,
+        height: BUTTON_HEIGHT,
+    };
+    commands.push(DisplayCommand::RoundedRect(
+        MENU_INK,
+        rect,
+        CornerRadii::uniform(6.0),
+    ));
+    let label = "Resume agent";
+    let label_width = measure_text_width(label, PANEL_FONT);
+    commands.push(text(
+        label,
+        rect.x + (rect.width - label_width).max(0.0) / 2.0,
+        rect.y + 6.0,
+        PANEL_FONT,
+        BADGE_FG,
+        true,
+    ));
+    let buttons = vec![Button {
+        rect,
+        action: PanelAction::Control(Control::Resume),
+    }];
+    (commands, buttons, height)
+}
+
 fn clip(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
@@ -878,6 +1384,7 @@ mod tests {
         let (commands, _) = panel(
             &PanelInfo {
                 approve: ApproveMode::Deny,
+                paused: None,
                 allow_origins: &[],
                 timeline: &timeline,
                 waiting: None,
@@ -907,6 +1414,7 @@ mod tests {
         let (commands, buttons) = panel(
             &PanelInfo {
                 approve: ApproveMode::Ask,
+                paused: None,
                 allow_origins: &[],
                 timeline: &[],
                 waiting: Some(&waiting),
@@ -953,6 +1461,7 @@ mod tests {
         let (_, buttons) = panel(
             &PanelInfo {
                 approve: ApproveMode::Ask,
+                paused: None,
                 allow_origins: &[],
                 timeline: &[],
                 waiting: Some(&waiting),
@@ -998,6 +1507,7 @@ mod tests {
         let (commands, buttons) = panel(
             &PanelInfo {
                 approve: ApproveMode::Ask,
+                paused: None,
                 allow_origins: &[],
                 timeline: &[],
                 waiting: Some(&waiting),
@@ -1069,5 +1579,148 @@ mod tests {
         };
         assert_eq!(color_of("- button"), Some(FAIL));
         assert_eq!(color_of("+ button"), Some(OK));
+    }
+
+    fn centre(b: &Button) -> (f32, f32) {
+        (
+            b.rect.x + b.rect.width / 2.0,
+            b.rect.y + b.rect.height / 2.0,
+        )
+    }
+
+    fn controls(menu: &Menu) -> Vec<Control> {
+        menu.buttons
+            .iter()
+            .filter_map(|b| match b.action {
+                PanelAction::Control(c) => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_menu_offers_pause_and_the_three_approval_modes() {
+        let menu = menu(
+            &MenuInfo {
+                paused: false,
+                approve: ApproveMode::Ask,
+                allow_origins: &[],
+                hover: None,
+            },
+            900.0,
+        );
+        assert_eq!(
+            controls(&menu),
+            [
+                Control::Pause,
+                Control::Approve(ApproveMode::Ask),
+                Control::Approve(ApproveMode::Deny),
+                Control::Approve(ApproveMode::Auto),
+            ]
+        );
+        let texts = badge_texts(&menu.commands);
+        for label in ["AGENT", "Pause the agent", "Ask me", "Refuse", "Allow"] {
+            assert!(texts.contains(&label.to_string()), "{label}: {texts:?}");
+        }
+        // Not built yet: listed, but nothing to click.
+        assert!(texts.contains(&"Record this session".to_string()));
+        assert_eq!(menu.buttons.len(), 4);
+        // Hangs under the ⋮ button, right-aligned to it, inside the page.
+        let button = mb_runtime::chrome::menu_button_rect(900.0);
+        assert!(menu.rect.y > button.y + button.height);
+        assert_eq!(menu.rect.x + menu.rect.width, button.x + button.width);
+        for b in &menu.buttons {
+            let (x, y) = centre(b);
+            assert!(contains(&menu.rect, (x, y)), "{b:?}");
+        }
+        // Each click lands on exactly one item.
+        for b in &menu.buttons {
+            let (x, y) = centre(b);
+            assert_eq!(menu.buttons.iter().filter(|o| o.contains(x, y)).count(), 1);
+        }
+    }
+
+    #[test]
+    fn the_selected_mode_is_bold_and_a_paused_menu_offers_resume() {
+        let bold_texts = |m: &Menu| -> Vec<String> {
+            m.commands
+                .iter()
+                .filter_map(|c| match c {
+                    DisplayCommand::Text(t) if t.font_weight == 700 => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let menu = menu(
+            &MenuInfo {
+                paused: true,
+                approve: ApproveMode::Auto,
+                allow_origins: &["http://127.0.0.1:8765".into()],
+                hover: None,
+            },
+            900.0,
+        );
+        assert_eq!(controls(&menu)[0], Control::Resume);
+        let bold = bold_texts(&menu);
+        assert!(bold.contains(&"Allow".to_string()), "{bold:?}");
+        assert!(!bold.contains(&"Ask me".to_string()), "{bold:?}");
+        let texts = badge_texts(&menu.commands);
+        assert!(texts.contains(&"Resume the agent".to_string()));
+        assert!(texts.contains(&"http://127.0.0.1:8765".to_string()));
+    }
+
+    #[test]
+    fn a_narrow_page_keeps_the_menu_on_screen() {
+        let menu = menu(
+            &MenuInfo {
+                paused: false,
+                approve: ApproveMode::Deny,
+                allow_origins: &[],
+                hover: None,
+            },
+            250.0,
+        );
+        assert!(menu.rect.x >= 0.0 && menu.rect.x + menu.rect.width <= 250.0);
+    }
+
+    #[test]
+    fn paused_panel_shows_the_held_call_and_resume() {
+        let info = |held: Option<Option<String>>| PanelInfo {
+            approve: ApproveMode::Ask,
+            paused: held,
+            allow_origins: &[],
+            timeline: &[],
+            waiting: None,
+            page_wait: None,
+            attach: None,
+            copied: false,
+        };
+        let (commands, buttons) = panel(&info(Some(Some("click e26".into()))), 900.0, 300.0, 700.0);
+        let texts = badge_texts(&commands);
+        assert!(
+            texts.iter().any(|t| t.starts_with("Agent paused")),
+            "{texts:?}"
+        );
+        assert!(texts.contains(&"  click e26".to_string()), "{texts:?}");
+        assert_eq!(
+            buttons.iter().map(|b| b.action).collect::<Vec<_>>(),
+            [PanelAction::Control(Control::Resume)]
+        );
+        let (_, buttons) = panel(&info(None), 900.0, 300.0, 700.0);
+        assert!(buttons.is_empty(), "running: no Resume button");
+    }
+
+    #[test]
+    fn the_paused_pill_sits_inside_the_address_bar() {
+        let commands = paused_pill(900.0);
+        let address = mb_runtime::chrome::address_bar_rect(900.0);
+        let texts = badge_texts(&commands);
+        assert_eq!(texts, ["Agent paused"]);
+        for command in &commands {
+            if let DisplayCommand::RoundedRect(_, r, _) = command {
+                assert!(r.x >= address.x && r.x + r.width <= address.x + address.width);
+                assert!(r.y >= address.y && r.y + r.height <= address.y + address.height);
+            }
+        }
     }
 }

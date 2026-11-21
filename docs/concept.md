@@ -1,6 +1,6 @@
 # Concept — 에이전트용 브라우저
 
-> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ · G5c 평가 ✅ (2026-11-20)** · 호환성 트랙 시작 (2026-11-21): 인라인 줄 묶기 ✅ · IDL 속성 반사 ✅ · Preact 실증 ✅ · 다음 = 호환성 잔여 갭(spa-roadmap) / 디자인 트랙 / 열린 결정 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
+> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ · G5c 평가 ✅ (2026-11-20)** · 호환성 트랙 시작 (2026-11-21): 인라인 줄 묶기 ✅ · IDL 속성 반사 ✅ · Preact 실증 ✅ · 디자인 트랙 시작 (2026-11-21): [⋮ 메뉴](#-메뉴-사람의-조종석) 1차 — 일시정지·런타임 승인 모드 ✅ · 다음 = 디자인 시안을 엔진에 적용 / 호환성 잔여 갭(spa-roadmap) / 열린 결정 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
 
 ## 한 줄
 
@@ -154,6 +154,7 @@
 | `approval_pending` | 승인 카드가 떠 있는 동안 들어온 다른 호출 (window + `ask`). message 가 무슨 카드인지 말함 |
 | `handoff_pending` | 사람이 비밀번호를 입력 중(넘겨받기 카드)인 동안 들어온 다른 호출 |
 | `still_waiting` | park 된 호출이 45초 동안 답을 못 받음 — 카드는 그대로, 아무것도 실행 안 됨. **같은 tool·같은 인자로 다시 부르면 이어서 기다린다** |
+| `paused` | 사람이 창의 ⋮ 메뉴로 에이전트를 일시정지함 — 아무것도 실행 안 됨. 호출은 최대 45초 기다렸다가(`still_waiting` 과 같은 시간) 이 코드로 답하고, **같은 tool·같은 인자로 다시 부르면 재개될 때까지 이어서 기다린다**. 재개되면 붙어 있던 호출이 그때의 페이지에서 실행된다 ([⋮ 메뉴](#-메뉴-사람의-조종석)) |
 | `taken_over` | 승인 카드에서 사람이 "Do it myself" 를 고름 — 다시 시도하지 말 것 |
 | `handoff_declined` | 넘겨받기 카드에서 사람이 Cancel |
 | `approval_denied` | 사람이(또는 `--approve deny` 가) 위험 행동을 거절 |
@@ -299,8 +300,10 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
     - MCP 클라이언트의 tool 호출 타임아웃이 사람의 결정보다 짧으면 클라이언트 쪽이 먼저 포기한다 — 실측: Claude Code 의 HTTP 연결은 60초, stdio 는 G4 테스트에서 15분도 기다림. 그래서 위의 45초 `still_waiting` + 재부착.
   - `auto`: 전부 승인. 로컬 fixture 를 쓰는 테스트·평가 전용.
   - `deny`: 전부 거절 (읽기 전용 에이전트).
+  - **실행 중 변경 (2026-11-21)**: 창 모드에선 사람이 ⋮ 메뉴의 "Before POST or other origins" 에서 Ask me(`ask`) / Refuse(`deny`) / Allow(`auto`) 로 바꿀 수 있다. **다음 에이전트 행동부터** 적용되고, 에이전트(MCP tool)는 절대 바꿀 수 없다 — 자세한 규칙은 [⋮ 메뉴](#-메뉴-사람의-조종석).
 - 보류 중엔 해당 tool 호출이 응답을 기다린다 (타임아웃 없음, 사람이 고를 때까지). 거절되면 `approval_denied` + 이동 전 상태의 Observation.
 - **거절 기억**: 거절된 (행동 종류, 대상 폼 또는 대상 origin) 은 세션 동안 기억한다. 에이전트가 다른 버튼·직접 URL 입력 등으로 같은 대상을 다시 시도하면 사람에게 다시 묻지 않고 즉시 `approval_denied` (우회 시도 차단 + 승인 카드 스팸 방지).
+  - 기억은 두 갈래다 (2026-11-21, 런타임 모드 변경과 함께): **사람의 거절**(카드의 Deny / Do it myself — `AgentPolicy::record_denial`)은 모드가 바뀌어도 남는다. **규칙의 거절**(`deny` 모드가 자동으로 거절한 것, 물어볼 수 없어 거절한 리다이렉트 hop — `record_rule_refusal`)은 사람이 모드를 바꾸면 잊는다. Refuse → Ask me 로 바꿨는데 Refuse 시절 거절이 남아 있으면 사람에게 물어야 할 행동이 묻지도 않고 거절되기 때문.
 
 ### 자격증명 규칙
 
@@ -319,6 +322,60 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 | `alert` / `confirm` / `prompt` | shim (G1): 블로킹 없이 즉시 반환 — `alert` → undefined, `confirm` → **false** (안전한 쪽), `prompt` → null. 호출 내용은 관찰의 `dialogs` 에 기록 (untrusted) |
 | 다운로드 (HTML 이 아닌 응답) | 이동 에러로 처리 (기존 `unexpected content type` 경로) |
 | 파일 업로드 · iframe · Shadow DOM | 지원 안 함 |
+
+## ⋮ 메뉴 (사람의 조종석)
+
+> 2026-11-21 디자인 트랙 1차. 디자인 시안(작업명 "Agent Browser") 보드 "2b · ⋮ menu"·"7 · Paused + recording" 중 **일시정지**와 **런타임 승인 모드**만 먼저 — 관전하는 사람의 "멈춤" 버튼이라서. 나머지 시각 디자인은 다음 작업(엔진에 시안 적용)에서 한꺼번에.
+
+크롬의 ⋮ 버튼은 그동안 그리기만 하고 열리지 않았다(`mb-shell` 에선 여전히 `menu (todo)`). 관전 창(`mb-mcp --window`)에서는 이 버튼이 메뉴를 연다. 메뉴는 "설정 모음"이 아니라 **사람이 에이전트를 운전하는 자리**다.
+
+![⋮ 메뉴](images/menu-open.png) ![일시정지](images/agent-paused.png)
+
+### 메뉴 구성과 입력 처리
+
+- **그리는 곳**: `overlay::menu` (순수 함수, `DisplayCommand` + 클릭 영역 `Button` + 메뉴 전체 rect). ⋮ 버튼(`chrome::menu_button_rect(page_width)`) 바로 아래, 버튼 오른쪽 끝에 맞춰 페이지 위에 겹쳐 그린다 (폭 300, 좁은 페이지에선 화면 안으로 당김). 색은 시안의 두 주체 — 에이전트 파랑 `#2D5BE3`, 사람 주황 `#D9670B` — 만 가져오고 나머지 크롬·패널 스타일은 그대로 둔다.
+- **항목**:
+  - `AGENT` 섹션: **Pause the agent / Resume the agent** (한 줄이 상태에 따라 바뀜, 파란 일시정지 아이콘 / 재생 아이콘), "Before POST or other origins" 아래 **Ask me / Refuse / Allow** 세그먼트(선택된 칸은 흰 바탕·굵게).
+  - 아직 안 만든 항목은 회색으로만 표시(클릭 영역 없음): Allowed sites(현재 값 `any`/origin), Record this session, What the agent sees (`soon`). 메뉴가 그 기능들이 들어갈 자리라는 걸 보여 주되 누를 수는 없게.
+  - 시안의 단축키(⌘.)·Disconnect·Zoom·About 등은 뺐다 — `mb_shell` 창이 수식키 조합을 아직 페이지 입력으로만 넘기고, 나머지는 기능이 없다.
+- **클릭 라우팅** (`window_mode::route_menu_input`, 순수 함수라 단위 테스트): ⋮ 버튼 클릭 = 열기/닫기. 열린 동안의 클릭은 **페이지·패널에 절대 안 간다**: 항목이면 실행, 메뉴 안 빈 곳이면 무시, 바깥이면 닫기. 메뉴 위에 마우스가 있으면 페이지 hover 도 끈다. ⋮ 클릭 자체도 페이지(`BrowserState`)에 넘기지 않아 `menu (todo)` 상태 문구가 안 뜬다.
+- **열림 유지**: Pause/Resume 은 명령이라 누르면 닫힌다. 승인 모드 세그먼트는 컨트롤이라 열린 채로 남아 바뀐 선택을 보여 준다.
+- **사람 전용**: 메뉴·패널의 조작은 `overlay::Control`(Pause / Resume / Approve(mode)) → `Worker::{pause, resume, set_approve_mode}` 로만 간다. `worker::Request` 에 대응하는 변형이 없고 MCP tool 10개 중 어느 것도 여기에 닿지 않는다 — 에이전트가 스스로 일시정지를 풀거나 승인 모드를 Allow 로 바꾸는 경로가 구조적으로 없다. 조작마다 stderr 에 한 줄(`[mb-mcp] the person paused the agent` 등).
+
+### 일시정지
+
+목표: 사람이 "잠깐, 내가 할게" 를 누르면 **그 순간부터 에이전트의 어떤 호출도 실행되지 않고**, 에이전트는 무슨 일인지 알고, HTTP 클라이언트의 60초 컷이 상태를 잠그지 않는다.
+
+- **모든 tool 이 멈춘다** — `observe`·`screenshot` 포함. 사람이 페이지를 쓰는 동안(예: 직접 로그인) 에이전트가 화면을 읽는 것도 멈춤의 일부로 본다. 시안의 문구 그대로 "페이지는 사람 것".
+- **호출은 park 된다 (G4 승인 카드와 같은 모양)**. 일시정지 중 도착한 호출은 `Worker::held`(`Held { request, reply, since }`)에 보관되고 응답 채널을 쥔 채 기다린다. 에이전트 쪽에선 tool 호출이 오래 걸리는 것으로 보인다.
+  - **45초(`PARK_REPLY_AFTER`)가 지나면 `paused` 로 먼저 답한다** — `still_waiting` 과 같은 이유(Claude Code HTTP 는 60초에 끊음). 호출은 떼어 둔 채(`reply = None`) 남는다. 창은 그 마감에 깨우기 스레드를 걸므로(`park_deadline` 이 승인 park 와 held 중 이른 쪽) 아무도 창을 안 만져도 답이 나간다.
+  - **같은 tool·같은 인자로 다시 부르면 다시 붙는다**(재부착). 클라이언트가 먼저 끊은 경우(채널 닫힘)도 같다.
+  - 보관은 한 번에 하나: 붙어 있는 호출이 있는데 **다른** 호출이 오면 즉시 `paused` (두 클라이언트가 붙은 HTTP 등). 떼어진 호출이 있는데 다른 호출이 오면 **새 호출로 교체** — 에이전트가 넘어간 것.
+  - 즉시 답하는 `paused` 와 45초 `paused` 모두 "기다림 코드"라 반복해도 "Stop repeating" 힌트로 바뀌지 않는다. 즉시 답한 것은 타임라인에 `✗ … — paused` 로 남는다.
+  - 왜 즉시 `paused` 가 아닌가: 매 호출에 바로 에러를 주면 에이전트가 재시도를 촘촘히 돌린다(턴 낭비). park 하면 재시도 간격이 자연스럽게 ≤45초로 벌어지고, 사람이 금방 재개하면 에이전트는 그냥 "느린 호출" 로 경험한다.
+- **재개**: 붙어 있는 보관 호출은 **그때의 페이지에서** 실행된다(`run_now`) — ID 는 평소처럼 검사하므로 사람이 페이지를 바꿨다면 `stale_element` 나 "the person used the window" note 가 함께 온다. 결과의 trusted 블록 끝에 `note: the person paused you from the window; this call ran after they resumed` (브라우저가 쓴 문장만 — `add_note` 는 `&'static str` 만 받는다). 그 행동이 다시 승인을 필요로 하면 평소처럼 카드가 뜬다.
+  - **떼어진 호출(이미 `paused` 로 답했고 다시 안 불린 것)은 버린다** — 실행하지 않는다. 타임라인에 `… (not run: paused)`. 이유: 에이전트는 그 호출이 실패했다고 알고 이미 다른 판단(사용자에게 알림 등)을 했을 수 있다. 아무도 안 기다리는 행동을 재개 순간 몰래 실행하면 놀라운 일이 생긴다. (승인 카드의 늦은 Approve 를 실행하는 것과 다른 점: 그건 사람이 그 행동을 명시적으로 허락했다.)
+- **일시정지 순간 진행 중이던 것**:
+  - 창 모드의 비차단 `wait_for`(`page_wait`)는 즉시 `paused` 로 끝낸다. 이어 기다리게(보관) 하면 이미 흐른 시간 + 45초가 60초 컷을 넘을 수 있고, 그 결과는 어차피 사람의 페이지다. 그 뒤에 줄 서 있던 호출(`deferred`)은 보관 규칙을 탄다.
+  - 이미 떠 있는 **승인·넘겨받기 카드는 그대로 답할 수 있다**. 같은 호출의 재부착도 된다. 일시정지 중 사람이 Approve/Done 을 누르면 그 행동은 사람이 직접 허락한 것이므로 실행된다. 카드가 떠 있을 때 온 다른 호출은 `approval_pending` 이 아니라 일시정지 보관으로 간다 — 지금 진짜 이유는 일시정지라서.
+  - 사람이 답했는데 에이전트가 없던 결과(`unclaimed`)는 일시정지 중에도 같은 호출에 돌려준다 — 이미 끝난 일의 결과 전달이지 실행이 아니다.
+- **창 표시**:
+  - 크롬: 주소창 오른쪽 끝에 주황 알약 **"Agent paused"** (`overlay::paused_pill`). 크롬 높이를 바꾸지 않으려고 시안의 별도 배너 줄 대신 주소창 안에 둔다 — 아주 긴 URL 의 끝은 가려질 수 있다.
+  - **ID 배지 없음**: 페이지는 사람 것. 넘겨받기 카드가 떠 있으면 그 칸의 주황 테두리만 남긴다.
+  - 패널: 맨 위에 주황 카드 "Agent paused · you have the wheel" + 설명 + (보관 호출이 있으면) "1 call is waiting for you: click e26" + "It runs on resume, on the page as it is then (ids are checked first)." + 검은 **Resume agent** 버튼. 패널이 없는 좁은 창(700px 미만)에선 ⋮ 메뉴의 Resume 을 쓴다.
+  - 페이지는 사람이 평소대로 쓴다(사람 입력은 게이트 밖).
+- **세션 로그**: `paused` 는 기다림 응답이라 기록하지 않는다. 재개 후 실행된 호출은 평소처럼 한 줄 — 그 사이 사람이 문서를 바꿨으면 `person_moved: true` 라 재생은 그 단계에서 멈춘다(기록에 없는 사람 행동은 지어내지 않는다는 기존 규칙).
+- headless 에는 메뉴가 없으므로 일시정지도 없다.
+
+### 런타임 승인 모드
+
+- `Worker::set_approve_mode(mode)` → `AgentBrowser::set_approve_mode` → `AgentPolicy::set_approve`. **다음 에이전트 행동부터** 적용. `Options.agent.approve` 도 바꿔서, 엔진 패닉 후 새로 만든 브라우저(`new_browser`)도 지금 모드로 뜬다. 패널의 `approve:` 줄도 실시간 값.
+- **이미 떠 있는 승인 카드는 모드 변경으로 답하지 않는다**. 카드는 특정 행동에 대한 질문이고, 모드는 앞으로의 일반 규칙이다. Allow 로 바꿨다고 화면의 "POST …/signup" 을 사람이 보지도 않고 실행하거나, Refuse 로 바꿨다고 질문을 조용히 거절하면 사람의 명시적 답을 일반 설정이 가로채는 것 — 카드의 Approve / Deny 가 바로 옆에 있다. 카드는 사람이 누를 때까지 그대로.
+- 진행 중인 이동의 리다이렉트 hop 은 이동 시작 때 복사한 정책(`HopGuard`)으로 판정한다 — 이미 출발한 이동에는 새 모드가 안 닿는다 ("다음 행동부터" 의 정의에 맞음).
+- **거절 기억**: 모드가 바뀌면 규칙의 거절은 잊고 사람의 거절은 남긴다 ([정책 게이트](#정책-게이트)). 그래서 Refuse → Ask me 는 다시 묻고, 사람이 Deny 한 대상은 Allow 로 바꿔도 계속 거절된다(사람이 직접 하면 됨).
+- **Allow = `auto`** 라서 [자격증명 규칙](#자격증명-규칙)의 예외(로컬 개발 호스트에선 에이전트가 테스트 비밀번호를 입력)도 같이 켜진다. 기존 의미 그대로이며, 사람이 직접 고른 것이다.
+- **Ask me 는 창이 필요** — 창 모드에서만 메뉴가 있으니 항상 성립한다. (CLI 의 "`--approve ask` 는 `--window` 필요" 검사는 그대로.)
+- **세션 로그·재생**: 단계 줄에 그 행동이 **시작될 때의 모드**를 헤더와 다를 때만 `"approve":"auto"` 처럼 남긴다(`StepRecord.approve`, `begin_step` 에서 캡처 — 카드가 떠 있는 동안 모드를 바꿔도 그 단계는 시작 모드로 기록). 재생은 단계마다 `set_approve_mode(단계 값 또는 헤더 값)` 을 먼저 호출한다. 필드가 없는 기존 로그는 헤더 모드 그대로라 로그 버전은 1 유지.
 
 ## 결정성
 
@@ -406,6 +463,7 @@ G5 를 셋으로 나눈다: **G5a** 세션 로그 + `mb-mcp replay`(결정적 �
 - **`result.text`**: 행동 후 전체 문서의 보이는 텍스트 블록 (문구만 바뀐 회귀 — "1 of 3 done" — 도 잡게). 시계·난수처럼 저절로 바뀌는 문구가 있는 페이지는 재생 때 `--ignore-text`. `text` 가 없는 (이전) 로그는 텍스트를 비교하지 않는다.
 - **`result.elements`**: 행동 **후** 전체 문서(`Scope::Full`)의 상호작용 요소를 문서 순서로 `role "name"[ = "value" | = <N chars>][ [x]|[ ]]` 한 줄씩. 레이아웃·뷰포트·폰트와 무관한 것만 담아서, 창+시스템 폰트로 기록한 세션을 headless 로 재생해도 비교가 된다 (rect·스크롤·`settled` 는 넣지 않음). 비밀번호는 길이만 (관찰과 같은 규칙).
 - **텍스트**: `type` 의 `text` 는 남긴다 — 재생에 필요하고 `--log` 는 사용자가 켜는 산출물이다. 단 대상이 비밀번호 칸이면 `"<redacted>"`. (stderr 로그에는 여전히 어떤 타이핑 텍스트도 안 남긴다 — AGENTS.md 규칙과 구분.)
+- **`approve`** (2026-11-21): 사람이 창에서 승인 모드를 바꾼 뒤의 단계에만, 그 행동이 시작될 때의 모드(`auto`/`deny`/`ask`). 없으면 헤더의 `approve`. 재생은 단계마다 이 값으로 모드를 맞춘다 ([런타임 승인 모드](#런타임-승인-모드)).
 - 시각·소요 시간은 넣지 않는다 (같은 실행 두 번이 바이트 단위로 같아야 L6 결정성 테스트가 된다).
 - 파일은 소유자만 읽기·쓰기(0600) — 에이전트가 친 텍스트와 본 페이지가 들어 있다. 대상 칸을 확인 못 한 `type` 은 비밀번호일 수도 있으므로 `<redacted>` (fail closed).
 
@@ -674,6 +732,8 @@ claude mcp add --scope project mini-browser -- /abs/path/to/target/release/mb-mc
 | `--preview PATH` | — | 창을 열지 않고 관전 창 한 프레임을 PNG 로 렌더하고 종료 (`--start-url` 후). 오버레이 확인·문서 이미지용 |
 | `--preview-click ID` (반복) | — | `--preview` 전에 클릭할 요소 |
 | `--preview-scale N` | `1` | `--preview` 의 기기 배율 (2 = Retina). 창과 같은 경로: CSS px 레이아웃 후 확대 |
+| `--preview-menu` | — | `--preview` 에 ⋮ 메뉴를 연 상태로 |
+| `--preview-pause` | — | `--preview-click` 전에 에이전트를 일시정지 — 클릭들이 재개를 기다리는 일시정지 화면 |
 | `--viewport WxH` | `1280x800` | 페이지 뷰포트 크기 (크롬 UI 102px 는 별도로 위에 붙는다) |
 | `--start-url URL` | `about:blank` | 시작 페이지 |
 | `--allow-origin ORIGIN` (반복) | 없음 | 이동 가능한 origin 화이트리스트. 지정하면 목록 밖 이동은 즉시 `navigation_blocked`. 미지정이면 모든 origin 가능하되 origin 이동은 승인 대상 |
@@ -749,6 +809,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | **G5a** 기록·재생 ✅ | `session_log.rs`(`--log`: 헤더 + 최종 결과마다 한 줄, target role·name·nth, 결과 요소 목록, 비밀번호 칸 입력 `<redacted>`, `prompts::fingerprint`), `replay.rs`(`mb-mcp replay FILE [--secret NAME=VALUE]`: headless·가상 시계, `worker::execute` 그대로, 요소 재해석, 기록대로 승인 재현, 넘겨받기는 `AgentBrowser::fill_as_person` 로 사람 경로 입력, 회귀 지점 diff, exit 0/1/2/3) | **실사용 확인 (2026-11-17)**: 실제 Claude Code 세션 10단계 기록 → 재생 10/10 일치, 페이지 변경 시 회귀 지점 보고 | session_log 2 · replay 5(일치, 회귀 지점, 문구만 변경, **L6 같은 실행 = 같은 바이트**, diff) · 창 세션(승인+비밀번호) 재생 1 · 실 바이너리 e2e 1 · CLI 1 (699 green) |
 | **G5b** 재생 뷰 ✅ | `replay_window.rs` + `overlay::replay_panel` ([재생 뷰](#재생-뷰-g5b-mb-mcp-replay-file---window)): `Replayer`(열기·한 단계·처음부터·n 단계로, headless 재생과 공유), Next(Enter)/Back/Run all/Restart, 다음 대상 주황 테두리, 단계 목록 ✓✗⏸▶·, 마지막 단계 결과(일치 / diff 빨강·초록), 페이지 읽기 전용(스크롤만), 창·미리보기는 시스템 폰트, `--preview PATH --preview-steps N` | 실제 창 클릭은 사용자 확인 필요 | ![재생 뷰](images/g5b-replay-window.png) ![회귀 지점](images/g5b-replay-regression.png) — Replayer 뒤로·다시 같은 상태 1 · 패널 1 · 읽기 전용 입력 1 · 보안 2 (704 green) |
 | **G5c** `mb-eval` ✅ | [평가](#평가-g5c-mb-mcp-eval): `eval.rs`(시나리오 `success`/`forbid` 판정, `prompts` 해시별 집계, `--json`, `--min-success`), `--log DIR/`(실행마다 파일), 시나리오 `eval/scenarios/{todo-add,about-injection}.json`, `scripts/eval-run.sh`(claude -p N회) | **첫 기준선 (2026-11-20, Claude Code 세션 6개, prompts `02a705f5`)**: todo-add 3/3 (단계 3.7 ± 0.5 — 2회는 Add 클릭, 1회는 `type … submit`), about-injection 3/3 (2.0 ± 0, 인젝션 문구를 따른 실행 0, 안전 위반 0) | 판정·집계 3 · CLI 1 · `--log DIR/` 1 · 빈 실행 안 남김 1 (710 green). 실 바이너리 모의 실행 2/3 + `--min-success` exit 1 확인 |
+| **D1** ⋮ 메뉴 1차 ✅ (디자인 트랙) | [⋮ 메뉴](#-메뉴-사람의-조종석): `overlay::{menu, paused_pill, paused_card}`, `window_mode::route_menu_input`, `Worker::{pause, resume, held_call, set_approve_mode, approve_mode}`, 에러 코드 `paused`, `AgentBrowser::set_approve_mode`, `AgentPolicy::{set_approve, record_rule_refusal}`(거절 기억 두 갈래), 세션 로그 단계별 `approve` + 재생 적용, 서버 instructions 규칙 4 에 `paused`, `--preview-menu` / `--preview-pause` | 시안의 나머지 항목(Allowed sites 편집·Record·What the agent sees·Disconnect·Zoom·패널 토글)은 회색 표시만. 단축키 없음. **실제 창 클릭은 사용자 확인 필요** (GUI) | ![⋮ 메뉴](images/menu-open.png) ![일시정지](images/agent-paused.png) — Worker 6 (보관·재개 실행·45초 `paused`·재부착·떼어진 호출 버림·wait_for 종료·카드 유지·모드 전환·로그+재생) · 정책 1 (모드 변경 시 거절 기억) · 메뉴·알약·패널 5 · 클릭 라우팅 1 (733 green) |
 
 - G4 의 게이트 **판정 로직**은 G1 에서 입력 출처 태그와 함께 먼저 들어간다 (`--approve auto|deny` 만). G4 는 사람에게 묻는 UI(`ask`)·넘겨받기·elicitation 을 붙이는 단계.
 - `<select>` 는 G1 이후 필요해질 때 (`select(id, option)` tool 추가).
@@ -766,6 +827,14 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-11 | G0: 관찰은 layout 트리에서 rect 를 직접 수집, `LinkTarget` 미사용 | 모든 노드가 LayoutBox 를 가져서 별도 인라인 수집 불필요 (검토 때 오판 정정) |
 | 2026-11-11 | G0: `text:` 에 링크 텍스트 포함, 폼 크롬 제외, 이름 없는 컨트롤은 `field=` | 링크를 빼면 문장이 끊김 ("or read the ."). 라벨·버튼은 요소 목록과 중복. 이름 없는 `select` 는 `name=""` 만으론 용도를 알 수 없음 |
 | 2026-11-14 | G4: 승인은 "보관 후 재개" — 게이트가 요청을 보관하고 tool 응답을 park, 카드 답에 따라 재개/거절 | 창 루프 안에서 에이전트 행동이 동기 실행되므로 그 자리에서 기다리면 창이 멈춤. 승인된 요청은 에이전트 출처로 시작해 hop 게이트 유지 |
+| 2026-11-21 | ⋮ 메뉴 1차 = 일시정지 + 런타임 승인 모드. 나머지 시안 항목은 회색 표시, 시각 디자인 전면 적용은 다음 작업 | 관전하는 사람의 "멈춤" 버튼이 가장 먼저 필요. 시안 전체를 한 번에 적용하면 기능 변화와 스타일 변화가 한 diff 에 섞임 |
+| 2026-11-21 | 메뉴·패널 조작(`overlay::Control`)은 사람 전용 — `worker::Request` 에 대응 변형 없음 | 에이전트가 스스로 일시정지를 풀거나 승인을 Allow 로 바꾸면 정책 게이트가 무의미. 규칙이 아니라 구조로 막음 |
+| 2026-11-21 | 일시정지 중 호출은 즉시 거절이 아니라 park: 45초에 `paused`, 같은 호출 재부착, 재개 시 붙어 있는 호출만 실행하고 떼어진 호출은 버림. `observe`·`screenshot` 도 멈춤 | `still_waiting` 과 같은 이유(HTTP 60초 컷)로 잠김 없이, 즉시 에러의 촘촘한 재시도 루프 없이. 떼어진 호출을 재개 때 실행하면 이미 실패로 안 에이전트 몰래 행동이 일어남. 사람이 페이지를 쓰는 동안 읽기도 멈추는 게 "멈춤" 의 기대 |
+| 2026-11-21 | 일시정지 순간의 비차단 `wait_for` 는 즉시 `paused` 로 끝냄, 떠 있는 승인·넘겨받기 카드는 계속 답할 수 있음 | wait_for 를 보관으로 옮기면 이미 흐른 시간 + 45초가 60초를 넘을 수 있음. 카드는 사람이 이미 보고 있는 질문이라 일시정지가 막을 이유가 없음 |
+| 2026-11-21 | 승인 모드 변경은 다음 행동부터, 이미 떠 있는 카드는 답하지 않음 | 카드는 특정 행동에 대한 질문, 모드는 일반 규칙 — 일반 설정이 사람의 명시적 답을 가로채면 안 됨. 카드의 Approve/Deny 가 바로 옆에 있음 |
+| 2026-11-21 | 거절 기억을 사람의 거절 / 규칙의 거절로 나누고, 모드가 바뀌면 규칙의 거절만 잊음 | `deny` 모드가 거절을 기억에 넣으므로, 안 나누면 Refuse → Ask me 로 바꿔도 묻지 않고 거절됨. 사람의 거절은 우회·스팸 방지 목적이 그대로라 유지 |
+| 2026-11-21 | 세션 로그 단계에 시작 시점 승인 모드(헤더와 다를 때만), 재생이 단계마다 적용. 로그 버전 1 유지 | 모드를 바꾼 세션을 헤더 모드로 재생하면 Allow 로 성공한 단계가 `approval_denied` 로 갈라짐. 필드 생략 = 헤더라 기존 로그 호환 |
+| 2026-11-21 | 일시정지 표시는 크롬 높이를 바꾸지 않음: 주소창 안 알약 + 패널 카드 (시안의 배너 줄 대신) | `CHROME_HEIGHT` 는 에이전트 좌표·스크린샷 자르기·관찰 뷰포트에 묶여 있어 표시 하나 때문에 흔들 수 없음. 배너는 디자인 적용 작업에서 다시 검토 |
 | 2026-11-21 | 인라인 런은 레이아웃 트리에 익명 블록 래퍼 없이 펼쳐 넣는다 | 관찰·hit-test·`index` 가 레이아웃 박스 ↔ NodeId 로 걷고 일부는 스타일 자식과 순서로 짝지음. 래퍼를 넣으면 그 걷기를 전부 고쳐야 하는데 얻는 건 없음 (런의 높이는 배치 때만 필요) |
 | 2026-11-21 | `checked`/`selected` 속성 setter 는 속성(=현재 상태)에 쓴다 (스펙은 속성 = 기본값) | 이 엔진은 클릭 토글도 속성에 기록하고 관찰·폼 제출이 속성을 읽음. 기본값/현재값 분리는 필요해질 때 |
 | 2026-11-21 | JS 래퍼는 노드마다 하나 (NodeId → 래퍼 캐시) | Preact 가 노드 expando(`dom.l`)로 이벤트를 찾음, 프레임워크는 `===` 로 노드 비교. 문서 안 NodeId 재사용 없음 + 문서마다 새 런타임이라 무효화 불필요 |

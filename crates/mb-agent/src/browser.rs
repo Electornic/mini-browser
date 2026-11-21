@@ -743,6 +743,16 @@ impl AgentBrowser {
         Ok(observation)
     }
 
+    /// The person changed the approval mode in the observation window
+    /// (person-only: mb-mcp exposes no tool for it). Applies from the next
+    /// action — an action already held for approval keeps waiting for its
+    /// answer. Also governs the local-test-site password exception
+    /// (`Auto` only).
+    pub fn set_approve_mode(&mut self, approve: ApproveMode) {
+        self.config.approve = approve;
+        self.state.agent_policy.set_approve(approve);
+    }
+
     /// The action waiting for a person's answer (`ApproveMode::Ask`), as
     /// shown to them, e.g. "POST http://localhost:3000/signup".
     pub fn pending_approval(&self) -> Option<&str> {

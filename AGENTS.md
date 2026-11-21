@@ -48,17 +48,17 @@
 │
 ├── crates/mb-mcp      (binary [[bin]] mb-mcp)  rmcp 3.x, tokio, hyper, image(png), base64, arboard
 │   - main             tokio 스레드 = rmcp stdio 또는 HTTP 서버, 메인 스레드 = 브라우저
-│   - cli              --viewport / --start-url / --allow-origin / --approve auto|deny|ask / --clock / --seed / --window / --http --port / --preview
+│   - cli              --viewport / --start-url / --allow-origin / --approve auto|deny|ask / --clock / --seed / --window / --http --port / --preview(-menu/-pause)
 │   - http             --http: 127.0.0.1 바인딩, Bearer 토큰·Origin·경로 게이트 → rmcp StreamableHttpService
 │   - prompts          서버 instructions + tool 설명 (LLM 이 읽는 텍스트, 영어)
-│   - worker           Job 처리, repeat_count, 패닉 시 재생성, 창 모드의 park(승인·넘겨받기 대기)/answer
+│   - worker           Job 처리, repeat_count, 패닉 시 재생성, 창 모드의 park(승인·넘겨받기 대기)/answer, 일시정지 보관(held)·재개, 런타임 승인 모드
 │   - server           #[tool_router] tool 10개 → worker::Request, 결과 → CallToolResult
-│   - window_mode      --window: 메인 스레드 winit 루프 + 프레임마다 Job 처리, --preview PNG
+│   - window_mode      --window: 메인 스레드 winit 루프 + 프레임마다 Job 처리, ⋮ 메뉴 클릭 라우팅, --preview PNG
 │   - session_log      --log: 세션 로그(JSONL) 기록 형식 — target·결과 요소 목록·redact
 │   - replay           mb-mcp replay FILE: Replayer(한 단계씩) — worker::execute 로 결정적 재생 + 회귀 지점 diff
 │   - replay_window    replay --window: 단계별 재생 뷰 (Next/Back/Run all/Restart), --preview PNG
 │   - eval             mb-mcp eval SCENARIO LOGS: 시나리오 판정 + 성공률·에러·실패 지점·안전 위반 집계 (에이전트는 안 돌림)
-│   - overlay          ID 배지·대상 테두리·에이전트 패널 (DisplayCommand 순수 함수)
+│   - overlay          ID 배지·대상 테두리·에이전트 패널·⋮ 메뉴·일시정지 표시 (DisplayCommand 순수 함수)
 │
 └── crates/mb-shell    (lib + [[bin]] mb-shell)  anyhow, softbuffer, winit
     - lib.rs           pub mod window — mb-mcp --window 도 같은 창 코드를 씀
@@ -100,7 +100,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 720 (workspace 합계, 2026-11-21 호환성 트랙 1차 — 인라인 줄 묶기·IDL 속성 반사·Preact 실증). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 733 (workspace 합계, 2026-11-21 디자인 트랙 1차 — ⋮ 메뉴의 일시정지·런타임 승인 모드). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -215,6 +215,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - **네비게이션 fetch 는 리다이렉트를 직접 따라간다**: 문서 로드는 `navigation::load_remote_document_guarded`(내부적으로 `net::fetch_without_redirects`)를 쓰고 hop 마다 게이트를 묻는다. 네비게이션에 자동 리다이렉트 fetch(`net::fetch` / `fetch_with_request`)를 쓰면 게이트가 첫 URL 만 보게 된다. (서브리소스 — CSS/이미지/스크립트 — 는 이동이 아니라 해당 없음.)
 - **이동은 반드시 정책 게이트를 지난다**: 새 이동 경로(`location.href =`, `window.open`, meta refresh 등)를 추가할 때 `navigate` / `navigate_to_href` / `try_submit_form` 과 같은 `policy::check` 를 통과시킨다. 우회 경로를 만들지 말 것.
 - **에이전트 전용 DOM 조작 API 금지**: 에이전트 행동은 합성 `WindowInput` 으로만. 편의를 위해 DOM 을 직접 바꾸는 단축로를 만들지 않는다.
+- **사람의 조종은 MCP 로 열지 않는다**: 일시정지·재개·승인 모드 변경(`overlay::Control` → `Worker::{pause, resume, set_approve_mode}`)은 창 입력 전용. `worker::Request`·MCP tool 에 대응하는 경로를 만들지 말 것 — 에이전트가 스스로 멈춤을 풀거나 승인을 Allow 로 바꿀 수 있게 된다.
 - **`WindowInput::from_agent` 는 mb-agent 만 켠다**: 셸(사람 입력)은 항상 false. 정책 게이트는 이 플래그로 판정 대상을 가른다.
 - **trusted 블록의 `note:` 는 브라우저만 쓴다**: `Observation::notes` 에는 우리가 만든 문장만. 페이지 문자열(이름·텍스트·URL 일부라도)을 넣으면 위조 방지가 깨진다.
 - **비밀번호 값은 어디에도 남기지 않는다**: 관찰(길이만)·로그(`<redacted>`)·화면(마스킹). 에이전트가 입력한 텍스트도 stderr 로그에 남기지 않는다(`worker::Request` 의 Debug 가 가림), URL 로그는 쿼리 제외. 예외는 사용자가 켜는 `--log` 세션 로그뿐 — 재생에 필요해 텍스트를 남기되 비밀번호 칸 입력은 `<redacted>`, 값은 재생 때 `--secret` 으로만.
