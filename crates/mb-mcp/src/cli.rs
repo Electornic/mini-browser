@@ -44,6 +44,9 @@ OPTIONS:
     --preview-menu          Show the ⋮ menu open in --preview
     --preview-pause         Pause the agent before --preview-click (shows the
                             paused window, the clicks waiting to resume)
+    --preview-agent-view SCOPE
+                            Show the What-the-agent-sees viewer in --preview:
+                            on-screen (the last result) or whole-page
     -h, --help              Print this help (to stderr)
 
 REPLAY (a log runs like a script — replay only logs you trust):
@@ -95,12 +98,21 @@ pub struct Options {
     pub preview_menu: bool,
     /// `--preview-pause`: the agent paused before the preview clicks.
     pub preview_pause: bool,
+    /// `--preview-agent-view on-screen|whole-page`: the viewer open.
+    pub preview_agent_view: Option<PreviewView>,
     /// `--http`: serve MCP over HTTP on this loopback port (G3b).
     pub http_port: Option<u16>,
     /// Filled in by `main` once the HTTP listener is bound.
     pub attach: Option<crate::http::Attach>,
     /// `--log PATH`: session log for `mb-mcp replay` (G5a).
     pub log: Option<std::path::PathBuf>,
+}
+
+/// Which "What the agent sees" scope `--preview-agent-view` opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewView {
+    OnScreen,
+    WholePage,
 }
 
 /// `mb-mcp replay FILE ...`
@@ -265,6 +277,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut preview_scale = 1.0_f32;
     let mut preview_menu = false;
     let mut preview_pause = false;
+    let mut preview_agent_view = None;
     let mut http = false;
     let mut port: Option<u16> = None;
     let mut args = args.into_iter().peekable();
@@ -339,6 +352,18 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "--preview-click" => preview_clicks.push(value("--preview-click")?),
             "--preview-menu" => preview_menu = true,
             "--preview-pause" => preview_pause = true,
+            "--preview-agent-view" => {
+                let raw = value("--preview-agent-view")?;
+                preview_agent_view = Some(match raw.as_str() {
+                    "on-screen" => PreviewView::OnScreen,
+                    "whole-page" => PreviewView::WholePage,
+                    _ => {
+                        return Err(format!(
+                            "--preview-agent-view expects on-screen or whole-page, got {raw:?}"
+                        ));
+                    }
+                });
+            }
             "--preview-scale" => {
                 let raw = value("--preview-scale")?;
                 preview_scale = raw
@@ -373,6 +398,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         preview_scale,
         preview_menu,
         preview_pause,
+        preview_agent_view,
         http_port: http.then(|| port.unwrap_or(DEFAULT_PORT)),
         attach: None,
         log,

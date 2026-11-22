@@ -103,6 +103,24 @@ pub fn run<F>(
 where
     F: FnMut(&mut Frame<'_>, &WindowInput, &WakeHandle) -> bool,
 {
+    run_with(title, initial_width, initial_height, true, build_scene)
+}
+
+/// `run`, choosing what Escape does: `escape_quits` closes the window (the
+/// shell); otherwise it arrives as `WindowInput::escape_pressed` — for an
+/// embedder whose window holds a session (mb-mcp's observation window
+/// closes its own dialogs with it, and an Escape must not end the agent's
+/// browser).
+pub fn run_with<F>(
+    title: &str,
+    initial_width: usize,
+    initial_height: usize,
+    escape_quits: bool,
+    build_scene: F,
+) -> Result<()>
+where
+    F: FnMut(&mut Frame<'_>, &WindowInput, &WakeHandle) -> bool,
+{
     let event_loop = EventLoop::new().context("create event loop")?;
     // `Wait` lets winit block on the next real event when no animation
     // is pending. The shell explicitly schedules redraws via
@@ -121,6 +139,7 @@ where
         build_scene,
         wake,
     );
+    app.escape_quits = escape_quits;
     event_loop.run_app(&mut app).context("run event loop")?;
     if let Some(err) = app.error.take() {
         return Err(err);
@@ -141,6 +160,7 @@ where
     pending: PendingInput,
     last_left_down: bool,
     last_wants_redraw: bool,
+    escape_quits: bool,
     error: Option<anyhow::Error>,
 }
 
@@ -158,6 +178,7 @@ struct PendingInput {
     page_up_pressed: bool,
     page_down_pressed: bool,
     tab_pressed: bool,
+    escape_pressed: bool,
     mouse_position: Option<(f32, f32)>,
     left_held: bool,
     modifiers: ModifiersState,
@@ -182,8 +203,8 @@ impl PendingInput {
             left_mouse_pressed: self.left_held && !last_left_down,
             left_mouse_held: self.left_held,
             tab_pressed: std::mem::take(&mut self.tab_pressed),
-            // Escape quits the shell (below), so it never reaches the page.
-            escape_pressed: false,
+            // Only set when Escape doesn't quit (`run_with`).
+            escape_pressed: std::mem::take(&mut self.escape_pressed),
             // Everything the window delivers came from the person at it.
             from_agent: false,
         }
@@ -207,6 +228,7 @@ where
             // The first frame is unconditionally requested from `resumed`,
             // and that frame's closure reports back what to do next.
             last_wants_redraw: false,
+            escape_quits: true,
             error: None,
         }
     }
@@ -345,10 +367,11 @@ where
         let repeat = event.repeat;
 
         match &event.logical_key {
-            Key::Named(NamedKey::Escape) if !repeat => {
+            Key::Named(NamedKey::Escape) if !repeat && self.escape_quits => {
                 event_loop.exit();
                 return;
             }
+            Key::Named(NamedKey::Escape) if !repeat => self.pending.escape_pressed = true,
             Key::Named(NamedKey::Enter) if !repeat => self.pending.enter_pressed = true,
             // Backspace: minifb used `KeyRepeat::Yes`, so we accept repeats too.
             Key::Named(NamedKey::Backspace) => self.pending.backspace_pressed = true,

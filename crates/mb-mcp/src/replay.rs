@@ -669,6 +669,7 @@ mod tests {
             preview_scale: 1.0,
             preview_menu: false,
             preview_pause: false,
+            preview_agent_view: None,
             http_port: None,
             attach: None,
             log: Some(path.to_path_buf()),

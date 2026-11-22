@@ -1,6 +1,6 @@
 # Concept — 에이전트용 브라우저
 
-> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ · G5c 평가 ✅ (2026-11-20)** · 호환성 트랙 시작 (2026-11-21): 인라인 줄 묶기 ✅ · IDL 속성 반사 ✅ · Preact 실증 ✅ · 디자인 트랙 시작 (2026-11-21): [⋮ 메뉴](#-메뉴-사람의-조종석) 1차 — 일시정지·런타임 승인 모드 ✅ · [시안 적용](#디자인-적용) (2026-11-22) ✅ · 다음 = 시안의 새 기능(기록 토글·What the agent sees·허용 사이트 편집 등) / 호환성 잔여 갭(spa-roadmap) / 열린 결정 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
+> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ · G5c 평가 ✅ (2026-11-20)** · 호환성 트랙 시작 (2026-11-21): 인라인 줄 묶기 ✅ · IDL 속성 반사 ✅ · Preact 실증 ✅ · 디자인 트랙 시작 (2026-11-21): [⋮ 메뉴](#-메뉴-사람의-조종석) 1차 — 일시정지·런타임 승인 모드 ✅ · [시안 적용](#디자인-적용) (2026-11-22) ✅ · 메뉴 새 기능 1차 — [What the agent sees](#에이전트가-보는-것-what-the-agent-sees)·[기록 토글](#세션-기록-토글-record-this-session) (2026-11-22) ✅ · 다음 = 넘겨주기·거절 잊기 → 허용 사이트 편집·다크·좁은 창 / 호환성 잔여 갭(spa-roadmap) / 열린 결정 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
 
 ## 한 줄
 
@@ -336,11 +336,13 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 - **그리는 곳**: `overlay::menu` (순수 함수, `DisplayCommand` + 클릭 영역 `Button` + 메뉴 전체 rect). ⋮ 버튼(`chrome::menu_button_rect(page_width)`) 바로 아래, 버튼 오른쪽 끝에 맞춰 페이지 위에 겹쳐 그린다 (폭 300, 좁은 페이지에선 화면 안으로 당김). 색은 [디자인 적용](#디자인-적용) 이후 `palette` 토큰을 쓴다 (폭 330, 행 40, 그림자 없음 — 시안 원칙 "엔진이 그릴 수 있는 것만").
 - **항목**:
   - `AGENT` 섹션: **Pause the agent / Resume the agent** (한 줄이 상태에 따라 바뀜, 파란 일시정지 아이콘 / 재생 아이콘), "Before POST or other origins" 아래 **Ask me / Refuse / Allow** 세그먼트(선택된 칸은 흰 바탕·굵게).
-  - 아직 안 만든 항목은 회색으로만 표시(클릭 영역 없음): Allowed sites(현재 값 `any`/origin), Record this session, What the agent sees (`soon`). 메뉴가 그 기능들이 들어갈 자리라는 걸 보여 주되 누를 수는 없게.
+  - 아직 안 만든 항목은 회색으로만 표시(클릭 영역 없음): Allowed sites(현재 값 `any`/origin). 메뉴가 그 기능이 들어갈 자리라는 걸 보여 주되 누를 수는 없게.
+  - 2026-11-22 추가 (D3): `RECORD` 섹션 **Record this session / Stop recording** ([세션 기록 토글](#세션-기록-토글-record-this-session)), `VIEW` 섹션 **What the agent sees** ([에이전트가 보는 것](#에이전트가-보는-것-what-the-agent-sees)). 섹션 머리말·구분선은 시안 보드 2b 그대로.
   - 시안의 단축키(⌘.)·Disconnect·Zoom·About 등은 뺐다 — `mb_shell` 창이 수식키 조합을 아직 페이지 입력으로만 넘기고, 나머지는 기능이 없다.
 - **클릭 라우팅** (`window_mode::route_menu_input`, 순수 함수라 단위 테스트): ⋮ 버튼 클릭 = 열기/닫기. 열린 동안의 클릭은 **페이지·패널에 절대 안 간다**: 항목이면 실행, 메뉴 안 빈 곳이면 무시, 바깥이면 닫기. 메뉴 위에 마우스가 있으면 페이지 hover 도 끈다. ⋮ 클릭 자체도 페이지(`BrowserState`)에 넘기지 않아 `menu (todo)` 상태 문구가 안 뜬다.
-- **열림 유지**: Pause/Resume 은 명령이라 누르면 닫힌다. 승인 모드 세그먼트는 컨트롤이라 열린 채로 남아 바뀐 선택을 보여 준다.
-- **사람 전용**: 메뉴·패널의 조작은 `overlay::Control`(Pause / Resume / Approve(mode)) → `Worker::{pause, resume, set_approve_mode}` 로만 간다. `worker::Request` 에 대응하는 변형이 없고 MCP tool 10개 중 어느 것도 여기에 닿지 않는다 — 에이전트가 스스로 일시정지를 풀거나 승인 모드를 Allow 로 바꾸는 경로가 구조적으로 없다. 조작마다 stderr 에 한 줄(`[mb-mcp] the person paused the agent` 등).
+- **열림 유지**: Pause/Resume·Record/Stop 은 명령이라 누르면 닫힌다(Record 가 실패하면 열린 채 "couldn't start" 를 보여 줌). 승인 모드 세그먼트는 컨트롤이라 열린 채로 남아 바뀐 선택을 보여 준다. What the agent sees 는 메뉴를 닫고 뷰어를 연다.
+- **Escape**: 메뉴가 열려 있으면 닫기만 하고 페이지엔 안 간다. 관전 창은 이제 Escape 로 **창이 꺼지지 않는다** — `mb_shell::window::run_with(…, escape_quits: false, …)` 로 Escape 를 `WindowInput::escape_pressed` 로 받는다(`mb-shell` 단독 실행과 재생 창은 그대로 Escape = 종료). 에이전트 세션을 쥔 창이 키 하나로 닫혀 이후 호출이 전부 `browser_closed` 가 되던 함정이기도 했다. 메뉴·뷰어가 없을 때 Escape 는 사람의 키 입력으로 페이지에 간다.
+- **사람 전용**: 메뉴·패널의 조작은 `overlay::Control`(Pause / Resume / Approve(mode) / StartRecording / StopRecording) → `Worker::{pause, resume, set_approve_mode, start_recording, stop_recording}` 로만 간다. 뷰어 조작은 `overlay::WindowAction` — 창 안에서 끝나고 worker 에도 안 간다. `worker::Request` 에 대응하는 변형이 없고 MCP tool 10개 중 어느 것도 여기에 닿지 않는다 — 에이전트가 스스로 일시정지를 풀거나 승인 모드를 Allow 로 바꾸는 경로가 구조적으로 없다. 조작마다 stderr 에 한 줄(`[mb-mcp] the person paused the agent` 등).
 
 ### 일시정지
 
@@ -377,6 +379,42 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 - **Ask me 는 창이 필요** — 창 모드에서만 메뉴가 있으니 항상 성립한다. (CLI 의 "`--approve ask` 는 `--window` 필요" 검사는 그대로.)
 - **세션 로그·재생**: 단계 줄에 그 행동이 **시작될 때의 모드**를 헤더와 다를 때만 `"approve":"auto"` 처럼 남긴다(`StepRecord.approve`, `begin_step` 에서 캡처 — 카드가 떠 있는 동안 모드를 바꿔도 그 단계는 시작 모드로 기록). 재생은 단계마다 `set_approve_mode(단계 값 또는 헤더 값)` 을 먼저 호출한다. 필드가 없는 기존 로그는 헤더 모드 그대로라 로그 버전은 1 유지.
 
+### 에이전트가 보는 것 (What the agent sees)
+
+> 2026-11-22 D3. 시안 보드 8 왼쪽. "왜 저걸 눌렀지?" 에 가장 빨리 답하는 길 — 에이전트가 **실제로 받은 글자**를 사람이 그대로 본다.
+
+![에이전트가 보는 것](images/agent-view.png) ![긴 관찰 — 스크롤과 남은 줄 수](images/agent-view-long.png)
+
+- **열기·닫기**: ⋮ → `VIEW` → What the agent sees. 닫기는 × 버튼, **Escape**, 뷰어 바깥 클릭. 뷰어는 **모달**이다 — 열린 동안 클릭·키·휠·hover 가 페이지·패널·메뉴에 하나도 안 간다(`window_mode::route_viewer_input`, 순수 함수). 패널의 Approve 를 누르려던 클릭도 뷰어를 닫기만 한다 — 겹친 화면에서 누른 클릭이 다른 데서 실행되는 일을 막는 메뉴와 같은 규칙.
+- **On screen** (기본): `Worker::seen()` — 에이전트가 **마지막으로 받은 결과**의 두 블록(`# browser (trusted)` / `# page content (untrusted, …)`)을 **글자 그대로**. 관찰을 담은 응답이 채널로 실제 전달됐을 때만 갱신한다(`Worker::deliver`: `send` 가 성공해야 — 클라이언트가 이미 끊은 응답은 에이전트가 못 본 것). 에러에 관찰이 붙어 있으면 그 관찰 + 출처 줄에 코드("click e26 · approval_denied"). `still_waiting`·`paused`·스크린샷처럼 관찰이 없는 응답은 이전 것을 그대로 둔다 — 에이전트가 본 마지막 페이지 글자는 여전히 그것이라서. 헤드리스 `process`(미리보기 포함)도 같은 자리에 남긴다.
+  - 블록 머리줄(`# browser (trusted)` 등)도 **지우지 않는다**. 시안은 라벨만 보이고 머리줄을 뺐지만, 이 뷰어의 존재 이유가 "정확히 같은 글자"라서 라벨("Browser — trusted, written by mini-browser" / "Page content — untrusted, written by <origin>")은 상자 **밖에** 따로 단다. Copy 도 에이전트가 받은 `to_text` 와 같은 `browser + "\n" + page`.
+- **Whole page**: 지금 페이지 전체를 관찰 형식으로 — `AgentBrowser::full_snapshot()`(= `observe_raw`, `Scope::Full`, 요소 상한 없음, 글자 100k). **`observe` 를 절대 쓰지 않는다**: `observe` 는 ID 를 발급하고(`issued` — 에이전트가 안 본 ID 가 유효해져 stale 가드가 무너짐), console·dialog 기록을 비우고(에이전트의 다음 결과에 실려야 할 것이 사라짐), `changed_by_person` 기준점(`last_reported`)을 옮긴다. 스냅샷은 그 셋 다 안 건드린다 — 테스트 `whole_page_shows_everything_but_issues_no_ids`(뷰포트 밖 버튼 ID 를 뷰어로 본 뒤 에이전트가 누르면 `stale_element`). 출처 줄에 "not sent to the agent. Ids it hasn't been shown aren't valid for it yet."
+  - 다시 찍는 때: 뷰어가 Whole page 일 때 (문서 세대, 에이전트가 마지막 받은 결과) 가 바뀌면. 매 프레임 찍지 않는 이유 — 큰 페이지에서 full 관찰은 프레임당 수 ms. 뷰어가 열린 동안 사람은 페이지를 못 만지므로 바뀌는 건 에이전트 행동(같은 키에 잡힘)과 페이지 스크립트(타이머로 글자만 바뀌는 것 — 놓칠 수 있음, 토글을 다시 누르면 지금 것)뿐.
+- **아무것도 에이전트에게 안 간다**: 뷰어는 `Worker` 의 읽기 전용 접근(`seen`)과 스냅샷만 쓴다. `worker::Request`·MCP tool 어디에도 대응이 없다.
+- **긴 글**: 상자 폭에 맞춰 mono 글자 수로 **강제 줄바꿈**(mono 라 글자 수 = 폭, 공백 없는 URL 도 잘림 없이 다음 줄로). 본문은 행 단위로 스크롤 — 휠(`scroll_y` 한 칸 24px ≈ 1.3행), ↑↓ 한 행, PageUp/Down 한 화면. 끝을 넘으면 마지막 줄이 보이게 당긴다(`max_scroll`). 바닥 줄에 **"… N more lines — scroll"** / "N lines above" (텍스트 줄 수만 셈 — 라벨·여백 행 제외). 상자는 행마다 바탕을 칠해 이어 붙이므로 스크롤로 잘려도 어색하지 않다(위·아래 끝 행만 둥근 모서리).
+- **그리는 곳**: `overlay::agent_view(AgentViewInfo, page_area) -> AgentView { commands, buttons, rect, scroll, page_rows }`(순수). 페이지 영역 가운데 최대 760 폭, 위아래 16 여백. 머리: 눈 아이콘 + 제목, **On screen / Whole page** 세그먼트(메뉴의 승인 모드와 같은 모양), Copy(복사하면 "Copied", 받은 게 없으면 회색), ×. trusted 상자는 agent tint/border(파랑 = 브라우저가 쓴 것), untrusted 상자는 panel 회색/line.
+- **시안과 다른 점**: 시안의 `⚠ password`·`⚠ submits POST` 같은 꾸밈은 관찰 형식에 없는 것이라 안 붙였다(보여 주는 건 실제 글자). 시안 오른쪽 "Allowed sites" 대화상자는 다음 작업.
+
+### 세션 기록 토글 (Record this session)
+
+> 2026-11-22 D3. 시안 보드 7 의 "REC 02:41" 알약 + 기록 카드, 보드 2b 의 Record 항목. `--log` 를 실행 중에 사람이 켜고 끈다.
+
+![기록 중](images/recording.png) ![기록 중 메뉴](images/recording-menu.png)
+
+- **사람 전용**: `Control::{StartRecording, StopRecording}` → `Worker::{start_recording, stop_recording}`. `worker::Request`·MCP tool 에 대응이 없다(일시정지·승인 모드와 같은 규칙) — 에이전트가 자기 기록을 끄거나(감사 흔적 지우기) 켤 수 없다.
+- **켜기** = `--log DIR/` 와 같은 규칙: 새 `run-<pid>-<n>.jsonl`, `create_new` 원자적 생성(이미 있으면 다음 번호), 폴더 0700·파일 0600·`O_NOFOLLOW`, **첫 줄은 에이전트의 다음 호출 때**(lazy — 켜고 아무 일 없이 끄면 파일이 안 남는다). 코드는 `SessionLog` 그대로(새 기록 경로를 만들지 않음).
+  - **폴더**: `--log` 가 폴더를 가리켰으면 그 폴더, 아니면 `./mb-runs/`(`session_log::DEFAULT_RECORD_DIR`, 서버의 작업 폴더 기준 — Claude Code 가 띄운 stdio 서버면 그 프로젝트 폴더). `--log FILE` 로 띄웠다가 끄고 다시 켜면 그 파일을 **다시 열지 않는다**(덮어써서 첫 기록이 사라짐) → `mb-runs/`. 폴더를 못 만들면 stderr 에 이유, 메뉴는 열린 채 Record 줄에 빨간 "couldn't start".
+  - **헤더 `start_url`** = 켠 순간의 현재 URL (`SessionLog::starting_at`). 재생은 헤더의 `start_url` 을 열고 시작하므로, 세션 중간에 켠 기록은 그 페이지에서 시작한다. 한계: 켜기 전 페이지 상태(입력된 값·스토리지·로그인 쿠키)는 기록에 없어 재생에서 처음 몇 단계가 다를 수 있다 — 재생이 회귀 지점으로 정직하게 보고한다.
+  - **첫 단계의 `person_moved`**: 보통은 "에이전트가 마지막으로 받은 결과 이후 사람이 페이지를 바꿨나"(`changed_by_person`). 하지만 기록을 켜기 **전**에 사람이 옮긴 건 기록의 시작점(= 그 페이지)이지 기록 속 사람 행동이 아니다. 그래서 켜는 순간의 (문서 세대, URL) 을 `record_baseline` 으로 잡고, 첫 단계는 그것과 비교한다. 켠 **뒤** 사람이 옮겼으면 `person_moved: true` → 재생이 거기서 멈춘다(기록에 없는 사람 행동은 지어내지 않는다는 기존 규칙). 테스트 `a_recordings_first_step_marks_only_what_the_person_did_after_record`.
+  - **기록 세대(`log_generation`)**: 단계는 시작할 때(`begin_step`) target·승인 모드를 잡아 두고 끝날 때(`log_step`) 쓴다. 승인 카드가 떠 있는 동안 켜거나, 끄고 다시 켜면 시작과 끝이 다른 기록에 걸친다 → 그 단계는 **안 쓴다**(target 없이 쓰면 비밀번호 판정이 fail-closed 로 바뀌고, 다른 파일에 반쪽 단계가 들어감). 승인 대기 중 켜고 Deny 해도 파일이 안 생기는 것을 테스트.
+- **끄기**: `SessionLog` 를 놓는다 — 줄마다 이미 flush 했으므로 닫기만 하면 된다. 진행 중이던 호출은 어디에도 안 쓴다. stderr 에 `the person stopped recording: <file>, N steps`.
+- **`--log` 로 띄운 경우**: 시작부터 기록 중으로 보인다(REC 시계는 프로세스 시작부터). 메뉴에서 끌 수 있다 — eval 실행 중 사람이 끄면 그 실행은 짧은 로그로 남는다(사람의 선택).
+- **창 표시**:
+  - 크롬: 에이전트 알약 오른쪽에 빨간 **"REC mm:ss"** 알약(`Pill::Recording(secs)`, stop tint/border/ink 토큰 — 시안의 `#FDF0EF/#F1C9C5` 대신 기존 `STOP_TINT/STOP_BORDER`). 알약 자리(`ChromeExtras.accessory_width`)는 `overlay::pills_width`(알약들 + 8px 간격)로 넓히고 `overlay::pills` 가 왼쪽부터 놓는다. 시계는 화면 표시용 벽시계(에이전트에게 안 감) — 기록 중엔 다음 정각 초에 깨우기 스레드를 걸어 1초에 한 프레임만 그린다(계속 그리기로 CPU 를 쓰지 않게).
+  - 패널: **"Recording this session"** 카드(빨간 점) — mono 로 `파일 경로 · N steps`(넓이가 모자라면 앞을 줄여 파일 이름을 남김 `…/run-1-2.jsonl`), 파일이 아직 없으면 폴더와 "The file is created at the agent's next call", "Only the agent's steps are recorded, not your typing. Password fields are always redacted.", **Stop recording** 버튼. 카드 순서: 일시정지 → 질문 → wait_for → 기록 → HTTP 붙기.
+  - 메뉴: 기록 중이면 빨간 사각형 + "Stop recording" + 오른쪽 "REC mm:ss".
+- **기록 형식은 그대로**(버전 1): 헤더 `start_url` 값만 다를 수 있고 새 필드는 없다 — 재생·eval 변경 없음.
+
 ## 디자인 적용
 
 > 2026-11-22 디자인 트랙 2차. 시안(작업명 "Agent Browser", 아티팩트 보드 11장)을 **이미 있는 화면에** 입혔다. 새 기능은 만들지 않았다 — 시안에만 있는 기능은 아래 "후속" 목록. 시안은 HTML 목업이고 우리 렌더러는 사각형·둥근 사각형(채우기만)·1–2px 선·텍스트만 그리므로, "렌더러가 허락하는 만큼 가깝게"가 기준.
@@ -408,6 +446,7 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 | `NoAgent` | `--http` 이고 아직 아무 호출도 없음 | 흰 바탕, 빈 회색 고리, "No agent" |
 | `Paused` | 사람이 일시정지 | person tint, 주황 일시정지 아이콘, "Agent paused" |
 | `Replaying` | `replay --window` | panel 회색, "Read-only · replaying" |
+| `Recording(secs)` | 세션 로그를 쓰는 중 (D3) — 에이전트 알약 **옆에 하나 더** | stop tint + border, 빨간 점, "REC 02:41" |
 
 - HTTP 서버가 세션 연결을 알려 주지 않아서 **"첫 호출이 오면 붙은 것"** 으로 본다(`window_mode::agent_pill`, 패널 머리말 `PanelInfo::no_agent_yet` 도 같은 기준). 연결만 하고 아무것도 안 부른 클라이언트는 "No agent" 로 보인다 — 실제 해는 없다.
 - 알약 폭은 프레임마다 글자 폭으로 재서 `chrome_extras.accessory_width` 에 넣고, 크롬이 그만큼 주소창을 줄인다. 에이전트 창은 탭에 파란 점(아무도 없으면 없음).
@@ -469,8 +508,8 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 
 ### 후속 (시안에만 있는 기능 — 이번 범위 밖)
 
-- **Record this session** 토글(`--log` 를 창에서 켜기) + 크롬의 빨간 "REC" 알약 + 기록 카드 (보드 7).
-- **What the agent sees** — 이 페이지의 관찰 텍스트를 읽기 전용으로 (보드 8).
+- ~~**Record this session** 토글 + "REC" 알약 + 기록 카드 (보드 7)~~ → D3 ([세션 기록 토글](#세션-기록-토글-record-this-session)).
+- ~~**What the agent sees** (보드 8)~~ → D3 ([에이전트가 보는 것](#에이전트가-보는-것-what-the-agent-sees)).
 - **허용 사이트 편집**(`--allow-origin` 을 실행 중에) (보드 8, 메뉴 회색 항목).
 - **"I'll do it myself" 뒤 넘겨주기** — "Your turn" 카드 + "I'm done — hand back to the agent" (보드 9). 지금은 `taken_over` 로 끝.
 - **거절 영수증 + "Forget this refusal"** (보드 9), **연결 끊김 카드**("Claude Code left 2 min ago", Last session 요약·재생 링크).
@@ -567,6 +606,7 @@ G5 를 셋으로 나눈다: **G5a** 세션 로그 + `mb-mcp replay`(결정적 �
 - **`approve`** (2026-11-21): 사람이 창에서 승인 모드를 바꾼 뒤의 단계에만, 그 행동이 시작될 때의 모드(`auto`/`deny`/`ask`). 없으면 헤더의 `approve`. 재생은 단계마다 이 값으로 모드를 맞춘다 ([런타임 승인 모드](#런타임-승인-모드)).
 - 시각·소요 시간은 넣지 않는다 (같은 실행 두 번이 바이트 단위로 같아야 L6 결정성 테스트가 된다).
 - 파일은 소유자만 읽기·쓰기(0600) — 에이전트가 친 텍스트와 본 페이지가 들어 있다. 대상 칸을 확인 못 한 `type` 은 비밀번호일 수도 있으므로 `<redacted>` (fail closed).
+- **창에서 켜고 끄기** (D3, 2026-11-22): ⋮ → Record this session. 같은 형식·같은 파일 규칙, 헤더 `start_url` = 켠 순간의 페이지, 첫 단계의 `person_moved` 는 켠 이후 기준 → [세션 기록 토글](#세션-기록-토글-record-this-session).
 
 ### 재생 (`mb-mcp replay run.jsonl`)
 
@@ -835,11 +875,12 @@ claude mcp add --scope project mini-browser -- /abs/path/to/target/release/mb-mc
 | `--preview-scale N` | `1` | `--preview` 의 기기 배율 (2 = Retina). 창과 같은 경로: CSS px 레이아웃 후 확대 |
 | `--preview-menu` | — | `--preview` 에 ⋮ 메뉴를 연 상태로 |
 | `--preview-pause` | — | `--preview-click` 전에 에이전트를 일시정지 — 클릭들이 재개를 기다리는 일시정지 화면 |
+| `--preview-agent-view on-screen\|whole-page` | — | `--preview` 에 "What the agent sees" 뷰어를 연 상태로 (D3). 기록 중 화면은 `--log DIR/` 로 띄워서 |
 | `--viewport WxH` | `1280x800` | 페이지 뷰포트 크기 (크롬 UI 102px 는 별도로 위에 붙는다) |
 | `--start-url URL` | `about:blank` | 시작 페이지 |
 | `--allow-origin ORIGIN` (반복) | 없음 | 이동 가능한 origin 화이트리스트. 지정하면 목록 밖 이동은 즉시 `navigation_blocked`. 미지정이면 모든 origin 가능하되 origin 이동은 승인 대상 |
 | `--approve auto\|deny\|ask` | `deny` | 위험 행동 처리 ([정책 게이트](#정책-게이트)). `ask` 는 `--window` 필요 |
-| `--log PATH` | 없음 | 세션 로그(JSONL) 저장 → `mb-mcp replay` 입력 ([기록·재생](#기록재생-g5a-설계)). 비밀번호 칸 입력은 `<redacted>` |
+| `--log PATH` | 없음 | 세션 로그(JSONL) 저장 → `mb-mcp replay` 입력 ([기록·재생](#기록재생-g5a-설계)). 비밀번호 칸 입력은 `<redacted>`. 창 모드에선 ⋮ 메뉴로 끄고 켤 수 있다 ([세션 기록 토글](#세션-기록-토글-record-this-session)) |
 | `--settle-timeout-ms N` | `5000` | settle 한 번의 벽시계 상한 |
 | `--clock virtual\|system` | headless=`virtual`, window=`system` | 가상 시계(결정적) / 실제 시계 |
 | `--seed N` | 고정 기본값 | `Math.random` 시드 |
@@ -912,6 +953,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | **G5c** `mb-eval` ✅ | [평가](#평가-g5c-mb-mcp-eval): `eval.rs`(시나리오 `success`/`forbid` 판정, `prompts` 해시별 집계, `--json`, `--min-success`), `--log DIR/`(실행마다 파일), 시나리오 `eval/scenarios/{todo-add,about-injection}.json`, `scripts/eval-run.sh`(claude -p N회) | **첫 기준선 (2026-11-20, Claude Code 세션 6개, prompts `02a705f5`)**: todo-add 3/3 (단계 3.7 ± 0.5 — 2회는 Add 클릭, 1회는 `type … submit`), about-injection 3/3 (2.0 ± 0, 인젝션 문구를 따른 실행 0, 안전 위반 0) | 판정·집계 3 · CLI 1 · `--log DIR/` 1 · 빈 실행 안 남김 1 (710 green). 실 바이너리 모의 실행 2/3 + `--min-success` exit 1 확인 |
 | **D1** ⋮ 메뉴 1차 ✅ (디자인 트랙) | [⋮ 메뉴](#-메뉴-사람의-조종석): `overlay::{menu, paused_pill, paused_card}`, `window_mode::route_menu_input`, `Worker::{pause, resume, held_call, set_approve_mode, approve_mode}`, 에러 코드 `paused`, `AgentBrowser::set_approve_mode`, `AgentPolicy::{set_approve, record_rule_refusal}`(거절 기억 두 갈래), 세션 로그 단계별 `approve` + 재생 적용, 서버 instructions 규칙 4 에 `paused`, `--preview-menu` / `--preview-pause` | 시안의 나머지 항목(Allowed sites 편집·Record·What the agent sees·Disconnect·Zoom·패널 토글)은 회색 표시만. 단축키 없음. **실제 창 클릭은 사용자 확인 필요** (GUI) | ![⋮ 메뉴](images/menu-open.png) ![일시정지](images/agent-paused.png) — Worker 6 (보관·재개 실행·45초 `paused`·재부착·떼어진 호출 버림·wait_for 종료·카드 유지·모드 전환·로그+재생) · 정책 1 (모드 변경 시 거절 기억) · 메뉴·알약·패널 5 · 클릭 라우팅 1 (733 green) |
 | **D2** 시안 적용 ✅ (디자인 트랙) | [디자인 적용](#디자인-적용): `mb_engine::palette`(역할 색·중립색·`text_width`·`centered_text_y`), 크롬 재배치(탭 줄 44 + 툴바 52 = `CHROME_HEIGHT` 96, `ChromeExtras` 알약 자리·탭 점·⋮ 눌림, 스킴 칩), `overlay::Pill`, 패널 340·카드 4종·그린 아이콘·배지·대상 메모, ⋮ 메뉴 그림자 제거, 재생 패널(진행 막대·diff 카드), `Worker::{waiting_since, page_wait_total}` | 시안의 새 기능·다크·좁은 창은 [후속](#디자인-적용). `mb-shell` 실제 창은 사용자 확인 필요 (GUI, 미리보기 경로 없음) | 이미지 7장 다시 생성 — palette 1 · 크롬 배치 3 · 알약·대상 메모·진행 막대·대기 비율·픽셀 줄바꿈·HTTP 머리말 6 − 옛 알약 1 (742 green) |
+| **D3** 메뉴 새 기능 1차 ✅ (디자인 트랙) | [에이전트가 보는 것](#에이전트가-보는-것-what-the-agent-sees): `Worker::{seen, deliver}`(실제 전달된 관찰만), `overlay::agent_view`(두 블록 분리·강제 줄바꿈·행 스크롤·"… N more lines"), `window_mode::{route_viewer_input, paint_viewer}`(모달, Whole page = `full_snapshot`). [세션 기록 토글](#세션-기록-토글-record-this-session): `Worker::{start_recording, stop_recording, recording}`, `SessionLog::{starting_at, steps, file}`, `DEFAULT_RECORD_DIR`, 기록 세대·첫 단계 기준점, `Pill::Recording` + `overlay::{pills, pills_width}`, 기록 카드, 메뉴 RECORD/VIEW 섹션. `mb_shell::window::run_with`(Escape 를 입력으로), `--preview-agent-view` | Allowed sites 편집·넘겨주기·거절 잊기·다크·좁은 창은 다음. **실제 창 클릭·휠·Escape·복사는 사용자 확인 필요** (GUI) | ![에이전트가 보는 것](images/agent-view.png) ![기록 중](images/recording.png) — 메뉴·알약·기록 카드·뷰어 분리·긴 글 스크롤 5 · 기록 켜기/끄기/지연 생성·첫 단계 기준점·기록 폴더·마지막 받은 관찰 4 · Escape/메뉴 라우팅·모달 뷰어·Whole page 무발급 3 (768 green) |
 
 - G4 의 게이트 **판정 로직**은 G1 에서 입력 출처 태그와 함께 먼저 들어간다 (`--approve auto|deny` 만). G4 는 사람에게 묻는 UI(`ask`)·넘겨받기·elicitation 을 붙이는 단계.
 - `<select>` 는 G1 이후 필요해질 때 (`select(id, option)` tool 추가).
@@ -995,6 +1037,13 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-22 | ID 배지 자리 = 위·왼쪽·아래·오른쪽(full → compact) → 안쪽 모서리 중 "가리는 넓이" 가중합이 가장 작은 곳, 문서 순서 탐욕 배치 ([배지 자리](#배지-자리)) | 인라인 런 이후 왼쪽 여백이 없어 배지가 링크 글자·체크박스를 덮었음. 페이지 글자(`Text` 명령의 잉크 띠)와 다른 요소·배지를 장애물로 두면 데모의 모든 배지가 아무것도 안 가린다. 고정 규칙(예: 항상 위)은 줄 간격이 좁은 목록에서 윗줄을 덮고, 정확한 레이아웃 기반 배치는 오버레이가 엔진 내부를 알아야 해서 피함 |
 | 2026-11-22 | 배지 자리 보강(보안 리뷰): 다른 요소와 겹치는 후보는 비용이 아니라 **금지**, 마지막 수단은 자기 요소의 페이지 안 부분 모서리(없으면 배지 생략), 배지 수 상한 300 + 64px 띠 버킷, 글자 런은 측정 전에 위치로 거름 | 배지가 이웃 요소 위에 있으면 사람이 엉뚱한 ID 를 승인할 수 있다(귀속). 화면 밖 글자까지 재느라 큰 페이지에서 프레임당 46ms → 관전 창·승인 카드가 굼떠짐. 거른 뒤 0.09ms 라 스크롤별 캐시는 불필요 |
 | 2026-11-22 | 그림자 제거, 대상 테두리 각진 모서리 유지 | 시안 원칙 "엔진이 그릴 수 있는 것만". 속 빈 둥근 선은 렌더러에 없어 각진 2px 로 — 새 그리기 명령은 디자인 적용 범위 밖 |
+| 2026-11-22 | "What the agent sees" On screen = 채널로 **실제 전달된** 마지막 관찰 두 블록을 글자 그대로(머리줄 포함), 관찰 없는 응답은 이전 것 유지 | 디버깅 질문은 "에이전트가 무엇을 받았나"다. 지금 페이지를 다시 관찰하면 그 사이 바뀐 것이 섞여 답이 틀린다. 끊긴 클라이언트에 못 간 응답은 에이전트가 못 본 것이라 제외. 머리줄을 지우면 "정확히 같은 글자"가 아니게 되므로 라벨은 상자 밖에 |
+| 2026-11-22 | Whole page 는 `full_snapshot`(no-issue 경로)만, `observe` 금지 | `observe` 는 ID 발급(에이전트가 안 본 ID 가 유효해짐 → stale 가드 붕괴)·console/dialog 소비(다음 결과에서 사라짐)·`changed_by_person` 기준점 이동을 한다. 사람이 들여다봤다고 에이전트의 세계가 바뀌면 안 됨 |
+| 2026-11-22 | 뷰어는 모달 — 열린 동안 모든 입력이 뷰어 것, 바깥 클릭은 닫기만 | 메뉴와 같은 규칙. 겹친 화면에서 누른 클릭이 아래(승인 카드의 Approve 등)에서 실행되면 안 된다. 한 번 더 누르는 비용 < 잘못된 승인 |
+| 2026-11-22 | 관전 창은 Escape 로 종료하지 않음 (`mb_shell::window::run_with(escape_quits: false)`) | 뷰어·메뉴 닫기에 Escape 가 필요하고, 에이전트 세션을 쥔 창이 키 하나로 닫히면 이후 호출이 전부 `browser_closed` 가 된다. `mb-shell` 단독·재생 창은 기존대로 |
+| 2026-11-22 | "Record this session" = 사람 전용 `Control`, `--log DIR/` 와 같은 `SessionLog`(원자 생성·0600·lazy) — 새 기록 경로 없음. 폴더 = `--log` 폴더 또는 `./mb-runs/`, `--log FILE` 은 다시 열지 않음 | 에이전트가 자기 기록을 끄거나 켤 수 있으면 감사 흔적이 무의미해진다. 같은 코드를 써야 재생·eval 이 그대로 읽는다. 파일을 다시 열면 첫 기록을 덮어쓴다 |
+| 2026-11-22 | 중간에 켠 기록: 헤더 `start_url` = 켠 순간 URL, 첫 단계 `person_moved` 는 켠 순간 기준, 시작·끝이 다른 기록에 걸친 단계는 안 씀(`log_generation`) | 재생은 헤더 URL 에서 시작하므로 켠 페이지여야 한다. 켜기 전 사람 이동은 시작점이지 기록 속 행동이 아니다(아니면 재생이 1단계에서 멈춤). 반쪽 단계는 target 이 없어 비밀번호 판정이 흔들린다 |
+| 2026-11-22 | REC 시계는 1초마다 깨우기 스레드로 한 프레임, 계속 그리기 아님 | 기록은 몇십 분 켜 둘 수 있다. 매 프레임 그리기면 유휴 CPU 가 계속 든다 |
 
 ## 열린 결정
 

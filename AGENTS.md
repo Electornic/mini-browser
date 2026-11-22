@@ -49,22 +49,22 @@
 │
 ├── crates/mb-mcp      (binary [[bin]] mb-mcp)  rmcp 3.x, tokio, hyper, image(png), base64, arboard
 │   - main             tokio 스레드 = rmcp stdio 또는 HTTP 서버, 메인 스레드 = 브라우저
-│   - cli              --viewport / --start-url / --allow-origin / --approve auto|deny|ask / --clock / --seed / --window / --http --port / --preview(-menu/-pause)
+│   - cli              --viewport / --start-url / --allow-origin / --approve auto|deny|ask / --clock / --seed / --window / --http --port / --preview(-menu/-pause/-agent-view)
 │   - http             --http: 127.0.0.1 바인딩, Bearer 토큰·Origin·경로 게이트 → rmcp StreamableHttpService
 │   - prompts          서버 instructions + tool 설명 (LLM 이 읽는 텍스트, 영어)
-│   - worker           Job 처리, repeat_count, 패닉 시 재생성, 창 모드의 park(승인·넘겨받기 대기)/answer, 일시정지 보관(held)·재개, 런타임 승인 모드
+│   - worker           Job 처리, repeat_count, 패닉 시 재생성, 창 모드의 park(승인·넘겨받기 대기)/answer, 일시정지 보관(held)·재개, 런타임 승인 모드, 기록 켜기/끄기, 마지막 받은 관찰(seen)
 │   - server           #[tool_router] tool 10개 → worker::Request, 결과 → CallToolResult
-│   - window_mode      --window: 메인 스레드 winit 루프 + 프레임마다 Job 처리, ⋮ 메뉴 클릭 라우팅, --preview PNG
-│   - session_log      --log: 세션 로그(JSONL) 기록 형식 — target·결과 요소 목록·redact
+│   - window_mode      --window: 메인 스레드 winit 루프 + 프레임마다 Job 처리, ⋮ 메뉴·"What the agent sees" 뷰어(모달) 입력 라우팅, --preview PNG
+│   - session_log      --log: 세션 로그(JSONL) 기록 형식 — target·결과 요소 목록·redact (⋮ 메뉴 Record 도 같은 코드, 기본 폴더 mb-runs/)
 │   - replay           mb-mcp replay FILE: Replayer(한 단계씩) — worker::execute 로 결정적 재생 + 회귀 지점 diff
 │   - replay_window    replay --window: 단계별 재생 뷰 (Next/Back/Run all/Restart), --preview PNG
 │   - eval             mb-mcp eval SCENARIO LOGS: 시나리오 판정 + 성공률·에러·실패 지점·안전 위반 집계 (에이전트는 안 돌림)
-│   - overlay          ID 배지·대상 테두리·크롬 알약(Pill)·에이전트 패널·카드·⋮ 메뉴·재생 패널 (DisplayCommand 순수 함수, palette 색)
+│   - overlay          ID 배지·대상 테두리·크롬 알약(Pill, REC)·에이전트 패널·카드·⋮ 메뉴·관찰 뷰어(agent_view)·재생 패널 (DisplayCommand 순수 함수, palette 색)
 │
 └── crates/mb-shell    (lib + [[bin]] mb-shell)  anyhow, softbuffer, winit
     - lib.rs           pub mod window — mb-mcp --window 도 같은 창 코드를 씀
     - main.rs          진입점 — install_fonts → window::run(closure)
-    - window.rs        winit 이벤트 루프 + softbuffer 프레임 출력
+    - window.rs        winit 이벤트 루프 + softbuffer 프레임 출력 (run = Escape 로 종료, run_with(escape_quits=false) = Escape 를 입력으로)
 ```
 
 각 crate 는 위에서 아래로만 의존한다. 순환 dep 없음.
@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 756 (workspace 합계, 2026-11-22 배지 자리 보강 — 이웃 요소 금지·자기 상자 대체·배지 생략·상한·띠 버킷·글자 런 거르기 +7). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 768 (workspace 합계, 2026-11-22 메뉴 새 기능 1차 — What the agent sees·기록 토글 +12). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -191,6 +191,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - `gradient_transform` 은 `local → canvas` 방향.
 
 ### winit
+- `mb_shell::window::run` 은 **Escape = 창 종료**다. 에이전트 세션을 쥔 창(`mb-mcp --window`)은 `run_with(…, escape_quits: false, …)` 로 Escape 를 `WindowInput::escape_pressed` 로 받는다 — 안 그러면 Escape 한 번에 이후 호출이 전부 `browser_closed`.
 - winit `KeyEvent.text` 가 control char 도 흘려보냄 — `is_control()` 필터 안 걸면 input 박스에 invisible char 박힘.
 - GUI 검증은 메인 스레드 blocking 이라 백그라운드 task 로 못 돌림. `cargo run --bin mb-shell` 로 직접 확인.
 
@@ -222,7 +223,8 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - **네비게이션 fetch 는 리다이렉트를 직접 따라간다**: 문서 로드는 `navigation::load_remote_document_guarded`(내부적으로 `net::fetch_without_redirects`)를 쓰고 hop 마다 게이트를 묻는다. 네비게이션에 자동 리다이렉트 fetch(`net::fetch` / `fetch_with_request`)를 쓰면 게이트가 첫 URL 만 보게 된다. (서브리소스 — CSS/이미지/스크립트 — 는 이동이 아니라 해당 없음.)
 - **이동은 반드시 정책 게이트를 지난다**: 새 이동 경로(`location.href =`, `window.open`, meta refresh 등)를 추가할 때 `navigate` / `navigate_to_href` / `try_submit_form` 과 같은 `policy::check` 를 통과시킨다. 우회 경로를 만들지 말 것.
 - **에이전트 전용 DOM 조작 API 금지**: 에이전트 행동은 합성 `WindowInput` 으로만. 편의를 위해 DOM 을 직접 바꾸는 단축로를 만들지 않는다.
-- **사람의 조종은 MCP 로 열지 않는다**: 일시정지·재개·승인 모드 변경(`overlay::Control` → `Worker::{pause, resume, set_approve_mode}`)은 창 입력 전용. `worker::Request`·MCP tool 에 대응하는 경로를 만들지 말 것 — 에이전트가 스스로 멈춤을 풀거나 승인을 Allow 로 바꿀 수 있게 된다.
+- **사람의 조종은 MCP 로 열지 않는다**: 일시정지·재개·승인 모드 변경·기록 켜기/끄기(`overlay::Control` → `Worker::{pause, resume, set_approve_mode, start_recording, stop_recording}`)는 창 입력 전용. `worker::Request`·MCP tool 에 대응하는 경로를 만들지 말 것 — 에이전트가 스스로 멈춤을 풀거나 승인을 Allow 로 바꾸거나 자기 기록을 끌 수 있게 된다.
+- **사람이 들여다보는 것은 에이전트의 세계를 바꾸지 않는다**: "What the agent sees" 의 Whole page 같은 창 전용 관찰은 `AgentBrowser::full_snapshot`(ID 발급·console/dialog 소비·`changed_by_person` 기준점 이동 없음)만 쓴다. `observe` 를 부르면 에이전트가 안 본 ID 가 유효해진다.
 - **`WindowInput::from_agent` 는 mb-agent 만 켠다**: 셸(사람 입력)은 항상 false. 정책 게이트는 이 플래그로 판정 대상을 가른다.
 - **trusted 블록의 `note:` 는 브라우저만 쓴다**: `Observation::notes` 에는 우리가 만든 문장만. 페이지 문자열(이름·텍스트·URL 일부라도)을 넣으면 위조 방지가 깨진다.
 - **비밀번호 값은 어디에도 남기지 않는다**: 관찰(길이만)·로그(`<redacted>`)·화면(마스킹). 에이전트가 입력한 텍스트도 stderr 로그에 남기지 않는다(`worker::Request` 의 Debug 가 가림), URL 로그는 쿼리 제외. 예외는 사용자가 켜는 `--log` 세션 로그뿐 — 재생에 필요해 텍스트를 남기되 비밀번호 칸 입력은 `<redacted>`, 값은 재생 때 `--secret` 으로만.

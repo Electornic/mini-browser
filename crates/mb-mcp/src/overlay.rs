@@ -179,6 +179,29 @@ fn pause_icon(x: f32, y: f32, size: f32, color: Color) -> [DisplayCommand; 2] {
     [bar(size * 0.05), bar(size * 0.6)]
 }
 
+// An eye (board 2b "What the agent sees"), 16 × 16.
+fn eye_icon(x: f32, y: f32, color: Color) -> Vec<DisplayCommand> {
+    let mut commands = stroke(
+        &[
+            (1.5, 8.0),
+            (4.0, 5.0),
+            (8.0, 3.5),
+            (12.0, 5.0),
+            (14.5, 8.0),
+            (12.0, 11.0),
+            (8.0, 12.5),
+            (4.0, 11.0),
+            (1.5, 8.0),
+        ],
+        x,
+        y,
+        1.5,
+        color,
+    );
+    commands.extend(ring_icon(x + 5.0, y + 5.0, 6.0, 5.0, color, None));
+    commands
+}
+
 // A right-pointing triangle, one 1px strip per row.
 fn play_icon(x: f32, y: f32, size: f32, color: Color) -> Vec<DisplayCommand> {
     let rows = size.round() as usize;
@@ -824,6 +847,9 @@ pub enum Pill {
     Paused,
     /// `mb-mcp replay --window`: the page only replays.
     Replaying,
+    /// The session log is being written (board 7): "REC 02:41", seconds
+    /// since recording started.
+    Recording(u64),
 }
 
 impl Pill {
@@ -833,6 +859,7 @@ impl Pill {
             Pill::NoAgent => "No agent".into(),
             Pill::Paused => "Agent paused".into(),
             Pill::Replaying => "Read-only · replaying".into(),
+            Pill::Recording(secs) => format!("REC {}", clock(Duration::from_secs(secs))),
         }
     }
 
@@ -849,12 +876,16 @@ impl Pill {
 
     /// The pill at its slot right of the address field.
     pub fn commands(self, page_width: f32) -> Vec<DisplayCommand> {
-        let rect = accessory_rect(page_width, self.width());
+        self.commands_at(accessory_rect(page_width, self.width()))
+    }
+
+    fn commands_at(self, rect: Rect) -> Vec<DisplayCommand> {
         let (border, fill, ink) = match self {
             Pill::Attached(_) => (p::AGENT_BORDER, p::AGENT_TINT, p::AGENT_INK),
             Pill::NoAgent => (p::LINE, p::PAGE, p::MUTED),
             Pill::Paused => (p::PERSON_BORDER, p::PERSON_TINT, p::INK),
             Pill::Replaying => (p::LINE, p::PANEL, p::MUTED),
+            Pill::Recording(_) => (p::STOP_BORDER, p::STOP_TINT, p::STOP_INK),
         };
         let mut commands = framed_rect(rect, rect.height / 2.0, border, fill).to_vec();
         let icon_x = rect.x + 12.0;
@@ -872,6 +903,9 @@ impl Pill {
                 Some(p::PAGE),
             )),
             Pill::Paused => commands.extend(pause_icon(icon_x - 1.0, mid - 5.0, 10.0, p::PERSON)),
+            Pill::Recording(_) => {
+                commands.extend(ring_icon(icon_x, mid - 4.0, 8.0, 8.0, p::STOP, None))
+            }
             Pill::Replaying => {}
         }
         let label_x = if self == Pill::Replaying {
@@ -889,6 +923,33 @@ impl Pill {
         ));
         commands
     }
+}
+
+const PILL_GAP: f32 = 8.0;
+
+/// Width to reserve for several pills side by side (agent + REC).
+pub fn pills_width(pills: &[Pill]) -> f32 {
+    let widths: f32 = pills.iter().map(|pill| pill.width()).sum();
+    widths + PILL_GAP * pills.len().saturating_sub(1) as f32
+}
+
+/// Several pills in the accessory slot, left to right.
+pub fn pills(pills: &[Pill], page_width: f32) -> Vec<DisplayCommand> {
+    let slot = accessory_rect(page_width, pills_width(pills));
+    let mut x = slot.x;
+    let mut commands = Vec::new();
+    for pill in pills {
+        let width = pill.width();
+        commands.extend(pill.commands_at(Rect { x, width, ..slot }));
+        x += width + PILL_GAP;
+    }
+    commands
+}
+
+/// `02:41` — minutes can pass 99.
+fn clock(d: Duration) -> String {
+    let s = d.as_secs();
+    format!("{:02}:{:02}", s / 60, s % 60)
 }
 
 fn mode_word(mode: ApproveMode) -> &'static str {
@@ -918,6 +979,18 @@ pub struct PanelInfo<'a> {
     pub attach: Option<&'a Attach>,
     /// The setup command was copied (the button says so).
     pub copied: bool,
+    /// The session log being written (board 7's recording card).
+    pub recording: Option<RecordingCard>,
+}
+
+/// What the recording card says.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordingCard {
+    /// The file, or the directory it will be created in.
+    pub file: String,
+    /// The file exists (the agent called since recording started).
+    pub created: bool,
+    pub steps: u64,
 }
 
 impl PanelInfo<'_> {
@@ -941,8 +1014,31 @@ pub enum PanelAction {
     CopySetup,
     /// `mb-mcp replay --window` controls (G5b).
     Replay(ReplayControl),
-    /// Pause / resume / approval mode — the person running the agent.
+    /// Pause / resume / approval mode / recording — the person running
+    /// the agent.
     Control(Control),
+    /// The window's own views ("What the agent sees"): nothing reaches the
+    /// worker or the agent.
+    Window(WindowAction),
+}
+
+/// The "What the agent sees" viewer and the menu item that opens it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowAction {
+    ShowAgentView,
+    Scope(ViewScope),
+    CopyAgentView,
+    CloseAgentView,
+}
+
+/// What the viewer shows (board 8's toggle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewScope {
+    /// The observation the agent last received, as it was sent.
+    #[default]
+    OnScreen,
+    /// A fresh look at the whole page (never sent, issues no ids).
+    WholePage,
 }
 
 /// What the person can do to the agent from the ⋮ menu or the panel.
@@ -952,6 +1048,9 @@ pub enum Control {
     Pause,
     Resume,
     Approve(ApproveMode),
+    /// "Record this session": start / stop the session log.
+    StartRecording,
+    StopRecording,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1432,6 +1531,86 @@ fn paused_card(
     )
 }
 
+// Board 7: the session log being written, with Stop.
+fn recording_card(
+    commands: &mut Vec<DisplayCommand>,
+    buttons: &mut Vec<Button>,
+    card: &RecordingCard,
+    x: f32,
+    width: f32,
+    top: f32,
+) -> f32 {
+    framed_card(
+        commands,
+        x,
+        width,
+        top,
+        p::LINE,
+        1.0,
+        |c, left, inner, mut y| {
+            c.extend(ring_icon(left, y + 4.0, 8.0, 8.0, p::STOP, None));
+            c.push(text(
+                "Recording this session",
+                left + 16.0,
+                y,
+                14.0,
+                p::INK,
+                true,
+            ));
+            y += line_height(14.0) + 4.0;
+            let steps = match card.steps {
+                1 => "1 step".to_string(),
+                n => format!("{n} steps"),
+            };
+            let line = format!("{} · {steps}", card.file);
+            // A path has no spaces to wrap at: keep its end (the file name).
+            let per_char = text_width("0000000000", SMALL, true, 400) / 10.0;
+            let max_chars = (inner / per_char.max(1.0)) as usize;
+            c.push(text_cmd(
+                clip_start(&line, max_chars),
+                left,
+                y,
+                SMALL,
+                p::MUTED,
+                400,
+                true,
+            ));
+            y += line_height(SMALL) + 4.0;
+            let note = if card.created {
+                "Only the agent's steps are recorded, not your typing. Password fields are always redacted."
+            } else {
+                "The file is created at the agent's next call. Only the agent's steps are recorded, not your typing; password fields are always redacted."
+            };
+            paragraph(c, &mut y, note, left, inner, SMALL, p::MUTED, 4);
+            y += 6.0;
+            let rect = Rect {
+                x: left,
+                y,
+                width: inner,
+                height: 36.0,
+            };
+            c.extend(button(rect, "Stop recording", Look::Plain));
+            buttons.push(Button {
+                rect,
+                action: PanelAction::Control(Control::StopRecording),
+            });
+            y + rect.height
+        },
+    )
+}
+
+// Keep the end of `s` (`…/mb-runs/run-1-2.jsonl · 3 steps`).
+fn clip_start(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let mut out = String::from("…");
+    out.extend(s.chars().skip(count - keep));
+    out
+}
+
 // `--http` (board 4): where an agent attaches and the copy button.
 fn attach_card(
     commands: &mut Vec<DisplayCommand>,
@@ -1729,6 +1908,9 @@ pub fn panel(
     }
     if let Some(wait) = &info.page_wait {
         y = wait_card(&mut commands, wait, left, inner, y) + 14.0;
+    }
+    if let Some(recording) = &info.recording {
+        y = recording_card(&mut commands, &mut buttons, recording, left, inner, y) + 14.0;
     }
     if let Some(attach) = info.attach {
         y = attach_card(
@@ -2111,6 +2293,10 @@ pub struct MenuInfo<'a> {
     pub paused: bool,
     pub approve: ApproveMode,
     pub allow_origins: &'a [String],
+    /// Recording the session: for how long.
+    pub recording: Option<Duration>,
+    /// The last "Record this session" couldn't create its directory.
+    pub record_failed: bool,
     /// The mouse, for the hover wash.
     pub hover: Option<(f32, f32)>,
 }
@@ -2298,22 +2484,74 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
         None,
     );
     rule(&mut commands, &mut y);
-    row(
-        &mut commands,
-        &mut y,
-        "Record this session",
-        "soon",
-        false,
-        None,
-    );
-    row(
-        &mut commands,
-        &mut y,
-        "What the agent sees",
-        "soon",
-        false,
-        None,
-    );
+
+    // Record: start / stop the session log (person-only, like pause).
+    header(&mut commands, &mut y, "RECORD");
+    let (label, control, value) = match info.recording {
+        Some(elapsed) => (
+            "Stop recording",
+            Control::StopRecording,
+            format!("REC {}", clock(elapsed)),
+        ),
+        None if info.record_failed => (
+            "Record this session",
+            Control::StartRecording,
+            "couldn't start".to_string(),
+        ),
+        None => (
+            "Record this session",
+            Control::StartRecording,
+            String::new(),
+        ),
+    };
+    let rect = row(&mut commands, &mut y, label, "", true, None);
+    if info.recording.is_some() {
+        // Stop: a red square.
+        commands.push(rounded(
+            p::STOP,
+            Rect {
+                x: rect.x + 13.0,
+                y: rect.y + 15.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            2.0,
+        ));
+    } else {
+        commands.extend(ring_icon(
+            rect.x + 10.0,
+            rect.y + 12.0,
+            16.0,
+            10.0,
+            p::STOP,
+            None,
+        ));
+    }
+    if !value.is_empty() {
+        let value_width = text_width(&value, SMALL, false, 400);
+        commands.push(text(
+            value,
+            rect.x + rect.width - 10.0 - value_width,
+            centered_text_y(rect.y, MENU_ROW, SMALL),
+            SMALL,
+            p::STOP_TEXT,
+            false,
+        ));
+    }
+    buttons.push(Button {
+        rect,
+        action: PanelAction::Control(control),
+    });
+    rule(&mut commands, &mut y);
+
+    // View: the observation text, read-only.
+    header(&mut commands, &mut y, "VIEW");
+    let rect = row(&mut commands, &mut y, "What the agent sees", "", true, None);
+    commands.extend(eye_icon(rect.x + 10.0, rect.y + 12.0, p::INK));
+    buttons.push(Button {
+        rect,
+        action: PanelAction::Window(WindowAction::ShowAgentView),
+    });
     y += MENU_PAD - 2.0;
 
     let rect = Rect {
@@ -2330,6 +2568,432 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
         commands: all,
         buttons,
         rect,
+    }
+}
+
+// ------------------------------------------- "What the agent sees" ---
+
+const VIEW_MAX_WIDTH: f32 = 760.0;
+const VIEW_MARGIN: f32 = 16.0;
+const VIEW_HEADER: f32 = 64.0;
+const VIEW_FOOTER: f32 = 40.0;
+const VIEW_PAD: f32 = 20.0;
+const VIEW_MONO: f32 = 12.0;
+const VIEW_LINE: f32 = 18.0;
+const VIEW_LABEL: f32 = 24.0;
+const VIEW_GAP: f32 = 14.0;
+const VIEW_BOX_PAD: f32 = 8.0;
+
+/// What the viewer shows (board 8).
+pub struct AgentViewInfo<'a> {
+    pub scope: ViewScope,
+    /// (trusted browser block, untrusted page block), verbatim.
+    pub blocks: Option<(&'a str, &'a str)>,
+    /// One sentence under the title: where these blocks come from.
+    pub source: &'a str,
+    /// First row shown (clamped by the layout).
+    pub scroll: usize,
+    pub copied: bool,
+    pub hover: Option<(f32, f32)>,
+}
+
+/// The painted viewer: commands, its buttons, the dialog rect (input over
+/// it never reaches the page) and the scroll it ended up at.
+pub struct AgentView {
+    pub commands: Vec<DisplayCommand>,
+    pub buttons: Vec<Button>,
+    pub rect: Rect,
+    /// `info.scroll`, clamped to what can scroll.
+    pub scroll: usize,
+    /// Rows a page-down moves.
+    pub page_rows: usize,
+    /// Text lines below the visible part ("… N more lines").
+    #[cfg(test)]
+    pub below: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewBlock {
+    Browser,
+    Page,
+}
+
+/// One row of the viewer's scrolling body.
+#[derive(Debug, Clone, PartialEq)]
+enum ViewRow {
+    Label(String, ViewBlock),
+    /// Box padding: top (true) or bottom edge of a block's box.
+    Pad(ViewBlock, bool),
+    Line(ViewBlock, String),
+    Gap,
+}
+
+impl ViewRow {
+    fn height(&self) -> f32 {
+        match self {
+            ViewRow::Label(..) => VIEW_LABEL,
+            ViewRow::Pad(..) => VIEW_BOX_PAD,
+            ViewRow::Line(..) => VIEW_LINE,
+            ViewRow::Gap => VIEW_GAP,
+        }
+    }
+}
+
+/// `# page content (untrusted, origin=X)` → X (the browser wrote it from
+/// the URL; the rest of that block is the page's).
+fn page_origin(page: &str) -> &str {
+    page.lines()
+        .next()
+        .and_then(|line| line.split_once("origin="))
+        .map(|(_, rest)| rest.trim_end_matches(')'))
+        .unwrap_or("the page")
+}
+
+// The two blocks as rows: a label over each, then its lines hard-wrapped
+// at `columns` (monospace, so a char count is a width).
+fn view_rows(browser: &str, page: &str, columns: usize) -> Vec<ViewRow> {
+    let columns = columns.max(8);
+    let mut rows = Vec::new();
+    let blocks = [
+        (
+            ViewBlock::Browser,
+            "Browser — trusted, written by mini-browser".to_string(),
+            browser,
+        ),
+        (
+            ViewBlock::Page,
+            format!("Page content — untrusted, written by {}", page_origin(page)),
+            page,
+        ),
+    ];
+    for (i, (block, label, body)) in blocks.into_iter().enumerate() {
+        if i > 0 {
+            rows.push(ViewRow::Gap);
+        }
+        rows.push(ViewRow::Label(label, block));
+        rows.push(ViewRow::Pad(block, true));
+        for line in body.trim_end_matches('\n').split('\n') {
+            let chars: Vec<char> = line.chars().collect();
+            if chars.is_empty() {
+                rows.push(ViewRow::Line(block, String::new()));
+            }
+            for chunk in chars.chunks(columns) {
+                rows.push(ViewRow::Line(block, chunk.iter().collect()));
+            }
+        }
+        rows.push(ViewRow::Pad(block, false));
+    }
+    rows
+}
+
+// The largest first row that still fills the body.
+fn max_scroll(rows: &[ViewRow], body: f32) -> usize {
+    let mut used = 0.0;
+    for (i, row) in rows.iter().enumerate().rev() {
+        used += row.height();
+        if used > body {
+            return i + 1;
+        }
+    }
+    0
+}
+
+/// The read-only "What the agent sees" dialog (board 8) over the page
+/// area `page`. Long text scrolls (`info.scroll`, in rows); what doesn't
+/// fit is counted in the footer.
+pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
+    let width = (page.width - 2.0 * VIEW_MARGIN).clamp(0.0, VIEW_MAX_WIDTH);
+    let rect = Rect {
+        x: page.x + ((page.width - width) / 2.0).max(0.0),
+        y: page.y + VIEW_MARGIN,
+        width,
+        height: (page.height - 2.0 * VIEW_MARGIN).max(VIEW_HEADER + VIEW_FOOTER),
+    };
+    let mut commands = framed_rect(rect, 14.0, p::FRAME, p::PAGE).to_vec();
+    let mut buttons = Vec::new();
+    let left = rect.x + VIEW_PAD;
+    let inner = rect.width - 2.0 * VIEW_PAD;
+    let right = rect.x + rect.width - VIEW_PAD;
+    let hovered = |r: &Rect| info.hover.is_some_and(|point| contains(r, point));
+
+    // Header: eye, title, scope toggle, Copy, close.
+    let row_y = rect.y + (VIEW_HEADER - 32.0) / 2.0;
+    commands.extend(eye_icon(left, rect.y + (VIEW_HEADER - 16.0) / 2.0, p::INK));
+    commands.push(text(
+        "What the agent sees",
+        left + 26.0,
+        centered_text_y(rect.y, VIEW_HEADER, 16.0),
+        16.0,
+        p::INK,
+        true,
+    ));
+    let close = Rect {
+        x: right - 32.0,
+        y: row_y,
+        width: 32.0,
+        height: 32.0,
+    };
+    if hovered(&close) {
+        commands.push(rounded(p::PANEL, close, 8.0));
+    }
+    commands.extend(cross_icon(close.x + 9.0, close.y + 9.0, p::MUTED));
+    buttons.push(Button {
+        rect: close,
+        action: PanelAction::Window(WindowAction::CloseAgentView),
+    });
+    let copy_label = if info.copied { "Copied" } else { "Copy" };
+    let copy_width = text_width(copy_label, BODY, false, 400) + 24.0;
+    let copy = Rect {
+        x: close.x - 8.0 - copy_width,
+        y: row_y,
+        width: copy_width,
+        height: 32.0,
+    };
+    let look = if info.blocks.is_some() {
+        Look::Plain
+    } else {
+        Look::Disabled
+    };
+    commands.extend(button(copy, copy_label, look));
+    if info.blocks.is_some() {
+        buttons.push(Button {
+            rect: copy,
+            action: PanelAction::Window(WindowAction::CopyAgentView),
+        });
+    }
+    let segments = [
+        ("On screen", ViewScope::OnScreen),
+        ("Whole page", ViewScope::WholePage),
+    ];
+    let segment_widths: Vec<f32> = segments
+        .iter()
+        .map(|(label, _)| text_width(label, BODY, false, 700) + 24.0)
+        .collect();
+    let track_width = segment_widths.iter().sum::<f32>() + 3.0 * 3.0;
+    let track = Rect {
+        x: copy.x - 12.0 - track_width,
+        y: row_y - 1.0,
+        width: track_width,
+        height: 34.0,
+    };
+    commands.push(rounded(p::PANEL, track, 8.0));
+    let mut sx = track.x + 3.0;
+    for ((label, scope), w) in segments.into_iter().zip(segment_widths) {
+        let segment = Rect {
+            x: sx,
+            y: track.y + 3.0,
+            width: w,
+            height: 28.0,
+        };
+        let selected = info.scope == scope;
+        if selected {
+            commands.push(rounded(p::PAGE, segment, 6.0));
+        } else if hovered(&segment) {
+            commands.push(rounded(p::LINE, segment, 6.0));
+        }
+        let weight = if selected { 700 } else { 400 };
+        let label_width = text_width(label, BODY, false, weight);
+        commands.push(text(
+            label,
+            segment.x + (w - label_width) / 2.0,
+            centered_text_y(segment.y, segment.height, BODY),
+            BODY,
+            if selected { p::INK } else { p::MUTED },
+            selected,
+        ));
+        buttons.push(Button {
+            rect: segment,
+            action: PanelAction::Window(WindowAction::Scope(scope)),
+        });
+        sx += w + 3.0;
+    }
+    let rule = |commands: &mut Vec<DisplayCommand>, y: f32| {
+        commands.push(DisplayCommand::SolidRect(
+            p::LINE,
+            Rect {
+                x: rect.x + 1.0,
+                y,
+                width: rect.width - 2.0,
+                height: 1.0,
+            },
+        ));
+    };
+    rule(&mut commands, rect.y + VIEW_HEADER);
+
+    // Where the text comes from.
+    let mut y = rect.y + VIEW_HEADER + 14.0;
+    paragraph(
+        &mut commands,
+        &mut y,
+        info.source,
+        left,
+        inner,
+        BODY,
+        p::MUTED,
+        2,
+    );
+    y += 8.0;
+
+    // The scrolling body.
+    let footer_top = rect.y + rect.height - VIEW_FOOTER;
+    let body_top = y;
+    let body_height = (footer_top - 8.0 - body_top).max(0.0);
+    let box_inner = inner - 28.0;
+    let per_char = text_width("0000000000", VIEW_MONO, true, 400) / 10.0;
+    let columns = (box_inner / per_char.max(1.0)) as usize;
+    let rows = match info.blocks {
+        Some((browser, page_block)) => view_rows(browser, page_block, columns),
+        None => Vec::new(),
+    };
+    let scroll = info.scroll.min(max_scroll(&rows, body_height));
+    let mut shown = 0;
+    for row in &rows[scroll..] {
+        if y + row.height() > body_top + body_height {
+            break;
+        }
+        let (fill, border) = match row {
+            ViewRow::Pad(ViewBlock::Browser, _) | ViewRow::Line(ViewBlock::Browser, _) => {
+                (p::AGENT_TINT, p::AGENT_BORDER)
+            }
+            _ => (p::PANEL, p::LINE),
+        };
+        let strip = Rect {
+            x: left,
+            y,
+            width: inner,
+            height: row.height(),
+        };
+        match row {
+            ViewRow::Label(label, block) => {
+                let ink = match block {
+                    ViewBlock::Browser => p::AGENT_INK,
+                    ViewBlock::Page => p::MUTED,
+                };
+                commands.push(text(
+                    clip(label, (inner / 6.5) as usize),
+                    left,
+                    y + 4.0,
+                    SMALL,
+                    ink,
+                    true,
+                ));
+            }
+            ViewRow::Pad(_, top) => {
+                // Rounded on the box's outer edge; a 1 px border all round.
+                let radius = |r: f32| {
+                    if *top {
+                        CornerRadii {
+                            tl: r,
+                            tr: r,
+                            br: 0.0,
+                            bl: 0.0,
+                        }
+                    } else {
+                        CornerRadii {
+                            tl: 0.0,
+                            tr: 0.0,
+                            br: r,
+                            bl: r,
+                        }
+                    }
+                };
+                commands.push(DisplayCommand::RoundedRect(border, strip, radius(10.0)));
+                let (dy, dh) = if *top { (1.0, -1.0) } else { (0.0, -1.0) };
+                commands.push(DisplayCommand::RoundedRect(
+                    fill,
+                    Rect {
+                        x: strip.x + 1.0,
+                        y: strip.y + dy,
+                        width: strip.width - 2.0,
+                        height: strip.height + dh,
+                    },
+                    radius(9.0),
+                ));
+            }
+            ViewRow::Line(_, line) => {
+                commands.push(DisplayCommand::SolidRect(border, strip));
+                commands.push(DisplayCommand::SolidRect(
+                    fill,
+                    Rect {
+                        x: strip.x + 1.0,
+                        width: strip.width - 2.0,
+                        ..strip
+                    },
+                ));
+                if !line.is_empty() {
+                    commands.push(text_cmd(
+                        line.clone(),
+                        left + 14.0,
+                        centered_text_y(y, VIEW_LINE, VIEW_MONO),
+                        VIEW_MONO,
+                        p::INK,
+                        400,
+                        true,
+                    ));
+                }
+            }
+            ViewRow::Gap => {}
+        }
+        y += row.height();
+        shown += 1;
+    }
+    if rows.is_empty() {
+        commands.push(text(
+            "Nothing yet — switch to Whole page to look at this page as the agent would.",
+            left,
+            body_top,
+            BODY,
+            p::FAINT,
+            false,
+        ));
+    }
+    let lines = |rows: &[ViewRow]| {
+        rows.iter()
+            .filter(|row| matches!(row, ViewRow::Line(..)))
+            .count()
+    };
+    let above = lines(&rows[..scroll]);
+    let below = lines(&rows[(scroll + shown).min(rows.len())..]);
+
+    // Footer: read-only note, and how much is out of view.
+    rule(&mut commands, footer_top);
+    let footer_y = centered_text_y(footer_top, VIEW_FOOTER, SMALL);
+    commands.push(text(
+        "Read-only · nothing here is sent to the agent",
+        left,
+        footer_y,
+        SMALL,
+        p::MUTED,
+        false,
+    ));
+    let more = match (above, below) {
+        (0, 0) => String::new(),
+        (0, n) => format!("… {n} more line{} — scroll", if n == 1 { "" } else { "s" }),
+        (a, 0) => format!("{a} line{} above", if a == 1 { "" } else { "s" }),
+        (a, n) => format!(
+            "{a} above · … {n} more line{}",
+            if n == 1 { "" } else { "s" }
+        ),
+    };
+    if !more.is_empty() {
+        let more_width = text_width(&more, SMALL, false, 700);
+        commands.push(text(
+            more,
+            right - more_width,
+            footer_y,
+            SMALL,
+            p::INK,
+            true,
+        ));
+    }
+    AgentView {
+        commands,
+        buttons,
+        rect,
+        scroll,
+        page_rows: shown.saturating_sub(1).max(1),
+        #[cfg(test)]
+        below,
     }
 }
 
@@ -2782,6 +3446,7 @@ mod tests {
                 page_wait: None,
                 attach: None,
                 copied: false,
+                recording: None,
             },
             900.0,
             300.0,
@@ -2814,6 +3479,7 @@ mod tests {
                 page_wait: None,
                 attach: None,
                 copied: false,
+                recording: None,
             },
             900.0,
             300.0,
@@ -2866,6 +3532,7 @@ mod tests {
                 page_wait: None,
                 attach: None,
                 copied: false,
+                recording: None,
             },
             900.0,
             300.0,
@@ -2922,6 +3589,7 @@ mod tests {
                 )),
                 attach: Some(&attach),
                 copied: false,
+                recording: None,
             },
             900.0,
             300.0,
@@ -3015,12 +3683,14 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_offers_pause_and_the_three_approval_modes() {
+    fn the_menu_offers_pause_the_three_approval_modes_record_and_view() {
         let menu = menu(
             &MenuInfo {
                 paused: false,
                 approve: ApproveMode::Ask,
                 allow_origins: &[],
+                recording: None,
+                record_failed: false,
                 hover: None,
             },
             900.0,
@@ -3032,15 +3702,30 @@ mod tests {
                 Control::Approve(ApproveMode::Ask),
                 Control::Approve(ApproveMode::Deny),
                 Control::Approve(ApproveMode::Auto),
+                Control::StartRecording,
             ]
         );
         let texts = badge_texts(&menu.commands);
-        for label in ["AGENT", "Pause the agent", "Ask me", "Refuse", "Allow"] {
+        for label in [
+            "AGENT",
+            "Pause the agent",
+            "Ask me",
+            "Refuse",
+            "Allow",
+            "RECORD",
+            "Record this session",
+            "VIEW",
+            "What the agent sees",
+        ] {
             assert!(texts.contains(&label.to_string()), "{label}: {texts:?}");
         }
-        // Not built yet: listed, but nothing to click.
-        assert!(texts.contains(&"Record this session".to_string()));
-        assert_eq!(menu.buttons.len(), 4);
+        // The viewer is the window's own: no worker control behind it.
+        assert_eq!(
+            menu.buttons.last().map(|b| b.action),
+            Some(PanelAction::Window(WindowAction::ShowAgentView))
+        );
+        // Allowed sites isn't built yet: listed, but nothing to click.
+        assert_eq!(menu.buttons.len(), 6);
         // Hangs under the ⋮ button, right-aligned to it, inside the page.
         let button = mb_runtime::chrome::menu_button_rect(900.0);
         assert!(menu.rect.y > button.y + button.height);
@@ -3072,6 +3757,8 @@ mod tests {
                 paused: true,
                 approve: ApproveMode::Auto,
                 allow_origins: &["http://127.0.0.1:8765".into()],
+                recording: None,
+                record_failed: false,
                 hover: None,
             },
             900.0,
@@ -3092,6 +3779,8 @@ mod tests {
                 paused: false,
                 approve: ApproveMode::Deny,
                 allow_origins: &[],
+                recording: None,
+                record_failed: false,
                 hover: None,
             },
             250.0,
@@ -3111,6 +3800,7 @@ mod tests {
             page_wait: None,
             attach: None,
             copied: false,
+            recording: None,
         };
         let (commands, buttons) = panel(&info(Some(Some("click e26".into()))), 900.0, 300.0, 700.0);
         let texts = badge_texts(&commands);
@@ -3262,6 +3952,7 @@ mod tests {
             page_wait: None,
             attach: Some(&attach),
             copied: false,
+            recording: None,
         };
         let before = badge_texts(&panel(&info(&[]), 900.0, 340.0, 700.0).0);
         assert!(
@@ -3274,5 +3965,237 @@ mod tests {
             after.contains(&"attached over HTTP".to_string()),
             "{after:?}"
         );
+    }
+
+    #[test]
+    fn a_recording_menu_offers_stop_with_the_clock_and_a_failure_says_so() {
+        let info = |recording, record_failed| MenuInfo {
+            paused: false,
+            approve: ApproveMode::Ask,
+            allow_origins: &[],
+            recording,
+            record_failed,
+            hover: None,
+        };
+        let on = menu(&info(Some(Duration::from_secs(161)), false), 900.0);
+        assert!(controls(&on).contains(&Control::StopRecording));
+        assert!(!controls(&on).contains(&Control::StartRecording));
+        let texts = badge_texts(&on.commands);
+        assert!(texts.contains(&"Stop recording".to_string()), "{texts:?}");
+        assert!(texts.contains(&"REC 02:41".to_string()), "{texts:?}");
+        let failed = menu(&info(None, true), 900.0);
+        assert!(controls(&failed).contains(&Control::StartRecording));
+        assert!(badge_texts(&failed.commands).contains(&"couldn't start".to_string()));
+    }
+
+    #[test]
+    fn the_rec_pill_sits_after_the_agent_pill_in_the_reserved_slot() {
+        let pair = [
+            Pill::Attached(ApproveMode::Ask),
+            Pill::Recording(3 * 60 + 5),
+        ];
+        let width = pills_width(&pair);
+        assert_eq!(width, pair[0].width() + PILL_GAP + pair[1].width());
+        let commands = pills(&pair, 1000.0);
+        let texts = badge_texts(&commands);
+        assert_eq!(texts, ["Agent attached · ask", "REC 03:05"]);
+        // Both inside the slot the chrome reserved, agent first.
+        let slot = accessory_rect(1000.0, width);
+        let xs: Vec<f32> = commands
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::Text(t) => Some(t.x),
+                _ => None,
+            })
+            .collect();
+        assert!(xs[0] > slot.x && xs[0] < xs[1] && xs[1] < slot.x + slot.width);
+        assert_eq!(Pill::Recording(6001).label(), "REC 100:01");
+    }
+
+    #[test]
+    fn the_recording_card_shows_the_file_steps_and_stop() {
+        let card = |file: &str, created, steps| PanelInfo {
+            approve: ApproveMode::Ask,
+            paused: None,
+            allow_origins: &[],
+            timeline: &[],
+            waiting: None,
+            waited: Duration::ZERO,
+            page_wait: None,
+            attach: None,
+            copied: false,
+            recording: Some(RecordingCard {
+                file: file.into(),
+                created,
+                steps,
+            }),
+        };
+        let (commands, buttons) = panel(&card("runs/r-1.jsonl", true, 6), 900.0, 340.0, 800.0);
+        let texts = badge_texts(&commands);
+        assert!(texts.contains(&"Recording this session".to_string()));
+        // The path keeps its end when it doesn't fit (test fonts are wide).
+        assert!(
+            texts.iter().any(|t| t.ends_with("1.jsonl · 6 steps")),
+            "{texts:?}"
+        );
+        assert!(texts.contains(&"Stop recording".to_string()));
+        assert_eq!(
+            buttons.iter().map(|b| b.action).collect::<Vec<_>>(),
+            [PanelAction::Control(Control::StopRecording)]
+        );
+        // Before the first call: the directory, and when the file appears.
+        let (commands, _) = panel(&card("mb-runs/", false, 0), 900.0, 340.0, 800.0);
+        let texts = badge_texts(&commands).join(" ");
+        assert!(texts.contains("mb-runs/ · 0 steps"), "{texts}");
+        assert!(texts.contains("The file is created"), "{texts}");
+        // A long path keeps its end.
+        assert_eq!(clip_start("abcdefgh", 5), "…efgh");
+    }
+
+    fn view(blocks: Option<(&str, &str)>, scroll: usize, page: Rect) -> AgentView {
+        agent_view(
+            &AgentViewInfo {
+                scope: ViewScope::OnScreen,
+                blocks,
+                source: "Exactly the text the agent's last result carried (observe).",
+                scroll,
+                copied: false,
+                hover: None,
+            },
+            page,
+        )
+    }
+
+    const BROWSER_BLOCK: &str =
+        "# browser (trusted)\nurl: http://127.0.0.1:8765/\nelements: 1 shown\n";
+    const PAGE_BLOCK: &str =
+        "# page content (untrusted, origin=http://127.0.0.1:8765)\n[e26] button \"Sign up\"\n";
+
+    #[test]
+    fn the_viewer_keeps_trusted_and_page_text_apart() {
+        let rows = view_rows(BROWSER_BLOCK, PAGE_BLOCK, 80);
+        let labels: Vec<&ViewRow> = rows
+            .iter()
+            .filter(|r| matches!(r, ViewRow::Label(..)))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                &ViewRow::Label(
+                    "Browser — trusted, written by mini-browser".into(),
+                    ViewBlock::Browser
+                ),
+                &ViewRow::Label(
+                    "Page content — untrusted, written by http://127.0.0.1:8765".into(),
+                    ViewBlock::Page
+                ),
+            ]
+        );
+        // Every line is in its own block, verbatim, in order.
+        let lines = |block| -> Vec<String> {
+            rows.iter()
+                .filter_map(|r| match r {
+                    ViewRow::Line(b, line) if *b == block => Some(line.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(lines(ViewBlock::Browser).join("\n") + "\n", BROWSER_BLOCK);
+        assert_eq!(lines(ViewBlock::Page).join("\n") + "\n", PAGE_BLOCK);
+        // A line longer than the box wraps at the column count.
+        let wrapped = view_rows("# browser (trusted)\n0123456789abcdef\n", PAGE_BLOCK, 8);
+        assert!(wrapped.contains(&ViewRow::Line(ViewBlock::Browser, "01234567".into())));
+        assert!(wrapped.contains(&ViewRow::Line(ViewBlock::Browser, "89abcdef".into())));
+
+        // Painted: the two boxes in their own colours, buttons for the
+        // toggle, Copy and close — all the window's, none the worker's.
+        let page = Rect {
+            x: 0.0,
+            y: 96.0,
+            width: 900.0,
+            height: 700.0,
+        };
+        let painted = view(Some((BROWSER_BLOCK, PAGE_BLOCK)), 0, page);
+        assert!(within(&page, &painted.rect));
+        let fills: Vec<Color> = painted
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::SolidRect(color, _) => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert!(fills.contains(&p::AGENT_TINT) && fills.contains(&p::PANEL));
+        let actions: Vec<PanelAction> = painted.buttons.iter().map(|b| b.action).collect();
+        assert_eq!(
+            actions,
+            [
+                PanelAction::Window(WindowAction::CloseAgentView),
+                PanelAction::Window(WindowAction::CopyAgentView),
+                PanelAction::Window(WindowAction::Scope(ViewScope::OnScreen)),
+                PanelAction::Window(WindowAction::Scope(ViewScope::WholePage)),
+            ]
+        );
+        for b in &painted.buttons {
+            let (x, y) = centre(b);
+            assert_eq!(
+                painted.buttons.iter().filter(|o| o.contains(x, y)).count(),
+                1
+            );
+            assert!(contains(&painted.rect, (x, y)));
+        }
+        assert_eq!(painted.below, 0);
+        let texts = badge_texts(&painted.commands);
+        assert!(
+            texts.contains(&"[e26] button \"Sign up\"".to_string()),
+            "{texts:?}"
+        );
+        assert!(!texts.iter().any(|t| t.contains("more line")));
+        // Nothing received yet: no Copy to press.
+        let empty = view(None, 0, page);
+        assert!(
+            !empty
+                .buttons
+                .iter()
+                .any(|b| b.action == PanelAction::Window(WindowAction::CopyAgentView))
+        );
+    }
+
+    #[test]
+    fn a_long_observation_scrolls_and_counts_what_is_hidden() {
+        let page_block: String =
+            std::iter::once("# page content (untrusted, origin=http://127.0.0.1:8765)".to_string())
+                .chain((0..200).map(|i| format!("[e{i}] link \"Item {i}\"")))
+                .collect::<Vec<_>>()
+                .join("\n");
+        let page = Rect {
+            x: 0.0,
+            y: 96.0,
+            width: 900.0,
+            height: 500.0,
+        };
+        let top = view(Some((BROWSER_BLOCK, &page_block)), 0, page);
+        assert!(top.below > 150, "{}", top.below);
+        let footer = badge_texts(&top.commands).join(" | ");
+        assert!(
+            footer.contains(&format!("… {} more lines — scroll", top.below)),
+            "{footer}"
+        );
+        // Scrolled past the end: clamped so the last line shows.
+        let end = view(Some((BROWSER_BLOCK, &page_block)), 10_000, page);
+        assert_eq!(end.below, 0);
+        assert!(end.scroll > 0 && end.scroll < 10_000);
+        let texts = badge_texts(&end.commands);
+        assert!(texts.contains(&"[e199] link \"Item 199\"".to_string()));
+        assert!(
+            texts.iter().any(|t| t.ends_with("lines above")),
+            "{texts:?}"
+        );
+        // Nothing drawn below the footer rule.
+        for c in &end.commands {
+            if let DisplayCommand::Text(t) = c {
+                assert!(t.y < end.rect.y + end.rect.height, "{t:?}");
+            }
+        }
     }
 }

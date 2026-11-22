@@ -4,3 +4,4 @@ dist
 .DS_Store
 .claude/worktrees
 eval/runs/
+mb-runs/

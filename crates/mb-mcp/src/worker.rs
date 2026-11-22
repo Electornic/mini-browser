@@ -195,8 +195,20 @@ pub struct Worker {
     unclaimed: Option<(Request, Reply)>,
     // How long a call stays parked before it returns `still_waiting`.
     park_reply_after: Duration,
-    // `--log`: one line per finished call (G5a).
+    // `--log`: one line per finished call (G5a). Also started / stopped
+    // by the person from the ⋮ menu ("Record this session"); each start
+    // bumps `log_generation` so a call that began under another log (or
+    // none) isn't written into this one.
     log: Option<SessionLog>,
+    log_generation: u64,
+    recording_since: Option<std::time::Instant>,
+    // The page when the person started recording: the first step's
+    // `person_moved` is about changes since then, not since the agent's
+    // last result (which the recording doesn't hold).
+    record_baseline: Option<PageKey>,
+    // What the agent last received: the two observation blocks of its
+    // latest result that carried them ("What the agent sees").
+    seen: Option<Seen>,
     // The person paused the agent from the window's ⋮ menu: no agent call
     // runs until they resume. The one call holding meanwhile (parked like
     // an approval: `paused` after `park_reply_after`, re-attach by
@@ -220,9 +232,54 @@ const RESUMED_NOTE: &str =
 /// What a session-log line needs from before the action ran.
 #[derive(Debug, Clone, Default)]
 struct StepContext {
+    /// The log generation the step began under (None = not recording).
+    log: Option<u64>,
     target: Option<Target>,
     person_moved: bool,
     approve: ApproveMode,
+}
+
+/// (document generation, URL): which page the browser is on.
+type PageKey = (u64, Option<String>);
+
+/// The observation text the agent last received, for the window's "What
+/// the agent sees" viewer. Exactly the two blocks sent; never sent back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Seen {
+    pub browser: String,
+    pub page: String,
+    /// The call it answered, with the error code if it failed
+    /// ("click e26 · approval_denied").
+    pub from: String,
+}
+
+impl Seen {
+    fn of(request: &Request, reply: &Reply) -> Option<Seen> {
+        let (browser, page, from) = match reply {
+            Reply::Observation { browser, page } => (browser, page, request.label()),
+            Reply::Error(ErrorReport {
+                code,
+                observation: Some((browser, page)),
+                ..
+            }) => (browser, page, format!("{} · {code}", request.label())),
+            _ => return None,
+        };
+        Some(Seen {
+            browser: browser.clone(),
+            page: page.clone(),
+            from,
+        })
+    }
+}
+
+/// The session log as the window shows it (REC pill, recording card).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recording {
+    /// The file, once the first step created it; else where it will go.
+    pub file: Option<std::path::PathBuf>,
+    pub dir: std::path::PathBuf,
+    pub steps: u64,
+    pub since: std::time::Instant,
 }
 
 impl Worker {
@@ -234,6 +291,7 @@ impl Worker {
                 std::process::exit(2);
             })
         });
+        let recording_since = log.as_ref().map(|_| std::time::Instant::now());
         Self {
             options,
             browser,
@@ -245,9 +303,97 @@ impl Worker {
             unclaimed: None,
             park_reply_after: PARK_REPLY_AFTER,
             log,
+            log_generation: 0,
+            recording_since,
+            record_baseline: None,
+            seen: None,
             paused: false,
             held: None,
         }
+    }
+
+    /// The observation the agent last received (window viewer).
+    pub fn seen(&self) -> Option<&Seen> {
+        self.seen.as_ref()
+    }
+
+    // Send a final reply, remembering its observation if it got there.
+    fn deliver(&mut self, request: &Request, sender: oneshot::Sender<Reply>, reply: Reply) {
+        let seen = Seen::of(request, &reply);
+        if sender.send(reply).is_ok() && seen.is_some() {
+            self.seen = seen;
+        }
+    }
+
+    /// The person started recording from the ⋮ menu. Person-only: no MCP
+    /// tool or `Request` reaches this. Same rules as `--log DIR/`: a new
+    /// `run-<pid>-<n>.jsonl`, created atomically and owner-only at the
+    /// agent's first call after this. Into `--log`'s directory if it
+    /// named one, else `DEFAULT_RECORD_DIR` (a `--log FILE` from launch
+    /// is never reopened — that would overwrite it).
+    pub fn start_recording(&mut self) -> Result<(), String> {
+        if self.log.is_some() {
+            return Ok(());
+        }
+        let dir = self.record_dir();
+        let url = self
+            .browser
+            .state()
+            .current_url
+            .as_ref()
+            .map(|u| u.to_string());
+        let log = SessionLog::create(&dir, &self.options)
+            .map_err(|error| format!("{}: {error}", dir.display()))?
+            .starting_at(url);
+        self.log = Some(log);
+        self.log_generation += 1;
+        self.recording_since = Some(std::time::Instant::now());
+        self.record_baseline = Some(self.page_key());
+        Ok(())
+    }
+
+    /// The person stopped recording: the file is closed (it was flushed
+    /// after every line). A call still running isn't written anywhere.
+    pub fn stop_recording(&mut self) {
+        self.log = None;
+        self.recording_since = None;
+        self.record_baseline = None;
+    }
+
+    /// The session log being written, if any (`--log` or the ⋮ menu).
+    pub fn recording(&self) -> Option<Recording> {
+        let log = self.log.as_ref()?;
+        let dir = if crate::session_log::is_dir_path(log.path()) {
+            log.path().to_path_buf()
+        } else {
+            log.path()
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default()
+        };
+        Some(Recording {
+            file: log.file().map(std::path::Path::to_path_buf).or_else(|| {
+                (!crate::session_log::is_dir_path(log.path())).then(|| log.path().to_path_buf())
+            }),
+            dir,
+            steps: log.steps(),
+            since: self.recording_since.unwrap_or_else(std::time::Instant::now),
+        })
+    }
+
+    fn record_dir(&self) -> std::path::PathBuf {
+        match &self.options.log {
+            Some(path) if crate::session_log::is_dir_path(path) => path.clone(),
+            _ => std::path::PathBuf::from(crate::session_log::DEFAULT_RECORD_DIR),
+        }
+    }
+
+    fn page_key(&self) -> PageKey {
+        let state = self.browser.state();
+        (
+            state.document_generation(),
+            state.current_url.as_ref().map(|u| u.to_string()),
+        )
     }
 
     pub fn browser(&mut self) -> &mut AgentBrowser {
@@ -269,6 +415,10 @@ impl Worker {
         let result = self.execute_guarded(request, |browser| execute(browser, request));
         let reply = self.conclude(request, result, None);
         self.log_step(request, &context, None, &reply);
+        // The caller hands it to the agent.
+        if let Some(seen) = Seen::of(request, &reply) {
+            self.seen = Some(seen);
+        }
         reply
     }
 
@@ -281,7 +431,7 @@ impl Worker {
         if let Some((request, reply)) = self.unclaimed.take()
             && request == job.request
         {
-            let _ = job.reply.send(reply);
+            self.deliver(&request, job.reply, reply);
             return;
         }
         let job = match self.reattach(job) {
@@ -365,7 +515,7 @@ impl Worker {
                 Err(error) => {
                     let reply = self.conclude(&job.request, Err(error), None);
                     self.log_step(&job.request, &context, None, &reply);
-                    let _ = job.reply.send(reply);
+                    self.deliver(&job.request, job.reply, reply);
                 }
             }
             return;
@@ -411,7 +561,7 @@ impl Worker {
                     add_note(&mut reply, note);
                 }
                 self.log_step(&job.request, &context, None, &reply);
-                let _ = job.reply.send(reply);
+                self.deliver(&job.request, job.reply, reply);
             }
         }
     }
@@ -539,7 +689,7 @@ impl Worker {
         self.log_step(&parked.request, &parked.context, Some(outcome), &reply);
         match parked.reply {
             Some(sender) if !sender.is_closed() => {
-                let _ = sender.send(reply);
+                self.deliver(&parked.request, sender, reply);
             }
             _ => self.unclaimed = Some((parked.request, reply)),
         }
@@ -563,7 +713,7 @@ impl Worker {
         };
         let reply = self.conclude(&job.request, result, None);
         self.log_step(&job.request, &context, None, &reply);
-        let _ = job.reply.send(reply);
+        self.deliver(&job.request, job.reply, reply);
         self.run_deferred();
     }
 
@@ -609,16 +759,24 @@ impl Worker {
         if self.log.is_none() {
             return StepContext::default();
         }
+        // The first step of a recording started from the menu: did the
+        // person move since they pressed Record? (Before that is outside
+        // the recording; replay opens the page it started on.)
+        let person_moved = match self.record_baseline.take() {
+            Some(baseline) => baseline != self.page_key(),
+            None => self.browser.changed_by_person(),
+        };
         let id = match request {
             Request::Click { id } | Request::Type { id, .. } => Some(id),
             Request::WaitFor { id: Some(id), .. } => Some(id),
             _ => None,
         };
         StepContext {
+            log: Some(self.log_generation),
             target: id
                 .and_then(|id| parse_id(id).ok())
                 .and_then(|id| target_of(&mut self.browser, id)),
-            person_moved: self.browser.changed_by_person(),
+            person_moved,
             approve: self.options.agent.approve,
         }
     }
@@ -631,7 +789,9 @@ impl Worker {
         outcome: Option<&str>,
         reply: &Reply,
     ) {
-        if self.log.is_none() {
+        // Not recording, or the step began before this recording started
+        // (its target / mode weren't captured for it).
+        if self.log.is_none() || context.log != Some(self.log_generation) {
             return;
         }
         let result = result_record(&mut self.browser, reply);
@@ -1127,7 +1287,7 @@ pub fn encode_rgb_png(pixels: &[u32], width: usize, height: usize) -> Vec<u8> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use mb_runtime::input::WindowInput;
 
@@ -1154,7 +1314,7 @@ mod tests {
 
     // A tiny page server for the parking tests: a password field and a link
     // to another origin (same listener under its `localhost` name).
-    fn serve_page() -> String {
+    pub(crate) fn serve_page() -> String {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1173,6 +1333,10 @@ mod tests {
                 }
                 let body = if request_line.contains(" /x ") {
                     "<html><body><p>Arrived</p></body></html>".to_string()
+                } else if request_line.contains(" /long ") {
+                    // A button far below the first screen: a viewport
+                    // observation doesn't list (or issue) it.
+                    "<html><body><div style=\"height:3000px\">Top</div><button>Far away</button></body></html>".to_string()
                 } else {
                     format!(
                         "<html><body><label for=\"pw\">Password</label><input id=\"pw\" type=\"password\"><a href=\"{other}/x\">Elsewhere</a></body></html>"
@@ -1188,7 +1352,10 @@ mod tests {
         base
     }
 
-    fn worker_on(base: &str, approve: mb_agent::ApproveMode) -> (Worker, String, String) {
+    pub(crate) fn worker_on(
+        base: &str,
+        approve: mb_agent::ApproveMode,
+    ) -> (Worker, String, String) {
         worker_logging(base, approve, None)
     }
 
@@ -1213,6 +1380,7 @@ mod tests {
             preview_scale: 1.0,
             preview_menu: false,
             preview_pause: false,
+            preview_agent_view: None,
             http_port: None,
             attach: None,
             log,
@@ -1470,6 +1638,7 @@ mod tests {
             preview_scale: 1.0,
             preview_menu: false,
             preview_pause: false,
+            preview_agent_view: None,
             http_port: None,
             attach: None,
             log: None,
@@ -1910,5 +2079,182 @@ mod tests {
         assert_eq!(repeats.failure(&click, "not_interactable"), 1);
         repeats.success();
         assert_eq!(repeats.failure(&click, "not_interactable"), 1);
+    }
+
+    // The person clicks a link; frames until the new page is in.
+    fn person_navigates(worker: &mut Worker, id: &str) {
+        person_click(worker, id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !worker.browser().changed_by_person() {
+            assert!(std::time::Instant::now() < deadline, "no navigation");
+            worker.browser().human_frame(&WindowInput::default());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn run_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .map(|d| d.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        files.sort();
+        files
+    }
+
+    fn json_lines(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn recording_from_the_window_is_lazy_private_and_closes_on_stop() {
+        let base = serve_page();
+        let dir = std::env::temp_dir().join(format!("mb-record-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let as_dir = std::path::PathBuf::from(format!("{}/", dir.display()));
+        // `--log DIR/` at launch: recording from the start (the menu shows
+        // it on); the navigate was its first step.
+        let (mut worker, _, link) = worker_logging(&base, ApproveMode::Ask, Some(as_dir));
+        let first = worker.recording().expect("recording from launch");
+        assert_eq!(first.steps, 1);
+        let first_file = first.file.clone().expect("created at the first step");
+        // Stop: the file is closed; later calls aren't written anywhere.
+        worker.stop_recording();
+        assert!(worker.recording().is_none());
+        worker.process(&observe());
+        assert_eq!(json_lines(&first_file).len(), 2, "header + navigate");
+
+        // Start again from the menu: same directory, nothing on disk until
+        // the agent's next call, then a new run file.
+        let (mut worker, _) = (worker, ());
+        worker.start_recording().unwrap();
+        let waiting = worker.recording().unwrap();
+        assert_eq!((waiting.file.as_ref(), waiting.steps), (None, 0));
+        assert_eq!(run_files(&dir).len(), 1, "lazy: no file before a call");
+        worker.process(&observe());
+        let second = worker.recording().unwrap().file.expect("created now");
+        assert_ne!(second, first_file);
+        assert_eq!(run_files(&dir).len(), 2);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&second).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let lines = json_lines(&second);
+        // Replay opens the page the recording started on.
+        assert_eq!(lines[0]["start_url"], format!("{base}/"));
+        assert_eq!(lines[1]["n"], 1);
+        assert_eq!(lines[1]["tool"], "observe");
+        assert!(lines[1].get("person_moved").is_none());
+
+        // A call that began before Record (a question card up) isn't
+        // written into the recording when the person answers it.
+        worker.stop_recording();
+        let mut held = submit(&mut worker, Request::Click { id: link });
+        assert!(worker.waiting().is_some());
+        worker.start_recording().unwrap();
+        worker.answer(Answer::Deny);
+        assert!(matches!(held.try_recv(), Ok(Reply::Error(_))));
+        assert_eq!(worker.recording().unwrap().steps, 0);
+        assert_eq!(run_files(&dir).len(), 2, "nothing recorded yet");
+        worker.stop_recording();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_recordings_first_step_marks_only_what_the_person_did_after_record() {
+        let base = serve_page();
+        let dir = std::env::temp_dir().join(format!("mb-record-moved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let as_dir = std::path::PathBuf::from(format!("{}/", dir.display()));
+        let (mut worker, _, link) = worker_logging(&base, ApproveMode::Auto, Some(as_dir));
+        worker.stop_recording();
+        // The person navigates *before* pressing Record: that page is
+        // where the recording starts, not a move inside it.
+        person_navigates(&mut worker, &link);
+        worker.start_recording().unwrap();
+        worker.process(&observe());
+        let file = worker.recording().unwrap().file.unwrap();
+        let lines = json_lines(&file);
+        assert_eq!(
+            lines[0]["start_url"],
+            format!("{}/x", base.replace("127.0.0.1", "localhost"))
+        );
+        assert!(lines[1].get("person_moved").is_none(), "{}", lines[1]);
+        worker.stop_recording();
+
+        // The person navigates *after* pressing Record: replay must stop
+        // there (the move isn't in the log).
+        worker.process(&Request::Navigate {
+            url: format!("{base}/"),
+        });
+        worker.start_recording().unwrap();
+        let link = worker
+            .browser()
+            .full_snapshot()
+            .elements
+            .iter()
+            .find(|e| e.name == "Elsewhere")
+            .map(|e| format!("e{}", e.id.raw()))
+            .unwrap();
+        person_navigates(&mut worker, &link);
+        worker.process(&observe());
+        let file = worker.recording().unwrap().file.unwrap();
+        let lines = json_lines(&file);
+        assert_eq!(lines[0]["start_url"], format!("{base}/"));
+        assert_eq!(lines[1]["person_moved"], true);
+        worker.stop_recording();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_menu_records_into_mb_runs_unless_log_named_a_directory() {
+        let base = serve_page();
+        let (worker, _, _) = worker_on(&base, ApproveMode::Ask);
+        assert_eq!(
+            worker.record_dir(),
+            std::path::PathBuf::from(crate::session_log::DEFAULT_RECORD_DIR)
+        );
+        // `--log FILE`: never reopened (that would overwrite it).
+        let file =
+            std::env::temp_dir().join(format!("mb-record-file-{}.jsonl", std::process::id()));
+        let (mut worker, _, _) = worker_logging(&base, ApproveMode::Ask, Some(file.clone()));
+        assert_eq!(worker.recording().unwrap().file.as_ref(), Some(&file));
+        worker.stop_recording();
+        assert_eq!(
+            worker.record_dir(),
+            std::path::PathBuf::from(crate::session_log::DEFAULT_RECORD_DIR)
+        );
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn the_window_keeps_what_the_agent_last_received() {
+        let base = serve_page();
+        let (mut worker, _, link) = worker_on(&base, ApproveMode::Deny);
+        let seen = worker.seen().cloned().expect("the navigate result");
+        assert!(seen.browser.starts_with("# browser (trusted)"));
+        assert!(seen.page.starts_with("# page content (untrusted"));
+        assert_eq!(seen.from, format!("navigate {base}/"));
+        // An error that carried an observation: that observation, with
+        // the code; a reply without one (screenshot) keeps the last.
+        let mut refused = submit(&mut worker, Request::Click { id: link.clone() });
+        let Ok(Reply::Error(report)) = refused.try_recv() else {
+            panic!("refused");
+        };
+        let seen = worker.seen().unwrap();
+        assert_eq!(seen.from, format!("click {link} · {}", report.code));
+        assert_eq!(
+            Some((seen.browser.clone(), seen.page.clone())),
+            report.observation
+        );
+        let _shot = submit(&mut worker, Request::Screenshot);
+        assert_eq!(
+            worker.seen().unwrap().from,
+            format!("click {link} · {}", report.code)
+        );
     }
 }

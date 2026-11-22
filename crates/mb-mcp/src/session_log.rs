@@ -20,6 +20,10 @@ use crate::worker::{Reply, Request};
 
 pub const VERSION: u64 = 1;
 pub const REDACTED: &str = "<redacted>";
+/// Where "Record this session" (⋮ menu) writes when `--log` didn't name a
+/// directory: relative to the server's working directory, one
+/// `run-<pid>-<n>.jsonl` per recording, as `--log DIR/`.
+pub const DEFAULT_RECORD_DIR: &str = "mb-runs/";
 
 /// The element an id argument pointed at, as replay can find it again
 /// when NodeIds differ.
@@ -92,6 +96,8 @@ pub struct SessionLog {
     // health check, an unused registration) leaves no empty run behind
     // for `mb-mcp eval` to count as a failure.
     out: Option<BufWriter<File>>,
+    // The file actually opened (`run-<pid>-<n>.jsonl` for a directory).
+    file: Option<std::path::PathBuf>,
     steps: u64,
 }
 
@@ -124,8 +130,33 @@ impl SessionLog {
             path: path.to_path_buf(),
             header,
             out: None,
+            file: None,
             steps: 0,
         })
+    }
+
+    /// A recording started mid-session (⋮ menu): replay must open the
+    /// page it started on, not `--start-url`.
+    pub fn starting_at(mut self, url: Option<String>) -> Self {
+        if url.is_some() {
+            self.header["start_url"] = json!(url);
+        }
+        self
+    }
+
+    /// Steps recorded so far.
+    pub fn steps(&self) -> u64 {
+        self.steps
+    }
+
+    /// The file being written, once the first step created it.
+    pub fn file(&self) -> Option<&Path> {
+        self.file.as_deref()
+    }
+
+    /// What `--log` named: the file, or the directory runs go into.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn step(&mut self, request: &Request, context: StepRecord<'_>, result: Value) {
@@ -165,10 +196,12 @@ impl SessionLog {
 
     fn write(&mut self, value: &Value) -> std::io::Result<()> {
         if self.out.is_none() {
-            let mut out = BufWriter::new(open_run_log(&self.path)?.0);
+            let (file, path) = open_run_log(&self.path)?;
+            let mut out = BufWriter::new(file);
             serde_json::to_writer(&mut out, &self.header)?;
             out.write_all(b"\n")?;
             self.out = Some(out);
+            self.file = Some(path);
         }
         let out = self.out.as_mut().expect("opened above");
         serde_json::to_writer(&mut *out, value)?;
@@ -178,7 +211,7 @@ impl SessionLog {
     }
 }
 
-fn is_dir_path(path: &Path) -> bool {
+pub fn is_dir_path(path: &Path) -> bool {
     path.as_os_str().to_string_lossy().ends_with('/') || path.is_dir()
 }
 
