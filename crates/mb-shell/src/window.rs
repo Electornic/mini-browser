@@ -38,6 +38,10 @@ pub struct Frame<'a> {
     pub width: usize,
     pub height: usize,
     pub scale: f32,
+    /// The OS appearance as winit reports it (`None` = unknown). The
+    /// palette's theme is already set from it for this frame; an embedder
+    /// with its own appearance setting (`mb-mcp --window`) overrides it.
+    pub system_dark: Option<bool>,
     physical_width: usize,
     physical_height: usize,
     target: &'a mut [u32],
@@ -320,7 +324,10 @@ where
                 self.pending.scroll_y += dy;
                 self.request_redraw();
             }
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+            // The OS appearance changed: repaint the chrome in it.
+            WindowEvent::Resized(_)
+            | WindowEvent::ScaleFactorChanged { .. }
+            | WindowEvent::ThemeChanged(_) => {
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
@@ -424,6 +431,10 @@ where
             .map_err(|e| anyhow!("softbuffer resize: {e}"))?;
 
         let scale = window.scale_factor() as f32;
+        let system_dark = window
+            .theme()
+            .map(|theme| theme == winit::window::Theme::Dark);
+        mb_engine::palette::set_theme(mb_engine::palette::Theme::from_system(system_dark));
         let input = self.pending.drain_for_frame(self.last_left_down, scale);
         self.last_left_down = input.left_mouse_held;
 
@@ -438,6 +449,7 @@ where
             width: ((size.width as f32) / scale).floor().max(1.0) as usize,
             height: ((size.height as f32) / scale).floor().max(1.0) as usize,
             scale,
+            system_dark,
             physical_width: size.width as usize,
             physical_height: size.height as usize,
             target: &mut buffer,

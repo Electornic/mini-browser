@@ -24,7 +24,7 @@
 │   - layout/          taffy 브릿지 + boundary block/inline/flex/grid/table
 │   - render/          DisplayList paint commands + tiny-skia + swash (`render/raster/` 별도)
 │   - chrome           탭 줄 / 주소창 / 뒤로앞 / 메뉴 페인트 명령 + ChromeExtras (임베더 알약 자리)
-│   - palette          디자인 토큰 (역할 색·중립색·글자 폭 헬퍼) — 크롬과 mb-mcp 오버레이가 공유
+│   - palette          디자인 토큰 (역할 색·중립색·글자 폭 헬퍼, LIGHT/DARK 두 벌 + 스레드별 테마) — 크롬과 mb-mcp 오버레이가 공유
 │   - view             DocumentView 빌더 + hit-testing (per-frame entry)
 │   - font_system      shared FontSystem + SwashCache OnceLock 슬롯
 │   - input            WindowInput 데이터 + edit_line(주소창·대화상자 공용 한 줄 편집) (winit driver 는 mb-shell)
@@ -49,7 +49,7 @@
 │
 ├── crates/mb-mcp      (binary [[bin]] mb-mcp)  rmcp 3.x, tokio, hyper, image(png), base64, arboard
 │   - main             tokio 스레드 = rmcp stdio 또는 HTTP 서버, 메인 스레드 = 브라우저
-│   - cli              --viewport / --start-url / --allow-origin / --approve auto|deny|ask / --clock / --seed / --window / --http --port / --preview(-menu/-pause/-agent-view/-answer/-sites/-sites-add)
+│   - cli              --viewport / --start-url / --allow-origin / --approve auto|deny|ask / --clock / --seed / --window / --http --port / --theme / --preview(-menu/-pause/-agent-view/-answer/-sites/-sites-add)
 │   - http             --http: 127.0.0.1 바인딩, Bearer 토큰·Origin·경로 게이트 → rmcp StreamableHttpService
 │   - prompts          서버 instructions + tool 설명 (LLM 이 읽는 텍스트, 영어)
 │   - worker           Job 처리, repeat_count, 패닉 시 재생성, 창 모드의 park(승인·넘겨받기·"Your turn" 대기)/answer(넘겨주기 hand back), 거절 영수증·잊기, 일시정지 보관(held)·재개, 런타임 승인 모드, 허용 사이트 편집(목록 밖이 된 카드 → navigation_blocked), 기록 켜기/끄기, 마지막 받은 관찰(seen)
@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 782 (workspace 합계, 2026-11-22 허용 사이트 편집 +7). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 788 (workspace 합계, 2026-11-22 다크 모드 +6). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -201,7 +201,8 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - body cap 50 MB (`limit().read_to_vec`).
 
 ### 디자인 토큰
-- 크롬·오버레이 색은 `mb_runtime::palette` 에서만 가져온다 (시안 "Agent Browser" 보드 1). 주황(사람) 위 글자는 늘 ink. 새 색이 필요하면 palette 에 이름을 붙여 추가.
+- 크롬·오버레이 색은 `mb_runtime::palette` 에서만 가져온다 (시안 "Agent Browser" 보드 1). 주황(사람) 위 글자는 늘 ink. 새 색이 필요하면 palette 에 이름을 붙여 추가 — `Palette` 필드 + `LIGHT`·`DARK` 두 값 + `tokens!` 목록 (docs/concept.md "다크 모드").
+- 토큰은 함수다(`p::ink()`): 지금 스레드의 테마 값. `const`/`static` 에 담거나 프레임을 넘겨 캐시하지 말 것(테마 전환이 안 먹는다) — 상태 문구처럼 오래 들고 있을 색은 `palette::Tone` 으로. 역할 색 채우기 위 글자는 `on_fill`(`page` 는 다크에서 검정). 에이전트에게 가는 픽셀(스크린샷)은 `with_theme(Light)` 안에서 그린다.
 - 관전 창의 대화상자(뷰어·허용 사이트)는 모달이다 — 열린 프레임엔 `page_input` 을 비워 클릭·키가 페이지·주소창에 안 가게 한다. 새 대화상자를 만들면 같은 자리(`window_mode` 의 모달 라우팅)에 넣고, 글자 칸은 `input::edit_line` 을 쓸 것.
 - 오버레이 글자에 `⋮` 같은 기호를 쓰지 말 것 — 패널 폰트에 글리프가 없어 깨진다. ✓/✗ 도 글리프 대신 `overlay` 의 그린 아이콘.
 - ID 배지 자리는 `overlay::place_badges`(순수 함수)가 정한다 — 배지를 그리는 새 경로를 만들면 `text_obstacles` 와 `page_area` 를 같이 넘길 것 (안 넘기면 배지가 글자·크롬을 덮는다). 프레임마다 도는 코드라 문서 전체를 훑는 일(화면 밖 글자 측정 등)은 먼저 위치로 거를 것. 규칙은 docs/concept.md "배지 자리".

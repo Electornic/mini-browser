@@ -98,7 +98,7 @@ impl BrowserState {
             external_scripts: HashMap::new(),
             current_url: None,
             status_text: title.into(),
-            status_color: crate::palette::STOP,
+            status_color: crate::palette::Tone::Stop,
         }
     }
 }

@@ -43,7 +43,9 @@ impl BrowserState {
                     // The dropdown itself is not implemented yet, but acknowledging the click
                     // proves the hit region works and prevents the click from falling through
                     // to the page underneath.
-                    ChromeAction::Menu => self.set_status("menu (todo)", crate::palette::MUTED),
+                    ChromeAction::Menu => {
+                        self.set_status("menu (todo)", crate::palette::Tone::Muted)
+                    }
                 }
                 self.address_bar_focused = false;
                 self.address_bar_selected = false;

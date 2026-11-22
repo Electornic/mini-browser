@@ -205,7 +205,7 @@ fn eye_icon(x: f32, y: f32, color: Color) -> Vec<DisplayCommand> {
 // A globe (board 2b "Allowed sites"), 16 × 16: a ring, the equator and
 // a meridian.
 fn globe_icon(x: f32, y: f32, color: Color) -> Vec<DisplayCommand> {
-    let mut commands = ring_icon(x, y, 16.0, 14.0, color, Some(p::PAGE));
+    let mut commands = ring_icon(x, y, 16.0, 14.0, color, Some(p::page()));
     commands.extend(stroke(&[(2.0, 8.0), (14.0, 8.0)], x, y, 1.5, color));
     commands.extend(stroke(
         &[(8.0, 1.5), (5.5, 5.0), (5.5, 11.0), (8.0, 14.5)],
@@ -248,7 +248,7 @@ fn play_icon(x: f32, y: f32, size: f32, color: Color) -> Vec<DisplayCommand> {
 // holding "!" (approval) or a padlock (password handoff).
 fn card_badge(x: f32, y: f32, lock: bool) -> Vec<DisplayCommand> {
     let mut commands = vec![rounded(
-        p::PERSON_SOFT,
+        p::person_soft(),
         Rect {
             x,
             y,
@@ -267,8 +267,8 @@ fn card_badge(x: f32, y: f32, lock: bool) -> Vec<DisplayCommand> {
                 height: 7.0,
             },
             1.5,
-            p::INK,
-            p::PERSON_SOFT,
+            p::ink(),
+            p::person_soft(),
         ));
         commands.extend(stroke(
             &[
@@ -282,11 +282,11 @@ fn card_badge(x: f32, y: f32, lock: bool) -> Vec<DisplayCommand> {
             cx,
             cy,
             1.6,
-            p::INK,
+            p::ink(),
         ));
     } else {
         commands.push(rounded(
-            p::INK,
+            p::ink(),
             Rect {
                 x: cx - 1.0,
                 y: cy - 6.0,
@@ -296,7 +296,7 @@ fn card_badge(x: f32, y: f32, lock: bool) -> Vec<DisplayCommand> {
             1.0,
         ));
         commands.push(rounded(
-            p::INK,
+            p::ink(),
             Rect {
                 x: cx - 1.0,
                 y: cy + 4.0,
@@ -755,13 +755,13 @@ pub fn page_overlay(
         } else {
             BadgeStyle::FULL
         };
-        commands.push(rounded(p::AGENT, placed.rect, style.radius));
+        commands.push(rounded(p::agent(), placed.rect, style.radius));
         commands.push(text_cmd(
             label.clone(),
             placed.rect.x + style.pad,
             centered_text_y(placed.rect.y, placed.rect.height, style.font),
             style.font,
-            p::PAGE,
+            p::on_fill(),
             600,
             true,
         ));
@@ -784,7 +784,7 @@ pub fn page_overlay(
                     height: r.height + 4.0,
                 },
                 2.0,
-                p::PERSON,
+                p::person(),
             ));
             note_at = Some(r);
         }
@@ -801,13 +801,13 @@ pub fn page_overlay(
             width,
             height,
         };
-        commands.push(rounded(p::PERSON_SOFT, chip, 6.0));
+        commands.push(rounded(p::person_soft(), chip, 6.0));
         commands.push(text(
             note,
             chip.x + 8.0,
             centered_text_y(chip.y, height, SMALL),
             SMALL,
-            p::INK,
+            p::ink(),
             true,
         ));
     }
@@ -903,30 +903,30 @@ impl Pill {
 
     fn commands_at(self, rect: Rect) -> Vec<DisplayCommand> {
         let (border, fill, ink) = match self {
-            Pill::Attached(_) => (p::AGENT_BORDER, p::AGENT_TINT, p::AGENT_INK),
-            Pill::NoAgent => (p::LINE, p::PAGE, p::MUTED),
-            Pill::Paused => (p::PERSON_BORDER, p::PERSON_TINT, p::INK),
-            Pill::Replaying => (p::LINE, p::PANEL, p::MUTED),
-            Pill::Recording(_) => (p::STOP_BORDER, p::STOP_TINT, p::STOP_INK),
+            Pill::Attached(_) => (p::agent_border(), p::agent_tint(), p::agent_ink()),
+            Pill::NoAgent => (p::line(), p::page(), p::muted()),
+            Pill::Paused => (p::person_border(), p::person_tint(), p::ink()),
+            Pill::Replaying => (p::line(), p::panel(), p::muted()),
+            Pill::Recording(_) => (p::stop_border(), p::stop_tint(), p::stop_ink()),
         };
         let mut commands = framed_rect(rect, rect.height / 2.0, border, fill).to_vec();
         let icon_x = rect.x + 12.0;
         let mid = rect.y + rect.height / 2.0;
         match self {
             Pill::Attached(_) => {
-                commands.extend(ring_icon(icon_x, mid - 4.0, 8.0, 8.0, p::AGENT, None))
+                commands.extend(ring_icon(icon_x, mid - 4.0, 8.0, 8.0, p::agent(), None))
             }
             Pill::NoAgent => commands.extend(ring_icon(
                 icon_x,
                 mid - 4.0,
                 8.0,
                 8.0,
-                p::FAINT,
-                Some(p::PAGE),
+                p::faint(),
+                Some(p::page()),
             )),
-            Pill::Paused => commands.extend(pause_icon(icon_x - 1.0, mid - 5.0, 10.0, p::PERSON)),
+            Pill::Paused => commands.extend(pause_icon(icon_x - 1.0, mid - 5.0, 10.0, p::person())),
             Pill::Recording(_) => {
-                commands.extend(ring_icon(icon_x, mid - 4.0, 8.0, 8.0, p::STOP, None))
+                commands.extend(ring_icon(icon_x, mid - 4.0, 8.0, 8.0, p::stop(), None))
             }
             Pill::Replaying => {}
         }
@@ -1060,6 +1060,29 @@ pub enum WindowAction {
     /// Add what the field holds.
     AddSite,
     CloseAllowedSites,
+    /// The ⋮ menu's Appearance segment.
+    Theme(ThemeChoice),
+}
+
+/// The observation window's appearance (board 10): follow the OS, or pin
+/// one. Window-only — nothing reaches the worker or the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemeChoice {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeChoice {
+    /// The theme to paint in, given what the OS says (`None` = unknown).
+    pub fn resolve(self, system_dark: Option<bool>) -> p::Theme {
+        match self {
+            ThemeChoice::System => p::Theme::from_system(system_dark),
+            ThemeChoice::Light => p::Theme::Light,
+            ThemeChoice::Dark => p::Theme::Dark,
+        }
+    }
 }
 
 /// What the viewer shows (board 8's toggle).
@@ -1150,10 +1173,13 @@ enum Look {
 
 fn button(rect: Rect, label: &str, look: Look) -> Vec<DisplayCommand> {
     let (border, fill, ink, bold) = match look {
-        Look::Filled(color) => (color, color, p::PAGE, true),
-        Look::Plain => (p::LINE, p::PAGE, p::INK, false),
-        Look::Danger => (p::STOP_BORDER, p::PAGE, p::STOP_TEXT, true),
-        Look::Disabled => (p::LINE, p::DISABLED_BG, p::FAINT, false),
+        // Ink-filled (Resume, Next) inverts with the theme: its label is
+        // the surface color. Role fills always carry white.
+        Look::Filled(color) if color == p::ink() => (color, color, p::page(), true),
+        Look::Filled(color) => (color, color, p::on_fill(), true),
+        Look::Plain => (p::line(), p::page(), p::ink(), false),
+        Look::Danger => (p::stop_border(), p::page(), p::stop_text(), true),
+        Look::Disabled => (p::line(), p::disabled_bg(), p::faint(), false),
     };
     let mut commands = framed_rect(rect, 8.0, border, fill).to_vec();
     let size = if rect.height >= 40.0 { 14.0 } else { BODY };
@@ -1266,7 +1292,7 @@ fn mono_box(commands: &mut Vec<DisplayCommand>, y: &mut f32, s: &str, x: f32, wi
     let lines = wrap_px(s, width - 24.0, BODY, true, 3);
     let height = 16.0 + lines.len() as f32 * line_height(BODY);
     commands.push(rounded(
-        p::PANEL,
+        p::panel(),
         Rect {
             x,
             y: *y,
@@ -1277,7 +1303,7 @@ fn mono_box(commands: &mut Vec<DisplayCommand>, y: &mut f32, s: &str, x: f32, wi
     ));
     let mut ly = *y + 8.0;
     for line in lines {
-        commands.push(text_cmd(line, x + 12.0, ly, BODY, p::INK, 400, true));
+        commands.push(text_cmd(line, x + 12.0, ly, BODY, p::ink(), 400, true));
         ly += line_height(BODY);
     }
     *y += height;
@@ -1289,7 +1315,7 @@ fn card_frame(rect: Rect, border: Color, border_width: f32) -> Vec<DisplayComman
     vec![
         rounded(border, rect, 14.0),
         rounded(
-            p::PAGE,
+            p::page(),
             Rect {
                 x: rect.x + border_width,
                 y: rect.y + border_width,
@@ -1354,7 +1380,7 @@ fn question_card(
         x,
         width,
         top,
-        p::PERSON,
+        p::person(),
         2.0,
         |c, left, inner, mut y| {
             let (lock, title) = match waiting {
@@ -1376,7 +1402,7 @@ fn question_card(
                 left + 42.0,
                 centered_text_y(y, 32.0, 16.0),
                 16.0,
-                p::INK,
+                p::ink(),
                 true,
             ));
             y += 32.0 + 12.0;
@@ -1390,11 +1416,11 @@ fn question_card(
                     } else {
                         "The page hasn't changed yet."
                     };
-                    paragraph(c, &mut y, note, left, inner, BODY, p::MUTED, 2);
+                    paragraph(c, &mut y, note, left, inner, BODY, p::muted(), 2);
                     y += 6.0;
                     let half = (inner - 8.0) / 2.0;
                     let row = [
-                        ("Approve", Answer::Approve, Look::Filled(p::DONE), left),
+                        ("Approve", Answer::Approve, Look::Filled(p::done()), left),
                         ("Deny", Answer::Deny, Look::Danger, left + half + 8.0),
                     ];
                     for (label, answer, look, bx) in row {
@@ -1431,7 +1457,7 @@ fn question_card(
                         left,
                         y,
                         SMALL,
-                        p::MUTED,
+                        p::muted(),
                         false,
                     ));
                     y + line_height(SMALL) - 4.0
@@ -1447,13 +1473,13 @@ fn question_card(
                         left,
                         inner,
                         BODY,
-                        p::MUTED,
+                        p::muted(),
                         4,
                     );
                     y += 6.0;
                     let half = (inner - 8.0) / 2.0;
                     let row = [
-                        ("Done", Answer::HandoffDone, Look::Filled(p::DONE), left),
+                        ("Done", Answer::HandoffDone, Look::Filled(p::done()), left),
                         (
                             "Cancel",
                             Answer::HandoffCancel,
@@ -1497,10 +1523,10 @@ fn turn_card(
         x,
         width,
         top,
-        p::PERSON,
+        p::person(),
         2.0,
         |c, left, inner, mut y| {
-            c.push(text("Your turn", left, y, 16.0, p::INK, true));
+            c.push(text("Your turn", left, y, 16.0, p::ink(), true));
             y += line_height(16.0) + 6.0;
             let shown = action.strip_prefix("Navigation to ").unwrap_or(action);
             mono_box(c, &mut y, shown, left, inner);
@@ -1513,7 +1539,7 @@ fn turn_card(
                 left,
                 inner,
                 BODY,
-                p::MUTED,
+                p::muted(),
                 4,
             );
             y += 6.0;
@@ -1526,7 +1552,7 @@ fn turn_card(
             c.extend(button(
                 rect,
                 "I'm done — hand back to the agent",
-                Look::Filled(p::INK),
+                Look::Filled(p::ink()),
             ));
             buttons.push(Button {
                 rect,
@@ -1550,7 +1576,7 @@ fn turn_card(
                 left,
                 y,
                 SMALL,
-                p::MUTED,
+                p::muted(),
                 false,
             ));
             y + line_height(SMALL) - 4.0
@@ -1573,11 +1599,11 @@ fn refusal_card(
         x,
         width,
         top,
-        p::LINE,
+        p::line(),
         1.0,
         |c, left, inner, mut y| {
-            c.extend(cross_icon(left, y + 1.0, p::STOP));
-            c.push(text("Refused", left + 22.0, y, 14.0, p::INK, true));
+            c.extend(cross_icon(left, y + 1.0, p::stop()));
+            c.push(text("Refused", left + 22.0, y, 14.0, p::ink(), true));
             y += line_height(14.0) + 4.0;
             let action = refusal.action.as_str();
             mono_box(
@@ -1604,7 +1630,7 @@ fn refusal_card(
                 left,
                 inner,
                 BODY,
-                p::MUTED,
+                p::muted(),
                 6,
             );
             y += 6.0;
@@ -1639,16 +1665,16 @@ fn paused_card(
         x,
         width,
         top,
-        p::PERSON_BORDER,
+        p::person_border(),
         1.0,
         |c, left, inner, mut y| {
-            c.extend(pause_icon(left, y + 3.0, 12.0, p::PERSON));
+            c.extend(pause_icon(left, y + 3.0, 12.0, p::person()));
             c.push(text(
                 "Agent paused · you have the wheel",
                 left + 20.0,
                 y,
                 14.0,
-                p::INK,
+                p::ink(),
                 true,
             ));
             y += line_height(14.0) + 4.0;
@@ -1660,7 +1686,7 @@ fn paused_card(
                 left,
                 inner,
                 SMALL,
-                p::MUTED,
+                p::muted(),
                 3,
             );
             y += 6.0;
@@ -1671,7 +1697,7 @@ fn paused_card(
                         left,
                         y,
                         BODY,
-                        p::INK,
+                        p::ink(),
                         true,
                     ));
                     y += line_height(BODY) + 2.0;
@@ -1684,12 +1710,19 @@ fn paused_card(
                         left,
                         inner,
                         SMALL,
-                        p::MUTED,
+                        p::muted(),
                         3,
                     );
                 }
                 None => {
-                    c.push(text("No call is waiting.", left, y, BODY, p::MUTED, false));
+                    c.push(text(
+                        "No call is waiting.",
+                        left,
+                        y,
+                        BODY,
+                        p::muted(),
+                        false,
+                    ));
                     y += line_height(BODY);
                 }
             }
@@ -1700,7 +1733,7 @@ fn paused_card(
                 width: inner,
                 height: BUTTON_HEIGHT,
             };
-            c.extend(button(rect, "Resume agent", Look::Filled(p::INK)));
+            c.extend(button(rect, "Resume agent", Look::Filled(p::ink())));
             buttons.push(Button {
                 rect,
                 action: PanelAction::Control(Control::Resume),
@@ -1724,16 +1757,16 @@ fn recording_card(
         x,
         width,
         top,
-        p::LINE,
+        p::line(),
         1.0,
         |c, left, inner, mut y| {
-            c.extend(ring_icon(left, y + 4.0, 8.0, 8.0, p::STOP, None));
+            c.extend(ring_icon(left, y + 4.0, 8.0, 8.0, p::stop(), None));
             c.push(text(
                 "Recording this session",
                 left + 16.0,
                 y,
                 14.0,
-                p::INK,
+                p::ink(),
                 true,
             ));
             y += line_height(14.0) + 4.0;
@@ -1750,7 +1783,7 @@ fn recording_card(
                 left,
                 y,
                 SMALL,
-                p::MUTED,
+                p::muted(),
                 400,
                 true,
             ));
@@ -1760,7 +1793,7 @@ fn recording_card(
             } else {
                 "The file is created at the agent's next call. Only the agent's steps are recorded, not your typing; password fields are always redacted."
             };
-            paragraph(c, &mut y, note, left, inner, SMALL, p::MUTED, 4);
+            paragraph(c, &mut y, note, left, inner, SMALL, p::muted(), 4);
             y += 6.0;
             let rect = Rect {
                 x: left,
@@ -1805,7 +1838,7 @@ fn attach_card(
         x,
         width,
         top,
-        p::LINE,
+        p::line(),
         1.0,
         |c, left, inner, mut y| {
             c.push(text(
@@ -1813,7 +1846,7 @@ fn attach_card(
                 left,
                 y,
                 TITLE,
-                p::INK,
+                p::ink(),
                 true,
             ));
             y += line_height(TITLE) + 4.0;
@@ -1821,9 +1854,9 @@ fn attach_card(
                 ("Endpoint", attach.url.clone()),
                 ("Token", crate::http::masked(&attach.token)),
             ] {
-                c.push(text(label, left, y, SMALL, p::MUTED, false));
+                c.push(text(label, left, y, SMALL, p::muted(), false));
                 y += line_height(SMALL);
-                c.push(text_cmd(value, left, y, BODY, p::INK, 400, true));
+                c.push(text_cmd(value, left, y, BODY, p::ink(), 400, true));
                 y += line_height(BODY) + 4.0;
             }
             y += 4.0;
@@ -1838,7 +1871,7 @@ fn attach_card(
             } else {
                 "Copy setup command"
             };
-            c.extend(button(rect, label, Look::Filled(p::AGENT)));
+            c.extend(button(rect, label, Look::Filled(p::agent())));
             buttons.push(Button {
                 rect,
                 action: PanelAction::CopySetup,
@@ -1852,7 +1885,7 @@ fn attach_card(
                 left,
                 inner,
                 SMALL,
-                p::MUTED,
+                p::muted(),
                 4,
             );
             y - 4.0
@@ -1873,7 +1906,7 @@ fn wait_card(
         x,
         width,
         top,
-        p::AGENT_BORDER,
+        p::agent_border(),
         1.0,
         |c, left, inner, mut y| {
             c.push(text(
@@ -1881,7 +1914,7 @@ fn wait_card(
                 left,
                 y,
                 14.0,
-                p::INK,
+                p::ink(),
                 true,
             ));
             y += line_height(14.0) + 4.0;
@@ -1891,11 +1924,11 @@ fn wait_card(
                 width: inner,
                 height: 6.0,
             };
-            c.push(rounded(p::LINE, track, 3.0));
+            c.push(rounded(p::line(), track, 3.0));
             let done = progress(*left_time, *total);
             if done > 0.0 {
                 c.push(rounded(
-                    p::AGENT,
+                    p::agent(),
                     Rect {
                         width: (inner * done).max(6.0),
                         ..track
@@ -1912,7 +1945,7 @@ fn wait_card(
                 left,
                 y,
                 BODY,
-                p::MUTED,
+                p::muted(),
                 false,
             ));
             y + line_height(BODY) - 4.0
@@ -1963,7 +1996,7 @@ fn timeline_row(
         x + 22.0,
         y + 1.0,
         BODY,
-        p::INK,
+        p::ink(),
         bold,
     ));
 }
@@ -1978,7 +2011,7 @@ pub fn panel(
 ) -> (Vec<DisplayCommand>, Vec<Button>) {
     let mut commands = vec![
         DisplayCommand::SolidRect(
-            p::PANEL,
+            p::panel(),
             Rect {
                 x,
                 y: 0.0,
@@ -1987,7 +2020,7 @@ pub fn panel(
             },
         ),
         DisplayCommand::SolidRect(
-            p::LINE,
+            p::line(),
             Rect {
                 x,
                 y: 0.0,
@@ -2012,14 +2045,14 @@ pub fn panel(
         ("Agent", "attached over stdio")
     };
     let dot = if info.no_agent_yet() {
-        ring_icon(left, y + 4.0, 8.0, 8.0, p::FAINT, Some(p::PANEL))
+        ring_icon(left, y + 4.0, 8.0, 8.0, p::faint(), Some(p::panel()))
     } else if info.paused.is_some() {
-        ring_icon(left, y + 4.0, 8.0, 8.0, p::PERSON, None)
+        ring_icon(left, y + 4.0, 8.0, 8.0, p::person(), None)
     } else {
-        ring_icon(left, y + 4.0, 8.0, 8.0, p::AGENT, None)
+        ring_icon(left, y + 4.0, 8.0, 8.0, p::agent(), None)
     };
     commands.extend(dot);
-    commands.push(text(title, left + 16.0, y - 1.0, TITLE, p::INK, true));
+    commands.push(text(title, left + 16.0, y - 1.0, TITLE, p::ink(), true));
     if !sub.is_empty() {
         let title_width = text_width(title, TITLE, false, 700);
         commands.push(text(
@@ -2027,7 +2060,7 @@ pub fn panel(
             left + 16.0 + title_width + 8.0,
             y + 2.0,
             SMALL,
-            p::MUTED,
+            p::muted(),
             false,
         ));
     }
@@ -2047,13 +2080,13 @@ pub fn panel(
             width: chip_width.min(inner),
             height: 22.0,
         };
-        commands.extend(framed_rect(rect, 11.0, p::LINE, p::PAGE));
+        commands.extend(framed_rect(rect, 11.0, p::line(), p::page()));
         commands.push(text(
             chip,
             rect.x + 9.0,
             centered_text_y(rect.y, rect.height, SMALL),
             SMALL,
-            p::INK,
+            p::ink(),
             false,
         ));
         cx += chip_width + 6.0;
@@ -2066,7 +2099,7 @@ pub fn panel(
         left,
         inner,
         SMALL,
-        p::MUTED,
+        p::muted(),
         3,
     );
     y += 10.0;
@@ -2112,7 +2145,7 @@ pub fn panel(
         ) + 14.0;
     }
 
-    commands.push(text("Agent actions", left, y, BODY, p::MUTED, true));
+    commands.push(text("Agent actions", left, y, BODY, p::muted(), true));
     y += line_height(BODY) + 4.0;
     // Newest at the bottom, as many as fit; the running wait_for last.
     let running = info.page_wait.is_some() as usize;
@@ -2123,7 +2156,7 @@ pub fn panel(
             left,
             y,
             BODY,
-            p::MUTED,
+            p::muted(),
             false,
         ));
     }
@@ -2133,9 +2166,9 @@ pub fn panel(
         .saturating_sub(rows.saturating_sub(running));
     for entry in &info.timeline[start..] {
         let (icon, label) = match &entry.error {
-            None => (check_icon(left, y + 2.0, p::DONE), entry.label.clone()),
+            None => (check_icon(left, y + 2.0, p::done()), entry.label.clone()),
             Some(code) => (
-                cross_icon(left, y + 2.0, p::STOP),
+                cross_icon(left, y + 2.0, p::stop()),
                 format!("{} · {code}", entry.label),
             ),
         };
@@ -2143,7 +2176,7 @@ pub fn panel(
         y += ROW;
     }
     if running == 1 {
-        let icon = ring_icon(left, y + 2.0, 14.0, 10.0, p::AGENT, Some(p::PANEL));
+        let icon = ring_icon(left, y + 2.0, 14.0, 10.0, p::agent(), Some(p::panel()));
         timeline_row(
             &mut commands,
             left,
@@ -2168,7 +2201,7 @@ pub fn replay_panel(
 ) -> (Vec<DisplayCommand>, Vec<Button>) {
     let mut commands = vec![
         DisplayCommand::SolidRect(
-            p::PANEL,
+            p::panel(),
             Rect {
                 x,
                 y: 0.0,
@@ -2177,7 +2210,7 @@ pub fn replay_panel(
             },
         ),
         DisplayCommand::SolidRect(
-            p::LINE,
+            p::line(),
             Rect {
                 x,
                 y: 0.0,
@@ -2195,7 +2228,7 @@ pub fn replay_panel(
         left,
         y,
         TITLE,
-        p::INK,
+        p::ink(),
         true,
     ));
     y += line_height(TITLE);
@@ -2214,7 +2247,7 @@ pub fn replay_panel(
             info.position, info.total, info.matched
         )
     };
-    commands.push(text(progress_line, left, y, BODY, p::MUTED, false));
+    commands.push(text(progress_line, left, y, BODY, p::muted(), false));
     y += line_height(BODY) + 8.0;
 
     // One segment per step, colored by outcome.
@@ -2230,7 +2263,7 @@ pub fn replay_panel(
             "Next",
             ReplayControl::Next,
             if can_step {
-                Look::Filled(p::INK)
+                Look::Filled(p::ink())
             } else {
                 Look::Disabled
             },
@@ -2280,24 +2313,24 @@ pub fn replay_panel(
         .min(info.steps.len().saturating_sub(rows));
     for (mark, label) in info.steps.iter().skip(start).take(rows) {
         let (icon, ink, bold) = match mark {
-            StepMark::Matched => (check_icon(left, y + 3.0, p::DONE), p::INK, false),
-            StepMark::Differs => (cross_icon(left, y + 3.0, p::STOP), p::INK, true),
+            StepMark::Matched => (check_icon(left, y + 3.0, p::done()), p::ink(), false),
+            StepMark::Differs => (cross_icon(left, y + 3.0, p::stop()), p::ink(), true),
             StepMark::NeedsPerson => (
-                ring_icon(left, y + 3.0, 14.0, 10.0, p::PERSON, None),
-                p::INK,
+                ring_icon(left, y + 3.0, 14.0, 10.0, p::person(), None),
+                p::ink(),
                 true,
             ),
             StepMark::Next => (
-                ring_icon(left, y + 3.0, 14.0, 10.0, p::AGENT, Some(p::PANEL)),
-                p::INK,
+                ring_icon(left, y + 3.0, 14.0, 10.0, p::agent(), Some(p::panel())),
+                p::ink(),
                 true,
             ),
-            StepMark::Pending => (Vec::new(), p::FAINT, false),
+            StepMark::Pending => (Vec::new(), p::faint(), false),
         };
         // The step that stopped the replay is tinted.
         let tint = match mark {
-            StepMark::Differs => Some(p::STOP_TINT),
-            StepMark::NeedsPerson => Some(p::PERSON_TINT),
+            StepMark::Differs => Some(p::stop_tint()),
+            StepMark::NeedsPerson => Some(p::person_tint()),
             _ => None,
         };
         if let Some(tint) = tint {
@@ -2313,7 +2346,7 @@ pub fn replay_panel(
             ));
         }
         if *mark == StepMark::Pending {
-            commands.push(text("·", left + 5.0, y + 1.0, BODY, p::FAINT, false));
+            commands.push(text("·", left + 5.0, y + 1.0, BODY, p::faint(), false));
         }
         commands.extend(icon);
         commands.push(text(
@@ -2334,7 +2367,7 @@ pub fn replay_panel(
             left,
             y,
             SMALL,
-            p::MUTED,
+            p::muted(),
             false,
         ));
         y += line_height(BODY);
@@ -2346,18 +2379,18 @@ pub fn replay_panel(
             left,
             inner,
             y,
-            p::LINE,
+            p::line(),
             1.0,
             |c, cl, cw, mut cy| {
-                c.push(text(capitalize(label), cl, cy, 14.0, p::INK, true));
+                c.push(text(capitalize(label), cl, cy, 14.0, p::ink(), true));
                 cy += line_height(14.0) + 4.0;
                 let extra = lines.len().saturating_sub(12);
                 for result in lines.iter().take(12) {
                     let trimmed = result.trim_start();
                     let diff = if trimmed.starts_with("- ") {
-                        Some((p::STOP_TINT, p::STOP_INK))
+                        Some((p::stop_tint(), p::stop_ink()))
                     } else if trimmed.starts_with("+ ") {
-                        Some((p::DONE_TINT, p::DONE_INK))
+                        Some((p::done_tint(), p::done_ink()))
                     } else {
                         None
                     };
@@ -2386,9 +2419,9 @@ pub fn replay_panel(
                         }
                         None => {
                             let color = if trimmed == "matches the recording" {
-                                p::DONE_INK
+                                p::done_ink()
                             } else {
-                                p::MUTED
+                                p::muted()
                             };
                             c.push(text(result.clone(), cl, cy, BODY, color, false));
                             cy += line_height(BODY);
@@ -2401,7 +2434,7 @@ pub fn replay_panel(
                         cl,
                         cy,
                         SMALL,
-                        p::MUTED,
+                        p::muted(),
                         false,
                     ));
                     cy += line_height(SMALL);
@@ -2445,13 +2478,13 @@ pub fn progress_segments(
             let marks = &steps[from..to];
             let has = |m: StepMark| marks.iter().any(|(mark, _)| *mark == m);
             let color = if has(StepMark::Differs) {
-                p::STOP
+                p::stop()
             } else if has(StepMark::NeedsPerson) {
-                p::PERSON
+                p::person()
             } else if marks.iter().all(|(mark, _)| *mark == StepMark::Matched) {
-                p::DONE
+                p::done()
             } else {
-                p::FRAME
+                p::frame()
             };
             rounded(
                 color,
@@ -2485,6 +2518,8 @@ pub struct MenuInfo<'a> {
     pub recording: Option<Duration>,
     /// The last "Record this session" couldn't create its directory.
     pub record_failed: bool,
+    /// The window's appearance setting.
+    pub theme: ThemeChoice,
     /// The mouse, for the hover wash.
     pub hover: Option<(f32, f32)>,
 }
@@ -2522,7 +2557,7 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
             inner_x + 10.0,
             *y + 8.0,
             MENU_HEADER,
-            p::MUTED,
+            p::muted(),
             true,
         ));
         *y += 26.0;
@@ -2543,10 +2578,10 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
             height: MENU_ROW,
         };
         let hovered = enabled && info.hover.is_some_and(|p| contains(&rect, p));
-        if let Some(fill) = tint.or(hovered.then_some(p::PANEL)) {
+        if let Some(fill) = tint.or(hovered.then_some(p::panel())) {
             commands.push(rounded(fill, rect, 8.0));
         }
-        let ink = if enabled { p::INK } else { p::DISABLED };
+        let ink = if enabled { p::ink() } else { p::disabled() };
         commands.push(text(
             label,
             rect.x + 34.0,
@@ -2562,7 +2597,7 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
                 rect.x + rect.width - 10.0 - value_width,
                 centered_text_y(rect.y, MENU_ROW, SMALL),
                 SMALL,
-                if enabled { p::MUTED } else { p::DISABLED },
+                if enabled { p::muted() } else { p::disabled() },
                 false,
             ));
         }
@@ -2572,7 +2607,7 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
     let rule = |commands: &mut Vec<DisplayCommand>, y: &mut f32| {
         *y += 4.0;
         commands.push(DisplayCommand::SolidRect(
-            p::LINE,
+            p::line(),
             Rect {
                 x: inner_x + 4.0,
                 y: *y,
@@ -2587,15 +2622,15 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
     // Pause / resume: the watcher's stop button, tinted with the color of
     // whoever it hands the page to.
     let (label, control, tint) = if info.paused {
-        ("Resume the agent", Control::Resume, p::PERSON_TINT)
+        ("Resume the agent", Control::Resume, p::person_tint())
     } else {
-        ("Pause the agent", Control::Pause, p::AGENT_TINT)
+        ("Pause the agent", Control::Pause, p::agent_tint())
     };
     let rect = row(&mut commands, &mut y, label, "", true, Some(tint));
     if info.paused {
-        commands.extend(play_icon(rect.x + 11.0, rect.y + 13.0, 14.0, p::AGENT));
+        commands.extend(play_icon(rect.x + 11.0, rect.y + 13.0, 14.0, p::agent()));
     } else {
-        commands.extend(pause_icon(rect.x + 11.0, rect.y + 13.0, 14.0, p::AGENT));
+        commands.extend(pause_icon(rect.x + 11.0, rect.y + 13.0, 14.0, p::agent()));
     }
     buttons.push(Button {
         rect,
@@ -2603,58 +2638,31 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
     });
 
     // Approval mode: a segmented control, applied from the next action.
-    commands.push(text(
+    segmented(
+        &mut commands,
+        &mut buttons,
+        &mut y,
+        (inner_x, inner_width),
         "Before POST or other origins",
-        inner_x + 10.0,
-        y + 4.0,
-        BODY,
-        p::MUTED,
-        false,
-    ));
-    y += 24.0;
-    let track = Rect {
-        x: inner_x + 10.0,
-        y,
-        width: inner_width - 20.0,
-        height: SEGMENT_HEIGHT,
-    };
-    commands.push(rounded(p::PANEL, track, 8.0));
-    let segments = [
-        ("Ask me", ApproveMode::Ask),
-        ("Refuse", ApproveMode::Deny),
-        ("Allow", ApproveMode::Auto),
-    ];
-    let gap = 4.0;
-    let segment_width = (track.width - 6.0 - gap * 2.0) / 3.0;
-    for (i, (label, mode)) in segments.into_iter().enumerate() {
-        let rect = Rect {
-            x: track.x + 3.0 + i as f32 * (segment_width + gap),
-            y: track.y + 3.0,
-            width: segment_width,
-            height: SEGMENT_HEIGHT - 6.0,
-        };
-        let selected = info.approve == mode;
-        if selected {
-            commands.push(rounded(p::PAGE, rect, 6.0));
-        } else if info.hover.is_some_and(|p| contains(&rect, p)) {
-            commands.push(rounded(p::LINE, rect, 6.0));
-        }
-        let weight = if selected { 700 } else { 400 };
-        let label_width = text_width(label, BODY, false, weight);
-        commands.push(text(
-            label,
-            rect.x + (rect.width - label_width).max(0.0) / 2.0,
-            centered_text_y(rect.y, rect.height, BODY),
-            BODY,
-            if selected { p::INK } else { p::MUTED },
-            selected,
-        ));
-        buttons.push(Button {
-            rect,
-            action: PanelAction::Control(Control::Approve(mode)),
-        });
-    }
-    y += SEGMENT_HEIGHT + 8.0;
+        &[
+            (
+                "Ask me",
+                PanelAction::Control(Control::Approve(ApproveMode::Ask)),
+                info.approve == ApproveMode::Ask,
+            ),
+            (
+                "Refuse",
+                PanelAction::Control(Control::Approve(ApproveMode::Deny)),
+                info.approve == ApproveMode::Deny,
+            ),
+            (
+                "Allow",
+                PanelAction::Control(Control::Approve(ApproveMode::Auto)),
+                info.approve == ApproveMode::Auto,
+            ),
+        ],
+        info.hover,
+    );
 
     // Where the agent may go at all: opens the "Allowed sites" dialog.
     let origins = match info.allow_origins.len() {
@@ -2663,7 +2671,7 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
         n => format!("{n} sites"),
     };
     let rect = row(&mut commands, &mut y, "Allowed sites", &origins, true, None);
-    commands.extend(globe_icon(rect.x + 10.0, rect.y + 12.0, p::INK));
+    commands.extend(globe_icon(rect.x + 10.0, rect.y + 12.0, p::ink()));
     buttons.push(Button {
         rect,
         action: PanelAction::Window(WindowAction::ShowAllowedSites),
@@ -2693,7 +2701,7 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
     if info.recording.is_some() {
         // Stop: a red square.
         commands.push(rounded(
-            p::STOP,
+            p::stop(),
             Rect {
                 x: rect.x + 13.0,
                 y: rect.y + 15.0,
@@ -2708,7 +2716,7 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
             rect.y + 12.0,
             16.0,
             10.0,
-            p::STOP,
+            p::stop(),
             None,
         ));
     }
@@ -2719,7 +2727,7 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
             rect.x + rect.width - 10.0 - value_width,
             centered_text_y(rect.y, MENU_ROW, SMALL),
             SMALL,
-            p::STOP_TEXT,
+            p::stop_text(),
             false,
         ));
     }
@@ -2732,12 +2740,35 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
     // View: the observation text, read-only.
     header(&mut commands, &mut y, "VIEW");
     let rect = row(&mut commands, &mut y, "What the agent sees", "", true, None);
-    commands.extend(eye_icon(rect.x + 10.0, rect.y + 12.0, p::INK));
+    commands.extend(eye_icon(rect.x + 10.0, rect.y + 12.0, p::ink()));
     buttons.push(Button {
         rect,
         action: PanelAction::Window(WindowAction::ShowAgentView),
     });
-    y += MENU_PAD - 2.0;
+    // The window's appearance (board 10): follow the OS, or pin one.
+    y += 4.0;
+    let themes = [
+        ("System", ThemeChoice::System),
+        ("Light", ThemeChoice::Light),
+        ("Dark", ThemeChoice::Dark),
+    ]
+    .map(|(label, choice)| {
+        (
+            label,
+            PanelAction::Window(WindowAction::Theme(choice)),
+            info.theme == choice,
+        )
+    });
+    segmented(
+        &mut commands,
+        &mut buttons,
+        &mut y,
+        (inner_x, inner_width),
+        "Appearance",
+        &themes,
+        info.hover,
+    );
+    y += MENU_PAD - 10.0;
 
     let rect = Rect {
         x,
@@ -2747,13 +2778,74 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
     };
     // No shadow (board 1 "drawable by our engine"): a frame-grey border
     // sets the menu off the page.
-    let mut all = framed_rect(rect, 12.0, p::FRAME, p::PAGE).to_vec();
+    let mut all = framed_rect(rect, 12.0, p::frame(), p::page()).to_vec();
     all.extend(commands);
     Menu {
         commands: all,
         buttons,
         rect,
     }
+}
+
+// A labelled segmented control in the menu (approval mode, appearance):
+// the selected segment is the surface color and bold.
+#[allow(clippy::too_many_arguments)]
+fn segmented(
+    commands: &mut Vec<DisplayCommand>,
+    buttons: &mut Vec<Button>,
+    y: &mut f32,
+    (inner_x, inner_width): (f32, f32),
+    label: &str,
+    items: &[(&str, PanelAction, bool)],
+    hover: Option<(f32, f32)>,
+) {
+    commands.push(text(
+        label,
+        inner_x + 10.0,
+        *y + 4.0,
+        BODY,
+        p::muted(),
+        false,
+    ));
+    *y += 24.0;
+    let track = Rect {
+        x: inner_x + 10.0,
+        y: *y,
+        width: inner_width - 20.0,
+        height: SEGMENT_HEIGHT,
+    };
+    commands.push(rounded(p::panel(), track, 8.0));
+    let gap = 4.0;
+    let n = items.len().max(1) as f32;
+    let segment_width = (track.width - 6.0 - gap * (n - 1.0)) / n;
+    for (i, (label, action, selected)) in items.iter().enumerate() {
+        let rect = Rect {
+            x: track.x + 3.0 + i as f32 * (segment_width + gap),
+            y: track.y + 3.0,
+            width: segment_width,
+            height: SEGMENT_HEIGHT - 6.0,
+        };
+        if *selected {
+            commands.push(rounded(p::page(), rect, 6.0));
+        } else if hover.is_some_and(|p| contains(&rect, p)) {
+            commands.push(rounded(p::line(), rect, 6.0));
+        }
+        let weight = if *selected { 700 } else { 400 };
+        let label_width = text_width(label, BODY, false, weight);
+        commands.push(text(
+            *label,
+            rect.x + (rect.width - label_width).max(0.0) / 2.0,
+            centered_text_y(rect.y, rect.height, BODY),
+            BODY,
+            if *selected { p::ink() } else { p::muted() },
+            *selected,
+        ));
+        buttons.push(Button {
+            rect,
+            action: *action,
+        });
+    }
+    *y += SEGMENT_HEIGHT + 8.0;
 }
 
 // ------------------------------------------- "What the agent sees" ---
@@ -2894,7 +2986,7 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
         width,
         height: (page.height - 2.0 * VIEW_MARGIN).max(VIEW_HEADER + VIEW_FOOTER),
     };
-    let mut commands = framed_rect(rect, 14.0, p::FRAME, p::PAGE).to_vec();
+    let mut commands = framed_rect(rect, 14.0, p::frame(), p::page()).to_vec();
     let mut buttons = Vec::new();
     let left = rect.x + VIEW_PAD;
     let inner = rect.width - 2.0 * VIEW_PAD;
@@ -2903,13 +2995,17 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
 
     // Header: eye, title, scope toggle, Copy, close.
     let row_y = rect.y + (VIEW_HEADER - 32.0) / 2.0;
-    commands.extend(eye_icon(left, rect.y + (VIEW_HEADER - 16.0) / 2.0, p::INK));
+    commands.extend(eye_icon(
+        left,
+        rect.y + (VIEW_HEADER - 16.0) / 2.0,
+        p::ink(),
+    ));
     commands.push(text(
         "What the agent sees",
         left + 26.0,
         centered_text_y(rect.y, VIEW_HEADER, 16.0),
         16.0,
-        p::INK,
+        p::ink(),
         true,
     ));
     let close = Rect {
@@ -2919,9 +3015,9 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
         height: 32.0,
     };
     if hovered(&close) {
-        commands.push(rounded(p::PANEL, close, 8.0));
+        commands.push(rounded(p::panel(), close, 8.0));
     }
-    commands.extend(cross_icon(close.x + 9.0, close.y + 9.0, p::MUTED));
+    commands.extend(cross_icon(close.x + 9.0, close.y + 9.0, p::muted()));
     buttons.push(Button {
         rect: close,
         action: PanelAction::Window(WindowAction::CloseAgentView),
@@ -2961,7 +3057,7 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
         width: track_width,
         height: 34.0,
     };
-    commands.push(rounded(p::PANEL, track, 8.0));
+    commands.push(rounded(p::panel(), track, 8.0));
     let mut sx = track.x + 3.0;
     for ((label, scope), w) in segments.into_iter().zip(segment_widths) {
         let segment = Rect {
@@ -2972,9 +3068,9 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
         };
         let selected = info.scope == scope;
         if selected {
-            commands.push(rounded(p::PAGE, segment, 6.0));
+            commands.push(rounded(p::page(), segment, 6.0));
         } else if hovered(&segment) {
-            commands.push(rounded(p::LINE, segment, 6.0));
+            commands.push(rounded(p::line(), segment, 6.0));
         }
         let weight = if selected { 700 } else { 400 };
         let label_width = text_width(label, BODY, false, weight);
@@ -2983,7 +3079,7 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
             segment.x + (w - label_width) / 2.0,
             centered_text_y(segment.y, segment.height, BODY),
             BODY,
-            if selected { p::INK } else { p::MUTED },
+            if selected { p::ink() } else { p::muted() },
             selected,
         ));
         buttons.push(Button {
@@ -2994,7 +3090,7 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
     }
     let rule = |commands: &mut Vec<DisplayCommand>, y: f32| {
         commands.push(DisplayCommand::SolidRect(
-            p::LINE,
+            p::line(),
             Rect {
                 x: rect.x + 1.0,
                 y,
@@ -3014,7 +3110,7 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
         left,
         inner,
         BODY,
-        p::MUTED,
+        p::muted(),
         2,
     );
     y += 8.0;
@@ -3038,9 +3134,9 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
         }
         let (fill, border) = match row {
             ViewRow::Pad(ViewBlock::Browser, _) | ViewRow::Line(ViewBlock::Browser, _) => {
-                (p::AGENT_TINT, p::AGENT_BORDER)
+                (p::agent_tint(), p::agent_border())
             }
-            _ => (p::PANEL, p::LINE),
+            _ => (p::panel(), p::line()),
         };
         let strip = Rect {
             x: left,
@@ -3051,8 +3147,8 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
         match row {
             ViewRow::Label(label, block) => {
                 let ink = match block {
-                    ViewBlock::Browser => p::AGENT_INK,
-                    ViewBlock::Page => p::MUTED,
+                    ViewBlock::Browser => p::agent_ink(),
+                    ViewBlock::Page => p::muted(),
                 };
                 commands.push(text(
                     clip(label, (inner / 6.5) as usize),
@@ -3111,7 +3207,7 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
                         left + 14.0,
                         centered_text_y(y, VIEW_LINE, VIEW_MONO),
                         VIEW_MONO,
-                        p::INK,
+                        p::ink(),
                         400,
                         true,
                     ));
@@ -3128,7 +3224,7 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
             left,
             body_top,
             BODY,
-            p::FAINT,
+            p::faint(),
             false,
         ));
     }
@@ -3148,7 +3244,7 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
         left,
         footer_y,
         SMALL,
-        p::MUTED,
+        p::muted(),
         false,
     ));
     let more = match (above, below) {
@@ -3167,7 +3263,7 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
             right - more_width,
             footer_y,
             SMALL,
-            p::INK,
+            p::ink(),
             true,
         ));
     }
@@ -3238,14 +3334,21 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
         height: 32.0,
     };
     if hovered(&close) {
-        commands.push(rounded(p::PANEL, close, 8.0));
+        commands.push(rounded(p::panel(), close, 8.0));
     }
-    commands.extend(cross_icon(close.x + 9.0, close.y + 9.0, p::MUTED));
+    commands.extend(cross_icon(close.x + 9.0, close.y + 9.0, p::muted()));
     buttons.push(Button {
         rect: close,
         action: PanelAction::Window(WindowAction::CloseAllowedSites),
     });
-    commands.push(text("Allowed sites", left, top + 18.0, 16.0, p::INK, true));
+    commands.push(text(
+        "Allowed sites",
+        left,
+        top + 18.0,
+        16.0,
+        p::ink(),
+        true,
+    ));
     let mut y = top + 18.0 + line_height(16.0) + 2.0;
     paragraph(
         &mut commands,
@@ -3254,13 +3357,13 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
         left,
         inner - 24.0,
         BODY,
-        p::MUTED,
+        p::muted(),
         3,
     );
     y += 14.0;
     let rule = |commands: &mut Vec<DisplayCommand>, y: f32| {
         commands.push(DisplayCommand::SolidRect(
-            p::LINE,
+            p::line(),
             Rect {
                 x: x + 1.0,
                 y,
@@ -3291,13 +3394,13 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
             width: inner,
             height: SITES_ROW,
         };
-        commands.push(rounded(p::PANEL, row, 10.0));
+        commands.push(rounded(p::panel(), row, 10.0));
         commands.push(text(
             "Any site — the list is empty",
             row.x + 14.0,
             centered_text_y(row.y, row.height, BODY),
             BODY,
-            p::MUTED,
+            p::muted(),
             false,
         ));
         y += SITES_ROW + SITES_GAP;
@@ -3309,7 +3412,7 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
             width: inner,
             height: SITES_ROW,
         };
-        commands.extend(framed_rect(row, 10.0, p::LINE, p::PAGE));
+        commands.extend(framed_rect(row, 10.0, p::line(), p::page()));
         let remove = Rect {
             x: row.x + row.width - 8.0 - 32.0,
             y: row.y + (SITES_ROW - 32.0) / 2.0,
@@ -3317,9 +3420,9 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
             height: 32.0,
         };
         if hovered(&remove) {
-            commands.push(rounded(p::PANEL, remove, 8.0));
+            commands.push(rounded(p::panel(), remove, 8.0));
         }
-        commands.extend(cross_icon(remove.x + 9.0, remove.y + 9.0, p::MUTED));
+        commands.extend(cross_icon(remove.x + 9.0, remove.y + 9.0, p::muted()));
         buttons.push(Button {
             rect: remove,
             action: PanelAction::Window(WindowAction::RemoveSite(i)),
@@ -3333,7 +3436,7 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
                 text_right,
                 centered_text_y(row.y, row.height, SMALL),
                 SMALL,
-                p::MUTED,
+                p::muted(),
                 false,
             ));
             text_right -= 10.0;
@@ -3344,7 +3447,7 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
             row.x + 14.0,
             centered_text_y(row.y, row.height, SITES_MONO),
             SITES_MONO,
-            p::INK,
+            p::ink(),
             400,
             true,
         ));
@@ -3361,7 +3464,7 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
             left + 14.0,
             y,
             SMALL,
-            p::MUTED,
+            p::muted(),
             false,
         ));
         y += 24.0;
@@ -3383,11 +3486,11 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
         height: SITES_ROW,
     };
     let border = if info.error.is_some() {
-        p::STOP_BORDER
+        p::stop_border()
     } else {
-        p::AGENT
+        p::agent()
     };
-    commands.extend(framed_rect(field, 10.0, border, p::PAGE));
+    commands.extend(framed_rect(field, 10.0, border, p::page()));
     let columns = ((field.width - 30.0) / per_char.max(1.0)) as usize;
     let text_y = centered_text_y(field.y, field.height, SITES_MONO);
     let shown_text = clip_start(info.field, columns);
@@ -3397,7 +3500,7 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
             field.x + 12.0,
             text_y,
             SITES_MONO,
-            p::FAINT,
+            p::faint(),
             400,
             true,
         ));
@@ -3409,7 +3512,7 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
             field.x + 12.0,
             text_y,
             SITES_MONO,
-            p::INK,
+            p::ink(),
             400,
             true,
         ));
@@ -3417,7 +3520,7 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
     };
     // A steady caret: the field always has the keyboard while open.
     commands.push(DisplayCommand::SolidRect(
-        p::AGENT_INK,
+        p::agent_ink(),
         Rect {
             x: field.x + 12.0 + typed_width + 1.0,
             y: field.y + 12.0,
@@ -3430,7 +3533,7 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
         add,
         "Add",
         if can_add {
-            Look::Filled(p::AGENT)
+            Look::Filled(p::agent())
         } else {
             Look::Disabled
         },
@@ -3443,12 +3546,12 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
     }
     y += SITES_ROW + 6.0;
     let (note, color) = match info.error {
-        Some(error) => (error, p::STOP_TEXT),
+        Some(error) => (error, p::stop_text()),
         None if info.origins.is_empty() => (
             "The first site you add limits the agent to the list.",
-            p::MUTED,
+            p::muted(),
         ),
-        None => ("Type a site and press Enter or Add.", p::FAINT),
+        None => ("Type a site and press Enter or Add.", p::faint()),
     };
     paragraph(&mut commands, &mut y, note, left, inner, SMALL, color, 2);
     y += 12.0;
@@ -3456,7 +3559,7 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
     // Footer: what an empty list means, and when changes apply.
     rule(&mut commands, y);
     y += 14.0;
-    commands.push(text("Empty list = any site", left, y, BODY, p::INK, true));
+    commands.push(text("Empty list = any site", left, y, BODY, p::ink(), true));
     y += line_height(BODY) + 2.0;
     paragraph(
         &mut commands,
@@ -3465,7 +3568,7 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
         left,
         inner,
         SMALL,
-        p::MUTED,
+        p::muted(),
         4,
     );
     y += 14.0;
@@ -3476,7 +3579,7 @@ pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
         width,
         height: y - top,
     };
-    let mut all = framed_rect(rect, 14.0, p::FRAME, p::PAGE).to_vec();
+    let mut all = framed_rect(rect, 14.0, p::frame(), p::page()).to_vec();
     all.extend(commands);
     SitesDialog {
         commands: all,
@@ -3819,7 +3922,7 @@ mod tests {
             text: text.into(),
             x: 8.0,
             y,
-            color: p::INK,
+            color: p::ink(),
             font_size: 16.0,
             wrap_width: wrap,
             font_family: None,
@@ -3883,7 +3986,7 @@ mod tests {
                 text: s.into(),
                 x: 24.0,
                 y,
-                color: p::INK,
+                color: p::ink(),
                 font_size: 16.0,
                 wrap_width: Some(400.0),
                 font_family: None,
@@ -4232,14 +4335,14 @@ mod tests {
                 _ => None,
             })
         };
-        assert_eq!(color_of("- button"), Some(p::STOP_INK));
-        assert_eq!(color_of("+ button"), Some(p::DONE_INK));
+        assert_eq!(color_of("- button"), Some(p::stop_ink()));
+        assert_eq!(color_of("+ button"), Some(p::done_ink()));
         // Nothing to step: Next and Run all are greyed out.
         let next_label = commands.iter().find_map(|c| match c {
             DisplayCommand::Text(t) if t.text == "Next" => Some(t.color),
             _ => None,
         });
-        assert_eq!(next_label, Some(p::FAINT));
+        assert_eq!(next_label, Some(p::faint()));
     }
 
     fn centre(b: &Button) -> (f32, f32) {
@@ -4268,6 +4371,7 @@ mod tests {
                 allow_origins: &[],
                 recording: None,
                 record_failed: false,
+                theme: ThemeChoice::System,
                 hover: None,
             },
             900.0,
@@ -4296,13 +4400,19 @@ mod tests {
         ] {
             assert!(texts.contains(&label.to_string()), "{label}: {texts:?}");
         }
-        // The viewer is the window's own: no worker control behind it.
+        // The viewer and the appearance are the window's own: no worker
+        // control behind them.
+        assert!(
+            menu.buttons
+                .iter()
+                .any(|b| b.action == PanelAction::Window(WindowAction::ShowAgentView))
+        );
         assert_eq!(
             menu.buttons.last().map(|b| b.action),
-            Some(PanelAction::Window(WindowAction::ShowAgentView))
+            Some(PanelAction::Window(WindowAction::Theme(ThemeChoice::Dark)))
         );
         // Allowed sites opens its dialog (the window's own, like the viewer).
-        assert_eq!(menu.buttons.len(), 7);
+        assert_eq!(menu.buttons.len(), 10);
         assert!(
             menu.buttons
                 .iter()
@@ -4341,6 +4451,7 @@ mod tests {
                 allow_origins: &["http://127.0.0.1:8765".into()],
                 recording: None,
                 record_failed: false,
+                theme: ThemeChoice::System,
                 hover: None,
             },
             900.0,
@@ -4363,6 +4474,7 @@ mod tests {
                 allow_origins: &[],
                 recording: None,
                 record_failed: false,
+                theme: ThemeChoice::System,
                 hover: None,
             },
             250.0,
@@ -4445,7 +4557,7 @@ mod tests {
         assert!(texts.contains(&"The agent wants to press this".to_string()));
         // The note starts right of the element (x 10, width 80) and its outline.
         let note_box = commands.iter().find_map(|c| match c {
-            DisplayCommand::RoundedRect(color, r, _) if *color == p::PERSON_SOFT => Some(*r),
+            DisplayCommand::RoundedRect(color, r, _) if *color == p::person_soft() => Some(*r),
             _ => None,
         });
         assert!(
@@ -4469,7 +4581,7 @@ mod tests {
                 _ => panic!("segments are rounded rects"),
             })
             .collect();
-        assert_eq!(colors, [p::DONE, p::STOP, p::FRAME]);
+        assert_eq!(colors, [p::done(), p::stop(), p::frame()]);
         // 300 steps in 300 px: merged so each is ≥ 3 px, and a failure
         // anywhere in a merged segment still shows red.
         let mut many: Vec<(StepMark, String)> = (0..300)
@@ -4484,7 +4596,7 @@ mod tests {
                 panic!()
             };
             assert!(r.width >= 3.0, "{r:?}");
-            reds += usize::from(*color == p::STOP);
+            reds += usize::from(*color == p::stop());
         }
         assert_eq!(reds, 1);
     }
@@ -4559,6 +4671,7 @@ mod tests {
             allow_origins: &[],
             recording,
             record_failed,
+            theme: ThemeChoice::System,
             hover: None,
         };
         let on = menu(&info(Some(Duration::from_secs(161)), false), 900.0);
@@ -4710,7 +4823,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(fills.contains(&p::AGENT_TINT) && fills.contains(&p::PANEL));
+        assert!(fills.contains(&p::agent_tint()) && fills.contains(&p::panel()));
         let actions: Vec<PanelAction> = painted.buttons.iter().map(|b| b.action).collect();
         assert_eq!(
             actions,
@@ -4861,5 +4974,93 @@ mod tests {
         );
         assert!(texts(&crowded.commands).iter().any(|t| t.starts_with("… ")));
         assert!(crowded.rect.y + crowded.rect.height <= short.y + short.height);
+    }
+
+    #[test]
+    fn the_menu_offers_appearance_and_everything_paints_in_the_theme() {
+        assert_eq!(ThemeChoice::System.resolve(Some(true)), p::Theme::Dark);
+        assert_eq!(ThemeChoice::System.resolve(None), p::Theme::Light);
+        assert_eq!(ThemeChoice::Light.resolve(Some(true)), p::Theme::Light);
+        assert_eq!(ThemeChoice::Dark.resolve(Some(false)), p::Theme::Dark);
+        let info = MenuInfo {
+            paused: false,
+            approve: ApproveMode::Ask,
+            allow_origins: &[],
+            recording: None,
+            record_failed: false,
+            theme: ThemeChoice::Dark,
+            hover: None,
+        };
+        let dark = p::with_theme(p::Theme::Dark, || menu(&info, 900.0));
+        let themes: Vec<_> = dark
+            .buttons
+            .iter()
+            .filter_map(|b| match b.action {
+                PanelAction::Window(WindowAction::Theme(choice)) => Some(choice),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            themes,
+            [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark]
+        );
+        let bold: Vec<String> = dark
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::Text(t) if t.font_weight == 700 => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(bold.contains(&"Dark".to_string()), "{bold:?}");
+        // The menu's surface is the dark one; no light surface leaks in.
+        let colors: Vec<Color> =
+            dark.commands
+                .iter()
+                .filter_map(|c| match c {
+                    DisplayCommand::RoundedRect(color, ..)
+                    | DisplayCommand::SolidRect(color, _) => Some(*color),
+                    DisplayCommand::Text(t) => Some(t.color),
+                    _ => None,
+                })
+                .collect();
+        assert!(colors.contains(&p::DARK.page));
+        for light_only in [p::LIGHT.page, p::LIGHT.panel, p::LIGHT.ink, p::LIGHT.line] {
+            assert!(!colors.contains(&light_only), "{light_only:?}");
+        }
+        // Badges and filled buttons keep white marks on their role fill;
+        // an ink-filled button (Resume) inverts with the theme.
+        let dark_button = p::with_theme(p::Theme::Dark, || {
+            (
+                button(
+                    Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 120.0,
+                        height: 44.0,
+                    },
+                    "Approve",
+                    Look::Filled(p::done()),
+                ),
+                button(
+                    Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 120.0,
+                        height: 44.0,
+                    },
+                    "Resume agent",
+                    Look::Filled(p::ink()),
+                ),
+            )
+        });
+        let label = |commands: &[DisplayCommand]| {
+            commands.iter().find_map(|c| match c {
+                DisplayCommand::Text(t) => Some(t.color),
+                _ => None,
+            })
+        };
+        assert_eq!(label(&dark_button.0), Some(p::DARK.on_fill));
+        assert_eq!(label(&dark_button.1), Some(p::DARK.page));
     }
 }

@@ -9,7 +9,7 @@ use std::sync::mpsc;
 
 use crate::dom::NodeId;
 use crate::{
-    async_runtime, css,
+    async_runtime,
     navigation::{LoadOutcome, LoadedDocument, NavigationRequest, load_remote_document_guarded},
     net,
 };
@@ -243,10 +243,10 @@ impl BrowserState {
             kind: PendingKind::Navigate { error_title },
             receiver,
         });
-        self.set_status("loading…", crate::palette::MUTED);
+        self.set_status("loading…", crate::palette::Tone::Muted);
     }
 
-    pub(super) fn set_status(&mut self, text: impl Into<String>, color: css::Color) {
+    pub(super) fn set_status(&mut self, text: impl Into<String>, color: crate::palette::Tone) {
         self.status_text = text.into();
         self.status_color = color;
     }
@@ -280,7 +280,7 @@ impl BrowserState {
         }
 
         let Some(url) = self.current_url.clone() else {
-            self.set_status("nothing to refresh", crate::palette::FAINT);
+            self.set_status("nothing to refresh", crate::palette::Tone::Faint);
             return;
         };
 
@@ -303,7 +303,7 @@ impl BrowserState {
             kind: PendingKind::Refresh,
             receiver,
         });
-        self.set_status("loading…", crate::palette::MUTED);
+        self.set_status("loading…", crate::palette::Tone::Muted);
     }
 
     // Drain at most one completed result from the worker channel. Called at
@@ -340,7 +340,7 @@ impl BrowserState {
             // A refused hop leaves the page exactly as it was: no error
             // page, no history entry.
             LoadOutcome::Refused => {
-                self.set_status("blocked by policy", crate::palette::STOP);
+                self.set_status("blocked by policy", crate::palette::Tone::Stop);
                 return;
             }
         };
@@ -382,7 +382,7 @@ impl BrowserState {
                     external_scripts: loaded.external_scripts,
                     current_url: Some(loaded.final_url),
                     status_text: "loaded".into(),
-                    status_color: crate::palette::MUTED,
+                    status_color: crate::palette::Tone::Muted,
                 };
                 self.commit_navigation(next_entry);
                 // Favicon is owned by `BrowserState` rather than
@@ -418,7 +418,7 @@ impl BrowserState {
                 self.font_data = loaded.font_data;
                 self.favicon = loaded.favicon;
                 self.scroll_offset = 0.0;
-                self.set_status("loaded", crate::palette::MUTED);
+                self.set_status("loaded", crate::palette::Tone::Muted);
             }
             Err(error) => {
                 eprintln!("{error}");

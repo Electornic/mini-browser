@@ -87,7 +87,8 @@ pub struct ChromeState<'a> {
     pub viewport_width: usize,
     pub address_input: &'a str,
     pub status_text: &'a str,
-    pub status_color: css::Color,
+    /// Resolved when painted, so it follows a theme switch.
+    pub status_color: palette::Tone,
     pub address_bar_focused: bool,
     pub address_bar_selected: bool,
     pub show_caret: bool,
@@ -188,17 +189,17 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
         chrome.address_input.to_string()
     };
     let address_color = if input_empty {
-        palette::FAINT
+        palette::faint()
     } else {
-        palette::INK
+        palette::ink()
     };
     let address_box = address_bar_rect_with(width, chrome.extras.accessory_width);
     // Editing turns the field white with a darker edge; at rest it is a
     // panel-grey well (board 2). Blue is the agent's color, not focus.
     let (border_color, field_color) = if chrome.address_bar_focused {
-        (palette::MUTED, palette::PAGE)
+        (palette::muted(), palette::page())
     } else {
-        (palette::LINE, palette::PANEL)
+        (palette::line(), palette::panel())
     };
     // The padlock and the text live in the same field, so the text origin
     // and the caret/selection highlight have to honour the same indent —
@@ -212,7 +213,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
     let mut commands = vec![
         // Tab strip sits behind everything else and is the darker band of chrome.
         render::DisplayCommand::SolidRect(
-            palette::STRIP,
+            palette::strip(),
             layout::Rect {
                 x: 0.0,
                 y: 0.0,
@@ -222,7 +223,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
         ),
         // The toolbar is white like the page, set off by a 1px rule.
         render::DisplayCommand::SolidRect(
-            palette::PAGE,
+            palette::page(),
             layout::Rect {
                 x: 0.0,
                 y: TAB_STRIP_HEIGHT,
@@ -231,7 +232,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             },
         ),
         render::DisplayCommand::SolidRect(
-            palette::LINE,
+            palette::line(),
             layout::Rect {
                 x: 0.0,
                 y: CHROME_HEIGHT - 1.0,
@@ -243,7 +244,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
         // along the bottom edge while the rounded top corners show on the
         // darker strip.
         render::DisplayCommand::RoundedRect(
-            palette::PAGE,
+            palette::page(),
             layout::Rect {
                 x: TAB_X,
                 y: TAB_Y,
@@ -285,7 +286,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
         title_x,
         TAB_TITLE_Y,
         TAB_TITLE_FONT_SIZE,
-        palette::INK,
+        palette::ink(),
         false,
         palette::WEIGHT_REGULAR,
     ));
@@ -300,7 +301,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
                 status_x,
                 palette::centered_text_y(TAB_Y, TAB_HEIGHT, STATUS_FONT_SIZE),
                 STATUS_FONT_SIZE,
-                chrome.status_color,
+                chrome.status_color.color(),
                 false,
                 palette::WEIGHT_REGULAR,
             ));
@@ -326,13 +327,18 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             width: chip_width,
             height: SCHEME_CHIP_HEIGHT,
         };
-        commands.extend(framed_rect(chip_rect, 6.0, palette::LINE, palette::PAGE));
+        commands.extend(framed_rect(
+            chip_rect,
+            6.0,
+            palette::line(),
+            palette::page(),
+        ));
         commands.push(label(
             scheme,
             chip_rect.x + SCHEME_CHIP_PAD,
             palette::centered_text_y(chip_rect.y, chip_rect.height, SCHEME_CHIP_FONT),
             SCHEME_CHIP_FONT,
-            palette::MUTED,
+            palette::muted(),
             true,
             600,
         ));
@@ -386,7 +392,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
     if chrome.address_bar_selected {
         let measured = palette::text_width(&address_display, ADDRESS_FONT_SIZE, true, 400);
         commands.push(render::DisplayCommand::SolidRect(
-            palette::AGENT_BORDER,
+            palette::agent_border(),
             layout::Rect {
                 x: address_text_x - 2.0,
                 y: ADDRESS_TEXT_Y - 1.0,
@@ -399,7 +405,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             address_text_x,
             ADDRESS_TEXT_Y,
             ADDRESS_FONT_SIZE,
-            palette::INK,
+            palette::ink(),
             true,
             palette::WEIGHT_REGULAR,
         ));
@@ -413,7 +419,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             palette::text_width(&address_display, ADDRESS_FONT_SIZE, true, 400)
         };
         commands.push(render::DisplayCommand::SolidRect(
-            palette::INK,
+            palette::ink(),
             layout::Rect {
                 x: address_text_x + caret_offset,
                 y: ADDRESS_TEXT_Y,
@@ -424,7 +430,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
     }
 
     if chrome.is_https {
-        commands.extend(lock_icon_commands(address_box, palette::MUTED));
+        commands.extend(lock_icon_commands(address_box, palette::muted()));
     }
 
     if let Some(favicon) = chrome.tab_favicon {
@@ -526,7 +532,7 @@ fn lock_icon_commands(address_box: layout::Rect, color: css::Color) -> Vec<rende
 
 fn hover_wash(rect: layout::Rect) -> render::DisplayCommand {
     render::DisplayCommand::RoundedRect(
-        palette::PANEL,
+        palette::panel(),
         rect,
         render::CornerRadii::uniform(BUTTON_RADIUS),
     )
@@ -544,9 +550,9 @@ fn nav_button_commands(
         commands.push(hover_wash(rect));
     }
     let icon_color = if enabled {
-        palette::INK
+        palette::ink()
     } else {
-        palette::DISABLED
+        palette::disabled()
     };
     commands.extend(chevron_commands(rect, icon_color, pointing_left));
     commands
@@ -596,7 +602,7 @@ fn refresh_button_commands(rect: layout::Rect, hovered: bool) -> Vec<render::Dis
         commands.push(hover_wash(rect));
     }
 
-    let icon_color = palette::INK;
+    let icon_color = palette::ink();
     let cx = rect.x + rect.width / 2.0;
     let cy = rect.y + rect.height / 2.0;
     let radius = (rect.width.min(rect.height) / 2.0 - 12.0).max(4.0);
@@ -677,7 +683,7 @@ fn menu_button_commands(
     let mut commands = Vec::new();
     if open {
         commands.push(render::DisplayCommand::RoundedRect(
-            palette::LINE,
+            palette::line(),
             rect,
             render::CornerRadii::uniform(BUTTON_RADIUS),
         ));
@@ -691,7 +697,7 @@ fn menu_button_commands(
     let spacing = 5.0;
     commands.extend((-1..=1i32).map(|i| {
         render::DisplayCommand::RoundedRect(
-            palette::INK,
+            palette::ink(),
             layout::Rect {
                 x: cx - dot_size / 2.0,
                 y: cy + (i as f32 * spacing) - dot_size / 2.0,
@@ -799,6 +805,50 @@ mod tests {
         assert_eq!(field.x + field.width + 6.0, pill.x);
         assert_eq!(pill.x + pill.width + 6.0, menu.x);
         assert_eq!(address_bar_rect_with(900.0, 0.0), plain);
+    }
+
+    #[test]
+    fn the_chrome_paints_in_the_thread_theme_and_the_status_follows_it() {
+        let state = ChromeState {
+            viewport_width: 900,
+            address_input: "http://127.0.0.1:8765/",
+            status_text: "loaded",
+            status_color: palette::Tone::Muted,
+            address_bar_focused: false,
+            address_bar_selected: false,
+            show_caret: false,
+            can_go_back: false,
+            can_go_forward: false,
+            hovered_action: None,
+            tab_title: "Todo",
+            is_https: false,
+            tab_favicon: None,
+            extras: ChromeExtras::default(),
+        };
+        let fills = |commands: &[render::DisplayCommand]| -> Vec<css::Color> {
+            commands
+                .iter()
+                .filter_map(|c| match c {
+                    render::DisplayCommand::SolidRect(color, _) => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        };
+        let status = |commands: &[render::DisplayCommand]| {
+            commands.iter().find_map(|c| match c {
+                render::DisplayCommand::Text(t) if t.text == "loaded" => Some(t.color),
+                _ => None,
+            })
+        };
+        let light = chrome_commands(state);
+        assert_eq!(
+            fills(&light)[..2],
+            [palette::LIGHT.strip, palette::LIGHT.page]
+        );
+        assert_eq!(status(&light), Some(palette::LIGHT.muted));
+        let dark = palette::with_theme(palette::Theme::Dark, || chrome_commands(state));
+        assert_eq!(fills(&dark)[..2], [palette::DARK.strip, palette::DARK.page]);
+        assert_eq!(status(&dark), Some(palette::DARK.muted));
     }
 
     #[test]

@@ -257,7 +257,7 @@ mod tests {
             external_scripts: HashMap::new(),
             current_url: None,
             status_text: "loaded".into(),
-            status_color: css::Color::BLACK,
+            status_color: mb_runtime::palette::Tone::Ink,
         });
 
         browser.go_back();
@@ -2689,7 +2689,7 @@ mod tests {
         );
 
         let commands = browser.display_list(800, 600, &input::WindowInput::default());
-        let lock_color = mb_runtime::palette::MUTED;
+        let lock_color = mb_runtime::palette::muted();
         let lock_paints = commands
             .iter()
             .filter(|cmd| match cmd {
@@ -2741,7 +2741,7 @@ mod tests {
         );
 
         let commands = browser.display_list(800, 600, &input::WindowInput::default());
-        let lock_color = mb_runtime::palette::MUTED;
+        let lock_color = mb_runtime::palette::muted();
         let lock_paints = commands
             .iter()
             .filter(|cmd| match cmd {

@@ -23,6 +23,8 @@ OPTIONS:
                             origin). ask (needs --window) holds the action
                             and asks the person watching   [default: deny]
     --clock MODE            virtual | system                   [default: virtual]
+    --theme MODE            system | light | dark — the observation window's
+                            appearance (also in its ⋮ menu)   [default: system]
     --seed N                Math.random seed                   [default: 1]
     --settle-timeout-ms N   Wall-clock cap per settle          [default: 5000]
     --window                Open an observation window: the page with the
@@ -95,6 +97,8 @@ pub struct Options {
     pub start_url: Option<String>,
     /// Open the observation window (G3).
     pub window: bool,
+    /// `--theme`: the observation window's appearance (and the preview's).
+    pub theme: crate::overlay::ThemeChoice,
     /// `--preview PATH`: render one observation-window frame and exit.
     pub preview: Option<std::path::PathBuf>,
     /// `--preview-click ID` (repeatable): clicks to perform before it.
@@ -299,6 +303,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut preview_agent_view = None;
     let mut preview_answer = None;
     let mut preview_sites: Option<Vec<String>> = None;
+    let mut theme = crate::overlay::ThemeChoice::System;
     let mut http = false;
     let mut port: Option<u16> = None;
     let mut args = args.into_iter().peekable();
@@ -335,6 +340,16 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
                     "ask" => ApproveMode::Ask,
                     other => {
                         return Err(format!("--approve expects auto|deny|ask, got {other:?}"));
+                    }
+                }
+            }
+            "--theme" => {
+                theme = match value("--theme")?.as_str() {
+                    "system" => crate::overlay::ThemeChoice::System,
+                    "light" => crate::overlay::ThemeChoice::Light,
+                    "dark" => crate::overlay::ThemeChoice::Dark,
+                    other => {
+                        return Err(format!("--theme expects system|light|dark, got {other:?}"));
                     }
                 }
             }
@@ -433,6 +448,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         agent,
         start_url,
         window,
+        theme,
         preview,
         preview_clicks,
         preview_scale,
@@ -481,6 +497,16 @@ mod tests {
         assert_eq!(options.agent.clock, ClockMode::Virtual);
         assert!(options.agent.allow_origins.is_empty());
         assert!(options.start_url.is_none());
+    }
+
+    #[test]
+    fn theme_defaults_to_system_and_rejects_others() {
+        assert_eq!(run(&[]).theme, crate::overlay::ThemeChoice::System);
+        assert_eq!(
+            run(&["--theme", "dark"]).theme,
+            crate::overlay::ThemeChoice::Dark
+        );
+        assert!(parse(["--theme", "blue"].iter().map(|s| s.to_string())).is_err());
     }
 
     #[test]

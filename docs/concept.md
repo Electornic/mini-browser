@@ -1,6 +1,6 @@
 # Concept — 에이전트용 브라우저
 
-> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ · G5c 평가 ✅ (2026-11-20)** · 호환성 트랙 시작 (2026-11-21): 인라인 줄 묶기 ✅ · IDL 속성 반사 ✅ · Preact 실증 ✅ · 디자인 트랙 시작 (2026-11-21): [⋮ 메뉴](#-메뉴-사람의-조종석) 1차 — 일시정지·런타임 승인 모드 ✅ · [시안 적용](#디자인-적용) (2026-11-22) ✅ · 메뉴 새 기능 1차 — [What the agent sees](#에이전트가-보는-것-what-the-agent-sees)·[기록 토글](#세션-기록-토글-record-this-session) (2026-11-22) ✅ · 승인 흐름 — [넘겨주기·거절 영수증](#넘겨주기와-거절-영수증-보드-9) (2026-11-22) ✅ · [허용 사이트 편집](#허용-사이트-allowed-sites) (2026-11-22) ✅ · 다음 = 다크 → 좁은 창 / 호환성 잔여 갭(spa-roadmap) / 열린 결정 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
+> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ · G5c 평가 ✅ (2026-11-20)** · 호환성 트랙 시작 (2026-11-21): 인라인 줄 묶기 ✅ · IDL 속성 반사 ✅ · Preact 실증 ✅ · 디자인 트랙 시작 (2026-11-21): [⋮ 메뉴](#-메뉴-사람의-조종석) 1차 — 일시정지·런타임 승인 모드 ✅ · [시안 적용](#디자인-적용) (2026-11-22) ✅ · 메뉴 새 기능 1차 — [What the agent sees](#에이전트가-보는-것-what-the-agent-sees)·[기록 토글](#세션-기록-토글-record-this-session) (2026-11-22) ✅ · 승인 흐름 — [넘겨주기·거절 영수증](#넘겨주기와-거절-영수증-보드-9) (2026-11-22) ✅ · [허용 사이트 편집](#허용-사이트-allowed-sites) (2026-11-22) ✅ · [다크 모드](#다크-모드-보드-10) (2026-11-22) ✅ · 다음 = 좁은 창 / 호환성 잔여 갭(spa-roadmap) / 열린 결정 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
 
 ## 한 줄
 
@@ -511,8 +511,46 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 - **역할 색 4개**: 에이전트 파랑 `#2D5BE3`(배지·알약·타임라인 진행), 사람 주황 `#D9670B`(대상 테두리·승인·넘겨받기·일시정지 — 채우기/테두리만, 그 위 글자는 늘 ink), 완료 초록 `#1E7A46`(Approve·Done·✓·재생 일치), 정지 빨강 `#C2362B`(거절·실패·재생 다름). 각 역할의 tint/border/ink 변형도 시안 값 그대로(`AGENT_TINT #EEF2FD` 등).
 - **중립색**: ink `#15171C`, muted `#4A5060`, faint `#8A909C`, disabled `#A3A8B3`, line `#E2E4E8`, frame `#D5D8DE`, panel `#F4F5F7`, strip `#E9EBEF`, page `#FFFFFF`.
 - 크롬(`mb-engine`, `mb-shell` 과 공유)과 오버레이(`mb-mcp`)가 모두 여기서 칠한다 — 색 결정은 한 곳. `mb_runtime::palette` 로 재노출. 런타임 상태 문구 색(`loaded`·`loading…`·에러)도 토큰으로 옮겼다.
+- 2026-11-22 D6 부터 토큰은 상수가 아니라 **함수**(`palette::ink()`)다 — 라이트·다크 두 벌(`palette::LIGHT`/`DARK`) 중 지금 스레드의 테마 것을 돌려준다. 아래 [다크 모드](#다크-모드-보드-10).
 - **글꼴 갭**: 시안은 Inter(인터페이스)·JetBrains Mono(ID·URL·origin). 우리 폰트 시스템은 macOS 폴백(AppleSDGothicNeo·Menlo)만 올리므로 sans = 기본, mono = 제네릭 `monospace`(→ Menlo). 굵기는 600 이상이 bold 한 단계뿐이라 시안의 500(medium)은 400 으로. 두 글꼴을 번들하는 건 후속(라이선스 확인 + `install_fonts` 에 추가).
 - 헬퍼: `palette::text_width`(실제 칠할 글꼴·굵기로 측정), `palette::centered_text_y`(줄 상자 1.2×size 를 행 가운데에).
+
+### 다크 모드 (보드 10)
+
+> 2026-11-22 D6. 시안 보드 "10 · Dark + narrow window" 왼쪽 — "Dark — same roles, lifted for a dark ground".
+
+![다크 — 승인 카드](images/theme-dark.png) ![같은 장면 라이트](images/theme-light.png) ![다크 — 메뉴의 Appearance](images/theme-dark-menu.png)
+
+- **무엇이 바뀌나**: 브라우저가 칠하는 것만 — 크롬(탭 줄·툴바·주소 우물·알약·상태 문구)과 관전 창 오버레이(ID 배지·대상 테두리·패널·카드·메뉴·뷰어·허용 사이트). **페이지는 자기 색 그대로**다: 페이지 캔버스는 래스터가 흰색으로 채우고(`pixmap.fill(WHITE)`, 팔레트와 무관), 페이지 CSS 가 칠하는 것도 손대지 않는다. 다크 크롬 아래 흰 페이지가 보이는 게 맞는 모습(시안도 페이지는 페이지 색).
+- **값** (시안 보드 10 그대로, 시안에 없는 토큰은 같은 규칙으로 만듦 — tint 는 역할 색을 바닥 쪽으로 깊게 섞고, ink 는 역할 색을 흰색 쪽으로):
+
+| 토큰 | 라이트 | 다크 |
+|---|---|---|
+| page (브라우저 표면: 툴바·카드·메뉴·대화상자) | `#FFFFFF` | `#111317` (ground) |
+| panel | `#F4F5F7` | `#1A1D23` |
+| strip (탭 줄) | `#E9EBEF` | `#0B0C0F` |
+| line / frame | `#E2E4E8` / `#D5D8DE` | `#2A2E36` / `#3A3F49` |
+| ink / muted / faint | `#15171C` / `#4A5060` / `#8A909C` | `#ECEEF2` / `#A3A9B5` / `#7A808C` |
+| disabled / disabled_bg | `#A3A8B3` / `#EDEEF1` | `#555B66` / `#1F232A` |
+| agent / tint / border / ink | `#2D5BE3` / `#EEF2FD` / `#C9D5FA` / `#1F44B8` | `#3D68F0` / `#1B2445` / `#34488A` / `#B4C6FA` |
+| person / tint / border / soft | `#D9670B` / `#FDF1E7` / `#F0C7A6` / `#FBE7D6` | `#F0913F` / `#362415` / `#7A4A22` / `#4A2E17` |
+| done / tint / ink | `#1E7A46` / `#E2F2E8` / `#145734` | `#2E9A5C` / `#16301F` / `#8FD9AE` |
+| stop / tint / ink / text / border | `#C2362B` / `#FBE3E0` / `#8E2219` / `#A72D23` / `#E2B7B2` | `#E5564A` / `#3A1C1A` / `#F2A39B` / `#F2A39B` / `#6B3A36` |
+| on_fill (역할 색 위 글자·표시) | `#FFFFFF` | `#FFFFFF` |
+
+- **새 토큰 `on_fill`**: 라이트에선 배지 글자·Approve 글자가 `page`(흰색)였다. 다크에서 `page` 는 바닥색이라 파란 배지 위 글자가 검게 된다 — 그래서 "역할 색 채우기 위 글자"를 따로 이름 붙였다(두 테마 모두 흰색). **ink 채우기 버튼**(Resume agent·재생 Next)은 반대로 테마와 함께 뒤집힌다: 다크에선 밝은 채우기 + 바닥색 글자(`Look::Filled(ink)` → 글자 `page`).
+- 시안의 에이전트 알약 점 `#6E8EF5` 는 따로 두지 않고 `agent`(`#3D68F0`) — 토큰 하나를 위해 역할을 쪼개지 않았다. 주황 위 글자는 늘 ink 라는 규칙은 다크에서도 그대로(다크 ink 는 밝은 글자, 주황 tint 는 어두운 바닥).
+- **테마는 스레드마다** (`thread_local`): `palette::{theme, set_theme, with_theme, current}` + 토큰 함수(`palette::ink()` 등, 매크로로 `Palette` 필드마다 하나). 전역(atomic)이 아닌 이유: 테스트가 병렬 스레드로 돌며 색을 검사한다 — 한 테스트가 다크로 바꾸면 다른 테스트의 라이트 단정이 흔들린다. 그리는 일은 창 스레드 한 곳에서만 하므로 스레드 값으로 충분하다. 새 스레드는 Light.
+  - 모든 색은 계속 `palette` 를 거친다(AGENTS.md "디자인 토큰"). 크롬·오버레이 270여 곳의 `p::INK` → `p::ink()` 는 기계적 치환이고, 색 값 자체는 `palette.rs` 의 `LIGHT`/`DARK` 두 표에만 있다.
+  - **상태 문구 색은 역할로 저장**(`palette::Tone::{Ink, Muted, Faint, Stop}`, 칠할 때 `color()`): 전에는 `set_status` 가 색 값을 저장해서, 테마를 바꿔도 "loaded" 가 옛 테마 색으로 남았다.
+- **어디서 정하나**:
+  - `mb_shell::window` 가 매 프레임 winit 의 `Window::theme()`(macOS 지원, 모르면 `None` → Light)로 `set_theme` 하고, `Frame.system_dark` 로 넘긴다. OS 설정이 바뀌면 `WindowEvent::ThemeChanged` 로 다시 그린다. 그래서 `mb-shell` 단독 실행과 재생 창(`replay --window`)도 OS 를 따른다.
+  - 관전 창(`mb-mcp --window`)은 그 위에 **⋮ → VIEW → Appearance: System / Light / Dark** 세그먼트(`overlay::ThemeChoice`, `WindowAction::Theme`). System = OS 따라감(프레임마다 다시 봄), Light/Dark = 고정. 승인 모드처럼 컨트롤이라 누르면 메뉴가 열린 채 **새 색으로** 다시 그려진다. 시작 값은 `--theme system|light|dark`(기본 system). 세션 동안만 기억(설정 파일 없음).
+  - 창 전용: worker·에이전트에 닿지 않는다(`WindowAction`). 에이전트에게 알릴 것도 없다.
+- **에이전트 스크린샷은 늘 라이트**: `AgentBrowser::screenshot` 은 `with_theme(Light, …)` 로 그린다. 크롬은 어차피 잘라 내지만(`CHROME_HEIGHT` 아래만), 결정성 원칙상 에이전트가 받는 픽셀이 사람의 외관 설정에 따라 달라질 여지를 아예 없앤다(테스트 `the_screenshot_is_the_same_whatever_the_window_theme` — 다크 스레드에서 찍어도 같은 픽셀, 끝나면 다크로 복귀). 관찰 텍스트는 색과 무관.
+- **미리보기**: 모든 `--preview` 에 `--theme dark|light` (창이 없으니 system = light). 위 그림: `--approve ask --preview-click e15 --theme dark|light`(스크래치 가입 폼), `--preview-menu --theme dark`(examples/agent-demo).
+- **대비 확인**(테스트 `both_themes_keep_text_readable_on_their_surfaces`): 두 테마 모두 page·panel 위 ink ≥ 7:1, muted·stop text ≥ 4.5:1, agent tint 위 agent ink ≥ 4.5:1, 역할 네 색은 서로 다름. 흰 글자 대 done 초록은 다크에서 3.6:1 — 굵은 14px 버튼 글자라 큰 글자 기준(3:1)으로 둠(시안 값 그대로).
+- **시안과 다른 점**: 보드 10 의 카드 안 mono 상자 `#1F232A` 는 `disabled_bg` 와 같은 값이라 그대로 맞음. 패널 머리말 "Claude Code" 는 여전히 "Agent". 탭 줄 색은 시안에 없어 바닥보다 한 단계 어둡게(`#0B0C0F`) 잡았다.
 
 ### 크롬 (보드 2·6) — `chrome.rs`
 
@@ -601,7 +639,7 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 - ~~**"I'll do it myself" 뒤 넘겨주기**~~ · ~~**거절 영수증 + "Forget this refusal"**~~ (보드 9) → D4 ([넘겨주기와 거절 영수증](#넘겨주기와-거절-영수증-보드-9)).
 - **연결 끊김 카드** (보드 9 오른쪽 — "Claude Code left 2 min ago", Last session 요약·재생 링크).
 - 넘겨받기 카드의 "N characters entered", 패널 머리말의 클라이언트 이름(`clientInfo`).
-- **다크 모드·좁은 창 레이아웃** (보드 10) — 지금 700px 미만은 패널을 빼고 ⋮ 메뉴만.
+- ~~**다크 모드**~~ → D6 ([다크 모드](#다크-모드-보드-10)). **좁은 창 레이아웃** (보드 10) — 지금 740px 미만은 패널을 빼고 ⋮ 메뉴만.
 - Inter·JetBrains Mono 번들, 탭 여러 개(×·+).
 
 ## 결정성
@@ -1044,6 +1082,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | **D3** 메뉴 새 기능 1차 ✅ (디자인 트랙) | [에이전트가 보는 것](#에이전트가-보는-것-what-the-agent-sees): `Worker::{seen, deliver}`(실제 전달된 관찰만), `overlay::agent_view`(두 블록 분리·강제 줄바꿈·행 스크롤·"… N more lines"), `window_mode::{route_viewer_input, paint_viewer}`(모달, Whole page = `full_snapshot`). [세션 기록 토글](#세션-기록-토글-record-this-session): `Worker::{start_recording, stop_recording, recording}`, `SessionLog::{starting_at, steps, file}`, `DEFAULT_RECORD_DIR`, 기록 세대·첫 단계 기준점, `Pill::Recording` + `overlay::{pills, pills_width}`, 기록 카드, 메뉴 RECORD/VIEW 섹션. `mb_shell::window::run_with`(Escape 를 입력으로), `--preview-agent-view` | Allowed sites 편집·넘겨주기·거절 잊기·다크·좁은 창은 다음. **실제 창 클릭·휠·Escape·복사는 사용자 확인 필요** (GUI) | ![에이전트가 보는 것](images/agent-view.png) ![기록 중](images/recording.png) — 메뉴·알약·기록 카드·뷰어 분리·긴 글 스크롤 5 · 기록 켜기/끄기/지연 생성·첫 단계 기준점·기록 폴더·마지막 받은 관찰 4 · Escape/메뉴 라우팅·모달 뷰어·Whole page 무발급 3 (768 green) |
 | **D4** 승인 흐름: 넘겨주기·거절 영수증 ✅ (디자인 트랙) | [넘겨주기와 거절 영수증](#넘겨주기와-거절-영수증-보드-9): `AgentBrowser::{take_over, finish_take_over, forget_refusal}`(`PersonTurn` — 비밀번호 넘겨받기와 공유), `AgentPolicy::forget_denial`, `Waiting::TakenOver` + `Answer::{HandBack, WontDo}`(park 그대로: 45초 `still_waiting`·재부착·`unclaimed`), `ToolError::NotDone`(`approval_denied`), `Worker::{refusal, forget_refusal}` + `Control::ForgetRefusal`, `overlay::{turn_card, refusal_card}`, `resolved_by: person_handed_back`(재생은 멈춤), `--preview-answer`, prompts 규칙 4·click 설명 | 연결 끊김 카드·Allowed sites·다크·좁은 창은 다음. **실제 창 클릭과 실연결 에이전트의 `taken_over` 반응은 사용자 확인 필요** | ![Your turn](images/your-turn.png) ![거절 영수증](images/refusal-receipt.png) — 정책 잊기 1 · Worker 넘겨주기 park·재부착·busy / 넘겨준 뒤 다시 묻기·I won't do it 기억 / 떠난 에이전트(unclaimed) / Deny 영수증·잊기 / 기록·재생 멈춤 5 (기존 take-over 테스트 1개 대체) · 패널 카드 2 (775 green) |
 | **D5** 허용 사이트 편집 ✅ (디자인 트랙) | [허용 사이트](#허용-사이트-allowed-sites): `overlay::allowed_sites`(목록·`current`·×·더하기 칸·오류·"… N more"), 메뉴 항목 활성(지구본), `window_mode::{Sites, route_sites_input, set_sites}`(모달, 칸이 모든 키), `mb_runtime::input::edit_line`(주소창 글자 입력 규칙 공유), `policy::{parse_origin, AgentPolicy::allows}`(CLI `--allow-origin` 과 공유), `BrowserState::block_held`, `AgentBrowser::{set_allow_origins, block_pending_approval}`, `Worker::{allow_origins, set_allow_origins}`(목록 밖이 된 승인 카드 → `navigation_blocked`), 세션 로그 단계별 `allow_origins` + `person_changed_sites` 재생, `--preview-sites` / `--preview-sites-add` | 붙여넣기·거절 목록 화면 없음. **실제 창 클릭·타자·Escape 는 사용자 확인 필요** (GUI) | ![허용 사이트](images/allowed-sites.png) — 정책 1 (정규화·거절) · 입력 1 (`edit_line`) · Worker 2 (다음 행동부터·카드 종료·되돌리면 다시 물음, 로그+재생) · 대화상자 라우팅 2 (칸·추가·거절·중복·빼기·모달 닫기) · 오버레이 1 (782 green) |
+| **D6** 다크 모드 ✅ (디자인 트랙) | [다크 모드](#다크-모드-보드-10): `palette::{Palette, LIGHT, DARK, Theme, theme, set_theme, with_theme, current, Tone}` + 토큰 함수(`ink()` 등, 상수 → 함수 기계적 치환), `on_fill` 토큰, 상태 문구 `Tone`, `mb_shell::window` 가 winit 테마로 매 프레임 설정 + `Frame.system_dark` + `ThemeChanged` 다시 그리기, `overlay::ThemeChoice` + 메뉴 Appearance 세그먼트(`segmented` 로 승인 모드와 공유), `--theme`, 에이전트 스크린샷 Light 고정 | Inter·JetBrains Mono 번들 없음, 설정 저장 없음. **실제 창에서 OS 테마 전환·메뉴 클릭은 사용자 확인 필요** (GUI) | ![다크](images/theme-dark.png) — 팔레트 2 (대비·역할 구분, 스레드별 테마·복귀) · 크롬 1 · 메뉴/버튼 테마 1 · CLI 1 · 스크린샷 불변 1 (788 green) |
 
 - G4 의 게이트 **판정 로직**은 G1 에서 입력 출처 태그와 함께 먼저 들어간다 (`--approve auto|deny` 만). G4 는 사람에게 묻는 UI(`ask`)·넘겨받기·elicitation 을 붙이는 단계.
 - `<select>` 는 G1 이후 필요해질 때 (`select(id, option)` tool 추가).
@@ -1148,6 +1187,13 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-22 | 대화상자의 글자 입력은 주소창 규칙을 함수로 뽑아(`input::edit_line`) 공유, 열린 동안 페이지 입력은 통째로 비움 | "대화상자 키가 페이지로 새지 않는다" 를 라우팅 한 곳(모달)에서 보장. 주소창과 다른 편집 규칙이 생기지 않게 |
 | 2026-11-22 | 목록 편집은 세션 로그에 단계별 `allow_origins`(헤더와 다를 때만)로, 카드가 편집으로 끝난 단계는 `person_changed_sites` | 승인 모드 변경과 같은 방식 — 사람이 중간에 넓힌 목록을 재생이 모르면 그 뒤 단계가 전부 `navigation_blocked` 로 어긋난다. 필드 추가만이라 로그 버전 1 유지 |
 | 2026-11-22 | 빈 목록 = 아무 사이트 (기존 의미 유지), 대신 빈 목록일 때 "첫 사이트를 더하면 그것만" 문구 + 꼬리말 | 의미를 바꾸면 `--allow-origin` 없이 띄운 기존 사용이 전부 막힌다. 마지막 하나를 빼면 넓어지는 함정은 화면 문구로 보인다 |
+| 2026-11-22 | 다크 모드 = 크롬·오버레이만, 페이지는 자기 색 | 페이지 색을 바꾸면(강제 다크) 에이전트가 보는 것과 사람이 보는 것이 갈라지고, 사이트 디자인을 망가뜨린다. 시안도 페이지는 페이지 색 |
+| 2026-11-22 | 팔레트 토큰을 상수 → 함수(`palette::ink()`), 두 벌(`LIGHT`/`DARK`)은 `palette.rs` 한 곳 | 색이 테마에 따라 바뀌려면 값이 아니라 조회여야 한다. 그리는 함수마다 `&Palette` 를 넘기면 수백 개 시그니처가 바뀐다 — 조회 함수로 같은 효과 |
+| 2026-11-22 | 테마는 `thread_local`(전역 atomic 아님), 새 스레드는 Light | 단위 테스트가 병렬로 색을 단정한다 — 전역이면 한 테스트의 다크 전환이 다른 테스트를 흔든다. 그리는 일은 창 스레드 한 곳 |
+| 2026-11-22 | OS 테마는 `mb_shell` 이 매 프레임 설정, 관전 창은 메뉴 Appearance(System/Light/Dark) + `--theme` 로 덮어씀 | OS 를 따르는 게 기본 기대. 관전 창은 화면 공유·녹화 때 고정하고 싶을 수 있다. `mb-shell`·재생 창은 메뉴가 없으니 OS 만 |
+| 2026-11-22 | 새 토큰 `on_fill`(역할 색 위 흰 글자), ink 채우기 버튼은 테마와 함께 뒤집힘 | 라이트에서 `page` 가 "흰색" 과 "표면" 두 뜻을 겸했다. 다크에서 표면은 검정이라 배지 글자가 사라진다 — 뜻을 나눠 이름 붙임 |
+| 2026-11-22 | 에이전트 스크린샷은 `with_theme(Light)` 로 고정 | 결정성: 에이전트가 받는 픽셀이 사람의 외관 설정에 따라 달라지면 안 된다(크롬은 잘리지만 테마가 페이지 영역에 새는 미래 경로까지 막음) |
+| 2026-11-22 | 상태 문구 색은 `Tone`(역할)으로 저장, 칠할 때 색 결정 | 색 값을 저장하면 테마를 바꿔도 마지막 상태 문구가 옛 테마 색으로 남는다 |
 
 ## 열린 결정
 

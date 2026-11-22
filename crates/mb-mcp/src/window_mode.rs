@@ -55,6 +55,8 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
     let mut viewer: Option<Viewer> = None;
     // "Allowed sites", while open.
     let mut sites: Option<Sites> = None;
+    // Appearance (⋮ menu, `--theme`): System follows the OS each frame.
+    let mut theme = worker.options().theme;
     // The parked-call deadline a wake-up is already scheduled for.
     let mut wake_scheduled: Option<std::time::Instant> = None;
     // The next REC-clock second a wake-up is scheduled for.
@@ -69,6 +71,9 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
         false,
         |frame, input, wake| {
             let (window_width, window_height) = (frame.width, frame.height);
+            // `mb_shell` set the OS theme for this frame; a pinned choice
+            // overrides it. Everything painted below reads it.
+            palette::set_theme(theme.resolve(frame.system_dark));
             if !wake_registered {
                 let hook = wake.as_arc();
                 let _ = wake_slot.set(hook.clone());
@@ -159,6 +164,14 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
                     // Keys from the opening frame go nowhere either.
                     page_input = WindowInput::default();
                 }
+                MenuClick::Pick(overlay::PanelAction::Window(overlay::WindowAction::Theme(
+                    choice,
+                ))) => {
+                    // A control like the approval mode: stays open to
+                    // show the new selection — in the new colors.
+                    theme = choice;
+                    palette::set_theme(theme.resolve(frame.system_dark));
+                }
                 MenuClick::Pick(_) => {}
             }
             if routed.click == MenuClick::Escape {
@@ -227,6 +240,7 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
                     copied,
                     menu_open,
                     record_failed,
+                    theme,
                     hover: input.mouse_position,
                     viewer: viewer.as_mut(),
                     sites: sites.as_mut(),
@@ -577,6 +591,7 @@ struct View<'a> {
     copied: bool,
     menu_open: bool,
     record_failed: bool,
+    theme: overlay::ThemeChoice,
     hover: Option<(f32, f32)>,
     viewer: Option<&'a mut Viewer>,
     sites: Option<&'a mut Sites>,
@@ -614,7 +629,7 @@ fn compose(
     }
     worker.browser().state_mut().chrome_extras = ChromeExtras {
         accessory_width: overlay::pills_width(&pills),
-        tab_marker: (pill != overlay::Pill::NoAgent).then_some(palette::AGENT),
+        tab_marker: (pill != overlay::Pill::NoAgent).then_some(palette::agent()),
         menu_open: view.menu_open,
     };
     let mut commands = worker.browser().human_frame(input);
@@ -686,6 +701,7 @@ fn compose(
                 allow_origins: &worker.options().agent.allow_origins,
                 recording: recording.as_ref().map(|r| r.since.elapsed()),
                 record_failed: view.record_failed,
+                theme: view.theme,
                 hover: view.hover,
             },
             page_width as f32,
@@ -821,6 +837,9 @@ pub fn preview(options: Options, path: &std::path::Path, clicks: &[String]) -> R
     let (pause, menu_open) = (options.preview_pause, options.preview_menu);
     let answer = options.preview_answer;
     let site_adds = options.preview_sites.clone();
+    // No window to ask: System previews as light, `--theme dark` as dark.
+    let theme = options.theme;
+    palette::set_theme(theme.resolve(None));
     let mut viewer = options.preview_agent_view.map(|scope| Viewer {
         scope: match scope {
             crate::cli::PreviewView::OnScreen => overlay::ViewScope::OnScreen,
@@ -883,6 +902,7 @@ pub fn preview(options: Options, path: &std::path::Path, clicks: &[String]) -> R
         copied: false,
         menu_open,
         record_failed: false,
+        theme,
         hover: None,
         viewer: viewer.as_mut(),
         sites: sites.as_mut(),
@@ -921,6 +941,7 @@ mod tests {
                 allow_origins: &[],
                 recording: None,
                 record_failed: false,
+                theme: overlay::ThemeChoice::System,
                 hover: None,
             },
             page_width,

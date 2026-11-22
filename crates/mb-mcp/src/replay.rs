@@ -697,6 +697,7 @@ mod tests {
             preview_agent_view: None,
             preview_answer: None,
             preview_sites: None,
+            theme: crate::overlay::ThemeChoice::System,
             http_port: None,
             attach: None,
             log: Some(path.to_path_buf()),

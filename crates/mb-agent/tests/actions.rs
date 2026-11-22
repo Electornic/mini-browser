@@ -622,6 +622,25 @@ fn screenshot_renders_the_page_area_without_chrome() {
 }
 
 #[test]
+fn the_screenshot_is_the_same_whatever_the_window_theme() {
+    use mb_runtime::palette::{Theme, set_theme};
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    b.navigate(&server.url("/signup")).unwrap();
+    let light = b.screenshot().pixels;
+    // The observation window paints dark on this thread…
+    set_theme(Theme::Dark);
+    let dark = b.screenshot().pixels;
+    // …and the screenshot didn't leave it light.
+    assert_eq!(mb_runtime::palette::theme(), Theme::Dark);
+    set_theme(Theme::Light);
+    assert!(
+        light == dark,
+        "the agent's pixels follow the person's theme"
+    );
+}
+
+#[test]
 fn wait_for_never_turns_a_guessed_or_old_id_into_a_usable_one() {
     use std::time::Duration;
     let server = Server::start();

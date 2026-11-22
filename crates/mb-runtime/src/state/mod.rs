@@ -103,7 +103,7 @@ pub struct BrowserState {
 
     // UI state that is shown in the chrome.
     pub status_text: String,
-    pub status_color: css::Color,
+    pub status_color: crate::palette::Tone,
     /// What the embedder adds to the chrome (an agent window's pill slot,
     /// tab marker, ⋮ pressed). `mb-shell` leaves it at the default.
     pub chrome_extras: ChromeExtras,
@@ -272,7 +272,7 @@ pub struct HistoryEntry {
     pub external_scripts: HashMap<String, String>,
     pub current_url: Option<net::Url>,
     pub status_text: String,
-    pub status_color: css::Color,
+    pub status_color: crate::palette::Tone,
 }
 
 impl BrowserState {
@@ -323,7 +323,7 @@ impl BrowserState {
             font_data,
             current_url,
             status_text: status_text.into(),
-            status_color: css::Color::BLACK,
+            status_color: crate::palette::Tone::Ink,
             chrome_extras: ChromeExtras::default(),
             scroll_offset: 0.0,
             back_stack: Vec::new(),
@@ -1061,7 +1061,7 @@ impl BrowserState {
             }
             Err(build_error) => {
                 eprintln!("{build_error}");
-                self.set_status("render failed", crate::palette::STOP);
+                self.set_status("render failed", crate::palette::Tone::Stop);
                 // Tear down any stale cached view from before the failure
                 // so a subsequent recovery rebuilds against current inputs.
                 self.cached_view = None;
@@ -2533,7 +2533,7 @@ mod tests {
             external_scripts: HashMap::new(),
             current_url: None,
             status_text: String::new(),
-            status_color: css::Color::BLACK,
+            status_color: crate::palette::Tone::Ink,
         };
 
         state.commit_navigation(next);
@@ -2559,7 +2559,7 @@ mod tests {
             external_scripts: HashMap::new(),
             current_url: None,
             status_text: String::new(),
-            status_color: css::Color::BLACK,
+            status_color: crate::palette::Tone::Ink,
         });
 
         state.commit_navigation(HistoryEntry {
@@ -2571,7 +2571,7 @@ mod tests {
             external_scripts: HashMap::new(),
             current_url: None,
             status_text: String::new(),
-            status_color: css::Color::BLACK,
+            status_color: crate::palette::Tone::Ink,
         });
 
         assert!(state.forward_stack.is_empty());
@@ -2596,7 +2596,7 @@ mod tests {
             external_scripts: HashMap::new(),
             current_url: None,
             status_text: String::new(),
-            status_color: css::Color::BLACK,
+            status_color: crate::palette::Tone::Ink,
         });
         assert_eq!(state.address_input, "next");
 
@@ -2625,7 +2625,7 @@ mod tests {
             external_scripts: HashMap::new(),
             current_url: None,
             status_text: String::new(),
-            status_color: css::Color::BLACK,
+            status_color: crate::palette::Tone::Ink,
         });
         state.go_back();
 
@@ -2673,7 +2673,7 @@ mod tests {
             external_scripts: HashMap::new(),
             current_url: None,
             status_text: String::new(),
-            status_color: css::Color::BLACK,
+            status_color: crate::palette::Tone::Ink,
         });
 
         assert_eq!(state.scroll_offset, 0.0);
@@ -2873,7 +2873,7 @@ mod tests {
             external_scripts: HashMap::new(),
             current_url: None,
             status_text: String::new(),
-            status_color: css::Color::BLACK,
+            status_color: crate::palette::Tone::Ink,
         });
         let input = input::WindowInput {
             back_pressed: true,

@@ -678,14 +678,20 @@ impl AgentBrowser {
         let width = self.config.viewport_width;
         let chrome = CHROME_HEIGHT as usize;
         let window_height = self.config.viewport_height + chrome;
-        let commands = self.state.display_list(
-            width,
-            window_height,
-            &WindowInput {
-                from_agent: true,
-                ..WindowInput::default()
-            },
-        );
+        // Light whatever the person's window shows: the agent's pixels must
+        // not depend on their appearance setting (the page keeps its own
+        // colors anyway; this pins the chrome the crop removes and anything
+        // themed that might reach the page area).
+        let commands = mb_runtime::palette::with_theme(mb_runtime::palette::Theme::Light, || {
+            self.state.display_list(
+                width,
+                window_height,
+                &WindowInput {
+                    from_agent: true,
+                    ..WindowInput::default()
+                },
+            )
+        });
         let full = rasterize(&commands, width, window_height);
         Screenshot {
             width,
