@@ -326,12 +326,10 @@ fn compose(
         Some(worker::Waiting::Handoff { .. }) => Some("Type the password here"),
         None => None,
     };
+    let page = overlay::page_area(page_width, window_height);
+    let ink = overlay::text_obstacles(&commands, page);
     commands.extend(overlay::page_overlay(
-        &elements,
-        target,
-        note,
-        scroll_y,
-        window_height as f32,
+        &elements, target, note, scroll_y, page, &ink,
     ));
     let mut buttons = Vec::new();
     if panel_width > 0 {

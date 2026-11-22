@@ -32,9 +32,6 @@ use crate::worker::{Answer, TimelineEntry, Waiting};
 pub const PANEL_WIDTH: usize = 340;
 const MIN_WINDOW_FOR_PANEL: usize = PANEL_WIDTH + 400;
 
-const BADGE_FONT: f32 = 11.0;
-const BADGE_HEIGHT: f32 = 16.0;
-const BADGE_PAD: f32 = 4.0;
 const PANEL_PAD: f32 = 20.0;
 const CARD_PAD: f32 = 16.0;
 const TITLE: f32 = 15.0;
@@ -267,54 +264,321 @@ fn card_badge(x: f32, y: f32, lock: bool) -> Vec<DisplayCommand> {
     commands
 }
 
+// ------------------------------------------------------ badge placement ---
+//
+// Where an id badge goes (docs/concept.md "배지 자리"). Since inline
+// elements share line boxes there is no left margin to park badges in, so
+// each badge tries a few spots around its element and takes the one that
+// hides the least: first full size above / left / below / right, then the
+// same four compact, then compact inside the top-left corner as a last
+// resort. "Hides" = overlap area, weighted — the badge's own element and
+// badges placed earlier ×4, other elements ×2, page text ×1 — and the first
+// spot in that order wins ties, so a spot that hides nothing is taken as
+// soon as it comes up. Badges are placed greedily in document order; a spot
+// must lie inside the page area (never over the chrome or the panel).
+
+/// The page's part of the window: below the chrome, left of the panel.
+pub fn page_area(page_width: usize, window_height: usize) -> Rect {
+    Rect {
+        x: 0.0,
+        y: CHROME_HEIGHT,
+        width: page_width as f32,
+        height: (window_height as f32 - CHROME_HEIGHT).max(0.0),
+    }
+}
+
+/// Size and type of one badge variant.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BadgeStyle {
+    pub font: f32,
+    pub height: f32,
+    pub pad: f32,
+    pub radius: f32,
+}
+
+impl BadgeStyle {
+    /// Board 1: mono 11 semibold, 16 high, r4.
+    pub const FULL: BadgeStyle = BadgeStyle {
+        font: 11.0,
+        height: 16.0,
+        pad: 4.0,
+        radius: 4.0,
+    };
+    /// For tight spots (a checkbox at the body margin, stacked list rows).
+    pub const COMPACT: BadgeStyle = BadgeStyle {
+        font: 9.0,
+        height: 12.0,
+        pad: 2.0,
+        radius: 3.0,
+    };
+
+    /// (width, height) of a badge showing `label`.
+    fn size(self, label: &str) -> (f32, f32) {
+        (
+            text_width(label, self.font, true, 600) + self.pad * 2.0,
+            self.height,
+        )
+    }
+}
+
+/// One element's badge to place: its box in window coordinates, whether it
+/// carries the orange target outline, and the badge's (width, height) in
+/// both styles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BadgeRequest {
+    pub element: Rect,
+    pub outlined: bool,
+    pub full: (f32, f32),
+    pub compact: (f32, f32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlacedBadge {
+    pub rect: Rect,
+    pub compact: bool,
+}
+
+/// Space between a badge beside an element and the element.
+const BADGE_GAP: f32 = 2.0;
+/// How far a badge above / below may tuck into the element's box: a line
+/// box has leading above and below the glyphs, so 2 px hides no ink.
+const BADGE_TUCK: f32 = 2.0;
+/// The target outline's outer edge, past the element's box: 2 px clear + a
+/// 2 px line. The outline is painted over the badges, so the target's badge
+/// keeps outside it when it can.
+const OUTLINE_REACH: f32 = 4.0;
+const HIDES_OWN: f32 = 4.0;
+const HIDES_BADGE: f32 = 4.0;
+const HIDES_ELEMENT: f32 = 2.0;
+const HIDES_TEXT: f32 = 1.0;
+
+/// Badge spots for `requests` (in order), avoiding each other, the other
+/// elements and `text`, inside `page`.
+pub fn place_badges(requests: &[BadgeRequest], text: &[Rect], page: Rect) -> Vec<PlacedBadge> {
+    let mut placed: Vec<PlacedBadge> = Vec::with_capacity(requests.len());
+    for (i, request) in requests.iter().enumerate() {
+        let own = request.element;
+        // What the badge must not cover of its own element: the box past
+        // the allowed tuck, or the whole outline around the target.
+        let keep_clear = if request.outlined {
+            inset(own, -OUTLINE_REACH)
+        } else {
+            inset(own, BADGE_TUCK)
+        };
+        let cost = |spot: &Rect| {
+            let mut cost = HIDES_OWN * overlap(spot, &keep_clear);
+            for (j, other) in requests.iter().enumerate() {
+                if j != i {
+                    cost += HIDES_ELEMENT * overlap(spot, &other.element);
+                }
+            }
+            for badge in &placed {
+                cost += HIDES_BADGE * overlap(spot, &inset(badge.rect, -1.0));
+            }
+            for t in text {
+                cost += HIDES_TEXT * overlap(spot, t);
+            }
+            cost
+        };
+        let mut best: Option<(f32, PlacedBadge)> = None;
+        let mut spots = Vec::new();
+        if request.outlined {
+            spots.extend(badge_spots(
+                inset(own, -OUTLINE_REACH),
+                0.0,
+                request.full,
+                request.compact,
+            ));
+        }
+        spots.extend(badge_spots(own, BADGE_TUCK, request.full, request.compact));
+        for spot in spots {
+            if !within(&page, &spot.rect) {
+                continue;
+            }
+            let c = cost(&spot.rect);
+            if best.is_none_or(|(b, _)| c < b) {
+                best = Some((c, spot));
+            }
+            if c == 0.0 {
+                break;
+            }
+        }
+        // Nowhere inside the page (a tiny page, an element half under the
+        // chrome): inside the top-left corner, pulled onto the page.
+        let badge = best.map_or_else(|| inside_corner(own, request.compact, page), |(_, b)| b);
+        placed.push(badge);
+    }
+    placed
+}
+
+/// Candidate spots around `r` in preference order (see the section
+/// comment); above / below tuck `tuck` px into `r`.
+fn badge_spots(r: Rect, tuck: f32, full: (f32, f32), compact: (f32, f32)) -> Vec<PlacedBadge> {
+    let around = |(w, h): (f32, f32)| {
+        // Beside: level with a one-line element, at the top of a tall one.
+        let beside_y = if r.height <= h * 2.0 {
+            r.y + (r.height - h) / 2.0
+        } else {
+            r.y
+        };
+        [
+            (r.x, r.y - h + tuck),
+            (r.x - w - BADGE_GAP, beside_y),
+            (r.x, r.y + r.height - tuck),
+            (r.x + r.width + BADGE_GAP, beside_y),
+        ]
+        .map(|(x, y)| Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        })
+    };
+    let mut spots: Vec<PlacedBadge> = around(full)
+        .into_iter()
+        .map(|rect| PlacedBadge {
+            rect,
+            compact: false,
+        })
+        .collect();
+    spots.extend(around(compact).into_iter().map(|rect| PlacedBadge {
+        rect,
+        compact: true,
+    }));
+    spots.push(PlacedBadge {
+        rect: Rect {
+            x: r.x,
+            y: r.y,
+            width: compact.0,
+            height: compact.1,
+        },
+        compact: true,
+    });
+    spots
+}
+
+fn inside_corner(r: Rect, (w, h): (f32, f32), page: Rect) -> PlacedBadge {
+    let x = r.x.min(page.x + page.width - w).max(page.x);
+    let y = r.y.min(page.y + page.height - h).max(page.y);
+    PlacedBadge {
+        rect: Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        },
+        compact: true,
+    }
+}
+
+fn overlap(a: &Rect, b: &Rect) -> f32 {
+    let w = (a.x + a.width).min(b.x + b.width) - a.x.max(b.x);
+    let h = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
+    if w > 0.0 && h > 0.0 { w * h } else { 0.0 }
+}
+
+fn within(outer: &Rect, inner: &Rect) -> bool {
+    inner.x >= outer.x
+        && inner.y >= outer.y
+        && inner.x + inner.width <= outer.x + outer.width
+        && inner.y + inner.height <= outer.y + outer.height
+}
+
+/// `r` shrunk by `by` on every side (grown when negative).
+fn inset(r: Rect, by: f32) -> Rect {
+    Rect {
+        x: r.x + by,
+        y: r.y + by,
+        width: (r.width - 2.0 * by).max(0.0),
+        height: (r.height - 2.0 * by).max(0.0),
+    }
+}
+
+/// Where `commands` (a frame from `human_frame`, window coordinates) paint
+/// page text inside `page`: one box per text run, cut to the glyphs' ink
+/// band (a line box has leading above and below), so a badge may sit in
+/// the gap between two lines.
+pub fn text_obstacles(commands: &[DisplayCommand], page: Rect) -> Vec<Rect> {
+    commands
+        .iter()
+        .filter_map(|c| match c {
+            DisplayCommand::Text(t) => Some(t),
+            _ => None,
+        })
+        .filter(|t| !t.text.trim().is_empty())
+        .filter_map(|t| {
+            let (width, lines) = mb_runtime::render::measure_text_wrap_with_family(
+                &t.text,
+                t.font_size,
+                t.wrap_width,
+                t.font_family.as_deref(),
+                t.font_weight,
+            );
+            let width = t.wrap_width.map_or(width, |w| width.min(w.max(0.0)));
+            let line = t.font_size * 1.2;
+            let r = Rect {
+                x: t.x,
+                y: t.y + t.font_size * 0.15,
+                width,
+                height: line * lines as f32 - t.font_size * 0.25,
+            };
+            (overlap(&r, &page) > 0.0).then_some(r)
+        })
+        .collect()
+}
+
 // --------------------------------------------------------- page overlay ---
 
 /// Badges and the target outline, in window coordinates. `scroll_y` is the
-/// page's current scroll; `page_bottom` the window height. `note` labels the
-/// target ("The agent wants to press this"). Nothing is drawn over the
-/// browser chrome.
+/// page's current scroll; `page` the page's area of the window (below the
+/// chrome, left of the panel); `ink` where the page paints text
+/// ([`text_obstacles`]), so badges can stay off it. `note` labels the target
+/// ("The agent wants to press this"). Nothing is drawn over the browser
+/// chrome.
 pub fn page_overlay(
     elements: &[ElementObservation],
     target: Option<NodeId>,
     note: Option<&str>,
     scroll_y: f32,
-    page_bottom: f32,
+    page: Rect,
+    ink: &[Rect],
 ) -> Vec<DisplayCommand> {
     let to_window = |rect: Rect| Rect {
         y: rect.y - scroll_y + CHROME_HEIGHT,
         ..rect
     };
-    let visible = |r: &Rect| r.y + r.height > CHROME_HEIGHT && r.y < page_bottom;
+    let visible = |r: &Rect| r.y + r.height > page.y && r.y < page.y + page.height;
 
+    let shown: Vec<(String, Rect, bool)> = elements
+        .iter()
+        .map(|e| {
+            let label = format!("e{}", e.id.raw());
+            (label, to_window(e.rect), Some(e.id) == target)
+        })
+        .filter(|(_, r, _)| visible(r))
+        .collect();
+    let wanted: Vec<BadgeRequest> = shown
+        .iter()
+        .map(|(label, r, outlined)| BadgeRequest {
+            element: *r,
+            outlined: *outlined,
+            full: BadgeStyle::FULL.size(label),
+            compact: BadgeStyle::COMPACT.size(label),
+        })
+        .collect();
     let mut commands = Vec::new();
-    for element in elements {
-        let r = to_window(element.rect);
-        if !visible(&r) {
-            continue;
-        }
-        let label = format!("e{}", element.id.raw());
-        let width = text_width(&label, BADGE_FONT, true, 600) + BADGE_PAD * 2.0;
-        // Sit just left of the element when the margin has room, so small
-        // controls (checkboxes, short links) stay visible; otherwise pin to
-        // its top-left corner. Never under the chrome.
-        let x = if r.x - width - 3.0 >= 0.0 {
-            r.x - width - 3.0
+    for ((label, _, _), placed) in shown.iter().zip(place_badges(&wanted, ink, page)) {
+        let style = if placed.compact {
+            BadgeStyle::COMPACT
         } else {
-            r.x
+            BadgeStyle::FULL
         };
-        let y = r.y.max(CHROME_HEIGHT);
-        let badge = Rect {
-            x,
-            y,
-            width,
-            height: BADGE_HEIGHT,
-        };
-        commands.push(rounded(p::AGENT, badge, 4.0));
+        commands.push(rounded(p::AGENT, placed.rect, style.radius));
         commands.push(text_cmd(
-            label,
-            x + BADGE_PAD,
-            centered_text_y(y, BADGE_HEIGHT, BADGE_FONT),
-            BADGE_FONT,
+            label.clone(),
+            placed.rect.x + style.pad,
+            centered_text_y(placed.rect.y, placed.rect.height, style.font),
+            style.font,
             p::PAGE,
             600,
             true,
@@ -1979,38 +2243,246 @@ mod tests {
     #[test]
     fn badges_follow_scroll_and_skip_offscreen_elements() {
         let elements = [element(5, 20.0), element(9, 900.0)];
-        let top = page_overlay(&elements, None, None, 0.0, 700.0);
+        let page = page_area(900, 700);
+        let top = page_overlay(&elements, None, None, 0.0, page, &[]);
         assert_eq!(badge_texts(&top), vec!["e5"]);
-        let scrolled = page_overlay(&elements, None, None, 600.0, 700.0);
+        let scrolled = page_overlay(&elements, None, None, 600.0, page, &[]);
         assert_eq!(badge_texts(&scrolled), vec!["e9"]);
-        // e9 at document y 900, scrolled 600 → window y 300 + chrome; the
-        // element starts at x 10, too close to the edge for a left badge.
+        // e9 at document y 900, scrolled 600 → window y 300 + chrome; with
+        // nothing around it the badge sits on its top-left corner, outside.
         let DisplayCommand::RoundedRect(_, badge, _) = &scrolled[0] else {
             panic!("badge background first");
         };
-        assert_eq!(badge.y, 300.0 + CHROME_HEIGHT);
         assert_eq!(badge.x, 10.0);
+        assert_eq!(
+            badge.y,
+            300.0 + CHROME_HEIGHT - BadgeStyle::FULL.height + BADGE_TUCK
+        );
+    }
+
+    // ---- badge placement (pure, sizes given) ----
+
+    const FULL: (f32, f32) = (28.0, 16.0);
+    const COMPACT: (f32, f32) = (20.0, 12.0);
+
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn request(element: Rect) -> BadgeRequest {
+        BadgeRequest {
+            element,
+            outlined: false,
+            full: FULL,
+            compact: COMPACT,
+        }
+    }
+
+    fn page() -> Rect {
+        page_area(900, 700)
+    }
+
+    /// No badge hides an element (past the tuck), the text, or another badge.
+    fn assert_nothing_hidden(requests: &[BadgeRequest], ink: &[Rect], placed: &[PlacedBadge]) {
+        for (i, badge) in placed.iter().enumerate() {
+            let b = badge.rect;
+            for (j, r) in requests.iter().enumerate() {
+                let keep = if i == j {
+                    inset(r.element, BADGE_TUCK)
+                } else {
+                    r.element
+                };
+                assert_eq!(
+                    overlap(&b, &keep),
+                    0.0,
+                    "badge {i} hides element {j}: {b:?}"
+                );
+            }
+            for t in ink {
+                assert_eq!(overlap(&b, t), 0.0, "badge {i} hides text {t:?}: {b:?}");
+            }
+            for other in &placed[i + 1..] {
+                assert_eq!(overlap(&b, &other.rect), 0.0, "badges overlap: {b:?}");
+            }
+            assert!(within(&page(), &b), "badge {i} off the page: {b:?}");
+        }
+    }
+
+    /// The badge touches (or nearly touches) its element.
+    fn assert_next_to(badge: Rect, element: Rect) {
+        let gap_x =
+            (element.x - (badge.x + badge.width)).max(badge.x - (element.x + element.width));
+        let gap_y =
+            (element.y - (badge.y + badge.height)).max(badge.y - (element.y + element.height));
+        assert!(
+            gap_x.max(gap_y) <= OUTLINE_REACH,
+            "badge {badge:?} too far from {element:?}"
+        );
     }
 
     #[test]
-    fn badges_move_left_of_the_element_when_there_is_room() {
-        let mut far = element(5, 20.0);
-        far.rect.x = 200.0;
-        let commands = page_overlay(&[far], None, None, 0.0, 700.0);
-        let DisplayCommand::RoundedRect(_, badge, _) = &commands[0] else {
-            panic!("badge background first");
-        };
+    fn adjacent_inline_links_get_badges_above_without_covering_each_other() {
+        // "About this demo · Sign in · Report" on one line, the paragraph
+        // gap above it free: every badge goes on top of its link, full size.
+        let y = CHROME_HEIGHT + 200.0;
+        let links = [
+            request(rect(24.0, y, 110.0, 20.0)),
+            request(rect(144.0, y, 44.0, 20.0)),
+            request(rect(199.0, y, 45.0, 20.0)),
+        ];
+        let placed = place_badges(&links, &[], page());
+        assert_nothing_hidden(&links, &[], &placed);
+        for (badge, link) in placed.iter().zip(&links) {
+            assert!(!badge.compact);
+            assert_eq!(badge.rect.x, link.element.x);
+            assert!(badge.rect.y < link.element.y, "above: {badge:?}");
+        }
+    }
+
+    #[test]
+    fn links_packed_tighter_than_a_badge_never_stack_badges() {
+        // Short links 6 px apart: the full badge above the first one also
+        // reaches over the second, so the second must go somewhere else.
+        let y = CHROME_HEIGHT + 200.0;
+        let links = [
+            request(rect(24.0, y, 14.0, 20.0)),
+            request(rect(44.0, y, 14.0, 20.0)),
+            request(rect(64.0, y, 14.0, 20.0)),
+        ];
+        let placed = place_badges(&links, &[], page());
+        assert_nothing_hidden(&links, &[], &placed);
+        for (badge, link) in placed.iter().zip(&links) {
+            assert_next_to(badge.rect, link.element);
+        }
+    }
+
+    #[test]
+    fn a_line_of_text_above_a_link_pushes_its_badge_to_a_free_spot() {
+        // "1 of 2 done" right above "About this demo · Sign in", 12 px
+        // gap; the next line holds another link: a full badge fits
+        // nowhere around the first link, a compact one fits the gap above.
+        let y = CHROME_HEIGHT + 200.0;
+        let ink = [
+            rect(24.0, y - 30.0, 74.0, 18.0), // "1 of 2 done"
+            rect(136.0, y + 2.0, 6.0, 15.0),  // " · "
+        ];
+        let links = [
+            request(rect(24.0, y, 110.0, 20.0)),
+            request(rect(144.0, y, 44.0, 20.0)),
+            request(rect(24.0, y + 31.0, 130.0, 20.0)),
+        ];
+        let placed = place_badges(&links, &ink, page());
+        assert_nothing_hidden(&links, &ink, &placed);
+        assert!(placed[0].compact, "{:?}", placed[0]);
         assert!(
-            badge.x + badge.width < 200.0,
-            "badge clear of the element: {badge:?}"
+            placed[0].rect.y < links[0].element.y,
+            "above: {:?}",
+            placed[0]
         );
+        assert_next_to(placed[0].rect, links[0].element);
+    }
+
+    #[test]
+    fn checkbox_and_its_label_both_stay_visible() {
+        // A list of checkboxes at the 24 px body margin, each followed by
+        // its label text, the "New item" row right above: a full badge fits
+        // nowhere, a compact one in the margin or the gap between rows.
+        let top = CHROME_HEIGHT + 160.0;
+        let ink = [
+            rect(24.0, top + 4.0, 63.0, 15.0),   // "New item"
+            rect(47.0, top + 31.0, 108.0, 15.0), // "Water the plants"
+            rect(47.0, top + 54.0, 140.0, 15.0), // "Read the concept doc"
+            rect(24.0, top + 81.0, 74.0, 15.0),  // "1 of 2 done"
+        ];
+        let requests = [
+            request(rect(90.0, top, 210.0, 21.0)),       // the textbox
+            request(rect(24.0, top + 29.0, 16.0, 16.0)), // checkbox 1
+            request(rect(24.0, top + 52.0, 16.0, 16.0)), // checkbox 2
+        ];
+        let placed = place_badges(&requests, &ink, page());
+        assert_nothing_hidden(&requests, &ink, &placed);
+        for (badge, checkbox) in placed[1..].iter().zip(&requests[1..]) {
+            assert!(badge.compact, "{badge:?}");
+            assert_next_to(badge.rect, checkbox.element);
+        }
+    }
+
+    #[test]
+    fn element_at_the_top_of_the_viewport_keeps_its_badge_off_the_chrome() {
+        // Right under the chrome: "above" would be over the toolbar.
+        let flush = [request(rect(200.0, CHROME_HEIGHT, 80.0, 20.0))];
+        let placed = place_badges(&flush, &[], page());
+        assert!(placed[0].rect.y >= CHROME_HEIGHT, "{:?}", placed[0]);
+        assert_nothing_hidden(&flush, &[], &placed);
+        assert_next_to(placed[0].rect, flush[0].element);
+
+        // Half scrolled under the chrome, at the left edge: every spot
+        // around it leaves the page except below.
+        let tucked = [request(rect(0.0, CHROME_HEIGHT - 10.0, 80.0, 20.0))];
+        let placed = place_badges(&tucked, &[], page());
+        assert!(placed[0].rect.y >= CHROME_HEIGHT, "{:?}", placed[0]);
+        assert!(within(&page(), &placed[0].rect));
+    }
+
+    #[test]
+    fn nowhere_to_go_falls_back_to_the_inside_corner_on_the_page() {
+        // The element fills the whole page area.
+        let area = rect(0.0, CHROME_HEIGHT, 100.0, 30.0);
+        let full = [request(area)];
+        let placed = place_badges(&full, &[], area);
+        assert!(placed[0].compact);
+        assert_eq!((placed[0].rect.x, placed[0].rect.y), (0.0, CHROME_HEIGHT));
+    }
+
+    #[test]
+    fn the_target_badge_stays_outside_its_outline() {
+        let y = CHROME_HEIGHT + 200.0;
+        let mut target = request(rect(300.0, y, 120.0, 20.0));
+        target.outlined = true;
+        let placed = place_badges(&[target], &[], page());
+        let ring = inset(target.element, -OUTLINE_REACH);
+        assert_eq!(overlap(&placed[0].rect, &ring), 0.0, "{:?}", placed[0]);
+        assert_next_to(placed[0].rect, target.element);
+    }
+
+    #[test]
+    fn text_obstacles_cover_page_text_only_and_skip_the_leading() {
+        let page = page();
+        let label = |s: &str, y: f32| {
+            DisplayCommand::Text(TextCommand {
+                text: s.into(),
+                x: 24.0,
+                y,
+                color: p::INK,
+                font_size: 16.0,
+                wrap_width: Some(400.0),
+                font_family: None,
+                font_weight: 400,
+            })
+        };
+        let commands = [
+            label("tab title", 10.0),    // chrome
+            label("1 of 2 done", 300.0), // page
+            label("   ", 330.0),         // nothing to cover
+        ];
+        let ink = text_obstacles(&commands, page);
+        assert_eq!(ink.len(), 1, "{ink:?}");
+        // Inside the 19.2 px line box, off its top and bottom edges.
+        assert!(ink[0].y > 300.0 && ink[0].y + ink[0].height < 300.0 + 19.2);
+        assert!(ink[0].width > 0.0 && ink[0].width <= 400.0);
     }
 
     #[test]
     fn target_gets_an_outline() {
         let elements = [element(5, 20.0)];
-        let plain = page_overlay(&elements, None, None, 0.0, 700.0);
-        let targeted = page_overlay(&elements, Some(NodeId::from_raw(5)), None, 0.0, 700.0);
+        let page = page_area(900, 700);
+        let plain = page_overlay(&elements, None, None, 0.0, page, &[]);
+        let targeted = page_overlay(&elements, Some(NodeId::from_raw(5)), None, 0.0, page, &[]);
         assert_eq!(targeted.len(), plain.len() + 4);
     }
 
@@ -2420,7 +2892,8 @@ mod tests {
             Some(NodeId::from_raw(5)),
             Some("The agent wants to press this"),
             0.0,
-            700.0,
+            page_area(900, 700),
+            &[],
         );
         let texts = badge_texts(&commands);
         assert!(texts.contains(&"The agent wants to press this".to_string()));

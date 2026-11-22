@@ -143,12 +143,10 @@ fn compose(
     commands.extend(pill.commands(page_width as f32));
     let scroll_y = browser.state().scroll_offset;
     let elements = browser.element_boxes();
+    let page = overlay::page_area(page_width, window_height);
+    let ink = overlay::text_obstacles(&commands, page);
     commands.extend(overlay::page_overlay(
-        &elements,
-        target,
-        None,
-        scroll_y,
-        window_height as f32,
+        &elements, target, None, scroll_y, page, &ink,
     ));
     let info = panel_info(replayer, target.is_some());
     let (panel, buttons) = overlay::replay_panel(
