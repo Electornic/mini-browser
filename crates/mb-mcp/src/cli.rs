@@ -50,6 +50,10 @@ OPTIONS:
     --preview-answer ANSWER Answer the card the --preview-click raised:
                             deny (the refusal receipt) or take-over (the
                             Your-turn card)
+    --preview-sites         Show the Allowed-sites dialog open in --preview
+    --preview-sites-add TEXT
+                            Type TEXT into that dialog and press Enter (opens
+                            it; repeatable — garbage shows the field's error)
     -h, --help              Print this help (to stderr)
 
 REPLAY (a log runs like a script — replay only logs you trust):
@@ -105,6 +109,9 @@ pub struct Options {
     pub preview_agent_view: Option<PreviewView>,
     /// `--preview-answer deny|take-over`: answer the card the clicks raised.
     pub preview_answer: Option<PreviewAnswer>,
+    /// `--preview-sites` / `--preview-sites-add TEXT`: the "Allowed sites"
+    /// dialog open, after typing each TEXT and pressing Enter.
+    pub preview_sites: Option<Vec<String>>,
     /// `--http`: serve MCP over HTTP on this loopback port (G3b).
     pub http_port: Option<u16>,
     /// Filled in by `main` once the HTTP listener is bound.
@@ -291,6 +298,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut preview_pause = false;
     let mut preview_agent_view = None;
     let mut preview_answer = None;
+    let mut preview_sites: Option<Vec<String>> = None;
     let mut http = false;
     let mut port: Option<u16> = None;
     let mut args = args.into_iter().peekable();
@@ -365,6 +373,13 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "--preview-click" => preview_clicks.push(value("--preview-click")?),
             "--preview-menu" => preview_menu = true,
             "--preview-pause" => preview_pause = true,
+            "--preview-sites" => {
+                preview_sites.get_or_insert_with(Vec::new);
+            }
+            "--preview-sites-add" => {
+                let raw = value("--preview-sites-add")?;
+                preview_sites.get_or_insert_with(Vec::new).push(raw);
+            }
             "--preview-agent-view" => {
                 let raw = value("--preview-agent-view")?;
                 preview_agent_view = Some(match raw.as_str() {
@@ -425,6 +440,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         preview_pause,
         preview_agent_view,
         preview_answer,
+        preview_sites,
         http_port: http.then(|| port.unwrap_or(DEFAULT_PORT)),
         attach: None,
         log,
@@ -441,10 +457,10 @@ fn parse_dimension(raw: &str, whole: &str) -> Result<usize, String> {
 
 /// `http://localhost:3000/` → `http://localhost:3000`, matching how the
 /// policy prints origins (default ports dropped).
+// Same rule as the window's "Allowed sites" add field.
 fn normalize_origin(raw: &str) -> Result<String, String> {
-    let url = mb_runtime::net::Url::parse(raw)
-        .map_err(|_| format!("--allow-origin {raw:?} is not an http(s) URL"))?;
-    Ok(mb_runtime::state::policy::origin_of(&url))
+    mb_runtime::state::policy::parse_origin(raw)
+        .ok_or_else(|| format!("--allow-origin {raw:?} is not an http(s) URL"))
 }
 
 #[cfg(test)]

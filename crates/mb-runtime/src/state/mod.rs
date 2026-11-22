@@ -773,6 +773,21 @@ impl BrowserState {
         true
     }
 
+    /// The person changed the allowed sites while an action was held and
+    /// its target is outside them now: drop it as the gate would have
+    /// (`Blocked` — not a refusal, so nothing is remembered). Returns false
+    /// if nothing was held.
+    pub fn block_held(&mut self) -> bool {
+        let Some(held) = self.held_navigation.take() else {
+            return false;
+        };
+        self.policy_events.push(policy::PolicyEvent {
+            action: held.action,
+            decision: policy::PolicyDecision::Blocked,
+        });
+        true
+    }
+
     /// Gate decisions (approved / denied / blocked) since the last call.
     pub fn take_policy_events(&mut self) -> Vec<policy::PolicyEvent> {
         std::mem::take(&mut self.policy_events)

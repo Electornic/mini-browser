@@ -53,6 +53,8 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
     let mut record_failed = false;
     // "What the agent sees", while open.
     let mut viewer: Option<Viewer> = None;
+    // "Allowed sites", while open.
+    let mut sites: Option<Sites> = None;
     // The parked-call deadline a wake-up is already scheduled for.
     let mut wake_scheduled: Option<std::time::Instant> = None;
     // The next REC-clock second a wake-up is scheduled for.
@@ -108,10 +110,21 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
                 }
                 page_input = WindowInput::default();
             }
+            // "Allowed sites" is modal too, and its field takes every
+            // keystroke: none of them reaches the page or the address bar.
+            if let Some(open) = &mut sites {
+                match route_sites_input(open, worker.allow_origins(), input) {
+                    SitesOutcome::Nothing => {}
+                    SitesOutcome::Close => sites = None,
+                    SitesOutcome::Set(origins) => set_sites(&mut worker, origins),
+                }
+                page_input = WindowInput::default();
+            }
+            let modal = viewer.is_some() || sites.is_some();
             // The ⋮ menu takes clicks first: the button toggles it; while
             // it is open, a click picks an item or closes it, and never
             // reaches the page (or the panel) below.
-            let routed = if viewer.is_some() {
+            let routed = if modal {
                 RoutedInput {
                     click: MenuClick::None,
                     over_menu: false,
@@ -119,7 +132,7 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
             } else {
                 route_menu_input(menu_open, menu.as_ref(), page_width as f32, input)
             };
-            let consumed = viewer.is_some() || routed.click != MenuClick::None;
+            let consumed = modal || routed.click != MenuClick::None;
             match routed.click {
                 MenuClick::None | MenuClick::Swallow => {}
                 MenuClick::Toggle => menu_open = !menu_open,
@@ -137,6 +150,14 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
                 )) => {
                     menu_open = false;
                     viewer = Some(Viewer::default());
+                }
+                MenuClick::Pick(overlay::PanelAction::Window(
+                    overlay::WindowAction::ShowAllowedSites,
+                )) => {
+                    menu_open = false;
+                    sites = Some(Sites::default());
+                    // Keys from the opening frame go nowhere either.
+                    page_input = WindowInput::default();
                 }
                 MenuClick::Pick(_) => {}
             }
@@ -208,6 +229,7 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
                     record_failed,
                     hover: input.mouse_position,
                     viewer: viewer.as_mut(),
+                    sites: sites.as_mut(),
                 },
             );
             buttons = composed.buttons;
@@ -388,6 +410,101 @@ fn apply(worker: &mut Worker, control: overlay::Control) -> bool {
     true
 }
 
+// The person's edit of the allowed sites (person-only, like `apply`).
+fn set_sites(worker: &mut Worker, origins: Vec<String>) {
+    let list = if origins.is_empty() {
+        "any site".to_string()
+    } else {
+        origins.join(", ")
+    };
+    eprintln!("[mb-mcp] the person set the allowed sites: {list}");
+    worker.set_allow_origins(origins);
+}
+
+/// "Allowed sites" while open (board 8, right).
+#[derive(Default)]
+struct Sites {
+    /// The add field.
+    field: String,
+    /// Why the last Add didn't take.
+    error: Option<&'static str>,
+    /// Buttons and dialog rect as painted last frame.
+    painted: Option<(Vec<overlay::Button>, Rect)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum SitesOutcome {
+    Nothing,
+    Close,
+    /// The list the person made: apply it.
+    Set(Vec<String>),
+}
+
+// One frame of input to the open dialog. Modal: every click and key is
+// its own — typed text edits the field (the address bar's rules,
+// `edit_line`), Enter / Add adds what it holds (normalized like
+// `--allow-origin`, garbage and duplicates refused with a reason), × on a
+// row removes it, Escape / × / a click outside closes.
+fn route_sites_input(sites: &mut Sites, current: &[String], input: &WindowInput) -> SitesOutcome {
+    if input.escape_pressed {
+        return SitesOutcome::Close;
+    }
+    let mut ignored = false;
+    let before = sites.field.clone();
+    let enter = mb_runtime::input::edit_line(&mut sites.field, &mut ignored, input);
+    if sites.field.chars().count() > overlay::SITES_FIELD_MAX {
+        sites.field = sites.field.chars().take(overlay::SITES_FIELD_MAX).collect();
+    }
+    if sites.field != before {
+        sites.error = None;
+    }
+    let mut action = enter.then_some(overlay::WindowAction::AddSite);
+    if let (true, Some((x, y)), Some((buttons, rect))) = (
+        input.left_mouse_pressed,
+        input.mouse_position,
+        &sites.painted,
+    ) {
+        match buttons.iter().find(|b| b.contains(x, y)) {
+            Some(overlay::Button {
+                action: overlay::PanelAction::Window(picked),
+                ..
+            }) => action = Some(*picked),
+            _ if contains(rect, (x, y)) => {}
+            _ => return SitesOutcome::Close,
+        }
+    }
+    match action {
+        Some(overlay::WindowAction::CloseAllowedSites) => SitesOutcome::Close,
+        Some(overlay::WindowAction::RemoveSite(i)) if i < current.len() => {
+            let mut origins = current.to_vec();
+            origins.remove(i);
+            SitesOutcome::Set(origins)
+        }
+        Some(overlay::WindowAction::AddSite) if !sites.field.trim().is_empty() => {
+            match mb_runtime::state::policy::parse_origin(&sites.field) {
+                None => {
+                    sites.error = Some(
+                        "Not a site address — write it like https://example.test or http://localhost:3000.",
+                    );
+                    SitesOutcome::Nothing
+                }
+                Some(origin) if current.contains(&origin) => {
+                    sites.error = Some("Already allowed.");
+                    SitesOutcome::Nothing
+                }
+                Some(origin) => {
+                    sites.field.clear();
+                    sites.error = None;
+                    let mut origins = current.to_vec();
+                    origins.push(origin);
+                    SitesOutcome::Set(origins)
+                }
+            }
+        }
+        _ => SitesOutcome::Nothing,
+    }
+}
+
 /// "What the agent sees" while open (board 8).
 #[derive(Default)]
 struct Viewer {
@@ -462,6 +579,7 @@ struct View<'a> {
     record_failed: bool,
     hover: Option<(f32, f32)>,
     viewer: Option<&'a mut Viewer>,
+    sites: Option<&'a mut Sites>,
 }
 
 struct Composed {
@@ -578,6 +696,26 @@ fn compose(
     if let Some(viewer) = view.viewer.as_deref_mut() {
         commands.extend(paint_viewer(worker, viewer, page, view.hover));
     }
+    if let Some(sites) = view.sites.as_deref_mut() {
+        let current = worker
+            .browser()
+            .state()
+            .current_url
+            .as_ref()
+            .map(mb_runtime::state::policy::origin_of);
+        let painted = overlay::allowed_sites(
+            &overlay::SitesInfo {
+                origins: worker.allow_origins(),
+                current: current.as_deref(),
+                field: &sites.field,
+                error: sites.error,
+                hover: view.hover,
+            },
+            page,
+        );
+        commands.extend(painted.commands);
+        sites.painted = Some((painted.buttons, painted.rect));
+    }
     Composed {
         commands,
         buttons,
@@ -682,6 +820,7 @@ pub fn preview(options: Options, path: &std::path::Path, clicks: &[String]) -> R
     let scale = options.preview_scale;
     let (pause, menu_open) = (options.preview_pause, options.preview_menu);
     let answer = options.preview_answer;
+    let site_adds = options.preview_sites.clone();
     let mut viewer = options.preview_agent_view.map(|scope| Viewer {
         scope: match scope {
             crate::cli::PreviewView::OnScreen => overlay::ViewScope::OnScreen,
@@ -718,6 +857,25 @@ pub fn preview(options: Options, path: &std::path::Path, clicks: &[String]) -> R
         Some(crate::cli::PreviewAnswer::TakeOver) => worker.answer(worker::Answer::TakeOver),
         None => {}
     }
+    // The dialog, after typing each TEXT and pressing Enter in it.
+    let mut sites = site_adds.map(|adds| {
+        let mut sites = Sites::default();
+        for text in adds {
+            // Each TEXT on its own, as if the field was cleared first.
+            sites.field.clear();
+            let typed = WindowInput {
+                typed: text,
+                enter_pressed: true,
+                ..WindowInput::default()
+            };
+            if let SitesOutcome::Set(origins) =
+                route_sites_input(&mut sites, worker.allow_origins(), &typed)
+            {
+                set_sites(&mut worker, origins);
+            }
+        }
+        sites
+    });
     // Two frames: the first lays out at the window size, the second paints
     // with the hover/focus state that settled.
     let input = WindowInput::default();
@@ -727,6 +885,7 @@ pub fn preview(options: Options, path: &std::path::Path, clicks: &[String]) -> R
         record_failed: false,
         hover: None,
         viewer: viewer.as_mut(),
+        sites: sites.as_mut(),
     };
     let _ = compose(&mut worker, &input, width, height, &mut view);
     let commands = compose(&mut worker, &input, width, height, &mut view).commands;
@@ -919,6 +1078,145 @@ mod tests {
         assert_eq!(route(&page_down).scroll, viewer.page_rows as isize);
         // The frame it opened on (nothing painted yet): Escape still works.
         assert_eq!(route_viewer_input(None, &escape).click, ViewerClick::Close);
+    }
+
+    fn typing(text: &str, enter: bool) -> WindowInput {
+        WindowInput {
+            typed: text.into(),
+            enter_pressed: enter,
+            ..WindowInput::default()
+        }
+    }
+
+    fn paint_sites(sites: &mut Sites, origins: &[String]) {
+        let painted = overlay::allowed_sites(
+            &overlay::SitesInfo {
+                origins,
+                current: None,
+                field: &sites.field,
+                error: sites.error,
+                hover: None,
+            },
+            overlay::page_area(900, 800),
+        );
+        sites.painted = Some((painted.buttons, painted.rect));
+    }
+
+    #[test]
+    fn the_sites_field_takes_the_keys_and_adds_only_real_sites() {
+        let list = vec!["http://127.0.0.1:8765".to_string()];
+        let mut sites = Sites::default();
+        // Typed text and Backspace edit the field (the address bar's rules).
+        let route = |sites: &mut Sites, input: &WindowInput| route_sites_input(sites, &list, input);
+        assert_eq!(
+            route(&mut sites, &typing("localhost:30001", false)),
+            SitesOutcome::Nothing
+        );
+        let back = WindowInput {
+            backspace_pressed: true,
+            ..WindowInput::default()
+        };
+        route(&mut sites, &back);
+        assert_eq!(sites.field, "localhost:3000");
+        // Garbage: refused with a reason, the text stays to fix.
+        assert_eq!(route(&mut sites, &typing("", true)), SitesOutcome::Nothing);
+        assert!(
+            sites
+                .error
+                .is_some_and(|e| e.contains("http://localhost:3000"))
+        );
+        assert_eq!(sites.field, "localhost:3000");
+        // Editing clears the error; a real site is normalized and added.
+        sites.field.clear();
+        assert_eq!(
+            route(&mut sites, &typing("HTTP://LocalHost:3000/app?x=1", true)),
+            SitesOutcome::Set(vec![
+                "http://127.0.0.1:8765".into(),
+                "http://localhost:3000".into()
+            ])
+        );
+        assert!(sites.error.is_none());
+        assert!(sites.field.is_empty());
+        // Already there: refused, nothing set.
+        assert_eq!(
+            route(&mut sites, &typing("http://127.0.0.1:8765/", true)),
+            SitesOutcome::Nothing
+        );
+        assert_eq!(sites.error, Some("Already allowed."));
+        // Enter on an empty field does nothing; the field is capped.
+        sites.field.clear();
+        assert_eq!(route(&mut sites, &typing("", true)), SitesOutcome::Nothing);
+        route(&mut sites, &typing(&"x".repeat(500), false));
+        assert_eq!(sites.field.chars().count(), overlay::SITES_FIELD_MAX);
+    }
+
+    #[test]
+    fn the_sites_dialog_is_modal_removes_by_row_and_closes() {
+        let list = vec![
+            "http://127.0.0.1:8765".to_string(),
+            "http://localhost:8765".to_string(),
+        ];
+        let mut sites = Sites::default();
+        paint_sites(&mut sites, &list);
+        let (buttons, rect) = sites.painted.clone().unwrap();
+        let at = |action: overlay::WindowAction| {
+            let b = buttons
+                .iter()
+                .find(|b| b.action == overlay::PanelAction::Window(action))
+                .unwrap();
+            click_at(b.rect.x + 2.0, b.rect.y + 2.0)
+        };
+        assert_eq!(
+            route_sites_input(&mut sites, &list, &at(overlay::WindowAction::RemoveSite(1))),
+            SitesOutcome::Set(vec!["http://127.0.0.1:8765".into()])
+        );
+        // Removing the last one = any site.
+        assert_eq!(
+            route_sites_input(
+                &mut sites,
+                &list[..1],
+                &at(overlay::WindowAction::RemoveSite(0))
+            ),
+            SitesOutcome::Set(Vec::new())
+        );
+        // No Add button while the field is empty.
+        assert!(
+            !buttons
+                .iter()
+                .any(|b| b.action == overlay::PanelAction::Window(overlay::WindowAction::AddSite))
+        );
+        // Inside, not on a button: swallowed. Outside, ×, Escape: close.
+        let inside = click_at(rect.x + 4.0, rect.y + rect.height - 8.0);
+        assert_eq!(
+            route_sites_input(&mut sites, &list, &inside),
+            SitesOutcome::Nothing
+        );
+        assert_eq!(
+            route_sites_input(&mut sites, &list, &click_at(4.0, 700.0)),
+            SitesOutcome::Close
+        );
+        assert_eq!(
+            route_sites_input(
+                &mut sites,
+                &list,
+                &at(overlay::WindowAction::CloseAllowedSites)
+            ),
+            SitesOutcome::Close
+        );
+        let escape = WindowInput {
+            escape_pressed: true,
+            ..WindowInput::default()
+        };
+        assert_eq!(
+            route_sites_input(&mut sites, &list, &escape),
+            SitesOutcome::Close
+        );
+        // The menu row opens it (no longer greyed out).
+        let menu = painted(900.0);
+        assert!(
+            menu.0.iter().any(|b| b.action
+                == overlay::PanelAction::Window(overlay::WindowAction::ShowAllowedSites))
+        );
     }
 
     #[test]

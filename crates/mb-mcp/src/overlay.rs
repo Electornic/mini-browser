@@ -202,6 +202,28 @@ fn eye_icon(x: f32, y: f32, color: Color) -> Vec<DisplayCommand> {
     commands
 }
 
+// A globe (board 2b "Allowed sites"), 16 × 16: a ring, the equator and
+// a meridian.
+fn globe_icon(x: f32, y: f32, color: Color) -> Vec<DisplayCommand> {
+    let mut commands = ring_icon(x, y, 16.0, 14.0, color, Some(p::PAGE));
+    commands.extend(stroke(&[(2.0, 8.0), (14.0, 8.0)], x, y, 1.5, color));
+    commands.extend(stroke(
+        &[(8.0, 1.5), (5.5, 5.0), (5.5, 11.0), (8.0, 14.5)],
+        x,
+        y,
+        1.5,
+        color,
+    ));
+    commands.extend(stroke(
+        &[(8.0, 1.5), (10.5, 5.0), (10.5, 11.0), (8.0, 14.5)],
+        x,
+        y,
+        1.5,
+        color,
+    ));
+    commands
+}
+
 // A right-pointing triangle, one 1px strip per row.
 fn play_icon(x: f32, y: f32, size: f32, color: Color) -> Vec<DisplayCommand> {
     let rows = size.round() as usize;
@@ -1024,13 +1046,20 @@ pub enum PanelAction {
     Window(WindowAction),
 }
 
-/// The "What the agent sees" viewer and the menu item that opens it.
+/// The window's own dialogs ("What the agent sees", "Allowed sites") and
+/// the menu items that open them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowAction {
     ShowAgentView,
     Scope(ViewScope),
     CopyAgentView,
     CloseAgentView,
+    ShowAllowedSites,
+    /// × on the n-th allowed site.
+    RemoveSite(usize),
+    /// Add what the field holds.
+    AddSite,
+    CloseAllowedSites,
 }
 
 /// What the viewer shows (board 8's toggle).
@@ -2627,21 +2656,18 @@ pub fn menu(info: &MenuInfo<'_>, page_width: f32) -> Menu {
     }
     y += SEGMENT_HEIGHT + 8.0;
 
-    // Not built yet (design board "2b · ⋮ menu"): shown so the menu reads
-    // as the place they will live, but inert.
+    // Where the agent may go at all: opens the "Allowed sites" dialog.
     let origins = match info.allow_origins.len() {
-        0 => "any".to_string(),
-        1 => info.allow_origins[0].clone(),
-        n => format!("{n} origins"),
+        0 => "any site".to_string(),
+        1 => clip_start(&info.allow_origins[0], 24),
+        n => format!("{n} sites"),
     };
-    row(
-        &mut commands,
-        &mut y,
-        "Allowed sites",
-        &origins,
-        false,
-        None,
-    );
+    let rect = row(&mut commands, &mut y, "Allowed sites", &origins, true, None);
+    commands.extend(globe_icon(rect.x + 10.0, rect.y + 12.0, p::INK));
+    buttons.push(Button {
+        rect,
+        action: PanelAction::Window(WindowAction::ShowAllowedSites),
+    });
     rule(&mut commands, &mut y);
 
     // Record: start / stop the session log (person-only, like pause).
@@ -3153,6 +3179,309 @@ pub fn agent_view(info: &AgentViewInfo<'_>, page: Rect) -> AgentView {
         page_rows: shown.saturating_sub(1).max(1),
         #[cfg(test)]
         below,
+    }
+}
+
+// ------------------------------------------------------ "Allowed sites" ---
+
+const SITES_MAX_WIDTH: f32 = 520.0;
+const SITES_ROW: f32 = 44.0;
+const SITES_GAP: f32 = 8.0;
+const SITES_MONO: f32 = 13.0;
+/// The add field keeps at most this many characters (no origin is longer;
+/// a paste of a whole page is not a site).
+pub const SITES_FIELD_MAX: usize = 200;
+const SITES_PLACEHOLDER: &str = "https://staging.example.test";
+
+/// What the "Allowed sites" dialog shows (board 8, right).
+pub struct SitesInfo<'a> {
+    /// The list now (empty = any site).
+    pub origins: &'a [String],
+    /// The origin of the page on screen, tagged "current" in the list.
+    pub current: Option<&'a str>,
+    /// What the person has typed into the add field.
+    pub field: &'a str,
+    /// Why the last Add didn't take ("Not a site address…").
+    pub error: Option<&'a str>,
+    pub hover: Option<(f32, f32)>,
+}
+
+/// The painted dialog: commands, its buttons and its rect (input over it
+/// never reaches the page — it is modal).
+pub struct SitesDialog {
+    pub commands: Vec<DisplayCommand>,
+    pub buttons: Vec<Button>,
+    pub rect: Rect,
+}
+
+/// The "Allowed sites" dialog (board 8, right) at the top of the page
+/// area `page`: the list with × on each row, the add field (always
+/// focused — the dialog's only text box) with its Add button, and the
+/// "empty list = any site" note. Rows that don't fit are counted.
+pub fn allowed_sites(info: &SitesInfo<'_>, page: Rect) -> SitesDialog {
+    let width = (page.width - 2.0 * VIEW_MARGIN).clamp(0.0, SITES_MAX_WIDTH);
+    let x = page.x + ((page.width - width) / 2.0).max(0.0);
+    let top = page.y + VIEW_MARGIN;
+    let left = x + VIEW_PAD;
+    let inner = (width - 2.0 * VIEW_PAD).max(0.0);
+    let right = x + width - VIEW_PAD;
+    let hovered = |r: &Rect| info.hover.is_some_and(|point| contains(r, point));
+    let per_char = text_width("0000000000", SITES_MONO, true, 400) / 10.0;
+    let mut commands = Vec::new();
+    let mut buttons = Vec::new();
+
+    // Header: title, what the list does, close.
+    let close = Rect {
+        x: right - 32.0 + 8.0,
+        y: top + 12.0,
+        width: 32.0,
+        height: 32.0,
+    };
+    if hovered(&close) {
+        commands.push(rounded(p::PANEL, close, 8.0));
+    }
+    commands.extend(cross_icon(close.x + 9.0, close.y + 9.0, p::MUTED));
+    buttons.push(Button {
+        rect: close,
+        action: PanelAction::Window(WindowAction::CloseAllowedSites),
+    });
+    commands.push(text("Allowed sites", left, top + 18.0, 16.0, p::INK, true));
+    let mut y = top + 18.0 + line_height(16.0) + 2.0;
+    paragraph(
+        &mut commands,
+        &mut y,
+        "The agent can only go to these. Anything else is refused at once — no card, no asking.",
+        left,
+        inner - 24.0,
+        BODY,
+        p::MUTED,
+        3,
+    );
+    y += 14.0;
+    let rule = |commands: &mut Vec<DisplayCommand>, y: f32| {
+        commands.push(DisplayCommand::SolidRect(
+            p::LINE,
+            Rect {
+                x: x + 1.0,
+                y,
+                width: width - 2.0,
+                height: 1.0,
+            },
+        ));
+    };
+    rule(&mut commands, y);
+    y += 14.0;
+
+    // The list. Leave room below for the field, its note and the footer.
+    // (field, its note, the footer's title and note, the "… N more" line)
+    let reserved =
+        4.0 + SITES_ROW + 6.0 + 2.0 * 18.0 + 12.0 + 14.0 + 22.0 + 4.0 * 18.0 + 14.0 + 24.0;
+    let room = (page.y + page.height - VIEW_MARGIN - reserved - y).max(0.0);
+    let fits = ((room + SITES_GAP) / (SITES_ROW + SITES_GAP)).floor() as usize;
+    let shown = if info.origins.len() > fits {
+        // The last row that would fit becomes the "… N more" line.
+        fits.saturating_sub(1)
+    } else {
+        info.origins.len()
+    };
+    if info.origins.is_empty() {
+        let row = Rect {
+            x: left,
+            y,
+            width: inner,
+            height: SITES_ROW,
+        };
+        commands.push(rounded(p::PANEL, row, 10.0));
+        commands.push(text(
+            "Any site — the list is empty",
+            row.x + 14.0,
+            centered_text_y(row.y, row.height, BODY),
+            BODY,
+            p::MUTED,
+            false,
+        ));
+        y += SITES_ROW + SITES_GAP;
+    }
+    for (i, origin) in info.origins.iter().enumerate().take(shown) {
+        let row = Rect {
+            x: left,
+            y,
+            width: inner,
+            height: SITES_ROW,
+        };
+        commands.extend(framed_rect(row, 10.0, p::LINE, p::PAGE));
+        let remove = Rect {
+            x: row.x + row.width - 8.0 - 32.0,
+            y: row.y + (SITES_ROW - 32.0) / 2.0,
+            width: 32.0,
+            height: 32.0,
+        };
+        if hovered(&remove) {
+            commands.push(rounded(p::PANEL, remove, 8.0));
+        }
+        commands.extend(cross_icon(remove.x + 9.0, remove.y + 9.0, p::MUTED));
+        buttons.push(Button {
+            rect: remove,
+            action: PanelAction::Window(WindowAction::RemoveSite(i)),
+        });
+        let mut text_right = remove.x - 10.0;
+        if info.current == Some(origin.as_str()) {
+            let tag_width = text_width("current", SMALL, false, 400);
+            text_right -= tag_width;
+            commands.push(text(
+                "current",
+                text_right,
+                centered_text_y(row.y, row.height, SMALL),
+                SMALL,
+                p::MUTED,
+                false,
+            ));
+            text_right -= 10.0;
+        }
+        let columns = ((text_right - row.x - 14.0) / per_char.max(1.0)) as usize;
+        commands.push(text_cmd(
+            clip(origin, columns),
+            row.x + 14.0,
+            centered_text_y(row.y, row.height, SITES_MONO),
+            SITES_MONO,
+            p::INK,
+            400,
+            true,
+        ));
+        y += SITES_ROW + SITES_GAP;
+    }
+    if shown < info.origins.len() {
+        let more = info.origins.len() - shown;
+        commands.push(text(
+            format!(
+                "… {more} {}site{} — the window is too short to list them",
+                if shown > 0 { "more " } else { "" },
+                if more == 1 { "" } else { "s" }
+            ),
+            left + 14.0,
+            y,
+            SMALL,
+            p::MUTED,
+            false,
+        ));
+        y += 24.0;
+    }
+
+    // The add field (always focused) and Add.
+    y += 4.0;
+    let add_width = text_width("Add", 14.0, false, 700) + 36.0;
+    let add = Rect {
+        x: right - add_width,
+        y,
+        width: add_width,
+        height: SITES_ROW,
+    };
+    let field = Rect {
+        x: left,
+        y,
+        width: (add.x - 8.0 - left).max(0.0),
+        height: SITES_ROW,
+    };
+    let border = if info.error.is_some() {
+        p::STOP_BORDER
+    } else {
+        p::AGENT
+    };
+    commands.extend(framed_rect(field, 10.0, border, p::PAGE));
+    let columns = ((field.width - 30.0) / per_char.max(1.0)) as usize;
+    let text_y = centered_text_y(field.y, field.height, SITES_MONO);
+    let shown_text = clip_start(info.field, columns);
+    let typed_width = if info.field.is_empty() {
+        commands.push(text_cmd(
+            SITES_PLACEHOLDER,
+            field.x + 12.0,
+            text_y,
+            SITES_MONO,
+            p::FAINT,
+            400,
+            true,
+        ));
+        0.0
+    } else {
+        let w = text_width(&shown_text, SITES_MONO, true, 400);
+        commands.push(text_cmd(
+            shown_text,
+            field.x + 12.0,
+            text_y,
+            SITES_MONO,
+            p::INK,
+            400,
+            true,
+        ));
+        w
+    };
+    // A steady caret: the field always has the keyboard while open.
+    commands.push(DisplayCommand::SolidRect(
+        p::AGENT_INK,
+        Rect {
+            x: field.x + 12.0 + typed_width + 1.0,
+            y: field.y + 12.0,
+            width: 1.5,
+            height: SITES_ROW - 24.0,
+        },
+    ));
+    let can_add = !info.field.trim().is_empty();
+    commands.extend(button(
+        add,
+        "Add",
+        if can_add {
+            Look::Filled(p::AGENT)
+        } else {
+            Look::Disabled
+        },
+    ));
+    if can_add {
+        buttons.push(Button {
+            rect: add,
+            action: PanelAction::Window(WindowAction::AddSite),
+        });
+    }
+    y += SITES_ROW + 6.0;
+    let (note, color) = match info.error {
+        Some(error) => (error, p::STOP_TEXT),
+        None if info.origins.is_empty() => (
+            "The first site you add limits the agent to the list.",
+            p::MUTED,
+        ),
+        None => ("Type a site and press Enter or Add.", p::FAINT),
+    };
+    paragraph(&mut commands, &mut y, note, left, inner, SMALL, color, 2);
+    y += 12.0;
+
+    // Footer: what an empty list means, and when changes apply.
+    rule(&mut commands, y);
+    y += 14.0;
+    commands.push(text("Empty list = any site", left, y, BODY, p::INK, true));
+    y += line_height(BODY) + 2.0;
+    paragraph(
+        &mut commands,
+        &mut y,
+        "Then leaving the current site still goes through the approval mode (Ask me / Refuse / Allow). Changes apply to the agent's next action; the agent is not told the list.",
+        left,
+        inner,
+        SMALL,
+        p::MUTED,
+        4,
+    );
+    y += 14.0;
+
+    let rect = Rect {
+        x,
+        y: top,
+        width,
+        height: y - top,
+    };
+    let mut all = framed_rect(rect, 14.0, p::FRAME, p::PAGE).to_vec();
+    all.extend(commands);
+    SitesDialog {
+        commands: all,
+        buttons,
+        rect,
     }
 }
 
@@ -3972,8 +4301,13 @@ mod tests {
             menu.buttons.last().map(|b| b.action),
             Some(PanelAction::Window(WindowAction::ShowAgentView))
         );
-        // Allowed sites isn't built yet: listed, but nothing to click.
-        assert_eq!(menu.buttons.len(), 6);
+        // Allowed sites opens its dialog (the window's own, like the viewer).
+        assert_eq!(menu.buttons.len(), 7);
+        assert!(
+            menu.buttons
+                .iter()
+                .any(|b| b.action == PanelAction::Window(WindowAction::ShowAllowedSites))
+        );
         // Hangs under the ⋮ button, right-aligned to it, inside the page.
         let button = mb_runtime::chrome::menu_button_rect(900.0);
         assert!(menu.rect.y > button.y + button.height);
@@ -4448,5 +4782,84 @@ mod tests {
                 assert!(t.y < end.rect.y + end.rect.height, "{t:?}");
             }
         }
+    }
+
+    #[test]
+    fn the_sites_dialog_lists_tags_the_current_site_and_explains_empty() {
+        let origins = vec![
+            "http://127.0.0.1:8765".to_string(),
+            "http://localhost:8765".to_string(),
+        ];
+        let page = page_area(900, 800);
+        let texts = |commands: &[DisplayCommand]| -> Vec<String> {
+            commands
+                .iter()
+                .filter_map(|c| match c {
+                    DisplayCommand::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let dialog = allowed_sites(
+            &SitesInfo {
+                origins: &origins,
+                current: Some("http://127.0.0.1:8765"),
+                field: "https://staging.example.test",
+                error: None,
+                hover: None,
+            },
+            page,
+        );
+        let shown = texts(&dialog.commands);
+        assert!(shown.iter().any(|t| t == "http://127.0.0.1:8765"));
+        assert_eq!(shown.iter().filter(|t| *t == "current").count(), 1);
+        assert!(shown.iter().any(|t| t == "Empty list = any site"));
+        let actions: Vec<_> = dialog.buttons.iter().map(|b| b.action).collect();
+        for action in [
+            WindowAction::RemoveSite(0),
+            WindowAction::RemoveSite(1),
+            WindowAction::AddSite,
+            WindowAction::CloseAllowedSites,
+        ] {
+            assert!(actions.contains(&PanelAction::Window(action)), "{action:?}");
+        }
+        for b in &dialog.buttons {
+            assert!(within(&dialog.rect, &b.rect), "{b:?} outside the dialog");
+        }
+
+        // Empty: "any site", and the first add warns it narrows.
+        let empty = allowed_sites(
+            &SitesInfo {
+                origins: &[],
+                current: None,
+                field: "",
+                error: None,
+                hover: None,
+            },
+            page,
+        );
+        let shown = texts(&empty.commands);
+        assert!(shown.iter().any(|t| t.contains("Any site")));
+        assert!(
+            shown
+                .iter()
+                .any(|t| t.contains("first site you add limits"))
+        );
+
+        // Too many to list in a short window: counted, still inside the page.
+        let many: Vec<String> = (0..40).map(|i| format!("http://h{i}.test")).collect();
+        let short = page_area(900, 560);
+        let crowded = allowed_sites(
+            &SitesInfo {
+                origins: &many,
+                current: None,
+                field: "",
+                error: None,
+                hover: None,
+            },
+            short,
+        );
+        assert!(texts(&crowded.commands).iter().any(|t| t.starts_with("… ")));
+        assert!(crowded.rect.y + crowded.rect.height <= short.y + short.height);
     }
 }

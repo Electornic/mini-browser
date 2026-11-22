@@ -197,8 +197,14 @@ impl Replayer {
             Some(mode) => approve_mode(mode),
             None => approve_mode(&self.header["approve"]),
         };
+        // And the allowed sites ("Allowed sites" dialog).
+        let sites = origins(
+            step.get("allow_origins")
+                .unwrap_or(&self.header["allow_origins"]),
+        );
         let outcome = match mode.and_then(|mode| {
             self.browser.set_approve_mode(mode);
+            self.browser.set_allow_origins(sites);
             replay_step(
                 &mut self.browser,
                 step,
@@ -317,6 +323,17 @@ fn approve_mode(value: &Value) -> Result<ApproveMode, Stop> {
     }
 }
 
+fn origins(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(|o| o.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn config_from(header: &Value) -> Result<AgentConfig, Stop> {
     let mut config = AgentConfig::default();
     if let Some([w, h]) = header["viewport"].as_array().map(Vec::as_slice) {
@@ -324,14 +341,7 @@ fn config_from(header: &Value) -> Result<AgentConfig, Stop> {
         config.viewport_height = h.as_u64().unwrap_or(800) as usize;
     }
     config.approve = approve_mode(&header["approve"])?;
-    config.allow_origins = header["allow_origins"]
-        .as_array()
-        .map(|list| {
-            list.iter()
-                .filter_map(|o| o.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    config.allow_origins = origins(&header["allow_origins"]);
     if let Some(seed) = header["seed"].as_u64().and_then(|s| u32::try_from(s).ok()) {
         config.seed = seed;
     }
@@ -454,6 +464,9 @@ fn replay_step(
         Err(ToolError::Agent(AgentError::ApprovalPending { action })) => match resolved_by {
             Some("person_approved") => outcome(browser.resolve_approval(true)),
             Some("person_denied") => outcome(browser.resolve_approval(false)),
+            // The person took the site off the allowed sites while the
+            // card was up (the next step carries the new list).
+            Some("person_changed_sites") => outcome(browser.block_pending_approval()),
             // The person did the step in the window: what they did isn't
             // in the log (only the agent's steps are).
             Some("person_handed_back") => {
@@ -683,6 +696,7 @@ mod tests {
             preview_pause: false,
             preview_agent_view: None,
             preview_answer: None,
+            preview_sites: None,
             http_port: None,
             attach: None,
             log: Some(path.to_path_buf()),

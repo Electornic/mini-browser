@@ -1,6 +1,6 @@
 # Concept — 에이전트용 브라우저
 
-> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ · G5c 평가 ✅ (2026-11-20)** · 호환성 트랙 시작 (2026-11-21): 인라인 줄 묶기 ✅ · IDL 속성 반사 ✅ · Preact 실증 ✅ · 디자인 트랙 시작 (2026-11-21): [⋮ 메뉴](#-메뉴-사람의-조종석) 1차 — 일시정지·런타임 승인 모드 ✅ · [시안 적용](#디자인-적용) (2026-11-22) ✅ · 메뉴 새 기능 1차 — [What the agent sees](#에이전트가-보는-것-what-the-agent-sees)·[기록 토글](#세션-기록-토글-record-this-session) (2026-11-22) ✅ · 승인 흐름 — [넘겨주기·거절 영수증](#넘겨주기와-거절-영수증-보드-9) (2026-11-22) ✅ · 다음 = 허용 사이트 편집 → 다크·좁은 창 / 호환성 잔여 갭(spa-roadmap) / 열린 결정 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
+> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ · G5c 평가 ✅ (2026-11-20)** · 호환성 트랙 시작 (2026-11-21): 인라인 줄 묶기 ✅ · IDL 속성 반사 ✅ · Preact 실증 ✅ · 디자인 트랙 시작 (2026-11-21): [⋮ 메뉴](#-메뉴-사람의-조종석) 1차 — 일시정지·런타임 승인 모드 ✅ · [시안 적용](#디자인-적용) (2026-11-22) ✅ · 메뉴 새 기능 1차 — [What the agent sees](#에이전트가-보는-것-what-the-agent-sees)·[기록 토글](#세션-기록-토글-record-this-session) (2026-11-22) ✅ · 승인 흐름 — [넘겨주기·거절 영수증](#넘겨주기와-거절-영수증-보드-9) (2026-11-22) ✅ · [허용 사이트 편집](#허용-사이트-allowed-sites) (2026-11-22) ✅ · 다음 = 다크 → 좁은 창 / 호환성 잔여 갭(spa-roadmap) / 열린 결정 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
 
 ## 한 줄
 
@@ -283,7 +283,7 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 | 행동 | 판정 |
 |---|---|
 | POST(및 GET 이외) 폼 제출 | 승인 필요 |
-| 다른 origin 으로 이동 | 승인 필요 (`--allow-origin` 지정 시 목록 밖은 즉시 `navigation_blocked`) |
+| 다른 origin 으로 이동 | 승인 필요 (`--allow-origin` 지정 시 목록 밖은 즉시 `navigation_blocked` — 창에선 실행 중 [허용 사이트](#허용-사이트-allowed-sites)로 편집) |
 | 같은 origin 안 GET 이동·GET 폼 | 통과 |
 | 비밀번호 필드 입력 | 게이트가 아니라 [자격증명 규칙](#자격증명-규칙) 으로 처리 |
 
@@ -336,7 +336,7 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 - **그리는 곳**: `overlay::menu` (순수 함수, `DisplayCommand` + 클릭 영역 `Button` + 메뉴 전체 rect). ⋮ 버튼(`chrome::menu_button_rect(page_width)`) 바로 아래, 버튼 오른쪽 끝에 맞춰 페이지 위에 겹쳐 그린다 (폭 300, 좁은 페이지에선 화면 안으로 당김). 색은 [디자인 적용](#디자인-적용) 이후 `palette` 토큰을 쓴다 (폭 330, 행 40, 그림자 없음 — 시안 원칙 "엔진이 그릴 수 있는 것만").
 - **항목**:
   - `AGENT` 섹션: **Pause the agent / Resume the agent** (한 줄이 상태에 따라 바뀜, 파란 일시정지 아이콘 / 재생 아이콘), "Before POST or other origins" 아래 **Ask me / Refuse / Allow** 세그먼트(선택된 칸은 흰 바탕·굵게).
-  - 아직 안 만든 항목은 회색으로만 표시(클릭 영역 없음): Allowed sites(현재 값 `any`/origin). 메뉴가 그 기능이 들어갈 자리라는 걸 보여 주되 누를 수는 없게.
+  - 아직 안 만든 항목은 회색으로만 표시(클릭 영역 없음). 메뉴가 그 기능이 들어갈 자리라는 걸 보여 주되 누를 수는 없게. (Allowed sites 가 D1~D4 동안 이렇게 있다가 2026-11-22 D5 에 켜졌다 — 지구본 아이콘, 오른쪽 값 `any site` / origin 하나 / `N sites`, 누르면 [허용 사이트](#허용-사이트-allowed-sites) 대화상자.)
   - 2026-11-22 추가 (D3): `RECORD` 섹션 **Record this session / Stop recording** ([세션 기록 토글](#세션-기록-토글-record-this-session)), `VIEW` 섹션 **What the agent sees** ([에이전트가 보는 것](#에이전트가-보는-것-what-the-agent-sees)). 섹션 머리말·구분선은 시안 보드 2b 그대로.
   - 시안의 단축키(⌘.)·Disconnect·Zoom·About 등은 뺐다 — `mb_shell` 창이 수식키 조합을 아직 페이지 입력으로만 넘기고, 나머지는 기능이 없다.
 - **클릭 라우팅** (`window_mode::route_menu_input`, 순수 함수라 단위 테스트): ⋮ 버튼 클릭 = 열기/닫기. 열린 동안의 클릭은 **페이지·패널에 절대 안 간다**: 항목이면 실행, 메뉴 안 빈 곳이면 무시, 바깥이면 닫기. 메뉴 위에 마우스가 있으면 페이지 hover 도 끈다. ⋮ 클릭 자체도 페이지(`BrowserState`)에 넘기지 않아 `menu (todo)` 상태 문구가 안 뜬다.
@@ -393,7 +393,7 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 - **아무것도 에이전트에게 안 간다**: 뷰어는 `Worker` 의 읽기 전용 접근(`seen`)과 스냅샷만 쓴다. `worker::Request`·MCP tool 어디에도 대응이 없다.
 - **긴 글**: 상자 폭에 맞춰 mono 글자 수로 **강제 줄바꿈**(mono 라 글자 수 = 폭, 공백 없는 URL 도 잘림 없이 다음 줄로). 본문은 행 단위로 스크롤 — 휠(`scroll_y` 한 칸 24px ≈ 1.3행), ↑↓ 한 행, PageUp/Down 한 화면. 끝을 넘으면 마지막 줄이 보이게 당긴다(`max_scroll`). 바닥 줄에 **"… N more lines — scroll"** / "N lines above" (텍스트 줄 수만 셈 — 라벨·여백 행 제외). 상자는 행마다 바탕을 칠해 이어 붙이므로 스크롤로 잘려도 어색하지 않다(위·아래 끝 행만 둥근 모서리).
 - **그리는 곳**: `overlay::agent_view(AgentViewInfo, page_area) -> AgentView { commands, buttons, rect, scroll, page_rows }`(순수). 페이지 영역 가운데 최대 760 폭, 위아래 16 여백. 머리: 눈 아이콘 + 제목, **On screen / Whole page** 세그먼트(메뉴의 승인 모드와 같은 모양), Copy(복사하면 "Copied", 받은 게 없으면 회색), ×. trusted 상자는 agent tint/border(파랑 = 브라우저가 쓴 것), untrusted 상자는 panel 회색/line.
-- **시안과 다른 점**: 시안의 `⚠ password`·`⚠ submits POST` 같은 꾸밈은 관찰 형식에 없는 것이라 안 붙였다(보여 주는 건 실제 글자). 시안 오른쪽 "Allowed sites" 대화상자는 다음 작업.
+- **시안과 다른 점**: 시안의 `⚠ password`·`⚠ submits POST` 같은 꾸밈은 관찰 형식에 없는 것이라 안 붙였다(보여 주는 건 실제 글자). 시안 오른쪽 "Allowed sites" 대화상자는 D5 → [허용 사이트](#허용-사이트-allowed-sites).
 
 ### 세션 기록 토글 (Record this session)
 
@@ -469,6 +469,36 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 - 시안에 없는 **I won't do it** 버튼(흰 바탕, 36px)을 hand back 아래에 뒀다 — 사람이 넘겨받은 채 돌아오지 않으면 에이전트는 45초마다 다시 붙으며 영원히 기다린다. 끝낼 길이 필요하다.
 - 시안의 `approval_denied` 인라인 mono 표기는 패널 문단이 한 글꼴이라 일반 글자로.
 - 패널 머리말의 "Claude Code"(클라이언트 이름)는 여전히 "Agent" — `clientInfo` 미보관.
+
+### 허용 사이트 (Allowed sites)
+
+> 2026-11-22 D5. 시안 보드 "8 · What the agent sees + allowed sites" 의 오른쪽 대화상자. `--allow-origin` 목록을 **실행 중에 사람이** 보고 고친다.
+
+![허용 사이트](images/allowed-sites.png) ![주소가 아닌 것을 넣었을 때](images/allowed-sites-error.png)
+
+- **무엇을 바꾸나**: 정책 게이트의 `AgentPolicy::allow_origins` — 비어 있지 않으면 목록 밖 origin 으로의 에이전트 이동은 **승인 모드와 상관없이** 즉시 `navigation_blocked`(카드도 질문도 없음). 비어 있으면 아무 사이트나 — 그때 현재 사이트를 떠나는 이동은 승인 모드(Ask me / Refuse / Allow)를 따른다. 판정표(`policy::decide`)에서 목록 검사가 **맨 먼저**(거절 기억·승인 모드보다 앞) 오는 것은 그대로다.
+- **열기·닫기**: ⋮ → `AGENT` → Allowed sites(지구본, 오른쪽에 `any site` / origin / `N sites`). 닫기는 ×, **Escape**, 대화상자 바깥 클릭. "What the agent sees" 와 같은 **모달** — 열린 동안 클릭·키·휠·hover 가 페이지·패널·메뉴에 하나도 안 간다(`window_mode::route_sites_input`, 순수 함수). 에이전트는 계속 움직인다(모달은 사람의 입력만 막는다).
+- **목록**: 줄마다 mono origin + 지금 페이지의 origin 이면 `current` + × (그 줄 빼기). 비어 있으면 회색 줄 "Any site — the list is empty". 창이 낮아 다 못 그리면 들어가는 만큼만 그리고 "… N more sites — the window is too short to list them" (스크롤은 없다 — 이 목록이 수십 개가 되는 쓰임은 없다고 봄).
+- **더하기 칸**: 대화상자에 글자 칸은 이것 하나라 **열려 있는 동안 늘 포커스**(멈춰 있는 캐럿, 깜빡임 없음 — 깜빡이면 계속 다시 그려야 해서). Enter 또는 Add 로 더한다.
+  - **글자 입력은 주소창과 같은 규칙**: `mb_runtime::input::edit_line`(이번에 주소창 코드에서 뽑아냄 — 출력 가능한 글자만 붙이고 winit 이 흘리는 control char 는 버림, Backspace 한 글자). 주소창과 대화상자가 같은 함수를 쓴다.
+  - **키가 페이지에 절대 안 간다**: 대화상자가 열린 프레임엔 `page_input = WindowInput::default()` — `typed`/Backspace/Enter 가 `BrowserState` 에 닿지 않으므로 주소창이 포커스돼 있었어도, 페이지의 input 이 포커스돼 있었어도 거기로 안 들어간다(키 이벤트 JS 도 안 뜬다). 대화상자를 여는 클릭과 같은 프레임에 들어온 키도 버린다(대화상자는 다음 프레임부터 입력을 받음).
+  - **정규화 = `--allow-origin` 과 같은 함수**: `policy::parse_origin` (CLI 의 `--allow-origin` 도 이제 이걸 부른다). http(s) URL 이면 경로·쿼리·조각을 버리고 기본 포트를 뺀 `scheme://host[:port]`, 호스트는 소문자. `HTTP://LocalHost:3000/app?x=1` → `http://localhost:3000`.
+  - **거절하는 것**: 빈 칸(Add 가 회색), 공백 포함, 스킴 없음(`localhost:3000` 은 URL 로는 스킴 "localhost" 라 거절 — 사람이 가장 많이 칠 실수라 오류 문구 예시에 그대로 넣음), http(s) 아닌 스킴(`file:`·`javascript:`·`ftp:`), 호스트 없음. 오류는 칸 아래 빨간 줄 "Not a site address — write it like https://example.test or http://localhost:3000." + 칸 테두리 빨강, 친 글자는 남겨서 고칠 수 있게. 이미 있는 것은 "Already allowed.". 글자를 고치면 오류는 사라진다. 칸은 200자에서 자른다.
+  - 붙여넣기(⌘V)는 아직 없다 — `mb_shell` 창이 수식키 조합을 넘기지 않는다(주소창도 마찬가지).
+- **바로 적용, 저장 버튼 없음**: Add·× 마다 `Worker::set_allow_origins(목록)` → `AgentBrowser::set_allow_origins` → `AgentPolicy.allow_origins`. **다음 에이전트 행동부터**. `Options.agent.allow_origins` 도 바꿔서 엔진 패닉 뒤 새 브라우저, 나중에 켠 기록의 헤더, 패널의 `Sites:` 칩이 지금 값을 쓴다. 조작마다 stderr 한 줄 `[mb-mcp] the person set the allowed sites: …` (origin 만 — 쿼리 없음).
+  - **비어 있는 목록에 첫 사이트를 더하면 좁아진다**(아무 데나 → 그 하나만). 빈 목록일 때 칸 아래 문구가 "The first site you add limits the agent to the list." 로 바뀐다. 반대로 **마지막 하나를 빼면 아무 데나**가 된다 — 꼬리말 "Empty list = any site" 가 그 뜻을 늘 보여 준다. "아무 데도 못 가게"는 Refuse 모드 + 현재 사이트만 남기기로 한다.
+  - **현재 사이트를 빼도 된다**: 그러면 같은 사이트 안 링크도 막힌다(`--allow-origin` 과 같은 의미 — 목록은 "이동해도 되는 곳"). `current` 표시가 그걸 미리 보여 준다.
+- **이미 떠 있는 승인 카드** (결정): 카드가 기다리는 행동의 대상 origin 이 **새 목록 밖이 되면, 그 카드는 그 자리에서 `navigation_blocked` 로 끝난다** — 보관한 이동은 실행하지 않고 버리며(`BrowserState::block_held` → `PolicyDecision::Blocked`), 거절 기억에도 안 넣고(사람의 거절이 아니라 목록의 판정 — 목록을 되돌리면 다음 시도는 다시 묻는다), 거절 영수증도 안 남긴다. 결과 관찰에 trusted note "the person changed the allowed sites while this action waited for approval; it is outside them now".
+  - 승인 모드 변경과 다르게 다룬 이유: 모드는 "어떻게 물을지" 라 특정 행동에 대한 질문(카드)이 일반 설정보다 구체적이다 → 카드 유지. 목록은 "어디까지 갈 수 있나" 이고 판정표에서 승인보다 **먼저** 온다 — 목록 밖 행동엔 애초에 카드가 안 뜬다. 목록 밖이 된 카드를 남기면 Approve 가 목록을 넘어 실행하거나(목록이 무의미) Approve 를 눌러도 막히는(누를 수 있는 버튼이 거짓말) 둘 중 하나다. 그리고 사이트를 빼는 건 그 카드만큼 구체적인 사람의 "거긴 안 돼" 다.
+  - 대상이 새 목록 **안**이면 카드는 그대로(현재 사이트를 뺐더라도) — 테스트 `allowed_sites_apply_to_the_next_action_and_end_a_card_now_outside_them`.
+  - 다른 기다림은 영향 없음: **Your turn**(넘겨받은 단계 — 보관 이동은 이미 버렸고 사람이 하는 중), **비밀번호 넘겨받기**(이동이 아님), **일시정지 보관 호출**(재개 때 게이트를 새로 지나므로 새 목록으로 판정), **이미 출발한 이동의 리다이렉트 hop**(출발 때 복사한 `HopGuard` 로 판정 — 승인 모드와 같은 "다음 행동부터").
+- **에이전트에게 목록을 알려 주지 않는다**: 관찰·서버 instructions 에 목록이 없다(지금까지와 같음). 에이전트가 아는 건 막혔을 때의 `navigation_blocked`("…is outside the allowed origins", hint "ask the user to allow this one") 뿐. 목록을 알려 주면 "허용된 곳"을 탐색 지도로 쓰거나 사람에게 특정 사이트 추가를 조르는 문구를 만들 수 있다.
+- **사람 전용**: `Worker::set_allow_origins` 는 창 입력(`overlay::WindowAction::{ShowAllowedSites, RemoveSite, AddSite, CloseAllowedSites}` → `window_mode`)에서만 불린다. `worker::Request`·MCP tool 10개 어디에도 대응이 없다 — 에이전트가 자기 울타리를 넓히는 경로가 구조적으로 없다 (AGENTS.md "사람의 조종은 MCP 로 열지 않는다").
+- **세션 로그·재생**: 단계 줄에 그 행동이 **시작될 때의 목록**을 헤더와 다를 때만 `"allow_origins":[…]` 로 남긴다(`StepRecord.allow_origins`, 승인 모드의 `approve` 와 같은 방식). 재생은 단계마다 `set_allow_origins(단계 값 또는 헤더 값)` 을 먼저 부른다. 카드가 목록 편집으로 끝난 단계는 `resolved_by: "person_changed_sites"` → 재생에서 `AgentBrowser::block_pending_approval` 로 같은 결과를 낸다(새 목록은 다음 단계 줄에 실린다). 필드가 없는 기존 로그는 헤더 목록 그대로라 로그 버전은 1 유지.
+- **그리는 곳**: `overlay::allowed_sites(SitesInfo, page_area) -> SitesDialog { commands, buttons, rect }`(순수). 페이지 영역 위쪽 가운데 최대 520 폭(시안처럼 위에 붙음 — 내용 높이만큼). 머리: 제목 + 설명 + ×. 줄 44px(10 둥근 모서리, line 테두리), 더하기 칸 테두리는 agent 파랑(포커스)·오류면 stop border, Add 는 agent 채움(빈 칸이면 회색). 색은 전부 `palette`.
+- **미리보기**: `--preview-sites`(열린 대화상자), `--preview-sites-add TEXT`(칸에 TEXT 를 치고 Enter — 반복 가능, 매번 칸을 비우고 침. 쓰레기를 넣으면 오류 상태). 위 그림: `--allow-origin http://127.0.0.1:8790 --allow-origin http://localhost:8790 --preview-sites` 와 `--preview-sites-add localhost:3000` (examples/agent-demo).
+- **시안과 다른 점**: 시안의 버튼 높이·글자 크기 그대로. 빈 목록일 때의 회색 줄·첫 추가 경고·오류 줄·"… N more" 는 시안에 없어 더했다. 시안의 placeholder 위 캐럿은 깜빡이지 않는다.
+- **거절 목록은 아직 여기 없다**: 거절 기억 전체를 보여 주고 하나씩 잊는 화면은 이 대화상자에 어울리지만(D4 인수 메모) 이번 범위 밖 — 지금은 마지막 거절의 영수증에서만 잊는다.
 
 ## 디자인 적용
 
@@ -567,7 +597,7 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 
 - ~~**Record this session** 토글 + "REC" 알약 + 기록 카드 (보드 7)~~ → D3 ([세션 기록 토글](#세션-기록-토글-record-this-session)).
 - ~~**What the agent sees** (보드 8)~~ → D3 ([에이전트가 보는 것](#에이전트가-보는-것-what-the-agent-sees)).
-- **허용 사이트 편집**(`--allow-origin` 을 실행 중에) (보드 8, 메뉴 회색 항목).
+- ~~**허용 사이트 편집**(`--allow-origin` 을 실행 중에) (보드 8, 메뉴 회색 항목)~~ → D5 ([허용 사이트](#허용-사이트-allowed-sites)).
 - ~~**"I'll do it myself" 뒤 넘겨주기**~~ · ~~**거절 영수증 + "Forget this refusal"**~~ (보드 9) → D4 ([넘겨주기와 거절 영수증](#넘겨주기와-거절-영수증-보드-9)).
 - **연결 끊김 카드** (보드 9 오른쪽 — "Claude Code left 2 min ago", Last session 요약·재생 링크).
 - 넘겨받기 카드의 "N characters entered", 패널 머리말의 클라이언트 이름(`clientInfo`).
@@ -1013,6 +1043,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | **D2** 시안 적용 ✅ (디자인 트랙) | [디자인 적용](#디자인-적용): `mb_engine::palette`(역할 색·중립색·`text_width`·`centered_text_y`), 크롬 재배치(탭 줄 44 + 툴바 52 = `CHROME_HEIGHT` 96, `ChromeExtras` 알약 자리·탭 점·⋮ 눌림, 스킴 칩), `overlay::Pill`, 패널 340·카드 4종·그린 아이콘·배지·대상 메모, ⋮ 메뉴 그림자 제거, 재생 패널(진행 막대·diff 카드), `Worker::{waiting_since, page_wait_total}` | 시안의 새 기능·다크·좁은 창은 [후속](#디자인-적용). `mb-shell` 실제 창은 사용자 확인 필요 (GUI, 미리보기 경로 없음) | 이미지 7장 다시 생성 — palette 1 · 크롬 배치 3 · 알약·대상 메모·진행 막대·대기 비율·픽셀 줄바꿈·HTTP 머리말 6 − 옛 알약 1 (742 green) |
 | **D3** 메뉴 새 기능 1차 ✅ (디자인 트랙) | [에이전트가 보는 것](#에이전트가-보는-것-what-the-agent-sees): `Worker::{seen, deliver}`(실제 전달된 관찰만), `overlay::agent_view`(두 블록 분리·강제 줄바꿈·행 스크롤·"… N more lines"), `window_mode::{route_viewer_input, paint_viewer}`(모달, Whole page = `full_snapshot`). [세션 기록 토글](#세션-기록-토글-record-this-session): `Worker::{start_recording, stop_recording, recording}`, `SessionLog::{starting_at, steps, file}`, `DEFAULT_RECORD_DIR`, 기록 세대·첫 단계 기준점, `Pill::Recording` + `overlay::{pills, pills_width}`, 기록 카드, 메뉴 RECORD/VIEW 섹션. `mb_shell::window::run_with`(Escape 를 입력으로), `--preview-agent-view` | Allowed sites 편집·넘겨주기·거절 잊기·다크·좁은 창은 다음. **실제 창 클릭·휠·Escape·복사는 사용자 확인 필요** (GUI) | ![에이전트가 보는 것](images/agent-view.png) ![기록 중](images/recording.png) — 메뉴·알약·기록 카드·뷰어 분리·긴 글 스크롤 5 · 기록 켜기/끄기/지연 생성·첫 단계 기준점·기록 폴더·마지막 받은 관찰 4 · Escape/메뉴 라우팅·모달 뷰어·Whole page 무발급 3 (768 green) |
 | **D4** 승인 흐름: 넘겨주기·거절 영수증 ✅ (디자인 트랙) | [넘겨주기와 거절 영수증](#넘겨주기와-거절-영수증-보드-9): `AgentBrowser::{take_over, finish_take_over, forget_refusal}`(`PersonTurn` — 비밀번호 넘겨받기와 공유), `AgentPolicy::forget_denial`, `Waiting::TakenOver` + `Answer::{HandBack, WontDo}`(park 그대로: 45초 `still_waiting`·재부착·`unclaimed`), `ToolError::NotDone`(`approval_denied`), `Worker::{refusal, forget_refusal}` + `Control::ForgetRefusal`, `overlay::{turn_card, refusal_card}`, `resolved_by: person_handed_back`(재생은 멈춤), `--preview-answer`, prompts 규칙 4·click 설명 | 연결 끊김 카드·Allowed sites·다크·좁은 창은 다음. **실제 창 클릭과 실연결 에이전트의 `taken_over` 반응은 사용자 확인 필요** | ![Your turn](images/your-turn.png) ![거절 영수증](images/refusal-receipt.png) — 정책 잊기 1 · Worker 넘겨주기 park·재부착·busy / 넘겨준 뒤 다시 묻기·I won't do it 기억 / 떠난 에이전트(unclaimed) / Deny 영수증·잊기 / 기록·재생 멈춤 5 (기존 take-over 테스트 1개 대체) · 패널 카드 2 (775 green) |
+| **D5** 허용 사이트 편집 ✅ (디자인 트랙) | [허용 사이트](#허용-사이트-allowed-sites): `overlay::allowed_sites`(목록·`current`·×·더하기 칸·오류·"… N more"), 메뉴 항목 활성(지구본), `window_mode::{Sites, route_sites_input, set_sites}`(모달, 칸이 모든 키), `mb_runtime::input::edit_line`(주소창 글자 입력 규칙 공유), `policy::{parse_origin, AgentPolicy::allows}`(CLI `--allow-origin` 과 공유), `BrowserState::block_held`, `AgentBrowser::{set_allow_origins, block_pending_approval}`, `Worker::{allow_origins, set_allow_origins}`(목록 밖이 된 승인 카드 → `navigation_blocked`), 세션 로그 단계별 `allow_origins` + `person_changed_sites` 재생, `--preview-sites` / `--preview-sites-add` | 붙여넣기·거절 목록 화면 없음. **실제 창 클릭·타자·Escape 는 사용자 확인 필요** (GUI) | ![허용 사이트](images/allowed-sites.png) — 정책 1 (정규화·거절) · 입력 1 (`edit_line`) · Worker 2 (다음 행동부터·카드 종료·되돌리면 다시 물음, 로그+재생) · 대화상자 라우팅 2 (칸·추가·거절·중복·빼기·모달 닫기) · 오버레이 1 (782 green) |
 
 - G4 의 게이트 **판정 로직**은 G1 에서 입력 출처 태그와 함께 먼저 들어간다 (`--approve auto|deny` 만). G4 는 사람에게 묻는 UI(`ask`)·넘겨받기·elicitation 을 붙이는 단계.
 - `<select>` 는 G1 이후 필요해질 때 (`select(id, option)` tool 추가).
@@ -1111,6 +1142,12 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-22 | 넘겨준 단계는 재생에서 멈춘다(`person_handed_back` → `NEEDS_PERSON`) | 사람이 창에서 한 일은 로그에 없다. 지어내지 않는다는 기존 규칙(`person_moved`) |
 | 2026-11-22 | 거절 영수증은 사람의 거절(Deny·I won't do it)에만, 하나만(마지막 것), 잊거나 덮어쓸 때까지 | 규칙의 거절은 모드를 바꾸면 이미 잊힌다. 자동으로 사라지면 몇 분 뒤 마음이 바뀐 사람이 풀 곳이 없다(거절 목록 화면은 아직 없음) |
 | 2026-11-22 | Forget this refusal = 사람 전용 `Control::ForgetRefusal` → `AgentPolicy::forget_denial`(사람·규칙 거절 둘 다 지움), MCP 경로 없음 | 에이전트가 거절을 지울 수 있으면 거절 기억(우회·스팸 차단)이 무의미. 둘 다 지워 "아무도 거절하기 전" 으로 — 그 뒤는 지금 모드가 정한다 |
+| 2026-11-22 | 허용 사이트 편집 = 사람 전용(`Worker::set_allow_origins` 는 창 입력에서만), 저장 버튼 없이 Add·× 마다 바로, **다음 에이전트 행동부터** | 에이전트가 자기 울타리를 넓히는 경로가 있으면 목록이 무의미. 시안에 저장 버튼이 없고, 승인 모드도 누르는 즉시 적용이라 같은 감각 |
+| 2026-11-22 | 편집으로 목록 밖이 된 **이미 떠 있는 승인 카드는 즉시 `navigation_blocked`** 로 끝냄 (보관 이동 버림, 거절 기억·영수증 없음, trusted note). 대상이 목록 안이면 카드 유지 | 목록은 판정표에서 승인보다 먼저 온다 — 목록 밖 행동엔 카드가 안 뜬다. 남기면 Approve 가 목록을 넘거나(무의미) 눌러도 막힌다(거짓 버튼). 승인 모드 변경이 카드를 안 건드리는 것과 다른 이유: 모드는 "어떻게 물을지", 목록은 "어디까지" + 사이트 빼기는 카드만큼 구체적인 "거긴 안 돼". 거절 기억에 안 넣는 건 목록을 되돌리면 다시 물어야 해서 |
+| 2026-11-22 | 더하기 칸 정규화 = `--allow-origin` 과 같은 `policy::parse_origin`, 스킴 없는 `localhost:3000` 은 거절(추측해서 http:// 를 붙이지 않음) | 같은 목록에 두 정규화 규칙이 있으면 CLI 로 넣은 것과 창으로 넣은 것이 어긋난다. http/https 를 추측하면 사람이 보지 않은 origin 이 허용된다 — 오류 문구가 쓰는 법을 보여 준다 |
+| 2026-11-22 | 대화상자의 글자 입력은 주소창 규칙을 함수로 뽑아(`input::edit_line`) 공유, 열린 동안 페이지 입력은 통째로 비움 | "대화상자 키가 페이지로 새지 않는다" 를 라우팅 한 곳(모달)에서 보장. 주소창과 다른 편집 규칙이 생기지 않게 |
+| 2026-11-22 | 목록 편집은 세션 로그에 단계별 `allow_origins`(헤더와 다를 때만)로, 카드가 편집으로 끝난 단계는 `person_changed_sites` | 승인 모드 변경과 같은 방식 — 사람이 중간에 넓힌 목록을 재생이 모르면 그 뒤 단계가 전부 `navigation_blocked` 로 어긋난다. 필드 추가만이라 로그 버전 1 유지 |
+| 2026-11-22 | 빈 목록 = 아무 사이트 (기존 의미 유지), 대신 빈 목록일 때 "첫 사이트를 더하면 그것만" 문구 + 꼬리말 | 의미를 바꾸면 `--allow-origin` 없이 띄운 기존 사용이 전부 막힌다. 마지막 하나를 빼면 넓어지는 함정은 화면 문구로 보인다 |
 
 ## 열린 결정
 

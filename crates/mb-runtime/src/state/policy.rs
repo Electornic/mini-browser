@@ -66,6 +66,12 @@ impl AgentPolicy {
             self.refused_by_rule.clear();
         }
     }
+
+    /// Whether `allow_origins` lets the agent go to `target` at all (an
+    /// empty list = any site). Checked before anything else.
+    pub fn allows(&self, target: &Url) -> bool {
+        self.allow_origins.is_empty() || self.allow_origins.contains(&origin_of(target))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +109,19 @@ pub enum PolicyDecision {
 pub struct PolicyEvent {
     pub action: GatedAction,
     pub decision: PolicyDecision,
+}
+
+/// A site the person (or `--allow-origin`) names, as the `scheme://host[:port]`
+/// the gate compares: any http(s) URL, path / query / fragment dropped,
+/// default port left out. `None` for anything else — no scheme
+/// (`localhost:3000` parses as the scheme "localhost"), another scheme,
+/// no host, spaces.
+pub fn parse_origin(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Url::parse(raw).ok().map(|url| origin_of(&url))
 }
 
 pub fn origin_of(url: &Url) -> String {
@@ -202,10 +221,10 @@ pub fn decide(
     if !from_agent {
         return PolicyDecision::Allowed;
     }
-    let target_origin = origin_of(&action.target);
-    if !policy.allow_origins.is_empty() && !policy.allow_origins.contains(&target_origin) {
+    if !policy.allows(&action.target) {
         return PolicyDecision::Blocked;
     }
+    let target_origin = origin_of(&action.target);
     // Leaving a page with no origin (about:blank, the start page) isn't
     // "leaving an origin".
     let crosses_origin = current.is_some_and(|url| origin_of(url) != target_origin);
@@ -248,6 +267,30 @@ mod tests {
             kind: GatedKind::Submit,
             method: "POST".into(),
             target: url(target),
+        }
+    }
+
+    #[test]
+    fn parse_origin_normalizes_like_allow_origin_and_rejects_garbage() {
+        assert_eq!(
+            parse_origin(" http://localhost:3000/app?x=1#y ").as_deref(),
+            Some("http://localhost:3000")
+        );
+        assert_eq!(
+            parse_origin("https://Staging.Example.test:443").as_deref(),
+            Some("https://staging.example.test")
+        );
+        for garbage in [
+            "",
+            "hello",
+            "localhost:3000",
+            "ftp://example.test",
+            "http://",
+            "http://exa mple.test",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(parse_origin(garbage), None, "{garbage:?}");
         }
     }
 

@@ -242,6 +242,9 @@ struct Held {
 }
 
 /// Trusted note on a result that waited for the person to resume.
+/// The outcome of an approval card answered by an allowed-sites edit.
+pub const SITE_REMOVED: &str = "outside the allowed sites now";
+
 const RESUMED_NOTE: &str =
     "the person paused you from the window; this call ran after they resumed";
 
@@ -253,6 +256,8 @@ struct StepContext {
     target: Option<Target>,
     person_moved: bool,
     approve: ApproveMode,
+    /// The allowed sites the action started under.
+    allow_origins: Vec<String>,
 }
 
 /// (document generation, URL): which page the browser is on.
@@ -652,6 +657,36 @@ impl Worker {
         self.browser.set_approve_mode(mode);
     }
 
+    /// The sites the agent may go to (empty = any site).
+    pub fn allow_origins(&self) -> &[String] {
+        &self.options.agent.allow_origins
+    }
+
+    /// The person edited the allowed sites ("Allowed sites" dialog).
+    /// Person-only: no MCP tool or `Request` reaches this. Applies from
+    /// the next agent action; kept in `options` too, so a browser rebuilt
+    /// after a panic and a recording started later get it. An approval
+    /// card up for a site that is outside the new list is answered now
+    /// with `navigation_blocked` — the list is checked before the approval
+    /// mode, so that question has no answer left (docs/concept.md
+    /// "허용 사이트").
+    pub fn set_allow_origins(&mut self, origins: Vec<String>) {
+        self.options.agent.allow_origins = origins.clone();
+        let blocked = self.browser.set_allow_origins(origins);
+        if !blocked || !matches!(self.waiting(), Some(Waiting::Approval { .. })) {
+            return;
+        }
+        let Some(parked) = self.parked.take() else {
+            return;
+        };
+        let result = self.execute_guarded(&parked.request, |b| {
+            b.block_pending_approval()
+                .map(observation_reply)
+                .map_err(ToolError::from)
+        });
+        self.finish_parked(parked, result, SITE_REMOVED);
+    }
+
     /// What the person is being asked, if anything.
     pub fn waiting(&self) -> Option<&Waiting> {
         self.parked.as_ref().map(|p| &p.waiting)
@@ -753,6 +788,17 @@ impl Worker {
                 return;
             }
         };
+        self.finish_parked(parked, result, outcome);
+    }
+
+    // A parked call got its final result: log it, send it (or keep it for
+    // the agent's identical next call), run what queued behind it.
+    fn finish_parked(
+        &mut self,
+        parked: Parked,
+        result: Result<Reply, ToolError>,
+        outcome: &'static str,
+    ) {
         let reply = self.conclude(&parked.request, result, Some(outcome));
         self.log_step(&parked.request, &parked.context, Some(outcome), &reply);
         match parked.reply {
@@ -860,6 +906,7 @@ impl Worker {
                 .and_then(|id| target_of(&mut self.browser, id)),
             person_moved,
             approve: self.options.agent.approve,
+            allow_origins: self.options.agent.allow_origins.clone(),
         }
     }
 
@@ -885,6 +932,7 @@ impl Worker {
                     person_moved: context.person_moved,
                     resolved_by: outcome.and_then(resolved_by),
                     approve: context.approve,
+                    allow_origins: &context.allow_origins,
                 },
                 result,
             );
@@ -1506,6 +1554,7 @@ pub(crate) mod tests {
             preview_pause: false,
             preview_agent_view: None,
             preview_answer: None,
+            preview_sites: None,
             http_port: None,
             attach: None,
             log,
@@ -1771,6 +1820,7 @@ pub(crate) mod tests {
             preview_pause: false,
             preview_agent_view: None,
             preview_answer: None,
+            preview_sites: None,
             http_port: None,
             attach: None,
             log: None,
@@ -2096,6 +2146,99 @@ pub(crate) mod tests {
             preview_scale: 1.0,
         };
         assert_eq!(crate::replay::replay(&options).unwrap(), 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn allowed_sites_apply_to_the_next_action_and_end_a_card_now_outside_them() {
+        let base = serve_page();
+        let other = base.replace("127.0.0.1", "localhost");
+        let (mut worker, _, link) = worker_on(&base, mb_agent::ApproveMode::Ask);
+        let click = Request::Click { id: link };
+        // A card up for the other origin; the person narrows the list to
+        // this one: the card has no answer left — navigation_blocked now.
+        let mut asked = submit(&mut worker, click.clone());
+        assert!(matches!(worker.waiting(), Some(Waiting::Approval { .. })));
+        worker.set_allow_origins(vec![base.clone()]);
+        assert!(worker.waiting().is_none());
+        let Ok(Reply::Error(report)) = asked.try_recv() else {
+            panic!("the card is answered")
+        };
+        assert_eq!(report.code, "navigation_blocked");
+        let observation = report.observation.unwrap();
+        assert!(
+            observation.0.contains("changed the allowed sites"),
+            "{}",
+            observation.0
+        );
+        assert!(worker.refusal().is_none(), "not the person's refusal");
+        assert_eq!(worker.options().agent.allow_origins, vec![base.clone()]);
+        // The next try is blocked at once, no card.
+        let Reply::Error(report) = worker.process(&click) else {
+            panic!("expected navigation_blocked")
+        };
+        assert_eq!(report.code, "navigation_blocked");
+        assert!(worker.waiting().is_none());
+
+        // Allowed again: asked again (the block wasn't remembered). A card
+        // for a site the new list still has stays up — even when the
+        // current site is the one removed.
+        worker.set_allow_origins(vec![base.clone(), other.clone()]);
+        let mut asked = submit(&mut worker, click.clone());
+        assert!(matches!(worker.waiting(), Some(Waiting::Approval { .. })));
+        worker.set_allow_origins(vec![other.clone()]);
+        assert!(asked.try_recv().is_err());
+        worker.answer(Answer::Approve);
+        let Ok(Reply::Observation { page, .. }) = asked.try_recv() else {
+            panic!("approved")
+        };
+        assert!(page.contains("Arrived"));
+        // Empty = any site again.
+        worker.set_allow_origins(Vec::new());
+        assert!(worker.allow_origins().is_empty());
+    }
+
+    #[test]
+    fn allowed_sites_edits_are_logged_per_step_and_replay() {
+        let base = serve_page();
+        let path = std::env::temp_dir().join(format!("mb-sites-{}.jsonl", std::process::id()));
+        let (mut worker, _, link) =
+            worker_logging(&base, mb_agent::ApproveMode::Ask, Some(path.clone()));
+        worker.process(&observe());
+        let click = Request::Click { id: link };
+        let mut asked = submit(&mut worker, click.clone());
+        worker.set_allow_origins(vec![base.clone()]);
+        assert!(matches!(asked.try_recv(), Ok(Reply::Error(_))));
+        let Reply::Error(report) = worker.process(&click) else {
+            panic!("expected navigation_blocked")
+        };
+        assert_eq!(report.code, "navigation_blocked");
+        drop(worker);
+        let log = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert!(lines[0].contains(r#""allow_origins":[]"#), "{log}");
+        assert!(
+            lines[3].contains(r#""resolved_by":"person_changed_sites""#),
+            "{log}"
+        );
+        assert!(
+            !lines[3].contains(r#""allow_origins""#),
+            "header list: no field"
+        );
+        assert!(
+            lines[4].contains(&format!(r#""allow_origins":["{base}"]"#)),
+            "{log}"
+        );
+        let options = crate::cli::ReplayOptions {
+            file: path.clone(),
+            secrets: Vec::new(),
+            ignore_text: false,
+            window: false,
+            preview: None,
+            preview_steps: 0,
+            preview_scale: 1.0,
+        };
+        assert_eq!(crate::replay::replay(&options).unwrap(), 4);
         let _ = std::fs::remove_file(&path);
     }
 

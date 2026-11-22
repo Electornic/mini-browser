@@ -67,26 +67,11 @@ impl BrowserState {
 
         // Keyboard text entry only edits the address bar when it is focused.
         if self.address_bar_focused {
-            for ch in input.typed.chars() {
-                if !ch.is_control() {
-                    if self.address_bar_selected {
-                        self.address_input.clear();
-                        self.address_bar_selected = false;
-                    }
-                    self.address_input.push(ch);
-                }
-            }
-
-            if input.backspace_pressed {
-                if self.address_bar_selected {
-                    self.address_input.clear();
-                    self.address_bar_selected = false;
-                } else {
-                    self.address_input.pop();
-                }
-            }
-
-            if input.enter_pressed {
+            if crate::input::edit_line(
+                &mut self.address_input,
+                &mut self.address_bar_selected,
+                input,
+            ) {
                 self.address_bar_selected = false;
                 self.navigate();
                 self.address_bar_focused = false;

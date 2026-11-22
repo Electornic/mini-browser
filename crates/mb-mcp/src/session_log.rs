@@ -70,6 +70,8 @@ pub fn resolved_by(outcome: &str) -> Option<&'static str> {
         "taken over, not done" => "person_denied",
         "filled in by the person" => "person_filled",
         "declined" => "person_declined",
+        // The person changed the allowed sites while the card was up.
+        crate::worker::SITE_REMOVED => "person_changed_sites",
         _ => return None,
     })
 }
@@ -81,6 +83,8 @@ pub struct StepRecord<'a> {
     pub resolved_by: Option<&'a str>,
     /// The approval mode the action started under.
     pub approve: ApproveMode,
+    /// The allowed sites the action started under.
+    pub allow_origins: &'a [String],
 }
 
 /// `auto` / `deny` / `ask`, as in the header and `--approve`.
@@ -169,6 +173,7 @@ impl SessionLog {
             person_moved,
             resolved_by,
             approve,
+            allow_origins,
         } = context;
         let (tool, args) = request_json(request, target);
         let mut line = Map::new();
@@ -184,6 +189,10 @@ impl SessionLog {
         let approve = approve_name(approve);
         if self.header["approve"] != approve {
             line.insert("approve".into(), json!(approve));
+        }
+        // Same for the allowed sites ("Allowed sites" dialog).
+        if self.header["allow_origins"] != json!(allow_origins) {
+            line.insert("allow_origins".into(), json!(allow_origins));
         }
         if let Some(by) = resolved_by {
             line.insert("resolved_by".into(), json!(by));

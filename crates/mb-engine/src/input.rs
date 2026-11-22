@@ -31,3 +31,53 @@ pub struct WindowInput {
     /// agent-originated actions (docs/concept.md "정책 게이트").
     pub from_agent: bool,
 }
+
+/// One frame of single-line text editing, the way the address bar takes
+/// typed text: printable characters append (replacing the text when it is
+/// all selected), Backspace deletes the last character (or the selection).
+/// Control characters winit lets through are dropped. Returns whether
+/// Enter was pressed — what it means is the caller's.
+pub fn edit_line(text: &mut String, selected: &mut bool, input: &WindowInput) -> bool {
+    for ch in input.typed.chars() {
+        if !ch.is_control() {
+            if *selected {
+                text.clear();
+                *selected = false;
+            }
+            text.push(ch);
+        }
+    }
+    if input.backspace_pressed {
+        if *selected {
+            text.clear();
+            *selected = false;
+        } else {
+            text.pop();
+        }
+    }
+    input.enter_pressed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_line_appends_replaces_a_selection_and_backspaces() {
+        let mut text = "old".to_string();
+        let mut selected = true;
+        let typed = WindowInput {
+            typed: "a\u{7}b".into(),
+            ..WindowInput::default()
+        };
+        assert!(!edit_line(&mut text, &mut selected, &typed));
+        assert_eq!((text.as_str(), selected), ("ab", false));
+        let back = WindowInput {
+            backspace_pressed: true,
+            enter_pressed: true,
+            ..WindowInput::default()
+        };
+        assert!(edit_line(&mut text, &mut selected, &back));
+        assert_eq!(text, "a");
+    }
+}

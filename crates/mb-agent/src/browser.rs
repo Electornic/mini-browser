@@ -773,6 +773,50 @@ impl AgentBrowser {
         self.state.agent_policy.set_approve(approve);
     }
 
+    /// The person edited the allowed sites in the observation window
+    /// (person-only: mb-mcp exposes no tool for it). Applies from the next
+    /// action. Returns whether the action held for approval right now is
+    /// outside the new list — the caller then answers it with
+    /// `block_pending_approval` (the list is checked before the approval
+    /// mode, so a card for a site that is no longer allowed has no
+    /// answer left to give).
+    pub fn set_allow_origins(&mut self, origins: Vec<String>) -> bool {
+        self.config.allow_origins = origins.clone();
+        self.state.agent_policy.allow_origins = origins;
+        self.pending_approval.is_some()
+            && self
+                .state
+                .held_action()
+                .is_some_and(|held| !self.state.agent_policy.allows(&held.target))
+    }
+
+    /// End the action held for approval as `navigation_blocked`: its site
+    /// was taken off the allowed sites while it waited. Nothing runs and
+    /// nothing is remembered as a refusal (the list decides from now on).
+    pub fn block_pending_approval(&mut self) -> Result<Observation, AgentError> {
+        let Some(pending) = self.pending_approval.take() else {
+            return Err(AgentError::NothingPending);
+        };
+        self.state.take_policy_events();
+        self.state.block_held();
+        let events = self.state.take_policy_events();
+        let result = self.finish_action(
+            &pending.before,
+            pending.generation_before,
+            events,
+            pending.moved,
+        );
+        result.map_err(|mut error| {
+            if let AgentError::NavigationBlocked { observation, .. } = &mut error {
+                observation.notes.push(
+                    "the person changed the allowed sites while this action waited for approval; it is outside them now"
+                        .into(),
+                );
+            }
+            error
+        })
+    }
+
     /// The action waiting for a person's answer (`ApproveMode::Ask`), as
     /// shown to them, e.g. "POST http://localhost:3000/signup".
     pub fn pending_approval(&self) -> Option<&str> {
