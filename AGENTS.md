@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 749 (workspace 합계, 2026-11-22 배지 자리 — `overlay::place_badges` 겹침 케이스 +8, 옛 "왼쪽 여백" 테스트 −1). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 756 (workspace 합계, 2026-11-22 배지 자리 보강 — 이웃 요소 금지·자기 상자 대체·배지 생략·상한·띠 버킷·글자 런 거르기 +7). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -202,7 +202,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 ### 디자인 토큰
 - 크롬·오버레이 색은 `mb_runtime::palette` 에서만 가져온다 (시안 "Agent Browser" 보드 1). 주황(사람) 위 글자는 늘 ink. 새 색이 필요하면 palette 에 이름을 붙여 추가.
 - 오버레이 글자에 `⋮` 같은 기호를 쓰지 말 것 — 패널 폰트에 글리프가 없어 깨진다. ✓/✗ 도 글리프 대신 `overlay` 의 그린 아이콘.
-- ID 배지 자리는 `overlay::place_badges`(순수 함수)가 정한다 — 배지를 그리는 새 경로를 만들면 `text_obstacles` 와 `page_area` 를 같이 넘길 것 (안 넘기면 배지가 글자·크롬을 덮는다). 규칙은 docs/concept.md "배지 자리".
+- ID 배지 자리는 `overlay::place_badges`(순수 함수)가 정한다 — 배지를 그리는 새 경로를 만들면 `text_obstacles` 와 `page_area` 를 같이 넘길 것 (안 넘기면 배지가 글자·크롬을 덮는다). 프레임마다 도는 코드라 문서 전체를 훑는 일(화면 밖 글자 측정 등)은 먼저 위치로 거를 것. 규칙은 docs/concept.md "배지 자리".
 - `CHROME_HEIGHT` 는 에이전트 클릭 좌표·스크린샷 자르기·창 크기와 묶여 있다. 크롬 줄을 창 종류마다 다르게 하거나 아래쪽 바를 두지 말 것 (docs/concept.md "디자인 적용").
 
 ### Font System

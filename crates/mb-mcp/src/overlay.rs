@@ -268,14 +268,23 @@ fn card_badge(x: f32, y: f32, lock: bool) -> Vec<DisplayCommand> {
 //
 // Where an id badge goes (docs/concept.md "배지 자리"). Since inline
 // elements share line boxes there is no left margin to park badges in, so
-// each badge tries a few spots around its element and takes the one that
-// hides the least: first full size above / left / below / right, then the
-// same four compact, then compact inside the top-left corner as a last
-// resort. "Hides" = overlap area, weighted — the badge's own element and
-// badges placed earlier ×4, other elements ×2, page text ×1 — and the first
-// spot in that order wins ties, so a spot that hides nothing is taken as
-// soon as it comes up. Badges are placed greedily in document order; a spot
-// must lie inside the page area (never over the chrome or the panel).
+// each badge tries a few spots around its element: full size above / left /
+// below / right, then the same four compact.
+//
+// * Hard rules — a spot is dropped if it leaves the page area (never over
+//   the chrome or the panel), touches another element's box (a badge must
+//   never read as its neighbour's) or another badge.
+// * Of the spots left, the one hiding the least wins: overlap area with the
+//   badge's own element (past the allowed tuck) ×4 and page text ×1; the
+//   first spot in the order above wins ties, so one that hides nothing is
+//   taken as soon as it comes up.
+// * No spot left: compact, inside the element's own on-page box (a corner
+//   that's free of other badges). An element with no on-page area, or no
+//   free corner, gets no badge rather than one somewhere unrelated.
+//
+// Badges are placed greedily in document order. The work is bounded: at
+// most `MAX_BADGES` badges, and every overlap test only looks at rects in
+// the same `INDEX_ROW` px band of the page (`RowIndex`).
 
 /// The page's part of the window: below the chrome, left of the panel.
 pub fn page_area(page_width: usize, window_height: usize) -> Rect {
@@ -348,39 +357,40 @@ const BADGE_TUCK: f32 = 2.0;
 /// keeps outside it when it can.
 const OUTLINE_REACH: f32 = 4.0;
 const HIDES_OWN: f32 = 4.0;
-const HIDES_BADGE: f32 = 4.0;
-const HIDES_ELEMENT: f32 = 2.0;
 const HIDES_TEXT: f32 = 1.0;
+/// Most badges drawn in one frame (document order; the target always gets
+/// one). A screenful rarely holds more, and past it badges are noise anyway.
+pub const MAX_BADGES: usize = 300;
 
-/// Badge spots for `requests` (in order), avoiding each other, the other
-/// elements and `text`, inside `page`.
-pub fn place_badges(requests: &[BadgeRequest], text: &[Rect], page: Rect) -> Vec<PlacedBadge> {
-    let mut placed: Vec<PlacedBadge> = Vec::with_capacity(requests.len());
+/// Badge spots for `requests` (in order) inside `page`; `None` = no badge
+/// (see the section comment). `ink` is where page text is.
+pub fn place_badges(
+    requests: &[BadgeRequest],
+    ink: &[Rect],
+    page: Rect,
+) -> Vec<Option<PlacedBadge>> {
+    let mut elements = RowIndex::new(page);
+    for (i, r) in requests.iter().enumerate() {
+        elements.insert(i, &r.element);
+    }
+    let mut text = RowIndex::new(page);
+    for (i, t) in ink.iter().enumerate() {
+        text.insert(i, t);
+    }
+    let mut badges = RowIndex::new(page);
+    let mut placed_rects: Vec<Rect> = Vec::new();
+    let mut near = Vec::new();
+
+    let mut out = Vec::with_capacity(requests.len());
     for (i, request) in requests.iter().enumerate() {
         let own = request.element;
-        // What the badge must not cover of its own element: the box past
+        // What the badge should not cover of its own element: the box past
         // the allowed tuck, or the whole outline around the target.
         let keep_clear = if request.outlined {
             inset(own, -OUTLINE_REACH)
         } else {
             inset(own, BADGE_TUCK)
         };
-        let cost = |spot: &Rect| {
-            let mut cost = HIDES_OWN * overlap(spot, &keep_clear);
-            for (j, other) in requests.iter().enumerate() {
-                if j != i {
-                    cost += HIDES_ELEMENT * overlap(spot, &other.element);
-                }
-            }
-            for badge in &placed {
-                cost += HIDES_BADGE * overlap(spot, &inset(badge.rect, -1.0));
-            }
-            for t in text {
-                cost += HIDES_TEXT * overlap(spot, t);
-            }
-            cost
-        };
-        let mut best: Option<(f32, PlacedBadge)> = None;
         let mut spots = Vec::new();
         if request.outlined {
             spots.extend(badge_spots(
@@ -391,24 +401,57 @@ pub fn place_badges(requests: &[BadgeRequest], text: &[Rect], page: Rect) -> Vec
             ));
         }
         spots.extend(badge_spots(own, BADGE_TUCK, request.full, request.compact));
+
+        let mut best: Option<(f32, PlacedBadge)> = None;
         for spot in spots {
-            if !within(&page, &spot.rect) {
+            let r = spot.rect;
+            if !within(&page, &r)
+                || elements.hits(&r, &mut near, |j| {
+                    j != i && overlap(&r, &requests[j].element) > 0.0
+                })
+                || badges.hits(&r, &mut near, |j| {
+                    overlap(&r, &inset(placed_rects[j], -1.0)) > 0.0
+                })
+            {
                 continue;
             }
-            let c = cost(&spot.rect);
-            if best.is_none_or(|(b, _)| c < b) {
-                best = Some((c, spot));
+            let mut cost = HIDES_OWN * overlap(&r, &keep_clear);
+            text.for_near(&r, &mut near, |j| cost += HIDES_TEXT * overlap(&r, &ink[j]));
+            if best.is_none_or(|(b, _)| cost < b) {
+                best = Some((cost, spot));
             }
-            if c == 0.0 {
+            if cost == 0.0 {
                 break;
             }
         }
-        // Nowhere inside the page (a tiny page, an element half under the
-        // chrome): inside the top-left corner, pulled onto the page.
-        let badge = best.map_or_else(|| inside_corner(own, request.compact, page), |(_, b)| b);
-        placed.push(badge);
+        let badge = best.map(|(_, b)| b).or_else(|| {
+            // Off other badges always; off other elements too if a corner
+            // allows (a box narrower than the badge can't keep it all in).
+            let corners: Vec<Rect> = inside_own_box(own, request.compact, page)
+                .into_iter()
+                .filter(|r| {
+                    !badges.hits(r, &mut near, |j| {
+                        overlap(r, &inset(placed_rects[j], -1.0)) > 0.0
+                    })
+                })
+                .collect();
+            let clear = corners.iter().find(|r| {
+                !elements.hits(r, &mut near, |j| {
+                    j != i && overlap(r, &requests[j].element) > 0.0
+                })
+            });
+            clear.or(corners.first()).map(|&rect| PlacedBadge {
+                rect,
+                compact: true,
+            })
+        });
+        if let Some(b) = badge {
+            badges.insert(placed_rects.len(), &b.rect);
+            placed_rects.push(b.rect);
+        }
+        out.push(badge);
     }
-    placed
+    out
 }
 
 /// Candidate spots around `r` in preference order (see the section
@@ -445,29 +488,95 @@ fn badge_spots(r: Rect, tuck: f32, full: (f32, f32), compact: (f32, f32)) -> Vec
         rect,
         compact: true,
     }));
-    spots.push(PlacedBadge {
-        rect: Rect {
-            x: r.x,
-            y: r.y,
-            width: compact.0,
-            height: compact.1,
-        },
-        compact: true,
-    });
     spots
 }
 
-fn inside_corner(r: Rect, (w, h): (f32, f32), page: Rect) -> PlacedBadge {
-    let x = r.x.min(page.x + page.width - w).max(page.x);
-    let y = r.y.min(page.y + page.height - h).max(page.y);
-    PlacedBadge {
-        rect: Rect {
-            x,
-            y,
+/// Last resort: a `(w, h)` badge in a corner of the part of `r` that's on
+/// the page (top-left first), pulled onto the page if the box is smaller
+/// than the badge — so it always touches `r`. Empty when `r` is off-page.
+fn inside_own_box(r: Rect, (w, h): (f32, f32), page: Rect) -> Vec<Rect> {
+    let Some(clip) = intersection(&r, &page) else {
+        return Vec::new();
+    };
+    let (left, right) = (clip.x, clip.x + clip.width - w);
+    let (top, bottom) = (clip.y, clip.y + clip.height - h);
+    [(left, top), (right, top), (left, bottom), (right, bottom)]
+        .into_iter()
+        .map(|(x, y)| Rect {
+            x: x.min(page.x + page.width - w).max(page.x),
+            y: y.min(page.y + page.height - h).max(page.y),
             width: w,
             height: h,
-        },
-        compact: true,
+        })
+        .collect()
+}
+
+fn intersection(a: &Rect, b: &Rect) -> Option<Rect> {
+    let x = a.x.max(b.x);
+    let y = a.y.max(b.y);
+    let right = (a.x + a.width).min(b.x + b.width);
+    let bottom = (a.y + a.height).min(b.y + b.height);
+    (right > x && bottom > y).then_some(Rect {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+    })
+}
+
+/// Rect indices bucketed into `INDEX_ROW` px bands of the page, so an overlap
+/// test only looks at what's in the same bands — a page with thousands of
+/// elements or text runs costs per badge what its neighbourhood costs.
+/// Rects off the page are not kept (spots never leave the page).
+struct RowIndex {
+    top: f32,
+    rows: Vec<Vec<usize>>,
+}
+
+const INDEX_ROW: f32 = 64.0;
+
+impl RowIndex {
+    fn new(page: Rect) -> Self {
+        let count = (page.height / INDEX_ROW).ceil().max(0.0) as usize + 1;
+        RowIndex {
+            top: page.y,
+            rows: vec![Vec::new(); count],
+        }
+    }
+
+    /// The bands `r` spans, clamped to the page; empty when it's off-page.
+    fn rows_of(&self, r: &Rect) -> std::ops::Range<usize> {
+        let last = self.rows.len() as f32 - 1.0;
+        let first = ((r.y - self.top) / INDEX_ROW).floor();
+        let end = ((r.y + r.height - self.top) / INDEX_ROW).floor();
+        if end < 0.0 || first > last || r.height < 0.0 {
+            return 0..0;
+        }
+        first.max(0.0) as usize..end.min(last) as usize + 1
+    }
+
+    fn insert(&mut self, i: usize, r: &Rect) {
+        for row in self.rows_of(r) {
+            self.rows[row].push(i);
+        }
+    }
+
+    /// Calls `f` once for each rect sharing a band with `r`.
+    fn for_near(&self, r: &Rect, scratch: &mut Vec<usize>, mut f: impl FnMut(usize)) {
+        scratch.clear();
+        for row in self.rows_of(r) {
+            scratch.extend_from_slice(&self.rows[row]);
+        }
+        scratch.sort_unstable();
+        scratch.dedup();
+        scratch.iter().for_each(|&i| f(i));
+    }
+
+    /// Whether `test` holds for any rect sharing a band with `r`.
+    fn hits(&self, r: &Rect, scratch: &mut Vec<usize>, test: impl Fn(usize) -> bool) -> bool {
+        let mut hit = false;
+        self.for_near(r, scratch, |i| hit = hit || test(i));
+        hit
     }
 }
 
@@ -506,6 +615,9 @@ pub fn text_obstacles(commands: &[DisplayCommand], page: Rect) -> Vec<Rect> {
             _ => None,
         })
         .filter(|t| !t.text.trim().is_empty())
+        // Measuring is the cost (a frame carries every run of the document,
+        // most off screen): drop runs that can't reach the page first.
+        .filter(|t| could_reach(t, &page))
         .filter_map(|t| {
             let (width, lines) = mb_runtime::render::measure_text_wrap_with_family(
                 &t.text,
@@ -525,6 +637,27 @@ pub fn text_obstacles(commands: &[DisplayCommand], page: Rect) -> Vec<Rect> {
             (overlap(&r, &page) > 0.0).then_some(r)
         })
         .collect()
+}
+
+/// Whether text run `t` might paint inside `page`, without measuring it:
+/// it starts above the page's bottom edge and, if it starts above the top,
+/// its tallest possible wrap (no glyph wider than 1.5 em, or one character
+/// per line when the wrap width is narrower than that) reaches the page.
+fn could_reach(t: &TextCommand, page: &Rect) -> bool {
+    if t.y >= page.y + page.height || t.x >= page.x + page.width {
+        return false;
+    }
+    if t.y >= page.y {
+        return true;
+    }
+    let chars = t.text.chars().count() as f32;
+    let widest = 1.5 * t.font_size;
+    let lines = match t.wrap_width {
+        Some(w) if w >= widest => (chars * widest / w).ceil() + 1.0,
+        Some(_) => chars,
+        None => 1.0,
+    };
+    t.y + lines.min(chars).max(1.0) * t.font_size * 1.2 > page.y
 }
 
 // --------------------------------------------------------- page overlay ---
@@ -547,15 +680,17 @@ pub fn page_overlay(
         y: rect.y - scroll_y + CHROME_HEIGHT,
         ..rect
     };
-    let visible = |r: &Rect| r.y + r.height > page.y && r.y < page.y + page.height;
+    let visible = |r: &Rect| intersection(r, &page).is_some();
 
+    // Only what's on screen, and at most MAX_BADGES of it (the target
+    // always): the placement and the label measuring are per badge.
     let shown: Vec<(String, Rect, bool)> = elements
         .iter()
-        .map(|e| {
-            let label = format!("e{}", e.id.raw());
-            (label, to_window(e.rect), Some(e.id) == target)
-        })
-        .filter(|(_, r, _)| visible(r))
+        .map(|e| (e, to_window(e.rect)))
+        .filter(|(_, r)| visible(r))
+        .enumerate()
+        .filter(|(n, (e, _))| *n < MAX_BADGES || Some(e.id) == target)
+        .map(|(_, (e, r))| (format!("e{}", e.id.raw()), r, Some(e.id) == target))
         .collect();
     let wanted: Vec<BadgeRequest> = shown
         .iter()
@@ -567,7 +702,9 @@ pub fn page_overlay(
         })
         .collect();
     let mut commands = Vec::new();
-    for ((label, _, _), placed) in shown.iter().zip(place_badges(&wanted, ink, page)) {
+    let placed = place_badges(&wanted, ink, page);
+    for ((label, _, _), placed) in shown.iter().zip(placed) {
+        let Some(placed) = placed else { continue };
         let style = if placed.compact {
             BadgeStyle::COMPACT
         } else {
@@ -2287,6 +2424,15 @@ mod tests {
         page_area(900, 700)
     }
 
+    /// `place_badges` where every element is expected to get a badge.
+    fn place_all(requests: &[BadgeRequest], ink: &[Rect], page: Rect) -> Vec<PlacedBadge> {
+        place_badges(requests, ink, page)
+            .into_iter()
+            .enumerate()
+            .map(|(i, b)| b.unwrap_or_else(|| panic!("element {i} got no badge")))
+            .collect()
+    }
+
     /// No badge hides an element (past the tuck), the text, or another badge.
     fn assert_nothing_hidden(requests: &[BadgeRequest], ink: &[Rect], placed: &[PlacedBadge]) {
         for (i, badge) in placed.iter().enumerate() {
@@ -2335,7 +2481,7 @@ mod tests {
             request(rect(144.0, y, 44.0, 20.0)),
             request(rect(199.0, y, 45.0, 20.0)),
         ];
-        let placed = place_badges(&links, &[], page());
+        let placed = place_all(&links, &[], page());
         assert_nothing_hidden(&links, &[], &placed);
         for (badge, link) in placed.iter().zip(&links) {
             assert!(!badge.compact);
@@ -2354,7 +2500,7 @@ mod tests {
             request(rect(44.0, y, 14.0, 20.0)),
             request(rect(64.0, y, 14.0, 20.0)),
         ];
-        let placed = place_badges(&links, &[], page());
+        let placed = place_all(&links, &[], page());
         assert_nothing_hidden(&links, &[], &placed);
         for (badge, link) in placed.iter().zip(&links) {
             assert_next_to(badge.rect, link.element);
@@ -2376,7 +2522,7 @@ mod tests {
             request(rect(144.0, y, 44.0, 20.0)),
             request(rect(24.0, y + 31.0, 130.0, 20.0)),
         ];
-        let placed = place_badges(&links, &ink, page());
+        let placed = place_all(&links, &ink, page());
         assert_nothing_hidden(&links, &ink, &placed);
         assert!(placed[0].compact, "{:?}", placed[0]);
         assert!(
@@ -2404,7 +2550,7 @@ mod tests {
             request(rect(24.0, top + 29.0, 16.0, 16.0)), // checkbox 1
             request(rect(24.0, top + 52.0, 16.0, 16.0)), // checkbox 2
         ];
-        let placed = place_badges(&requests, &ink, page());
+        let placed = place_all(&requests, &ink, page());
         assert_nothing_hidden(&requests, &ink, &placed);
         for (badge, checkbox) in placed[1..].iter().zip(&requests[1..]) {
             assert!(badge.compact, "{badge:?}");
@@ -2416,7 +2562,7 @@ mod tests {
     fn element_at_the_top_of_the_viewport_keeps_its_badge_off_the_chrome() {
         // Right under the chrome: "above" would be over the toolbar.
         let flush = [request(rect(200.0, CHROME_HEIGHT, 80.0, 20.0))];
-        let placed = place_badges(&flush, &[], page());
+        let placed = place_all(&flush, &[], page());
         assert!(placed[0].rect.y >= CHROME_HEIGHT, "{:?}", placed[0]);
         assert_nothing_hidden(&flush, &[], &placed);
         assert_next_to(placed[0].rect, flush[0].element);
@@ -2424,7 +2570,7 @@ mod tests {
         // Half scrolled under the chrome, at the left edge: every spot
         // around it leaves the page except below.
         let tucked = [request(rect(0.0, CHROME_HEIGHT - 10.0, 80.0, 20.0))];
-        let placed = place_badges(&tucked, &[], page());
+        let placed = place_all(&tucked, &[], page());
         assert!(placed[0].rect.y >= CHROME_HEIGHT, "{:?}", placed[0]);
         assert!(within(&page(), &placed[0].rect));
     }
@@ -2434,9 +2580,136 @@ mod tests {
         // The element fills the whole page area.
         let area = rect(0.0, CHROME_HEIGHT, 100.0, 30.0);
         let full = [request(area)];
-        let placed = place_badges(&full, &[], area);
+        let placed = place_all(&full, &[], area);
         assert!(placed[0].compact);
         assert_eq!((placed[0].rect.x, placed[0].rect.y), (0.0, CHROME_HEIGHT));
+    }
+
+    #[test]
+    fn a_spot_touching_another_element_is_never_used() {
+        // A small button boxed in on every side by other controls, at the
+        // page's left edge: every spot around it touches a neighbour, so the
+        // badge goes inside its own box rather than on top of a neighbour's.
+        let y = CHROME_HEIGHT + 200.0;
+        let small = rect(0.0, y, 24.0, 16.0);
+        let requests = [
+            request(small),
+            request(rect(0.0, y - 20.0, 200.0, 19.0)), // above
+            request(rect(25.0, y - 2.0, 200.0, 20.0)), // right
+            request(rect(0.0, y + 17.0, 200.0, 19.0)), // below
+        ];
+        let placed = place_badges(&requests, &[], page());
+        let badge = placed[0].expect("a badge for the checkbox");
+        for other in &requests[1..] {
+            assert_eq!(overlap(&badge.rect, &other.element), 0.0, "{badge:?}");
+        }
+        assert!(badge.compact);
+        assert!(overlap(&badge.rect, &small) > 0.0, "touches its own box");
+    }
+
+    #[test]
+    fn the_fallback_stays_on_its_own_element_and_off_other_badges() {
+        // A big element filling the page with a smaller one nested in its
+        // top-left corner: both fall back inside their own boxes, and the
+        // nested one takes another corner instead of stacking on the first.
+        let area = rect(0.0, CHROME_HEIGHT, 300.0, 60.0);
+        let inner = rect(0.0, CHROME_HEIGHT, 80.0, 40.0);
+        let placed = place_badges(&[request(area), request(inner)], &[], area);
+        let (outer_badge, inner_badge) = (placed[0].unwrap(), placed[1].unwrap());
+        assert_eq!(overlap(&outer_badge.rect, &inner_badge.rect), 0.0);
+        assert!(within(&inner, &inner_badge.rect), "{inner_badge:?}");
+    }
+
+    #[test]
+    fn an_element_with_no_on_page_area_gets_no_badge() {
+        let below = rect(10.0, 2000.0, 80.0, 20.0);
+        let under_chrome = rect(10.0, 10.0, 80.0, 20.0);
+        let placed = place_badges(&[request(below), request(under_chrome)], &[], page());
+        assert_eq!(placed, [None, None]);
+    }
+
+    #[test]
+    fn no_corner_free_of_other_badges_means_no_badge() {
+        // Two elements with the same box that fills the page: the second
+        // has no spot and every corner of its box is taken by the first's.
+        let area = rect(0.0, CHROME_HEIGHT, 20.0, 12.0);
+        let placed = place_badges(&[request(area), request(area)], &[], area);
+        assert!(placed[0].is_some());
+        assert_eq!(placed[1], None);
+    }
+
+    #[test]
+    fn a_crowded_page_draws_at_most_max_badges_but_always_the_target() {
+        // 2000 visible links in a grid, the target last in document order.
+        let elements: Vec<ElementObservation> = (0..2000)
+            .map(|i| {
+                let mut e = element(i, (i / 20) as f32 * 6.0);
+                e.rect.x = (i % 20) as f32 * 44.0;
+                e.rect.width = 40.0;
+                e.rect.height = 5.0;
+                e
+            })
+            .collect();
+        let target = NodeId::from_raw(1999);
+        let commands = page_overlay(&elements, Some(target), None, 0.0, page_area(900, 700), &[]);
+        let labels = badge_texts(&commands);
+        assert!(labels.len() <= MAX_BADGES + 1, "{}", labels.len());
+        assert!(
+            labels.contains(&"e1999".to_string()),
+            "the target keeps its badge"
+        );
+    }
+
+    #[test]
+    fn text_far_off_the_page_is_skipped_before_measuring() {
+        let page = page();
+        let run = |y: f32, text: &str, wrap: Option<f32>| TextCommand {
+            text: text.into(),
+            x: 8.0,
+            y,
+            color: p::INK,
+            font_size: 16.0,
+            wrap_width: wrap,
+            font_family: None,
+            font_weight: 400,
+        };
+        // Below the page, or one line well above it: never measured.
+        assert!(!could_reach(
+            &run(page.y + page.height, "below", Some(400.0)),
+            &page
+        ));
+        assert!(!could_reach(&run(page.y - 100.0, "above", None), &page));
+        // On the page; or above it but long enough to wrap down into it.
+        assert!(could_reach(
+            &run(page.y + 10.0, "on it", Some(400.0)),
+            &page
+        ));
+        let long = "word ".repeat(200);
+        assert!(could_reach(&run(page.y - 100.0, &long, Some(400.0)), &page));
+        // A wrap narrower than a glyph: one character per line at most.
+        assert!(!could_reach(&run(page.y - 100.0, "abc", Some(4.0)), &page));
+        assert!(could_reach(&run(page.y - 30.0, "abc", Some(4.0)), &page));
+    }
+
+    #[test]
+    fn row_index_finds_rects_in_the_same_bands_once() {
+        let page = page();
+        let mut index = RowIndex::new(page);
+        let tall = rect(0.0, CHROME_HEIGHT, 10.0, 200.0); // spans several bands
+        let far = rect(0.0, CHROME_HEIGHT + 500.0, 10.0, 10.0);
+        let off = rect(0.0, 5000.0, 10.0, 10.0);
+        index.insert(0, &tall);
+        index.insert(1, &far);
+        index.insert(2, &off);
+        let mut scratch = Vec::new();
+        let mut seen = Vec::new();
+        let probe = rect(0.0, CHROME_HEIGHT + 60.0, 10.0, 80.0);
+        index.for_near(&probe, &mut scratch, |i| seen.push(i));
+        assert_eq!(seen, [0]);
+        assert!(
+            index.rows.iter().all(|row| !row.contains(&2)),
+            "off-page rect kept"
+        );
     }
 
     #[test]
@@ -2444,7 +2717,7 @@ mod tests {
         let y = CHROME_HEIGHT + 200.0;
         let mut target = request(rect(300.0, y, 120.0, 20.0));
         target.outlined = true;
-        let placed = place_badges(&[target], &[], page());
+        let placed = place_all(&[target], &[], page());
         let ring = inset(target.element, -OUTLINE_REACH);
         assert_eq!(overlap(&placed[0].rect, &ring), 0.0, "{:?}", placed[0]);
         assert_next_to(placed[0].rect, target.element);
