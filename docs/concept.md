@@ -1,6 +1,6 @@
 # Concept — 에이전트용 브라우저
 
-> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ · G5c 평가 ✅ (2026-11-20)** · 호환성 트랙 시작 (2026-11-21): 인라인 줄 묶기 ✅ · IDL 속성 반사 ✅ · Preact 실증 ✅ · 디자인 트랙 시작 (2026-11-21): [⋮ 메뉴](#-메뉴-사람의-조종석) 1차 — 일시정지·런타임 승인 모드 ✅ · [시안 적용](#디자인-적용) (2026-11-22) ✅ · 메뉴 새 기능 1차 — [What the agent sees](#에이전트가-보는-것-what-the-agent-sees)·[기록 토글](#세션-기록-토글-record-this-session) (2026-11-22) ✅ · 승인 흐름 — [넘겨주기·거절 영수증](#넘겨주기와-거절-영수증-보드-9) (2026-11-22) ✅ · [허용 사이트 편집](#허용-사이트-allowed-sites) (2026-11-22) ✅ · [다크 모드](#다크-모드-보드-10) (2026-11-22) ✅ · 다음 = 좁은 창 / 호환성 잔여 갭(spa-roadmap) / 열린 결정 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
+> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ · G5c 평가 ✅ (2026-11-20)** · 호환성 트랙 시작 (2026-11-21): 인라인 줄 묶기 ✅ · IDL 속성 반사 ✅ · Preact 실증 ✅ · 디자인 트랙 시작 (2026-11-21): [⋮ 메뉴](#-메뉴-사람의-조종석) 1차 — 일시정지·런타임 승인 모드 ✅ · [시안 적용](#디자인-적용) (2026-11-22) ✅ · 메뉴 새 기능 1차 — [What the agent sees](#에이전트가-보는-것-what-the-agent-sees)·[기록 토글](#세션-기록-토글-record-this-session) (2026-11-22) ✅ · 승인 흐름 — [넘겨주기·거절 영수증](#넘겨주기와-거절-영수증-보드-9) (2026-11-22) ✅ · [허용 사이트 편집](#허용-사이트-allowed-sites) (2026-11-22) ✅ · [다크 모드](#다크-모드-보드-10) (2026-11-22) ✅ · [좁은 창](#좁은-창-보드-10) (2026-11-23) ✅ · 디자인 시안의 기능 다 들어감 → 다음 = 후속 목록 / 호환성 잔여 갭(spa-roadmap) / 열린 결정 / 호환성 잔여 갭(spa-roadmap) / 열린 결정 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
 
 ## 한 줄
 
@@ -364,7 +364,7 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 - **창 표시**:
   - 크롬: 주소창과 ⋮ 사이 알약 자리에 주황 알약 **"Agent paused"** (`overlay::Pill::Paused`, [디자인 적용](#디자인-적용)). 크롬 높이를 바꾸지 않으려고 시안의 별도 배너 줄("You have the wheel")은 두지 않는다 — 같은 내용이 패널 카드에 있다.
   - **ID 배지 없음**: 페이지는 사람 것. 넘겨받기 카드가 떠 있으면 그 칸의 주황 테두리만 남긴다.
-  - 패널: 맨 위에 주황 카드 "Agent paused · you have the wheel" + 설명 + (보관 호출이 있으면) "1 call is waiting for you: click e26" + "It runs on resume, on the page as it is then (ids are checked first)." + 검은 **Resume agent** 버튼. 패널이 없는 좁은 창(700px 미만)에선 ⋮ 메뉴의 Resume 을 쓴다.
+  - 패널: 맨 위에 주황 카드 "Agent paused · you have the wheel" + 설명 + (보관 호출이 있으면) "1 call is waiting for you: click e26" + "It runs on resume, on the page as it is then (ids are checked first)." + 검은 **Resume agent** 버튼. 좁은 창(900px 미만)에선 같은 카드가 [시트](#좁은-창-보드-10)로 뜨고, ⋮ 메뉴의 Resume 도 있다.
   - 페이지는 사람이 평소대로 쓴다(사람 입력은 게이트 밖).
 - **세션 로그**: `paused` 는 기다림 응답이라 기록하지 않는다. 재개 후 실행된 호출은 평소처럼 한 줄 — 그 사이 사람이 문서를 바꿨으면 `person_moved: true` 라 재생은 그 단계에서 멈춘다(기록에 없는 사람 행동은 지어내지 않는다는 기존 규칙).
 - headless 에는 메뉴가 없으므로 일시정지도 없다.
@@ -499,6 +499,34 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 - **미리보기**: `--preview-sites`(열린 대화상자), `--preview-sites-add TEXT`(칸에 TEXT 를 치고 Enter — 반복 가능, 매번 칸을 비우고 침. 쓰레기를 넣으면 오류 상태). 위 그림: `--allow-origin http://127.0.0.1:8790 --allow-origin http://localhost:8790 --preview-sites` 와 `--preview-sites-add localhost:3000` (examples/agent-demo).
 - **시안과 다른 점**: 시안의 버튼 높이·글자 크기 그대로. 빈 목록일 때의 회색 줄·첫 추가 경고·오류 줄·"… N more" 는 시안에 없어 더했다. 시안의 placeholder 위 캐럿은 깜빡이지 않는다.
 - **거절 목록은 아직 여기 없다**: 거절 기억 전체를 보여 주고 하나씩 잊는 화면은 이 대화상자에 어울리지만(D4 인수 메모) 이번 범위 밖 — 지금은 마지막 거절의 영수증에서만 잊는다.
+
+### 좁은 창 (보드 10)
+
+> 2026-11-23 D7. 시안 보드 "10 · Dark + narrow window" 오른쪽 — "Below 900 px the side panel would squeeze the page, so it folds into a one-line bar. A question for the person opens as a sheet from the bottom; ids and the outline stay on the page."
+
+![좁은 창 — 질문이 시트로](images/narrow-question.png) ![좁은 창 — 평소](images/narrow-idle.png) ![좁은 창 — 다크](images/narrow-dark.png)
+
+- **언제**: 창 폭 **900px 미만**(`overlay::NARROW_BELOW`). 전엔 740px 미만에서 패널을 그냥 뺐다(질문 카드를 볼 곳이 없어 ⋮ 메뉴만) — 이제 그 자리에 바·시트가 있다. 900 이상은 지금까지와 같다(페이지 = 창 − 340, 오른쪽 패널).
+  - `--viewport W×H` 는 계속 **페이지 영역** 크기다: 창 폭 = `overlay::window_width_for(W)` = W + 340 이 900 이상이면 그것, 아니면 W 그대로(패널이 없으니). `--viewport 400x720` → 400×816 창.
+- **바는 탭 줄 안에** (시안과 다른 자리 — 결정): 시안은 툴바 **아래**에 40px 줄을 둔다. 그대로 하면 둘 중 하나다 — (a) 크롬을 40px 키운다: `CHROME_HEIGHT` 가 에이전트 클릭 좌표·스크린샷 자르기·창 크기와 묶여 있어 창 종류마다 다르면 안 된다(AGENTS.md 함정). (b) 페이지 맨 위 40px 위에 겹쳐 그린다: 좌표는 그대로지만 **에이전트는 보는데 사람은 못 보는** 띠가 생긴다(원칙 1 "에이전트가 보는 것을 사람도 본다" 위반, 대상 테두리가 그 밑에 숨을 수 있음). 그래서 **탭 줄 오른쪽 빈자리**(상태 문구 "loaded" 가 있던 곳)에 바를 둔다 — 크롬 높이 그대로, 페이지는 한 픽셀도 안 가려지고 안 움직인다.
+  - 크롬 쪽 장치: `ChromeExtras::strip_reserved`(임베더가 탭 줄 오른쪽에 쓸 폭) → `chrome::strip_slot_rect`(높이 32, 탭 줄 세로 가운데), 탭은 `chrome::tab_width` 로 줄어든다(최소 96, 바 옆에 120 이상 남김 — `overlay::bar_reserved`, 바 최대 420). 그 폭을 잡으면 상태 문구는 안 그린다(로딩 상태는 주소창·페이지로 보임).
+  - 툴바의 알약(에이전트·REC)도 좁은 창에선 뺀다(`accessory_width` 0) — 바가 같은 말을 하고, 400px 창에서 알약 170px 이 주소창을 50px 로 만든다. 시안의 좁은 툴바도 주소창 + ⋮ 뿐.
+- **바가 하는 말** (`overlay::agent_bar`, 한 줄, 점 + **굵은 말** · 나머지 + 꺾쇠):
+  - 질문: **Needs you** · 1 approval / a password (주황 tint·border·점), 넘겨받은 단계: **Your turn** · hand back when done, 일시정지: **Paused** · you have the wheel.
+  - 평소: **Agent** · ask · N actions (· waiting) (파랑 tint), `--http` 로 아무도 안 붙었으면 **No agent attached** (회색).
+  - 기록 중이면 끝에 · REC mm:ss. 넘치면 뒤를 `…` 로 자름.
+  - 시안 문구 "Claude Code needs you" 는 클라이언트 이름(`clientInfo`)을 안 들고 있어 "Needs you" — 좁은 바에 들어가게 짧게.
+  - 꺾쇠는 접혀 있으면 ▾, 펼쳐져 있으면 ▴. 바를 누르면 시트를 열고 닫는다(`WindowAction::ToggleSheet` — 창 전용).
+- **시트** (`overlay::sheet`): 창 아래에서 올라오는 패널. 내용 = 패널과 **같은 카드**(일시정지 → 질문 → 거절 영수증 → wait_for → 기록 → HTTP 붙기, `panel_cards` 를 패널과 공유) + "Agent actions" 최근 4줄(`panel_timeline` 공유). 패널 머리말(누가 운전하나·정책 칩)은 바가 대신하므로 뺐다.
+  - 높이 = 내용만큼, 최대 페이지 영역의 85%. 카드가 위라 넘쳐도 잘리는 건 아래(오래된 타임라인)다. 위 모서리 둥글게, 질문이 있으면 위 테두리 2px 주황(시안), 아니면 frame 회색. 손잡이(36×4) 줄을 누르면 접힌다.
+  - **질문이 오면 저절로 열린다** — 질문(승인·비밀번호·Your turn) 또는 일시정지가 **새로 생기는 순간 한 번**(`SheetState.asked` 로 앞 프레임과 비교). 사람이 접으면 그 질문 동안은 접힌 채(바가 주황으로 남아 있음) — 매 프레임 다시 열면 페이지를 볼 수가 없다. 다음 질문에 다시 열린다.
+  - **입력**: 바·열린 시트 위의 클릭·hover·휠은 패널 것(`window_mode::route_panel_input`, 순수 함수 — 넓은 창의 오른쪽 패널과 같은 규칙, 판정 영역만 `Composed.owned` 로 일반화). 시트 밖은 페이지 것 — 시트는 모달이 아니다(사람이 페이지를 보며 답할 수 있게). Escape 는 열린 시트를 접는다(메뉴·대화상자가 먼저 먹지 않았을 때).
+  - 시트는 페이지 아래쪽을 가린다 — 페이지는 움직이지 않으므로 에이전트 좌표는 그대로이고, 사람이 접으면 다 보인다. 시안과 같은 선택(질문이 있을 땐 답이 먼저).
+- **ID 배지·대상 테두리는 페이지에 그대로**: 배지 자리(`place_badges`)는 페이지 영역 기준 그대로. 시트·메뉴·대화상자는 그 위에 그린다.
+- **에이전트 쪽은 아무것도 안 바뀐다**: 뷰포트 = (창 폭, 창 높이 − `CHROME_HEIGHT`), 페이지 원점 = `CHROME_HEIGHT`. 시트를 열고 닫아도 요소 상자가 같다 — 테스트 `a_narrow_window_folds_the_panel_without_moving_the_agents_page`.
+- 메뉴(⋮)·What the agent sees·Allowed sites 는 좁은 창에서도 같다(폭이 페이지에 맞게 줄어듦). 재생 창(`replay --window`)은 이번 범위 밖 — 늘 오른쪽 패널.
+- **미리보기**: `--viewport 400x720` 이면 좁은 창으로 찍힌다(`--preview-click` 으로 질문을 띄우면 시트가 열린 상태). 위 그림: 스크래치 가입 폼 `--approve ask --preview-click e15` (+ `--theme dark`), examples/agent-demo `--preview-click e22`.
+- **시안과 다른 점**: 바 자리(위 결정), 문구("Needs you"), 시트에 타임라인을 함께 둠(시안은 질문 카드만 — 질문이 없을 때 바를 눌러 여는 시트는 패널 대신이라 타임라인이 있어야 한다), 카드가 시트 안에서 테두리를 한 번 더 가짐(패널과 같은 카드 함수를 쓰므로).
 
 ## 디자인 적용
 
@@ -639,7 +667,7 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 - ~~**"I'll do it myself" 뒤 넘겨주기**~~ · ~~**거절 영수증 + "Forget this refusal"**~~ (보드 9) → D4 ([넘겨주기와 거절 영수증](#넘겨주기와-거절-영수증-보드-9)).
 - **연결 끊김 카드** (보드 9 오른쪽 — "Claude Code left 2 min ago", Last session 요약·재생 링크).
 - 넘겨받기 카드의 "N characters entered", 패널 머리말의 클라이언트 이름(`clientInfo`).
-- ~~**다크 모드**~~ → D6 ([다크 모드](#다크-모드-보드-10)). **좁은 창 레이아웃** (보드 10) — 지금 740px 미만은 패널을 빼고 ⋮ 메뉴만.
+- ~~**다크 모드**~~ → D6 ([다크 모드](#다크-모드-보드-10)). ~~**좁은 창 레이아웃** (보드 10)~~ → D7 ([좁은 창](#좁은-창-보드-10)).
 - Inter·JetBrains Mono 번들, 탭 여러 개(×·+).
 
 ## 결정성
@@ -1083,6 +1111,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | **D4** 승인 흐름: 넘겨주기·거절 영수증 ✅ (디자인 트랙) | [넘겨주기와 거절 영수증](#넘겨주기와-거절-영수증-보드-9): `AgentBrowser::{take_over, finish_take_over, forget_refusal}`(`PersonTurn` — 비밀번호 넘겨받기와 공유), `AgentPolicy::forget_denial`, `Waiting::TakenOver` + `Answer::{HandBack, WontDo}`(park 그대로: 45초 `still_waiting`·재부착·`unclaimed`), `ToolError::NotDone`(`approval_denied`), `Worker::{refusal, forget_refusal}` + `Control::ForgetRefusal`, `overlay::{turn_card, refusal_card}`, `resolved_by: person_handed_back`(재생은 멈춤), `--preview-answer`, prompts 규칙 4·click 설명 | 연결 끊김 카드·Allowed sites·다크·좁은 창은 다음. **실제 창 클릭과 실연결 에이전트의 `taken_over` 반응은 사용자 확인 필요** | ![Your turn](images/your-turn.png) ![거절 영수증](images/refusal-receipt.png) — 정책 잊기 1 · Worker 넘겨주기 park·재부착·busy / 넘겨준 뒤 다시 묻기·I won't do it 기억 / 떠난 에이전트(unclaimed) / Deny 영수증·잊기 / 기록·재생 멈춤 5 (기존 take-over 테스트 1개 대체) · 패널 카드 2 (775 green) |
 | **D5** 허용 사이트 편집 ✅ (디자인 트랙) | [허용 사이트](#허용-사이트-allowed-sites): `overlay::allowed_sites`(목록·`current`·×·더하기 칸·오류·"… N more"), 메뉴 항목 활성(지구본), `window_mode::{Sites, route_sites_input, set_sites}`(모달, 칸이 모든 키), `mb_runtime::input::edit_line`(주소창 글자 입력 규칙 공유), `policy::{parse_origin, AgentPolicy::allows}`(CLI `--allow-origin` 과 공유), `BrowserState::block_held`, `AgentBrowser::{set_allow_origins, block_pending_approval}`, `Worker::{allow_origins, set_allow_origins}`(목록 밖이 된 승인 카드 → `navigation_blocked`), 세션 로그 단계별 `allow_origins` + `person_changed_sites` 재생, `--preview-sites` / `--preview-sites-add` | 붙여넣기·거절 목록 화면 없음. **실제 창 클릭·타자·Escape 는 사용자 확인 필요** (GUI) | ![허용 사이트](images/allowed-sites.png) — 정책 1 (정규화·거절) · 입력 1 (`edit_line`) · Worker 2 (다음 행동부터·카드 종료·되돌리면 다시 물음, 로그+재생) · 대화상자 라우팅 2 (칸·추가·거절·중복·빼기·모달 닫기) · 오버레이 1 (782 green) |
 | **D6** 다크 모드 ✅ (디자인 트랙) | [다크 모드](#다크-모드-보드-10): `palette::{Palette, LIGHT, DARK, Theme, theme, set_theme, with_theme, current, Tone}` + 토큰 함수(`ink()` 등, 상수 → 함수 기계적 치환), `on_fill` 토큰, 상태 문구 `Tone`, `mb_shell::window` 가 winit 테마로 매 프레임 설정 + `Frame.system_dark` + `ThemeChanged` 다시 그리기, `overlay::ThemeChoice` + 메뉴 Appearance 세그먼트(`segmented` 로 승인 모드와 공유), `--theme`, 에이전트 스크린샷 Light 고정 | Inter·JetBrains Mono 번들 없음, 설정 저장 없음. **실제 창에서 OS 테마 전환·메뉴 클릭은 사용자 확인 필요** (GUI) | ![다크](images/theme-dark.png) — 팔레트 2 (대비·역할 구분, 스레드별 테마·복귀) · 크롬 1 · 메뉴/버튼 테마 1 · CLI 1 · 스크린샷 불변 1 (788 green) |
+| **D7** 좁은 창 ✅ (디자인 트랙) | [좁은 창](#좁은-창-보드-10): `overlay::{NARROW_BELOW, window_width_for, bar_reserved, agent_bar, sheet, needs_person}`, 패널 카드·타임라인 함수 분리(`panel_cards`, `panel_timeline` — 패널과 시트 공유), `chrome::{strip_slot_rect, tab_width}` + `ChromeExtras::strip_reserved`(탭 줄 안의 바, `CHROME_HEIGHT` 그대로), `window_mode::{SheetState, route_panel_input}` + `Composed.owned`, `WindowAction::ToggleSheet` | 재생 창은 여전히 오른쪽 패널. **실제 창 크기 조절·바/시트 클릭은 사용자 확인 필요** (GUI) | ![좁은 창](images/narrow-question.png) — 레이아웃·바 자리 1 · 바 문구 1 · 시트 1 · 크롬 탭 줄 1 · 좁은 창 합성(좌표 불변·자동 열림·라우팅) 1 (793 green) |
 
 - G4 의 게이트 **판정 로직**은 G1 에서 입력 출처 태그와 함께 먼저 들어간다 (`--approve auto|deny` 만). G4 는 사람에게 묻는 UI(`ask`)·넘겨받기·elicitation 을 붙이는 단계.
 - `<select>` 는 G1 이후 필요해질 때 (`select(id, option)` tool 추가).
@@ -1194,6 +1223,10 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-22 | 새 토큰 `on_fill`(역할 색 위 흰 글자), ink 채우기 버튼은 테마와 함께 뒤집힘 | 라이트에서 `page` 가 "흰색" 과 "표면" 두 뜻을 겸했다. 다크에서 표면은 검정이라 배지 글자가 사라진다 — 뜻을 나눠 이름 붙임 |
 | 2026-11-22 | 에이전트 스크린샷은 `with_theme(Light)` 로 고정 | 결정성: 에이전트가 받는 픽셀이 사람의 외관 설정에 따라 달라지면 안 된다(크롬은 잘리지만 테마가 페이지 영역에 새는 미래 경로까지 막음) |
 | 2026-11-22 | 상태 문구 색은 `Tone`(역할)으로 저장, 칠할 때 색 결정 | 색 값을 저장하면 테마를 바꿔도 마지막 상태 문구가 옛 테마 색으로 남는다 |
+| 2026-11-23 | 좁은 창(900px 미만)의 바는 **탭 줄 안**(`strip_reserved`), 시안의 "툴바 아래 줄" 이 아님 | 크롬을 키우면 `CHROME_HEIGHT`(에이전트 좌표·스크린샷 자르기)가 창 종류마다 달라진다. 페이지 위에 겹치면 에이전트는 보는데 사람은 못 보는 띠가 생긴다. 탭 줄 오른쪽은 비어 있었다(상태 문구뿐) |
+| 2026-11-23 | 좁은 창에선 툴바 알약·탭 줄 상태 문구를 그리지 않음 | 바가 같은 정보를 말한다. 400px 창에서 알약이 주소창을 50px 로 만든다 |
+| 2026-11-23 | 시트 = 패널과 같은 카드 + 최근 4줄, 질문·일시정지가 **새로 생길 때 한 번** 저절로 열림, 접으면 그 질문 동안 접힌 채, 모달 아님 | 같은 카드 함수라 넓은/좁은 창의 질문이 같은 말·같은 버튼. 매 프레임 다시 열면 사람이 페이지를 못 본다. 모달이면 페이지를 보며 답할 수 없다 |
+| 2026-11-23 | `--viewport` 는 계속 페이지 크기 — 좁으면 창 = 페이지 폭(`window_width_for`) | 에이전트의 화면 크기를 정하는 옵션이 창 배치에 따라 다른 뜻이 되면 안 된다 |
 
 ## 열린 결정
 

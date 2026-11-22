@@ -54,12 +54,12 @@
 │   - prompts          서버 instructions + tool 설명 (LLM 이 읽는 텍스트, 영어)
 │   - worker           Job 처리, repeat_count, 패닉 시 재생성, 창 모드의 park(승인·넘겨받기·"Your turn" 대기)/answer(넘겨주기 hand back), 거절 영수증·잊기, 일시정지 보관(held)·재개, 런타임 승인 모드, 허용 사이트 편집(목록 밖이 된 카드 → navigation_blocked), 기록 켜기/끄기, 마지막 받은 관찰(seen)
 │   - server           #[tool_router] tool 10개 → worker::Request, 결과 → CallToolResult
-│   - window_mode      --window: 메인 스레드 winit 루프 + 프레임마다 Job 처리, ⋮ 메뉴·"What the agent sees" 뷰어·"Allowed sites" 대화상자(모달, 칸이 모든 키) 입력 라우팅, --preview PNG
+│   - window_mode      --window: 메인 스레드 winit 루프 + 프레임마다 Job 처리, ⋮ 메뉴·"What the agent sees" 뷰어·"Allowed sites" 대화상자(모달, 칸이 모든 키)·패널/좁은 창 바·시트(route_panel_input) 입력 라우팅, --preview PNG
 │   - session_log      --log: 세션 로그(JSONL) 기록 형식 — target·결과 요소 목록·redact (⋮ 메뉴 Record 도 같은 코드, 기본 폴더 mb-runs/)
 │   - replay           mb-mcp replay FILE: Replayer(한 단계씩) — worker::execute 로 결정적 재생 + 회귀 지점 diff
 │   - replay_window    replay --window: 단계별 재생 뷰 (Next/Back/Run all/Restart), --preview PNG
 │   - eval             mb-mcp eval SCENARIO LOGS: 시나리오 판정 + 성공률·에러·실패 지점·안전 위반 집계 (에이전트는 안 돌림)
-│   - overlay          ID 배지·대상 테두리·크롬 알약(Pill, REC)·에이전트 패널·카드(승인·Your turn·거절 영수증 등)·⋮ 메뉴·관찰 뷰어(agent_view)·허용 사이트(allowed_sites)·재생 패널 (DisplayCommand 순수 함수, palette 색)
+│   - overlay          ID 배지·대상 테두리·크롬 알약(Pill, REC)·에이전트 패널·카드(승인·Your turn·거절 영수증 등)·좁은 창 바(agent_bar)·시트(sheet)·⋮ 메뉴·관찰 뷰어(agent_view)·허용 사이트(allowed_sites)·재생 패널 (DisplayCommand 순수 함수, palette 색)
 │
 └── crates/mb-shell    (lib + [[bin]] mb-shell)  anyhow, softbuffer, winit
     - lib.rs           pub mod window — mb-mcp --window 도 같은 창 코드를 씀
@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 788 (workspace 합계, 2026-11-22 다크 모드 +6). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 793 (workspace 합계, 2026-11-23 좁은 창 +5). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -206,7 +206,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - 관전 창의 대화상자(뷰어·허용 사이트)는 모달이다 — 열린 프레임엔 `page_input` 을 비워 클릭·키가 페이지·주소창에 안 가게 한다. 새 대화상자를 만들면 같은 자리(`window_mode` 의 모달 라우팅)에 넣고, 글자 칸은 `input::edit_line` 을 쓸 것.
 - 오버레이 글자에 `⋮` 같은 기호를 쓰지 말 것 — 패널 폰트에 글리프가 없어 깨진다. ✓/✗ 도 글리프 대신 `overlay` 의 그린 아이콘.
 - ID 배지 자리는 `overlay::place_badges`(순수 함수)가 정한다 — 배지를 그리는 새 경로를 만들면 `text_obstacles` 와 `page_area` 를 같이 넘길 것 (안 넘기면 배지가 글자·크롬을 덮는다). 프레임마다 도는 코드라 문서 전체를 훑는 일(화면 밖 글자 측정 등)은 먼저 위치로 거를 것. 규칙은 docs/concept.md "배지 자리".
-- `CHROME_HEIGHT` 는 에이전트 클릭 좌표·스크린샷 자르기·창 크기와 묶여 있다. 크롬 줄을 창 종류마다 다르게 하거나 아래쪽 바를 두지 말 것 (docs/concept.md "디자인 적용").
+- `CHROME_HEIGHT` 는 에이전트 클릭 좌표·스크린샷 자르기·창 크기와 묶여 있다. 크롬 줄을 창 종류마다 다르게 하거나 아래쪽 바를 두지 말 것 (docs/concept.md "디자인 적용"). 페이지 위에 띠를 겹쳐 그리는 것도 안 된다(에이전트만 보는 영역이 생김). 크롬에 임베더 것을 넣을 자리는 툴바 `accessory_width`(알약)와 탭 줄 `strip_reserved`(좁은 창의 에이전트 바) 둘 — docs/concept.md "좁은 창".
 
 ### Font System
 - `font_system::shared_font_system()` 가 `None` 이면 unit test 환경 — `font_size * 0.75` fallback 으로 토이 측정.

@@ -80,6 +80,36 @@ pub struct ChromeExtras {
     pub tab_marker: Option<css::Color>,
     /// ⋮ drawn pressed: its menu is open.
     pub menu_open: bool,
+    /// Width reserved at the right of the tab strip for something the
+    /// embedder paints into `strip_slot_rect` (0 = none). The tab shrinks
+    /// to make room and the status text isn't drawn. The narrow
+    /// observation window puts its agent bar there: inside the chrome, so
+    /// `CHROME_HEIGHT` and the page below never move.
+    pub strip_reserved: f32,
+}
+
+/// The narrowest the tab gets when the strip is shared.
+pub const MIN_TAB_WIDTH: f32 = 96.0;
+/// Height of the strip slot (`strip_slot_rect`).
+pub const STRIP_SLOT_HEIGHT: f32 = 32.0;
+
+/// Where an embedder's strip content goes (see `ChromeExtras::strip_reserved`).
+pub fn strip_slot_rect(viewport_width: f32, reserved: f32) -> layout::Rect {
+    layout::Rect {
+        x: viewport_width - 12.0 - reserved,
+        y: (TAB_STRIP_HEIGHT - STRIP_SLOT_HEIGHT) / 2.0,
+        width: reserved,
+        height: STRIP_SLOT_HEIGHT,
+    }
+}
+
+/// The tab's width: full, or what's left beside a reserved strip slot.
+pub fn tab_width(viewport_width: f32, reserved: f32) -> f32 {
+    if reserved <= 0.0 {
+        return TAB_WIDTH;
+    }
+    let slot = strip_slot_rect(viewport_width, reserved);
+    (slot.x - 8.0 - TAB_X).clamp(MIN_TAB_WIDTH, TAB_WIDTH)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -194,6 +224,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
         palette::ink()
     };
     let address_box = address_bar_rect_with(width, chrome.extras.accessory_width);
+    let tab_width = tab_width(width, chrome.extras.strip_reserved);
     // Editing turns the field white with a darker edge; at rest it is a
     // panel-grey well (board 2). Blue is the agent's color, not focus.
     let (border_color, field_color) = if chrome.address_bar_focused {
@@ -248,7 +279,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             layout::Rect {
                 x: TAB_X,
                 y: TAB_Y,
-                width: TAB_WIDTH,
+                width: tab_width,
                 height: TAB_HEIGHT,
             },
             render::CornerRadii {
@@ -280,7 +311,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
     commands.push(label(
         clip_to_width(
             chrome.tab_title,
-            TAB_X + TAB_WIDTH - 12.0 - title_x,
+            TAB_X + tab_width - 12.0 - title_x,
             TAB_TITLE_FONT_SIZE,
         ),
         title_x,
@@ -292,7 +323,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
     ));
     // Status ("loaded", "loading…", errors) at the right end of the strip,
     // clear of the tab.
-    if !chrome.status_text.is_empty() {
+    if !chrome.status_text.is_empty() && chrome.extras.strip_reserved <= 0.0 {
         let status_width = render::measure_text_width(chrome.status_text, STATUS_FONT_SIZE);
         let status_x = width - 16.0 - status_width;
         if status_x > TAB_X + TAB_WIDTH + 12.0 {
@@ -849,6 +880,19 @@ mod tests {
         let dark = palette::with_theme(palette::Theme::Dark, || chrome_commands(state));
         assert_eq!(fills(&dark)[..2], [palette::DARK.strip, palette::DARK.page]);
         assert_eq!(status(&dark), Some(palette::DARK.muted));
+    }
+
+    #[test]
+    fn a_reserved_strip_slot_shrinks_the_tab_and_hides_the_status_only() {
+        assert_eq!(tab_width(900.0, 0.0), TAB_WIDTH);
+        let slot = strip_slot_rect(400.0, 228.0);
+        assert_eq!(slot.x + slot.width, 400.0 - 12.0);
+        assert!(slot.y + slot.height <= TAB_STRIP_HEIGHT);
+        let tab = tab_width(400.0, 228.0);
+        assert!(TAB_X + tab <= slot.x - 8.0 + 0.01);
+        assert!(tab >= MIN_TAB_WIDTH);
+        // Nothing below the strip moves: the toolbar keeps its rows.
+        assert_eq!(CHROME_HEIGHT, TAB_STRIP_HEIGHT + TOOLBAR_HEIGHT);
     }
 
     #[test]

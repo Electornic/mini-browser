@@ -38,7 +38,7 @@ pub type WakeSlot = Arc<OnceLock<Arc<dyn Fn() + Send + Sync>>>;
 
 pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
     let (width, height) = (
-        options.agent.viewport_width + overlay::PANEL_WIDTH,
+        overlay::window_width_for(options.agent.viewport_width),
         options.agent.viewport_height + CHROME_HEIGHT as usize,
     );
     let mut worker = Worker::new(options);
@@ -57,6 +57,9 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
     let mut sites: Option<Sites> = None;
     // Appearance (⋮ menu, `--theme`): System follows the OS each frame.
     let mut theme = worker.options().theme;
+    // Narrow window: the sheet, and where the panel was painted.
+    let mut sheet = SheetState::default();
+    let mut owned: Vec<Rect> = Vec::new();
     // The parked-call deadline a wake-up is already scheduled for.
     let mut wake_scheduled: Option<std::time::Instant> = None;
     // The next REC-clock second a wake-up is scheduled for.
@@ -177,6 +180,11 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
             if routed.click == MenuClick::Escape {
                 page_input.escape_pressed = false;
             }
+            // Escape folds an open sheet (when nothing above it took it).
+            if sheet.open && page_input.escape_pressed && !modal {
+                sheet.open = false;
+                page_input.escape_pressed = false;
+            }
             if consumed {
                 page_input.left_mouse_pressed = false;
                 page_input.left_mouse_held = false;
@@ -185,15 +193,13 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
                 page_input.mouse_position = None;
                 page_input.left_mouse_held = false;
             }
-            if let Some((x, y)) = input.mouse_position
-                && x >= page_width as f32
-                && !consumed
-            {
-                if input.left_mouse_pressed
-                    && let Some(button) = buttons.iter().find(|b| b.contains(x, y))
-                {
-                    match button.action {
+            if !consumed && let Some(click) = route_panel_input(&owned, &buttons, input) {
+                if let Some(action) = click {
+                    match action {
                         overlay::PanelAction::Answer(answer) => worker.answer(answer),
+                        overlay::PanelAction::Window(overlay::WindowAction::ToggleSheet) => {
+                            sheet.open = !sheet.open;
+                        }
                         overlay::PanelAction::Replay(_) | overlay::PanelAction::Window(_) => {}
                         overlay::PanelAction::Control(control) => {
                             apply(&mut worker, control);
@@ -208,6 +214,7 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
                 page_input.mouse_position = None;
                 page_input.left_mouse_pressed = false;
                 page_input.left_mouse_held = false;
+                page_input.scroll_y = 0.0;
             }
 
             // 2. Agent jobs. Each runs to completion (action + settle), or
@@ -242,12 +249,14 @@ pub fn run(options: Options, jobs: Receiver<Job>, wake_slot: WakeSlot) {
                     record_failed,
                     theme,
                     hover: input.mouse_position,
+                    sheet: &mut sheet,
                     viewer: viewer.as_mut(),
                     sites: sites.as_mut(),
                 },
             );
             buttons = composed.buttons;
             menu = composed.menu;
+            owned = composed.owned;
             let commands = composed.commands;
             frame.present(&commands);
             // A pending `wait_for` is checked after every frame, so keep
@@ -359,6 +368,28 @@ fn route_menu_input(
         MenuClick::None
     };
     RoutedInput { click, over_menu }
+}
+
+// Input over the panel (wide: the side panel; narrow: the bar and the
+// open sheet, `owned` as painted last frame) is the panel's: `None` = not
+// over it (the page gets it), `Some(click)` = over it, with the button
+// clicked if any. The page then gets neither the click nor the hover nor
+// the wheel.
+fn route_panel_input(
+    owned: &[Rect],
+    buttons: &[overlay::Button],
+    input: &WindowInput,
+) -> Option<Option<overlay::PanelAction>> {
+    let (x, y) = input.mouse_position?;
+    if !owned.iter().any(|r| contains(r, (x, y))) {
+        return None;
+    }
+    Some(
+        input
+            .left_mouse_pressed
+            .then(|| buttons.iter().find(|b| b.contains(x, y)).map(|b| b.action))
+            .flatten(),
+    )
 }
 
 fn contains(rect: &Rect, (x, y): (f32, f32)) -> bool {
@@ -586,6 +617,15 @@ fn route_viewer_input(painted: Option<&ViewerPainted>, input: &WindowInput) -> V
     ViewerInput { click, scroll }
 }
 
+/// The narrow window's sheet (board 10).
+#[derive(Default)]
+struct SheetState {
+    open: bool,
+    /// Something needed the person last frame (to open on a new question
+    /// once, not every frame).
+    asked: bool,
+}
+
 /// Window state that isn't the worker's: what the overlay needs.
 struct View<'a> {
     copied: bool,
@@ -593,6 +633,7 @@ struct View<'a> {
     record_failed: bool,
     theme: overlay::ThemeChoice,
     hover: Option<(f32, f32)>,
+    sheet: &'a mut SheetState,
     viewer: Option<&'a mut Viewer>,
     sites: Option<&'a mut Sites>,
 }
@@ -603,6 +644,9 @@ struct Composed {
     buttons: Vec<overlay::Button>,
     /// The open ⋮ menu's items and bounds.
     menu: Option<(Vec<overlay::Button>, Rect)>,
+    /// Where the panel is (wide: the side panel; narrow: the bar and the
+    /// open sheet) — input there never reaches the page.
+    owned: Vec<Rect>,
 }
 
 /// One observation-window frame: the page for `input` (human input), the
@@ -619,6 +663,9 @@ fn compose(
     worker.browser().set_viewport(page_width, page_height);
     // The chrome of an agent window (board 2): a pill saying who drives,
     // the agent dot on the tab, ⋮ pressed while its menu is open.
+    // Narrow (board 10): no pills in the toolbar — the agent bar in the
+    // tab strip says the same — so the address field keeps its width.
+    let narrow = panel_width == 0;
     let pill = agent_pill(worker);
     let recording = worker.recording();
     let mut pills = vec![pill];
@@ -627,10 +674,22 @@ fn compose(
             recording.since.elapsed().as_secs(),
         ));
     }
+    if narrow {
+        pills.clear();
+    }
     worker.browser().state_mut().chrome_extras = ChromeExtras {
-        accessory_width: overlay::pills_width(&pills),
+        accessory_width: if narrow {
+            0.0
+        } else {
+            overlay::pills_width(&pills)
+        },
         tab_marker: (pill != overlay::Pill::NoAgent).then_some(palette::agent()),
         menu_open: view.menu_open,
+        strip_reserved: if narrow {
+            overlay::bar_reserved(page_width as f32)
+        } else {
+            0.0
+        },
     };
     let mut commands = worker.browser().human_frame(input);
     commands.extend(overlay::pills(&pills, page_width as f32));
@@ -657,40 +716,73 @@ fn compose(
         &elements, target, note, scroll_y, page, &ink,
     ));
     let mut buttons = Vec::new();
-    if panel_width > 0 {
+    let mut owned = Vec::new();
+    {
         let agent = &worker.options().agent;
-        let (panel_commands, panel_buttons) = overlay::panel(
-            &overlay::PanelInfo {
-                approve: agent.approve,
-                paused: worker.paused().then(|| worker.held_call()),
-                allow_origins: &agent.allow_origins,
-                timeline: worker.timeline(),
-                waiting: worker.waiting(),
-                waited: worker
-                    .waiting_since()
-                    .map_or(Duration::ZERO, |since| since.elapsed()),
-                page_wait: worker.page_wait().map(|(condition, left)| {
-                    let what = match condition {
-                        mb_agent::WaitCondition::Text(text) => format!("\"{text}\""),
-                        mb_agent::WaitCondition::Element(id) => format!("e{}", id.raw()),
-                    };
-                    (what, left, worker.page_wait_total().unwrap_or(left))
-                }),
-                attach: worker.options().attach.as_ref(),
-                copied: view.copied,
-                recording: recording.as_ref().map(|r| overlay::RecordingCard {
-                    file: r.file.as_ref().unwrap_or(&r.dir).display().to_string(),
-                    created: r.file.is_some(),
-                    steps: r.steps,
-                }),
-                refusal: worker.refusal(),
-            },
-            page_width as f32,
-            panel_width as f32,
-            window_height as f32,
-        );
-        commands.extend(panel_commands);
-        buttons = panel_buttons;
+        let info = overlay::PanelInfo {
+            approve: agent.approve,
+            paused: worker.paused().then(|| worker.held_call()),
+            allow_origins: &agent.allow_origins,
+            timeline: worker.timeline(),
+            waiting: worker.waiting(),
+            waited: worker
+                .waiting_since()
+                .map_or(Duration::ZERO, |since| since.elapsed()),
+            page_wait: worker.page_wait().map(|(condition, left)| {
+                let what = match condition {
+                    mb_agent::WaitCondition::Text(text) => format!("\"{text}\""),
+                    mb_agent::WaitCondition::Element(id) => format!("e{}", id.raw()),
+                };
+                (what, left, worker.page_wait_total().unwrap_or(left))
+            }),
+            attach: worker.options().attach.as_ref(),
+            copied: view.copied,
+            recording: recording.as_ref().map(|r| overlay::RecordingCard {
+                file: r.file.as_ref().unwrap_or(&r.dir).display().to_string(),
+                created: r.file.is_some(),
+                steps: r.steps,
+            }),
+            refusal: worker.refusal(),
+        };
+        if narrow {
+            // A question (or the pause) opens the sheet by itself, once;
+            // folding it keeps it folded until the next one.
+            let asking = overlay::needs_person(&info);
+            if asking && !view.sheet.asked {
+                view.sheet.open = true;
+            }
+            view.sheet.asked = asking;
+            let bar = overlay::agent_bar(
+                &info,
+                recording.as_ref().map(|r| r.since.elapsed()),
+                view.sheet.open,
+                page_width as f32,
+            );
+            commands.extend(bar.commands);
+            owned.push(bar.button.rect);
+            buttons.push(bar.button);
+            if view.sheet.open {
+                let sheet = overlay::sheet(&info, page_width as f32, window_height as f32);
+                commands.extend(sheet.commands);
+                owned.push(sheet.rect);
+                buttons.extend(sheet.buttons);
+            }
+        } else {
+            let (panel_commands, panel_buttons) = overlay::panel(
+                &info,
+                page_width as f32,
+                panel_width as f32,
+                window_height as f32,
+            );
+            commands.extend(panel_commands);
+            buttons = panel_buttons;
+            owned.push(Rect {
+                x: page_width as f32,
+                y: 0.0,
+                width: panel_width as f32,
+                height: window_height as f32,
+            });
+        }
     }
     let mut menu = None;
     if view.menu_open {
@@ -736,6 +828,7 @@ fn compose(
         commands,
         buttons,
         menu,
+        owned,
     }
 }
 
@@ -831,12 +924,13 @@ fn copy_to_clipboard(text: &str) -> bool {
 /// (after `--start-url` and any `--preview-click ID`s) to a PNG, without
 /// opening a window. For checking the overlay and for docs.
 pub fn preview(options: Options, path: &std::path::Path, clicks: &[String]) -> Result<(), String> {
-    let width = options.agent.viewport_width + overlay::PANEL_WIDTH;
+    let width = overlay::window_width_for(options.agent.viewport_width);
     let height = options.agent.viewport_height + CHROME_HEIGHT as usize;
     let scale = options.preview_scale;
     let (pause, menu_open) = (options.preview_pause, options.preview_menu);
     let answer = options.preview_answer;
     let site_adds = options.preview_sites.clone();
+    let mut sheet_state = SheetState::default();
     // No window to ask: System previews as light, `--theme dark` as dark.
     let theme = options.theme;
     palette::set_theme(theme.resolve(None));
@@ -904,6 +998,7 @@ pub fn preview(options: Options, path: &std::path::Path, clicks: &[String]) -> R
         record_failed: false,
         theme,
         hover: None,
+        sheet: &mut sheet_state,
         viewer: viewer.as_mut(),
         sites: sites.as_mut(),
     };
@@ -1238,6 +1333,100 @@ mod tests {
             menu.0.iter().any(|b| b.action
                 == overlay::PanelAction::Window(overlay::WindowAction::ShowAllowedSites))
         );
+    }
+
+    #[test]
+    fn a_narrow_window_folds_the_panel_without_moving_the_agents_page() {
+        let base = crate::worker::tests::serve_page();
+        let (mut worker, _, link) =
+            crate::worker::tests::worker_on(&base, mb_agent::ApproveMode::Ask);
+        let (width, height) = (480, 816);
+        let mut sheet = SheetState::default();
+        let frame = |worker: &mut Worker, sheet: &mut SheetState| {
+            compose(
+                worker,
+                &WindowInput::default(),
+                width,
+                height,
+                &mut View {
+                    copied: false,
+                    menu_open: false,
+                    record_failed: false,
+                    theme: overlay::ThemeChoice::Light,
+                    hover: None,
+                    sheet,
+                    viewer: None,
+                    sites: None,
+                },
+            )
+        };
+        let idle = frame(&mut worker, &mut sheet);
+        // The page is the whole width, right under the unchanged chrome:
+        // the agent's viewport and coordinates are those of a page of
+        // that size (the bar lives in the tab strip, not over the page).
+        let boxes_before = worker.browser().element_boxes();
+        assert_eq!(
+            worker.options().agent.viewport_width,
+            800,
+            "--viewport is untouched"
+        );
+        let bar = idle.owned[0];
+        assert!(bar.y + bar.height <= mb_runtime::chrome::TAB_STRIP_HEIGHT);
+        assert!(!sheet.open, "nothing to ask yet");
+        assert_eq!(idle.owned.len(), 1);
+
+        // A question opens the sheet by itself, from the bottom.
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        worker.submit(crate::worker::Job {
+            request: crate::worker::Request::Click { id: link },
+            reply,
+        });
+        let asking = frame(&mut worker, &mut sheet);
+        assert!(sheet.open);
+        let sheet_rect = asking.owned[1];
+        assert_eq!(sheet_rect.y + sheet_rect.height, height as f32);
+        assert!(sheet_rect.y > CHROME_HEIGHT);
+        assert_eq!(worker.browser().element_boxes(), boxes_before);
+        // Approve is in the sheet, and a click on it is the panel's.
+        let approve = asking
+            .buttons
+            .iter()
+            .find(|b| b.action == overlay::PanelAction::Answer(crate::worker::Answer::Approve))
+            .unwrap();
+        assert!(contains(
+            &sheet_rect,
+            (approve.rect.x + 2.0, approve.rect.y + 2.0)
+        ));
+        let click = click_at(approve.rect.x + 2.0, approve.rect.y + 2.0);
+        assert_eq!(
+            route_panel_input(&asking.owned, &asking.buttons, &click),
+            Some(Some(overlay::PanelAction::Answer(
+                crate::worker::Answer::Approve
+            )))
+        );
+        // Over the sheet but not on a button: still not the page's.
+        let blank = click_at(2.0, sheet_rect.y + sheet_rect.height - 2.0);
+        assert_eq!(
+            route_panel_input(&asking.owned, &asking.buttons, &blank),
+            Some(None)
+        );
+        // Above the sheet: the page's.
+        assert_eq!(
+            route_panel_input(&asking.owned, &asking.buttons, &click_at(40.0, 200.0)),
+            None
+        );
+        // The bar folds it; it stays folded while the same question waits.
+        let on_bar = click_at(bar.x + 4.0, bar.y + 4.0);
+        assert_eq!(
+            route_panel_input(&asking.owned, &asking.buttons, &on_bar),
+            Some(Some(overlay::PanelAction::Window(
+                overlay::WindowAction::ToggleSheet
+            )))
+        );
+        sheet.open = false;
+        let folded = frame(&mut worker, &mut sheet);
+        assert!(!sheet.open);
+        assert_eq!(folded.owned.len(), 1);
     }
 
     #[test]

@@ -27,10 +27,11 @@ use mb_runtime::render::{CornerRadii, DisplayCommand, TextCommand};
 use crate::http::Attach;
 use crate::worker::{Answer, Refusal, TimelineEntry, Waiting};
 
-/// Width of the agent panel on the right. Below `MIN_WINDOW_FOR_PANEL` the
-/// panel is dropped so the page keeps a usable width.
+/// Width of the agent panel on the right. Below `NARROW_BELOW` the panel
+/// would squeeze the page (board 10): it folds into the agent bar in the
+/// tab strip, and opens as a sheet from the bottom.
 pub const PANEL_WIDTH: usize = 340;
-const MIN_WINDOW_FOR_PANEL: usize = PANEL_WIDTH + 400;
+pub const NARROW_BELOW: usize = 900;
 
 const PANEL_PAD: f32 = 20.0;
 const CARD_PAD: f32 = 16.0;
@@ -40,12 +41,25 @@ const SMALL: f32 = 12.0;
 const BUTTON_HEIGHT: f32 = 44.0;
 const ROW: f32 = 24.0;
 
-/// Split a window width into (page width, panel width).
+/// Split a window width into (page width, panel width). Panel width 0 =
+/// the narrow layout (bar + sheet).
 pub fn layout(window_width: usize) -> (usize, usize) {
-    if window_width >= MIN_WINDOW_FOR_PANEL {
+    if window_width >= NARROW_BELOW {
         (window_width - PANEL_WIDTH, PANEL_WIDTH)
     } else {
         (window_width, 0)
+    }
+}
+
+/// The window width that gives the page `viewport_width` (`--viewport`):
+/// the page plus the panel, unless that is still narrow — then the panel
+/// isn't there and the page is the whole width.
+pub fn window_width_for(viewport_width: usize) -> usize {
+    let wide = viewport_width + PANEL_WIDTH;
+    if wide >= NARROW_BELOW {
+        wide
+    } else {
+        viewport_width
     }
 }
 
@@ -1062,6 +1076,9 @@ pub enum WindowAction {
     CloseAllowedSites,
     /// The ⋮ menu's Appearance segment.
     Theme(ThemeChoice),
+    /// The narrow window's agent bar (or the sheet's handle): open / fold
+    /// the sheet.
+    ToggleSheet,
 }
 
 /// The observation window's appearance (board 10): follow the OS, or pin
@@ -2104,52 +2121,27 @@ pub fn panel(
     );
     y += 10.0;
 
-    if let Some(held) = &info.paused {
-        y = paused_card(&mut commands, &mut buttons, held.as_deref(), left, inner, y) + 14.0;
-    }
-    match info.waiting {
-        Some(Waiting::TakenOver { action }) => {
-            y = turn_card(&mut commands, &mut buttons, action, left, inner, y) + 14.0;
-        }
-        Some(waiting) => {
-            y = question_card(
-                &mut commands,
-                &mut buttons,
-                waiting,
-                info.waited,
-                left,
-                inner,
-                y,
-            ) + 14.0;
-        }
-        None => {}
-    }
-    if let Some(refusal) = info.refusal {
-        y = refusal_card(&mut commands, &mut buttons, refusal, left, inner, y) + 14.0;
-    }
-    if let Some(wait) = &info.page_wait {
-        y = wait_card(&mut commands, wait, left, inner, y) + 14.0;
-    }
-    if let Some(recording) = &info.recording {
-        y = recording_card(&mut commands, &mut buttons, recording, left, inner, y) + 14.0;
-    }
-    if let Some(attach) = info.attach {
-        y = attach_card(
-            &mut commands,
-            &mut buttons,
-            attach,
-            info.copied,
-            left,
-            inner,
-            y,
-        ) + 14.0;
-    }
+    y = panel_cards(&mut commands, &mut buttons, info, left, inner, y);
 
+    let rows = ((height - (y + line_height(BODY) + 4.0) - PANEL_PAD) / ROW).max(0.0) as usize;
+    panel_timeline(&mut commands, info, left, inner, y, rows);
+    (commands, buttons)
+}
+
+// "Agent actions": the newest `rows` entries of the timeline (the
+// running wait_for last). Returns the y below it.
+fn panel_timeline(
+    commands: &mut Vec<DisplayCommand>,
+    info: &PanelInfo<'_>,
+    left: f32,
+    inner: f32,
+    mut y: f32,
+    rows: usize,
+) -> f32 {
     commands.push(text("Agent actions", left, y, BODY, p::muted(), true));
     y += line_height(BODY) + 4.0;
     // Newest at the bottom, as many as fit; the running wait_for last.
     let running = info.page_wait.is_some() as usize;
-    let rows = ((height - y - PANEL_PAD) / ROW).max(0.0) as usize;
     if info.timeline.is_empty() && running == 0 {
         commands.push(text(
             "(waiting for the agent)",
@@ -2172,13 +2164,13 @@ pub fn panel(
                 format!("{} · {code}", entry.label),
             ),
         };
-        timeline_row(&mut commands, left, y, inner, icon, &label, false);
+        timeline_row(commands, left, y, inner, icon, &label, false);
         y += ROW;
     }
     if running == 1 {
         let icon = ring_icon(left, y + 2.0, 14.0, 10.0, p::agent(), Some(p::panel()));
         timeline_row(
-            &mut commands,
+            commands,
             left,
             y,
             inner,
@@ -2187,7 +2179,288 @@ pub fn panel(
             true,
         );
     }
-    (commands, buttons)
+    y
+}
+
+// The cards, in their order (docs/concept.md "패널·카드"): paused, the
+// question (approval / password / your turn), the refusal receipt,
+// wait_for, recording, HTTP attach. Shared by the side panel and the
+// narrow window's sheet. Returns the y below the last card.
+fn panel_cards(
+    commands: &mut Vec<DisplayCommand>,
+    buttons: &mut Vec<Button>,
+    info: &PanelInfo<'_>,
+    left: f32,
+    inner: f32,
+    mut y: f32,
+) -> f32 {
+    if let Some(held) = &info.paused {
+        y = paused_card(commands, buttons, held.as_deref(), left, inner, y) + 14.0;
+    }
+    match info.waiting {
+        Some(Waiting::TakenOver { action }) => {
+            y = turn_card(commands, buttons, action, left, inner, y) + 14.0;
+        }
+        Some(waiting) => {
+            y = question_card(commands, buttons, waiting, info.waited, left, inner, y) + 14.0;
+        }
+        None => {}
+    }
+    if let Some(refusal) = info.refusal {
+        y = refusal_card(commands, buttons, refusal, left, inner, y) + 14.0;
+    }
+    if let Some(wait) = &info.page_wait {
+        y = wait_card(commands, wait, left, inner, y) + 14.0;
+    }
+    if let Some(recording) = &info.recording {
+        y = recording_card(commands, buttons, recording, left, inner, y) + 14.0;
+    }
+    if let Some(attach) = info.attach {
+        y = attach_card(commands, buttons, attach, info.copied, left, inner, y) + 14.0;
+    }
+    y
+}
+
+// ------------------------------------------- narrow window: bar + sheet ---
+
+/// The tab keeps at least this much of the strip beside the bar.
+const NARROW_TAB: f32 = 120.0;
+const BAR_MAX: f32 = 420.0;
+const SHEET_PAD: f32 = 16.0;
+const SHEET_HANDLE: f32 = 22.0;
+/// The sheet never covers more of the page area than this.
+const SHEET_MAX: f32 = 0.85;
+const SHEET_ROWS: usize = 4;
+
+/// Width the narrow window reserves in the tab strip for the agent bar
+/// (`ChromeExtras::strip_reserved`).
+pub fn bar_reserved(page_width: f32) -> f32 {
+    (page_width - 12.0 - mb_runtime::chrome::TAB_X - 8.0 - NARROW_TAB).clamp(0.0, BAR_MAX)
+}
+
+/// Whether something on the panel needs the person (a question card or the
+/// pause): the bar turns orange and the sheet opens by itself.
+pub fn needs_person(info: &PanelInfo<'_>) -> bool {
+    info.waiting.is_some() || info.paused.is_some()
+}
+
+/// The agent bar: the side panel folded into one line (board 10).
+pub struct AgentBar {
+    pub commands: Vec<DisplayCommand>,
+    pub button: Button,
+}
+
+// What the bar says: (tone, bold part, the rest).
+fn bar_text(
+    info: &PanelInfo<'_>,
+    recording: Option<Duration>,
+) -> (Color, Color, Color, String, String) {
+    let person = (p::person_tint(), p::person_border(), p::person());
+    let agent = (p::agent_tint(), p::agent_border(), p::agent());
+    let idle = (p::panel(), p::line(), p::faint());
+    let ((fill, border, dot), bold, mut rest) = if info.paused.is_some() {
+        (
+            person,
+            "Paused".to_string(),
+            "you have the wheel".to_string(),
+        )
+    } else {
+        match info.waiting {
+            Some(Waiting::Approval { .. }) => (person, "Needs you".into(), "1 approval".into()),
+            Some(Waiting::Handoff { .. }) => (person, "Needs you".into(), "a password".into()),
+            Some(Waiting::TakenOver { .. }) => {
+                (person, "Your turn".into(), "hand back when done".into())
+            }
+            None if info.no_agent_yet() => (idle, "No agent attached".into(), String::new()),
+            None => {
+                let n = info.timeline.len();
+                let mut rest = format!(
+                    "{} · {n} action{}",
+                    mode_word(info.approve),
+                    if n == 1 { "" } else { "s" }
+                );
+                if info.page_wait.is_some() {
+                    rest.push_str(" · waiting");
+                }
+                (agent, "Agent".into(), rest)
+            }
+        }
+    };
+    if let Some(elapsed) = recording {
+        if !rest.is_empty() {
+            rest.push_str(" · ");
+        }
+        rest.push_str(&format!("REC {}", clock(elapsed)));
+    }
+    (fill, border, dot, bold, rest)
+}
+
+/// The bar in the tab strip slot (`chrome::strip_slot_rect`): a dot, who
+/// needs what, a chevron. Clicking it opens or folds the sheet.
+pub fn agent_bar(
+    info: &PanelInfo<'_>,
+    recording: Option<Duration>,
+    open: bool,
+    page_width: f32,
+) -> AgentBar {
+    let rect = mb_runtime::chrome::strip_slot_rect(page_width, bar_reserved(page_width));
+    let (fill, border, dot, bold, rest) = bar_text(info, recording);
+    let mut commands = framed_rect(rect, 10.0, border, fill).to_vec();
+    commands.extend(ring_icon(
+        rect.x + 10.0,
+        rect.y + (rect.height - 8.0) / 2.0,
+        8.0,
+        8.0,
+        dot,
+        None,
+    ));
+    let text_x = rect.x + 26.0;
+    let room = (rect.x + rect.width - 30.0 - text_x).max(0.0);
+    let y = centered_text_y(rect.y, rect.height, BODY);
+    let bold_width = text_width(&bold, BODY, false, 700);
+    let per_char = text_width("abcdefghij", BODY, false, 400) / 10.0;
+    if bold_width <= room {
+        commands.push(text(bold, text_x, y, BODY, p::ink(), true));
+        let rest_room = room - bold_width;
+        if !rest.is_empty() && rest_room > 30.0 {
+            let rest = clip(&format!(" · {rest}"), (rest_room / per_char) as usize);
+            commands.push(text(rest, text_x + bold_width, y, BODY, p::ink(), false));
+        }
+    } else {
+        commands.push(text(
+            clip(&bold, (room / per_char) as usize),
+            text_x,
+            y,
+            BODY,
+            p::ink(),
+            true,
+        ));
+    }
+    // Chevron: down = the sheet opens, up = it folds.
+    let (cx, cy) = (rect.x + rect.width - 22.0, rect.y + rect.height / 2.0 - 3.0);
+    let points: &[(f32, f32)] = if open {
+        &[(1.0, 5.0), (5.0, 1.0), (9.0, 5.0)]
+    } else {
+        &[(1.0, 1.0), (5.0, 5.0), (9.0, 1.0)]
+    };
+    commands.extend(stroke(points, cx, cy, 1.5, p::ink()));
+    AgentBar {
+        commands,
+        button: Button {
+            rect,
+            action: PanelAction::Window(WindowAction::ToggleSheet),
+        },
+    }
+}
+
+/// The narrow window's sheet: the panel's cards and the newest actions,
+/// rising from the bottom of the window over the page.
+pub struct Sheet {
+    pub commands: Vec<DisplayCommand>,
+    pub buttons: Vec<Button>,
+    pub rect: Rect,
+}
+
+/// The sheet for a `width` × `window_height` window (board 10: "a question
+/// for the person opens as a sheet from the bottom"). Its height is its
+/// content, at most `SHEET_MAX` of the page area; the cards come first so a
+/// question is never the part cut off.
+pub fn sheet(info: &PanelInfo<'_>, width: f32, window_height: f32) -> Sheet {
+    let max_height = ((window_height - CHROME_HEIGHT) * SHEET_MAX).max(SHEET_HANDLE + 40.0);
+    let left = SHEET_PAD;
+    let inner = (width - 2.0 * SHEET_PAD).max(0.0);
+    // Drawn at the origin, then moved up from the bottom once its height
+    // is known.
+    let mut body = Vec::new();
+    let mut buttons = Vec::new();
+    let mut y = panel_cards(
+        &mut body,
+        &mut buttons,
+        info,
+        left,
+        inner,
+        SHEET_HANDLE + 6.0,
+    );
+    let header = line_height(BODY) + 4.0;
+    let rows = ((max_height - SHEET_PAD - y - header) / ROW).clamp(0.0, SHEET_ROWS as f32) as usize;
+    if rows > 0 || info.timeline.is_empty() {
+        y = panel_timeline(&mut body, info, left, inner, y, rows.max(1));
+        // The last line (the "waiting" note, the running wait_for) isn't
+        // counted in the y it returns.
+        if info.timeline.is_empty() || info.page_wait.is_some() {
+            y += ROW;
+        }
+    }
+    let height = (y + SHEET_PAD).clamp(SHEET_HANDLE + 40.0, max_height);
+    let top = window_height - height;
+    let rect = Rect {
+        x: 0.0,
+        y: top,
+        width,
+        height,
+    };
+    let radii = |r: f32| CornerRadii {
+        tl: r,
+        tr: r,
+        br: 0.0,
+        bl: 0.0,
+    };
+    // A 2 px orange top edge while it holds a question (board 10), a
+    // frame-grey one otherwise.
+    let edge = if needs_person(info) {
+        p::person()
+    } else {
+        p::frame()
+    };
+    let mut commands = vec![
+        DisplayCommand::RoundedRect(edge, rect, radii(16.0)),
+        DisplayCommand::RoundedRect(
+            p::page(),
+            Rect {
+                x: rect.x,
+                y: rect.y + 2.0,
+                width: rect.width,
+                height: rect.height - 2.0,
+            },
+            radii(15.0),
+        ),
+        rounded(
+            p::frame(),
+            Rect {
+                x: width / 2.0 - 18.0,
+                y: top + 9.0,
+                width: 36.0,
+                height: 4.0,
+            },
+            2.0,
+        ),
+    ];
+    commands.extend(mb_runtime::render::translate(body, 0.0, top));
+    let mut buttons: Vec<Button> = buttons
+        .into_iter()
+        .map(|b| Button {
+            rect: Rect {
+                y: b.rect.y + top,
+                ..b.rect
+            },
+            ..b
+        })
+        .collect();
+    // The handle folds it (the bar does too).
+    buttons.push(Button {
+        rect: Rect {
+            x: 0.0,
+            y: top,
+            width,
+            height: SHEET_HANDLE,
+        },
+        action: PanelAction::Window(WindowAction::ToggleSheet),
+    });
+    Sheet {
+        commands,
+        buttons,
+        rect,
+    }
 }
 
 // ------------------------------------------------------ the replay panel ---
@@ -5062,5 +5335,116 @@ mod tests {
         };
         assert_eq!(label(&dark_button.0), Some(p::DARK.on_fill));
         assert_eq!(label(&dark_button.1), Some(p::DARK.page));
+    }
+
+    fn narrow_info<'a>(
+        timeline: &'a [TimelineEntry],
+        waiting: Option<&'a Waiting>,
+    ) -> PanelInfo<'a> {
+        PanelInfo {
+            approve: ApproveMode::Ask,
+            paused: None,
+            allow_origins: &[],
+            timeline,
+            waiting,
+            waited: Duration::ZERO,
+            page_wait: None,
+            attach: None,
+            copied: false,
+            refusal: None,
+            recording: None,
+        }
+    }
+
+    #[test]
+    fn below_900_px_the_panel_folds_and_the_window_is_the_page() {
+        assert_eq!(layout(900), (560, PANEL_WIDTH));
+        assert_eq!(layout(899), (899, 0));
+        assert_eq!(layout(400), (400, 0));
+        assert_eq!(window_width_for(1280), 1280 + PANEL_WIDTH);
+        assert_eq!(window_width_for(560), 900);
+        assert_eq!(window_width_for(559), 559);
+        assert_eq!(window_width_for(400), 400);
+        // The bar always leaves the tab some room, and stays in the strip.
+        for width in [320.0, 400.0, 600.0, 899.0] {
+            let reserved = bar_reserved(width);
+            let slot = mb_runtime::chrome::strip_slot_rect(width, reserved);
+            assert!(slot.x >= mb_runtime::chrome::TAB_X + NARROW_TAB, "{width}");
+            assert!(slot.y >= 0.0 && slot.y + slot.height <= mb_runtime::chrome::TAB_STRIP_HEIGHT);
+        }
+    }
+
+    #[test]
+    fn the_bar_says_who_needs_what_and_toggles_the_sheet() {
+        let timeline = vec![TimelineEntry {
+            label: "observe".into(),
+            error: None,
+        }];
+        let texts = |bar: &AgentBar| badge_texts(&bar.commands);
+        let idle = agent_bar(&narrow_info(&timeline, None), None, false, 480.0);
+        assert!(texts(&idle).contains(&"Agent".to_string()));
+        assert!(texts(&idle).iter().any(|t| t.contains("ask · 1 action")));
+        assert_eq!(
+            idle.button.action,
+            PanelAction::Window(WindowAction::ToggleSheet)
+        );
+        let waiting = Waiting::Approval {
+            action: "POST http://127.0.0.1:8765/signup".into(),
+        };
+        let asking = agent_bar(
+            &narrow_info(&timeline, Some(&waiting)),
+            Some(Duration::from_secs(61)),
+            false,
+            480.0,
+        );
+        assert!(texts(&asking).contains(&"Needs you".to_string()));
+        assert!(texts(&asking).iter().any(|t| t.contains("1 approval")));
+        // Orange: the person tint fills it.
+        assert!(asking.commands.iter().any(|c| matches!(
+            c,
+            DisplayCommand::RoundedRect(color, ..) if *color == p::person_tint()
+        )));
+    }
+
+    #[test]
+    fn the_sheet_rises_from_the_bottom_with_the_question_first() {
+        let timeline: Vec<TimelineEntry> = (0..12)
+            .map(|i| TimelineEntry {
+                label: format!("click e{i}"),
+                error: None,
+            })
+            .collect();
+        let waiting = Waiting::Approval {
+            action: "POST http://127.0.0.1:8765/signup".into(),
+        };
+        let info = narrow_info(&timeline, Some(&waiting));
+        let (width, height) = (400.0, 816.0);
+        let sheet = sheet(&info, width, height);
+        assert_eq!(sheet.rect.y + sheet.rect.height, height);
+        assert!(sheet.rect.height <= (height - CHROME_HEIGHT) * SHEET_MAX + 0.5);
+        let actions: Vec<_> = sheet.buttons.iter().map(|b| b.action).collect();
+        for answer in [Answer::Approve, Answer::Deny, Answer::TakeOver] {
+            assert!(actions.contains(&PanelAction::Answer(answer)));
+        }
+        assert!(actions.contains(&PanelAction::Window(WindowAction::ToggleSheet)));
+        for b in &sheet.buttons {
+            assert!(within(&sheet.rect, &b.rect), "{b:?}");
+        }
+        // Only the newest few actions; the question card above them.
+        let texts = badge_texts(&sheet.commands);
+        assert!(texts.contains(&"click e11".to_string()));
+        assert!(!texts.contains(&"click e0".to_string()));
+        let y_of = |label: &str| {
+            sheet.commands.iter().find_map(|c| match c {
+                DisplayCommand::Text(t) if t.text == label => Some(t.y),
+                _ => None,
+            })
+        };
+        assert!(y_of("Submit this form?").unwrap() < y_of("click e11").unwrap());
+        // An orange top edge while it holds a question.
+        assert!(matches!(
+            sheet.commands[0],
+            DisplayCommand::RoundedRect(color, ..) if color == p::person()
+        ));
     }
 }
