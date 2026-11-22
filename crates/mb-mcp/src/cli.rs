@@ -47,6 +47,9 @@ OPTIONS:
     --preview-agent-view SCOPE
                             Show the What-the-agent-sees viewer in --preview:
                             on-screen (the last result) or whole-page
+    --preview-answer ANSWER Answer the card the --preview-click raised:
+                            deny (the refusal receipt) or take-over (the
+                            Your-turn card)
     -h, --help              Print this help (to stderr)
 
 REPLAY (a log runs like a script — replay only logs you trust):
@@ -100,6 +103,8 @@ pub struct Options {
     pub preview_pause: bool,
     /// `--preview-agent-view on-screen|whole-page`: the viewer open.
     pub preview_agent_view: Option<PreviewView>,
+    /// `--preview-answer deny|take-over`: answer the card the clicks raised.
+    pub preview_answer: Option<PreviewAnswer>,
     /// `--http`: serve MCP over HTTP on this loopback port (G3b).
     pub http_port: Option<u16>,
     /// Filled in by `main` once the HTTP listener is bound.
@@ -113,6 +118,13 @@ pub struct Options {
 pub enum PreviewView {
     OnScreen,
     WholePage,
+}
+
+/// How `--preview-answer` answers the question card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewAnswer {
+    Deny,
+    TakeOver,
 }
 
 /// `mb-mcp replay FILE ...`
@@ -278,6 +290,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut preview_menu = false;
     let mut preview_pause = false;
     let mut preview_agent_view = None;
+    let mut preview_answer = None;
     let mut http = false;
     let mut port: Option<u16> = None;
     let mut args = args.into_iter().peekable();
@@ -364,6 +377,18 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
                     }
                 });
             }
+            "--preview-answer" => {
+                let raw = value("--preview-answer")?;
+                preview_answer = Some(match raw.as_str() {
+                    "deny" => PreviewAnswer::Deny,
+                    "take-over" => PreviewAnswer::TakeOver,
+                    _ => {
+                        return Err(format!(
+                            "--preview-answer expects deny or take-over, got {raw:?}"
+                        ));
+                    }
+                });
+            }
             "--preview-scale" => {
                 let raw = value("--preview-scale")?;
                 preview_scale = raw
@@ -399,6 +424,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         preview_menu,
         preview_pause,
         preview_agent_view,
+        preview_answer,
         http_port: http.then(|| port.unwrap_or(DEFAULT_PORT)),
         attach: None,
         log,

@@ -49,17 +49,17 @@
 │
 ├── crates/mb-mcp      (binary [[bin]] mb-mcp)  rmcp 3.x, tokio, hyper, image(png), base64, arboard
 │   - main             tokio 스레드 = rmcp stdio 또는 HTTP 서버, 메인 스레드 = 브라우저
-│   - cli              --viewport / --start-url / --allow-origin / --approve auto|deny|ask / --clock / --seed / --window / --http --port / --preview(-menu/-pause/-agent-view)
+│   - cli              --viewport / --start-url / --allow-origin / --approve auto|deny|ask / --clock / --seed / --window / --http --port / --preview(-menu/-pause/-agent-view/-answer)
 │   - http             --http: 127.0.0.1 바인딩, Bearer 토큰·Origin·경로 게이트 → rmcp StreamableHttpService
 │   - prompts          서버 instructions + tool 설명 (LLM 이 읽는 텍스트, 영어)
-│   - worker           Job 처리, repeat_count, 패닉 시 재생성, 창 모드의 park(승인·넘겨받기 대기)/answer, 일시정지 보관(held)·재개, 런타임 승인 모드, 기록 켜기/끄기, 마지막 받은 관찰(seen)
+│   - worker           Job 처리, repeat_count, 패닉 시 재생성, 창 모드의 park(승인·넘겨받기·"Your turn" 대기)/answer(넘겨주기 hand back), 거절 영수증·잊기, 일시정지 보관(held)·재개, 런타임 승인 모드, 기록 켜기/끄기, 마지막 받은 관찰(seen)
 │   - server           #[tool_router] tool 10개 → worker::Request, 결과 → CallToolResult
 │   - window_mode      --window: 메인 스레드 winit 루프 + 프레임마다 Job 처리, ⋮ 메뉴·"What the agent sees" 뷰어(모달) 입력 라우팅, --preview PNG
 │   - session_log      --log: 세션 로그(JSONL) 기록 형식 — target·결과 요소 목록·redact (⋮ 메뉴 Record 도 같은 코드, 기본 폴더 mb-runs/)
 │   - replay           mb-mcp replay FILE: Replayer(한 단계씩) — worker::execute 로 결정적 재생 + 회귀 지점 diff
 │   - replay_window    replay --window: 단계별 재생 뷰 (Next/Back/Run all/Restart), --preview PNG
 │   - eval             mb-mcp eval SCENARIO LOGS: 시나리오 판정 + 성공률·에러·실패 지점·안전 위반 집계 (에이전트는 안 돌림)
-│   - overlay          ID 배지·대상 테두리·크롬 알약(Pill, REC)·에이전트 패널·카드·⋮ 메뉴·관찰 뷰어(agent_view)·재생 패널 (DisplayCommand 순수 함수, palette 색)
+│   - overlay          ID 배지·대상 테두리·크롬 알약(Pill, REC)·에이전트 패널·카드(승인·Your turn·거절 영수증 등)·⋮ 메뉴·관찰 뷰어(agent_view)·재생 패널 (DisplayCommand 순수 함수, palette 색)
 │
 └── crates/mb-shell    (lib + [[bin]] mb-shell)  anyhow, softbuffer, winit
     - lib.rs           pub mod window — mb-mcp --window 도 같은 창 코드를 씀
@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 768 (workspace 합계, 2026-11-22 메뉴 새 기능 1차 — What the agent sees·기록 토글 +12). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 775 (workspace 합계, 2026-11-22 승인 흐름 — 넘겨주기·거절 영수증 +7). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -223,7 +223,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - **네비게이션 fetch 는 리다이렉트를 직접 따라간다**: 문서 로드는 `navigation::load_remote_document_guarded`(내부적으로 `net::fetch_without_redirects`)를 쓰고 hop 마다 게이트를 묻는다. 네비게이션에 자동 리다이렉트 fetch(`net::fetch` / `fetch_with_request`)를 쓰면 게이트가 첫 URL 만 보게 된다. (서브리소스 — CSS/이미지/스크립트 — 는 이동이 아니라 해당 없음.)
 - **이동은 반드시 정책 게이트를 지난다**: 새 이동 경로(`location.href =`, `window.open`, meta refresh 등)를 추가할 때 `navigate` / `navigate_to_href` / `try_submit_form` 과 같은 `policy::check` 를 통과시킨다. 우회 경로를 만들지 말 것.
 - **에이전트 전용 DOM 조작 API 금지**: 에이전트 행동은 합성 `WindowInput` 으로만. 편의를 위해 DOM 을 직접 바꾸는 단축로를 만들지 않는다.
-- **사람의 조종은 MCP 로 열지 않는다**: 일시정지·재개·승인 모드 변경·기록 켜기/끄기(`overlay::Control` → `Worker::{pause, resume, set_approve_mode, start_recording, stop_recording}`)는 창 입력 전용. `worker::Request`·MCP tool 에 대응하는 경로를 만들지 말 것 — 에이전트가 스스로 멈춤을 풀거나 승인을 Allow 로 바꾸거나 자기 기록을 끌 수 있게 된다.
+- **사람의 조종은 MCP 로 열지 않는다**: 일시정지·재개·승인 모드 변경·기록 켜기/끄기·거절 잊기(`overlay::Control` → `Worker::{pause, resume, set_approve_mode, start_recording, stop_recording, forget_refusal}`)와 카드 답(`Worker::answer` — Approve·Deny·넘겨받기·hand back)은 창 입력 전용. `worker::Request`·MCP tool 에 대응하는 경로를 만들지 말 것 — 에이전트가 스스로 멈춤을 풀거나 승인을 Allow 로 바꾸거나 자기 기록을 끄거나 사람의 거절을 지울 수 있게 된다.
 - **사람이 들여다보는 것은 에이전트의 세계를 바꾸지 않는다**: "What the agent sees" 의 Whole page 같은 창 전용 관찰은 `AgentBrowser::full_snapshot`(ID 발급·console/dialog 소비·`changed_by_person` 기준점 이동 없음)만 쓴다. `observe` 를 부르면 에이전트가 안 본 ID 가 유효해진다.
 - **`WindowInput::from_agent` 는 mb-agent 만 켠다**: 셸(사람 입력)은 항상 false. 정책 게이트는 이 플래그로 판정 대상을 가른다.
 - **trusted 블록의 `note:` 는 브라우저만 쓴다**: `Observation::notes` 에는 우리가 만든 문장만. 페이지 문자열(이름·텍스트·URL 일부라도)을 넣으면 위조 방지가 깨진다.

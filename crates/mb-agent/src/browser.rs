@@ -14,7 +14,7 @@ use mb_runtime::js::{FixedClock, JsOptions};
 use mb_runtime::layout::Rect;
 use mb_runtime::net::Url;
 use mb_runtime::render::rasterize;
-use mb_runtime::state::policy::{AgentPolicy, ApproveMode, GatedKind, PolicyDecision};
+use mb_runtime::state::policy::{AgentPolicy, ApproveMode, GatedAction, GatedKind, PolicyDecision};
 use mb_runtime::state::{BrowserState, install_fonts};
 
 use crate::error::AgentError;
@@ -92,9 +92,24 @@ pub struct AgentBrowser {
     pending_approval: Option<PendingApproval>,
     // (document generation, url) of the last observation handed out.
     last_reported: Option<(u64, Option<String>)>,
-    // A password handoff in progress: the page before the person typed,
-    // its document generation, and the field handed over.
-    handoff_before: Option<(Observation, u64, NodeId)>,
+    // A step handed to the person (window mode): a password field, or an
+    // action they chose to do themselves. Holds the page when they got it.
+    person_turn: Option<PersonTurn>,
+}
+
+/// The page when a step was handed to the person, so the agent's result
+/// can say what they changed.
+struct PersonTurn {
+    before: Observation,
+    generation_before: u64,
+    kind: TurnKind,
+}
+
+enum TurnKind {
+    /// "Type the password yourself": this field.
+    Password(NodeId),
+    /// "I'll do it myself" on an approval card.
+    TakeOver,
 }
 
 /// An agent action held for approval, with what's needed to report its
@@ -204,7 +219,7 @@ impl AgentBrowser {
             last_target: None,
             pending_approval: None,
             last_reported: None,
-            handoff_before: None,
+            person_turn: None,
         };
         browser.settle();
         browser
@@ -793,25 +808,87 @@ impl AgentBrowser {
     /// A password handoff begins (window mode): remember the page so the
     /// result can say what the person changed.
     pub fn begin_handoff(&mut self, field: NodeId) {
-        let before = self.full_snapshot();
-        self.handoff_before = Some((before, self.state.document_generation(), field));
+        self.begin_turn(TurnKind::Password(field));
+    }
+
+    fn begin_turn(&mut self, kind: TurnKind) {
+        self.person_turn = Some(PersonTurn {
+            before: self.full_snapshot(),
+            generation_before: self.state.document_generation(),
+            kind,
+        });
+    }
+
+    // The observation when the person ends their turn: settled, with the
+    // `changed:` summary since it began (values stay hidden), and the
+    // person-moved note if they loaded a new document. `None` if no turn.
+    fn end_turn(&mut self) -> Option<(Observation, TurnKind, bool)> {
+        let moved = self.changed_by_person();
+        let turn = self.person_turn.take()?;
+        self.settle();
+        let after = self.full_snapshot();
+        let new_document = self.state.document_generation() != turn.generation_before;
+        let mut observation = self.report(&ObserveOptions::default(), moved && new_document);
+        observation.changed = Some(Changes::between(&turn.before, &after, new_document));
+        Some((observation, turn.kind, new_document))
+    }
+
+    /// The person chose "I'll do it myself" on the approval card (window
+    /// mode). The held action is dropped — it never runs as the agent's —
+    /// and recorded as the person's refusal (the caller forgets it again
+    /// if they hand the step back done). Nothing is reported to the agent
+    /// yet: `finish_take_over` does that, with what the person changed
+    /// from here on. Returns the action, for the refusal memory.
+    pub fn take_over(&mut self) -> Result<GatedAction, AgentError> {
+        if self.pending_approval.take().is_none() {
+            return Err(AgentError::NothingPending);
+        }
+        let action = self.state.held_action().cloned();
+        self.state.take_policy_events();
+        self.state.resolve_held(false);
+        self.state.take_policy_events();
+        let action = action.ok_or(AgentError::NothingPending)?;
+        self.begin_turn(TurnKind::TakeOver);
+        Ok(action)
+    }
+
+    /// The person ended a take-over: `done` = "I'm done — hand back",
+    /// else "I won't do it". The observation now, with a `changed:`
+    /// summary since they took it over and a note saying which.
+    pub fn finish_take_over(&mut self, done: bool) -> Observation {
+        let Some((mut observation, _, _)) = self.end_turn() else {
+            return self.observe(&ObserveOptions::default());
+        };
+        observation.notes.push(if done {
+            "the person did this step themselves in the window and handed control back to you"
+                .into()
+        } else {
+            "the person took this step over, then chose not to do it".into()
+        });
+        observation
+    }
+
+    /// The person pressed "Forget this refusal" (window only — no MCP
+    /// tool reaches this): asking for `action` again shows a new card.
+    pub fn forget_refusal(&mut self, action: &GatedAction) -> bool {
+        self.state.agent_policy.forget_denial(action)
     }
 
     /// The person says they're done: the observation now, with a
     /// `changed:` summary since `begin_handoff` (values stay hidden).
     pub fn finish_handoff(&mut self) -> Observation {
-        let moved = self.changed_by_person();
-        let Some((before, generation_before, field)) = self.handoff_before.take() else {
+        let Some((mut observation, kind, new_document)) = self.end_turn() else {
             return self.observe(&ObserveOptions::default());
         };
-        self.settle();
-        let after = self.full_snapshot();
-        let new_document = self.state.document_generation() != generation_before;
-        let mut observation = self.report(&ObserveOptions::default(), moved && new_document);
-        let changes = Changes::between(&before, &after, new_document);
+        let TurnKind::Password(field) = kind else {
+            return observation;
+        };
         // Done doesn't prove anything was typed: say so when the field the
         // person was handed didn't change (and they didn't submit).
-        let filled = changes.values_changed.iter().any(|c| c.id == field);
+        let filled = observation
+            .changed
+            .as_ref()
+            .is_some_and(|c| c.values_changed.iter().any(|c| c.id == field));
         observation.notes.push(if new_document {
             "the person filled in the field and submitted the form themselves".into()
         } else if filled {
@@ -822,7 +899,6 @@ impl AgentBrowser {
                 field.raw()
             )
         });
-        observation.changed = Some(changes);
         observation
     }
 

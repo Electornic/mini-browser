@@ -454,6 +454,18 @@ fn replay_step(
         Err(ToolError::Agent(AgentError::ApprovalPending { action })) => match resolved_by {
             Some("person_approved") => outcome(browser.resolve_approval(true)),
             Some("person_denied") => outcome(browser.resolve_approval(false)),
+            // The person did the step in the window: what they did isn't
+            // in the log (only the agent's steps are).
+            Some("person_handed_back") => {
+                return Err(stop(
+                    NEEDS_PERSON,
+                    format!(
+                        "✗ {label}: the person did this step themselves in the window — that isn't in the log, so it can't be replayed"
+                    ),
+                ));
+            }
+            // Logs from before hand-back (2026-11-22): `taken_over` came
+            // right away.
             Some("person_took_over") => match browser.resolve_approval(false) {
                 Err(AgentError::ApprovalDenied { observation, .. }) => {
                     worker::error_reply(&ToolError::TakenOver(observation.to_blocks()), 1)
@@ -670,6 +682,7 @@ mod tests {
             preview_menu: false,
             preview_pause: false,
             preview_agent_view: None,
+            preview_answer: None,
             http_port: None,
             attach: None,
             log: Some(path.to_path_buf()),

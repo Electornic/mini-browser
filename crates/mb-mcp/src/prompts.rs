@@ -36,8 +36,12 @@ Rules:
    paused you from the window: nothing was done; call the same tool with
    the same arguments again to wait until they resume (it runs then), or
    tell the user the browser is paused. Do not retry or look for
-   a workaround after `approval_denied` or `taken_over` (the person chose
-   to do that step themselves); report it to the user.
+   a workaround after `approval_denied`; report it to the user. The person
+   may also choose to do the step themselves: your call keeps waiting
+   (`still_waiting` → repeat it, as above) until they hand back, then
+   returns `taken_over` with the page as it is now and a `changed:` line
+   saying what they changed. The step is done: don't repeat it; continue
+   from that observation.
 5. Password fields are for the person, not you. With the observation
    window open, `type` on a password field waits while the person types it
    in themselves, then returns the observation (the value stays hidden);
@@ -75,7 +79,7 @@ pub const CLICK: &str = "\
 Click an element by id (e.g. \"e21\"), the same way a mouse click would: it scrolls into view, hover and click events fire, links navigate, buttons submit, checkboxes toggle.
 Returns the observation after the page settles; its `changed:` line says what the click did, and the `changes:` section lists values and text that changed.
 - Only use ids from an observation of the current page.
-- Submitting a POST form or leaving the origin may wait for a person's approval (the call just takes longer) or return `approval_denied` / `taken_over`. Do not retry those.";
+- Submitting a POST form or leaving the origin may wait for a person's approval (the call just takes longer) or return `approval_denied` (do not retry) / `taken_over` (the person did it themselves: continue from the observation it returns).";
 
 pub const TYPE: &str = "\
 Type text into a text field or textarea identified by `id` (e.g. \"e12\").

@@ -129,6 +129,19 @@ impl AgentPolicy {
         self.denied.insert(denial_key(action));
     }
 
+    /// The person pressed "Forget this refusal" on the receipt the card
+    /// left (observation window only — no MCP tool reaches this): the
+    /// agent asking for this action again gets a fresh question instead
+    /// of `approval_denied`. Clears a rule's refusal of it too, so the
+    /// gate is back to where it was before anyone refused it. Returns
+    /// whether anything was remembered.
+    pub fn forget_denial(&mut self, action: &GatedAction) -> bool {
+        let key = denial_key(action);
+        let person = self.denied.remove(&key);
+        let rule = self.refused_by_rule.remove(&key);
+        person || rule
+    }
+
     /// Fold a refusal made elsewhere (a redirect hop judged on the loader
     /// thread against a copy of this policy) back into the session memory.
     pub fn record_rule_refusal(&mut self, action: &GatedAction) {
@@ -359,6 +372,36 @@ mod tests {
                 &post("http://a.test/signup")
             ),
             PolicyDecision::Denied { remembered: true }
+        );
+    }
+
+    #[test]
+    fn a_forgotten_refusal_is_asked_again() {
+        let mut policy = AgentPolicy::new(ApproveMode::Ask, vec![]);
+        let here = url("http://a.test/");
+        let signup = post("http://a.test/signup");
+        let other = post("http://a.test/login");
+        policy.record_denial(&signup);
+        policy.record_denial(&other);
+        assert!(policy.forget_denial(&signup));
+        assert_eq!(
+            decide(&mut policy, true, Some(&here), &signup),
+            PolicyDecision::Held,
+            "forgotten: the person is asked again"
+        );
+        assert_eq!(
+            decide(&mut policy, true, Some(&here), &other),
+            PolicyDecision::Denied { remembered: true },
+            "only that refusal is forgotten"
+        );
+        assert!(!policy.forget_denial(&signup), "nothing left to forget");
+        // A navigation refusal is keyed by origin: forgetting one target
+        // forgets that origin.
+        policy.record_denial(&nav("http://b.test/x"));
+        assert!(policy.forget_denial(&nav("http://b.test/y")));
+        assert_eq!(
+            decide(&mut policy, true, Some(&here), &nav("http://b.test/x")),
+            PolicyDecision::Held
         );
     }
 

@@ -25,7 +25,7 @@ use mb_runtime::palette::{self as p, centered_text_y, text_width};
 use mb_runtime::render::{CornerRadii, DisplayCommand, TextCommand};
 
 use crate::http::Attach;
-use crate::worker::{Answer, TimelineEntry, Waiting};
+use crate::worker::{Answer, Refusal, TimelineEntry, Waiting};
 
 /// Width of the agent panel on the right. Below `MIN_WINDOW_FOR_PANEL` the
 /// panel is dropped so the page keeps a usable width.
@@ -981,6 +981,8 @@ pub struct PanelInfo<'a> {
     pub copied: bool,
     /// The session log being written (board 7's recording card).
     pub recording: Option<RecordingCard>,
+    /// The receipt of the person's last refusal (board 9).
+    pub refusal: Option<&'a Refusal>,
 }
 
 /// What the recording card says.
@@ -1051,6 +1053,8 @@ pub enum Control {
     /// "Record this session": start / stop the session log.
     StartRecording,
     StopRecording,
+    /// "Forget this refusal" on the receipt a refusal card left.
+    ForgetRefusal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1331,7 +1335,10 @@ fn question_card(
                 Waiting::Approval { action } if action.starts_with("Navigation to") => {
                     (false, "Go to another site?")
                 }
-                Waiting::Approval { .. } => (false, "Allow this action?"),
+                // (A taken-over step is drawn by `turn_card`.)
+                Waiting::Approval { .. } | Waiting::TakenOver { .. } => {
+                    (false, "Allow this action?")
+                }
                 Waiting::Handoff { .. } => (true, "Type the password yourself"),
             };
             c.extend(card_badge(left, y, lock));
@@ -1440,7 +1447,150 @@ fn question_card(
                     }
                     y + BUTTON_HEIGHT
                 }
+                Waiting::TakenOver { .. } => y,
             }
+        },
+    )
+}
+
+// "Your turn" (board 9): the person took the step over. The agent's call
+// waits until they hand back (or say they won't do it).
+fn turn_card(
+    commands: &mut Vec<DisplayCommand>,
+    buttons: &mut Vec<Button>,
+    action: &str,
+    x: f32,
+    width: f32,
+    top: f32,
+) -> f32 {
+    framed_card(
+        commands,
+        x,
+        width,
+        top,
+        p::PERSON,
+        2.0,
+        |c, left, inner, mut y| {
+            c.push(text("Your turn", left, y, 16.0, p::INK, true));
+            y += line_height(16.0) + 6.0;
+            let shown = action.strip_prefix("Navigation to ").unwrap_or(action);
+            mono_box(c, &mut y, shown, left, inner);
+            y += 10.0;
+            paragraph(
+                c,
+                &mut y,
+                "Do this step in the page yourself. The agent's call waits; when you hand back, \
+             it gets the page as it is then, with what you changed.",
+                left,
+                inner,
+                BODY,
+                p::MUTED,
+                4,
+            );
+            y += 6.0;
+            let rect = Rect {
+                x: left,
+                y,
+                width: inner,
+                height: BUTTON_HEIGHT,
+            };
+            c.extend(button(
+                rect,
+                "I'm done — hand back to the agent",
+                Look::Filled(p::INK),
+            ));
+            buttons.push(Button {
+                rect,
+                action: PanelAction::Answer(Answer::HandBack),
+            });
+            y += BUTTON_HEIGHT + 8.0;
+            let rect = Rect {
+                x: left,
+                y,
+                width: inner,
+                height: 36.0,
+            };
+            c.extend(button(rect, "I won't do it", Look::Plain));
+            buttons.push(Button {
+                rect,
+                action: PanelAction::Answer(Answer::WontDo),
+            });
+            y += 36.0 + 10.0;
+            c.push(text(
+                "The agent checks back every 45 s",
+                left,
+                y,
+                SMALL,
+                p::MUTED,
+                false,
+            ));
+            y + line_height(SMALL) - 4.0
+        },
+    )
+}
+
+// The receipt a refusal leaves (board 9): what was refused, that nothing
+// happened, and "Forget this refusal".
+fn refusal_card(
+    commands: &mut Vec<DisplayCommand>,
+    buttons: &mut Vec<Button>,
+    refusal: &Refusal,
+    x: f32,
+    width: f32,
+    top: f32,
+) -> f32 {
+    framed_card(
+        commands,
+        x,
+        width,
+        top,
+        p::LINE,
+        1.0,
+        |c, left, inner, mut y| {
+            c.extend(cross_icon(left, y + 1.0, p::STOP));
+            c.push(text("Refused", left + 22.0, y, 14.0, p::INK, true));
+            y += line_height(14.0) + 4.0;
+            let action = refusal.action.as_str();
+            mono_box(
+                c,
+                &mut y,
+                action.strip_prefix("Navigation to ").unwrap_or(action),
+                left,
+                inner,
+            );
+            y += 8.0;
+            let what = if refusal.taken_over {
+                "You took this over and didn't do it."
+            } else if action.starts_with("Navigation to") {
+                "The page didn't change."
+            } else {
+                "Nothing was sent."
+            };
+            paragraph(
+                c,
+                &mut y,
+                &format!(
+                    "{what} The agent was told approval_denied and won't ask for this again this session."
+                ),
+                left,
+                inner,
+                BODY,
+                p::MUTED,
+                6,
+            );
+            y += 6.0;
+            let rect = Rect {
+                x: left,
+                y,
+                width: text_width("Forget this refusal", BODY, false, 400) + 24.0,
+                height: 36.0,
+            };
+            c.extend(button(rect, "Forget this refusal", Look::Plain));
+            buttons.push(Button {
+                rect,
+                action: PanelAction::Control(Control::ForgetRefusal),
+            });
+            y + rect.height
         },
     )
 }
@@ -1895,16 +2045,25 @@ pub fn panel(
     if let Some(held) = &info.paused {
         y = paused_card(&mut commands, &mut buttons, held.as_deref(), left, inner, y) + 14.0;
     }
-    if let Some(waiting) = info.waiting {
-        y = question_card(
-            &mut commands,
-            &mut buttons,
-            waiting,
-            info.waited,
-            left,
-            inner,
-            y,
-        ) + 14.0;
+    match info.waiting {
+        Some(Waiting::TakenOver { action }) => {
+            y = turn_card(&mut commands, &mut buttons, action, left, inner, y) + 14.0;
+        }
+        Some(waiting) => {
+            y = question_card(
+                &mut commands,
+                &mut buttons,
+                waiting,
+                info.waited,
+                left,
+                inner,
+                y,
+            ) + 14.0;
+        }
+        None => {}
+    }
+    if let Some(refusal) = info.refusal {
+        y = refusal_card(&mut commands, &mut buttons, refusal, left, inner, y) + 14.0;
     }
     if let Some(wait) = &info.page_wait {
         y = wait_card(&mut commands, wait, left, inner, y) + 14.0;
@@ -3446,6 +3605,7 @@ mod tests {
                 page_wait: None,
                 attach: None,
                 copied: false,
+                refusal: None,
                 recording: None,
             },
             900.0,
@@ -3479,6 +3639,7 @@ mod tests {
                 page_wait: None,
                 attach: None,
                 copied: false,
+                refusal: None,
                 recording: None,
             },
             900.0,
@@ -3532,6 +3693,7 @@ mod tests {
                 page_wait: None,
                 attach: None,
                 copied: false,
+                refusal: None,
                 recording: None,
             },
             900.0,
@@ -3543,6 +3705,91 @@ mod tests {
             answers,
             [Answer::HandoffDone, Answer::HandoffCancel].map(PanelAction::Answer)
         );
+    }
+
+    fn panel_with(
+        waiting: Option<&Waiting>,
+        refusal: Option<&Refusal>,
+    ) -> (Vec<String>, Vec<Button>) {
+        let (commands, buttons) = panel(
+            &PanelInfo {
+                approve: ApproveMode::Ask,
+                paused: None,
+                allow_origins: &[],
+                timeline: &[],
+                waiting,
+                waited: Duration::from_secs(5),
+                page_wait: None,
+                attach: None,
+                copied: false,
+                recording: None,
+                refusal,
+            },
+            900.0,
+            340.0,
+            900.0,
+        );
+        (badge_texts(&commands), buttons)
+    }
+
+    #[test]
+    fn the_your_turn_card_hands_back_or_declines() {
+        let waiting = Waiting::TakenOver {
+            action: "POST http://127.0.0.1:8765/signup".into(),
+        };
+        let (texts, buttons) = panel_with(Some(&waiting), None);
+        assert!(texts.contains(&"Your turn".to_string()), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("/signup")), "{texts:?}");
+        assert!(
+            texts.contains(&"I'm done — hand back to the agent".to_string()),
+            "{texts:?}"
+        );
+        // Not the approval card any more: no Approve / Deny.
+        assert!(!texts.contains(&"Approve".to_string()), "{texts:?}");
+        let answers: Vec<PanelAction> = buttons.iter().map(|b| b.action).collect();
+        assert_eq!(
+            answers,
+            [Answer::HandBack, Answer::WontDo].map(PanelAction::Answer)
+        );
+        assert!(buttons[0].rect.y + buttons[0].rect.height <= buttons[1].rect.y);
+    }
+
+    #[test]
+    fn a_refusal_leaves_a_receipt_with_forget() {
+        let denied = Refusal::sample("POST http://127.0.0.1:8765/signup", false);
+        let (texts, buttons) = panel_with(None, Some(&denied));
+        assert!(texts.contains(&"Refused".to_string()), "{texts:?}");
+        let body = texts.join(" ");
+        assert!(body.contains("Nothing was sent."), "{body}");
+        assert!(body.contains("approval_denied"), "{body}");
+        assert!(body.contains("this session"), "{body}");
+        assert_eq!(
+            buttons.iter().map(|b| b.action).collect::<Vec<_>>(),
+            [PanelAction::Control(Control::ForgetRefusal)]
+        );
+
+        // A navigation says the page didn't change; "I won't do it" says so.
+        let nav = Refusal::sample("Navigation to http://localhost:8765/x", false);
+        let (texts, _) = panel_with(None, Some(&nav));
+        let body = texts.join(" ");
+        assert!(body.contains("The page didn't change."), "{body}");
+        assert!(
+            texts.iter().any(|t| t.starts_with("http://localhost")),
+            "{texts:?}"
+        );
+        assert!(!body.contains("Navigation to"), "{body}");
+        let wont = Refusal::sample("POST http://127.0.0.1:8765/signup", true);
+        let (texts, _) = panel_with(None, Some(&wont));
+        assert!(texts.join(" ").contains("You took this over"), "{texts:?}");
+
+        // Under a question that is up meanwhile, both cards are answerable.
+        let asking = Waiting::Approval {
+            action: "POST http://127.0.0.1:8765/login".into(),
+        };
+        let (_, buttons) = panel_with(Some(&asking), Some(&denied));
+        let actions: Vec<PanelAction> = buttons.iter().map(|b| b.action).collect();
+        assert_eq!(actions.len(), 4, "{actions:?}");
+        assert_eq!(actions[3], PanelAction::Control(Control::ForgetRefusal));
     }
 
     #[test]
@@ -3589,6 +3836,7 @@ mod tests {
                 )),
                 attach: Some(&attach),
                 copied: false,
+                refusal: None,
                 recording: None,
             },
             900.0,
@@ -3800,6 +4048,7 @@ mod tests {
             page_wait: None,
             attach: None,
             copied: false,
+            refusal: None,
             recording: None,
         };
         let (commands, buttons) = panel(&info(Some(Some("click e26".into()))), 900.0, 300.0, 700.0);
@@ -3952,6 +4201,7 @@ mod tests {
             page_wait: None,
             attach: Some(&attach),
             copied: false,
+            refusal: None,
             recording: None,
         };
         let before = badge_texts(&panel(&info(&[]), 900.0, 340.0, 700.0).0);
@@ -4024,6 +4274,7 @@ mod tests {
             page_wait: None,
             attach: None,
             copied: false,
+            refusal: None,
             recording: Some(RecordingCard {
                 file: file.into(),
                 created,

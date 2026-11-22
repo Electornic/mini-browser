@@ -65,6 +65,9 @@ pub fn resolved_by(outcome: &str) -> Option<&'static str> {
         "approved" => "person_approved",
         "refused" => "person_denied",
         "person took over" => "person_took_over",
+        "handed back by the person" => "person_handed_back",
+        // Took it over, then "I won't do it": a refusal, replayed as one.
+        "taken over, not done" => "person_denied",
         "filled in by the person" => "person_filled",
         "declined" => "person_declined",
         _ => return None,

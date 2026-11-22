@@ -365,6 +365,11 @@ fn apply(worker: &mut Worker, control: overlay::Control) -> bool {
                 return false;
             }
         },
+        overlay::Control::ForgetRefusal => {
+            // The action itself stays out of stderr (URLs may carry queries).
+            eprintln!("[mb-mcp] the person forgot a refusal");
+            worker.forget_refusal();
+        }
         overlay::Control::StopRecording => {
             if let Some(recording) = worker.recording() {
                 let file = recording
@@ -508,6 +513,9 @@ fn compose(
     let note = match worker.waiting() {
         Some(worker::Waiting::Approval { .. }) => Some("The agent wants to press this"),
         Some(worker::Waiting::Handoff { .. }) => Some("Type the password here"),
+        Some(worker::Waiting::TakenOver { .. }) => {
+            Some("Your turn — the agent was going to press this")
+        }
         None => None,
     };
     let page = overlay::page_area(page_width, window_height);
@@ -542,6 +550,7 @@ fn compose(
                     created: r.file.is_some(),
                     steps: r.steps,
                 }),
+                refusal: worker.refusal(),
             },
             page_width as f32,
             panel_width as f32,
@@ -672,6 +681,7 @@ pub fn preview(options: Options, path: &std::path::Path, clicks: &[String]) -> R
     let height = options.agent.viewport_height + CHROME_HEIGHT as usize;
     let scale = options.preview_scale;
     let (pause, menu_open) = (options.preview_pause, options.preview_menu);
+    let answer = options.preview_answer;
     let mut viewer = options.preview_agent_view.map(|scope| Viewer {
         scope: match scope {
             crate::cli::PreviewView::OnScreen => overlay::ViewScope::OnScreen,
@@ -702,6 +712,11 @@ pub fn preview(options: Options, path: &std::path::Path, clicks: &[String]) -> R
             request: worker::Request::Click { id: id.clone() },
             reply,
         });
+    }
+    match answer {
+        Some(crate::cli::PreviewAnswer::Deny) => worker.answer(worker::Answer::Deny),
+        Some(crate::cli::PreviewAnswer::TakeOver) => worker.answer(worker::Answer::TakeOver),
+        None => {}
     }
     // Two frames: the first lays out at the window size, the second paints
     // with the hover/focus state that settled.

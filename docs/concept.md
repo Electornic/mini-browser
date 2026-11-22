@@ -1,6 +1,6 @@
 # Concept — 에이전트용 브라우저
 
-> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ · G5c 평가 ✅ (2026-11-20)** · 호환성 트랙 시작 (2026-11-21): 인라인 줄 묶기 ✅ · IDL 속성 반사 ✅ · Preact 실증 ✅ · 디자인 트랙 시작 (2026-11-21): [⋮ 메뉴](#-메뉴-사람의-조종석) 1차 — 일시정지·런타임 승인 모드 ✅ · [시안 적용](#디자인-적용) (2026-11-22) ✅ · 메뉴 새 기능 1차 — [What the agent sees](#에이전트가-보는-것-what-the-agent-sees)·[기록 토글](#세션-기록-토글-record-this-session) (2026-11-22) ✅ · 다음 = 넘겨주기·거절 잊기 → 허용 사이트 편집·다크·좁은 창 / 호환성 잔여 갭(spa-roadmap) / 열린 결정 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
+> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ · G5c 평가 ✅ (2026-11-20)** · 호환성 트랙 시작 (2026-11-21): 인라인 줄 묶기 ✅ · IDL 속성 반사 ✅ · Preact 실증 ✅ · 디자인 트랙 시작 (2026-11-21): [⋮ 메뉴](#-메뉴-사람의-조종석) 1차 — 일시정지·런타임 승인 모드 ✅ · [시안 적용](#디자인-적용) (2026-11-22) ✅ · 메뉴 새 기능 1차 — [What the agent sees](#에이전트가-보는-것-what-the-agent-sees)·[기록 토글](#세션-기록-토글-record-this-session) (2026-11-22) ✅ · 승인 흐름 — [넘겨주기·거절 영수증](#넘겨주기와-거절-영수증-보드-9) (2026-11-22) ✅ · 다음 = 허용 사이트 편집 → 다크·좁은 창 / 호환성 잔여 갭(spa-roadmap) / 열린 결정 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
 
 ## 한 줄
 
@@ -152,12 +152,12 @@
 | `not_interactable` | 노드는 있지만 rect 가 없거나 크기 0 (display:none 등) |
 | `handoff_required` | 비밀번호 필드 입력 등 사람이 해야 하는 단계 (headless) |
 | `approval_pending` | 승인 카드가 떠 있는 동안 들어온 다른 호출 (window + `ask`). message 가 무슨 카드인지 말함 |
-| `handoff_pending` | 사람이 비밀번호를 입력 중(넘겨받기 카드)인 동안 들어온 다른 호출 |
+| `handoff_pending` | 사람이 비밀번호를 입력 중(넘겨받기 카드)이거나 넘겨받은 단계를 직접 하는 중("Your turn" 카드)인 동안 들어온 다른 호출 |
 | `still_waiting` | park 된 호출이 45초 동안 답을 못 받음 — 카드는 그대로, 아무것도 실행 안 됨. **같은 tool·같은 인자로 다시 부르면 이어서 기다린다** |
 | `paused` | 사람이 창의 ⋮ 메뉴로 에이전트를 일시정지함 — 아무것도 실행 안 됨. 호출은 최대 45초 기다렸다가(`still_waiting` 과 같은 시간) 이 코드로 답하고, **같은 tool·같은 인자로 다시 부르면 재개될 때까지 이어서 기다린다**. 재개되면 붙어 있던 호출이 그때의 페이지에서 실행된다 ([⋮ 메뉴](#-메뉴-사람의-조종석)) |
-| `taken_over` | 승인 카드에서 사람이 "Do it myself" 를 고름 — 다시 시도하지 말 것 |
+| `taken_over` | 승인 카드에서 사람이 "I'll do it myself" 를 고르고, 그 단계를 창에서 직접 한 뒤 **넘겨줌**(2026-11-22 D4). 지금 페이지 관찰 + 넘겨받은 순간부터의 `changed:` + trusted note 를 함께 반환 — 단계는 끝났으니 반복하지 말고 그 관찰에서 이어 갈 것 ([넘겨주기](#넘겨주기와-거절-영수증-보드-9)) |
 | `handoff_declined` | 넘겨받기 카드에서 사람이 Cancel |
-| `approval_denied` | 사람이(또는 `--approve deny` 가) 위험 행동을 거절 |
+| `approval_denied` | 사람이(또는 `--approve deny` 가) 위험 행동을 거절. 넘겨받은 뒤 사람이 "I won't do it" 을 눌러도 이 코드 (+ 관찰) |
 | `navigation_blocked` | `--allow-origin` 목록 밖 이동 |
 | `unsupported_key` | `press` 지원 목록 밖 |
 | `browser_closed` | 사람이 관전 창을 닫음 |
@@ -291,7 +291,7 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
   - `ask` (G4, **`--window` 필수**): 게이트가 `PolicyDecision::Held` 를 내고 이동 요청(`NavigationRequest` — POST body 포함)을 `BrowserState` 에 **보관**한다 (`held_navigation`). 이동은 시작하지 않는다. `AgentBrowser` 는 행동 직전 스냅샷을 들고 `approval_pending` 상태가 되고, mb-mcp `Worker` 는 그 tool 호출의 **응답 채널을 보관(park)** 한 채 창 패널에 승인 카드를 띄운다 — 에이전트 쪽에선 tool 호출이 그냥 오래 걸리는 것으로 보인다. 카드 답:
     - **Approve** → `BrowserState::resolve_held(true)` 가 보관한 요청을 **에이전트 출처로** 시작(리다이렉트 hop 도 계속 게이트) → settle → 원래 행동의 결과 관찰로 응답.
     - **Deny** → 거절 기억에 넣고 `approval_denied`.
-    - **Do it myself** → 거절 기억에 넣고 `taken_over` (+현재 관찰). 사람이 창에서 직접 하면 된다 (사람 입력은 게이트 밖).
+    - **I'll do it myself** → 보관한 요청을 버리고(에이전트 출처로는 절대 실행 안 됨) 카드가 **"Your turn"** 으로 바뀐다. 에이전트의 호출은 **계속 park** 된 채 사람이 창에서 직접 한다(사람 입력은 게이트 밖). 사람이 **I'm done — hand back to the agent** 를 누르면 그 호출이 `taken_over`(지금 관찰 + 넘겨받은 뒤의 `changed:` + note)로, **I won't do it** 이면 `approval_denied` 로 답한다. 자세한 규칙은 [넘겨주기와 거절 영수증](#넘겨주기와-거절-영수증-보드-9). (2026-11-22 전에는 누르는 즉시 `taken_over` 로 끝났다.)
     - 기다리는 동안 들어온 다른 tool 호출은 줄 세우지 않고 `approval_pending`(넘겨받기면 `handoff_pending`) 으로 즉시 거절 — message 에 무슨 카드인지, hint 에 "기다리던 호출을 다시 하라".
     - **긴 대기 (G3b 실연결 후)**: park 는 45초(`PARK_REPLY_AFTER`)가 지나면 `still_waiting` 으로 먼저 답하고 카드는 그대로 둔다. 에이전트가 **같은 요청**(같은 tool·인자)을 다시 보내면 그 카드에 다시 붙는다(`Parked.reply` 교체). 클라이언트가 먼저 끊어도(응답 채널 닫힘) 마찬가지로 떼어 두기만 한다. 아무도 붙어 있지 않을 때 사람이 답하면 결과를 `unclaimed` 에 두고 **다음 같은 요청**에 돌려준다 — 다른 요청이 오면 버린다(에이전트가 넘어간 것, 페이지 변화는 다음 관찰에 보임). 창은 마감 시각에 깨우기 스레드를 걸어 아무도 창을 안 만져도 45초 답이 나가게 한다.
     - 기다림 관련 코드(`approval_pending`·`handoff_pending`·`still_waiting`·`wait_timeout`)는 반복해도 "Stop repeating" 힌트로 바꾸지 않는다 — 다시 부르는 게 맞는 행동이므로.
@@ -303,7 +303,7 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
   - **실행 중 변경 (2026-11-21)**: 창 모드에선 사람이 ⋮ 메뉴의 "Before POST or other origins" 에서 Ask me(`ask`) / Refuse(`deny`) / Allow(`auto`) 로 바꿀 수 있다. **다음 에이전트 행동부터** 적용되고, 에이전트(MCP tool)는 절대 바꿀 수 없다 — 자세한 규칙은 [⋮ 메뉴](#-메뉴-사람의-조종석).
 - 보류 중엔 해당 tool 호출이 응답을 기다린다 (타임아웃 없음, 사람이 고를 때까지). 거절되면 `approval_denied` + 이동 전 상태의 Observation.
 - **거절 기억**: 거절된 (행동 종류, 대상 폼 또는 대상 origin) 은 세션 동안 기억한다. 에이전트가 다른 버튼·직접 URL 입력 등으로 같은 대상을 다시 시도하면 사람에게 다시 묻지 않고 즉시 `approval_denied` (우회 시도 차단 + 승인 카드 스팸 방지).
-  - 기억은 두 갈래다 (2026-11-21, 런타임 모드 변경과 함께): **사람의 거절**(카드의 Deny / Do it myself — `AgentPolicy::record_denial`)은 모드가 바뀌어도 남는다. **규칙의 거절**(`deny` 모드가 자동으로 거절한 것, 물어볼 수 없어 거절한 리다이렉트 hop — `record_rule_refusal`)은 사람이 모드를 바꾸면 잊는다. Refuse → Ask me 로 바꿨는데 Refuse 시절 거절이 남아 있으면 사람에게 물어야 할 행동이 묻지도 않고 거절되기 때문.
+  - 기억은 두 갈래다 (2026-11-21, 런타임 모드 변경과 함께): **사람의 거절**(카드의 Deny, 넘겨받은 뒤 "I won't do it" — `AgentPolicy::record_denial`)은 모드가 바뀌어도 남는다. 넘겨받은 단계를 사람이 **넘겨주면**(hand back) 그 행동은 거절 기억에서 빠진다 — 사람이 한 것이지 거절한 게 아니라서 (2026-11-22). 사람의 거절은 패널의 거절 영수증에서 **Forget this refusal** 로 잊을 수 있다(`AgentPolicy::forget_denial`, 창 전용). **규칙의 거절**(`deny` 모드가 자동으로 거절한 것, 물어볼 수 없어 거절한 리다이렉트 hop — `record_rule_refusal`)은 사람이 모드를 바꾸면 잊는다. Refuse → Ask me 로 바꿨는데 Refuse 시절 거절이 남아 있으면 사람에게 물어야 할 행동이 묻지도 않고 거절되기 때문.
 
 ### 자격증명 규칙
 
@@ -415,6 +415,61 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
   - 메뉴: 기록 중이면 빨간 사각형 + "Stop recording" + 오른쪽 "REC mm:ss".
 - **기록 형식은 그대로**(버전 1): 헤더 `start_url` 값만 다를 수 있고 새 필드는 없다 — 재생·eval 변경 없음.
 
+### 넘겨주기와 거절 영수증 (보드 9)
+
+> 2026-11-22 D4. 시안 보드 "9 · Outcomes" 의 왼쪽 두 칸 — "You pressed Deny"(거절 영수증)와 "You pressed I'll do it myself"("Your turn"). 오른쪽 "The agent is gone"(연결 끊김 카드)은 후속.
+
+![Your turn](images/your-turn.png) ![거절 영수증](images/refusal-receipt.png)
+
+#### 넘겨주기 ("I'll do it myself" → "Your turn" → hand back)
+
+목표: 사람이 "내가 할게" 를 누른 뒤에도 **에이전트가 기다리고 있다가**, 사람이 끝냈다고 말하는 순간 "사람이 무엇을 했는지" 를 결과로 받는다. 전에는 누르는 즉시 `taken_over` 로 끝나서, 에이전트는 사람이 언제 끝낼지 모른 채 `observe` 를 찔러 보거나 사용자에게 물어야 했다.
+
+- **모양은 비밀번호 넘겨받기와 같다** (`Type the password yourself` → Done). 승인 카드에서 **I'll do it myself** 를 누르면:
+  1. `AgentBrowser::take_over()` — 보관한 요청(`held_navigation`)을 **거절로 풀어 버린다**(`resolve_held(false)`, 에이전트 출처로는 절대 실행 안 됨). 이 순간 거절 기억에도 들어간다(아래 "거절인가?"). 그리고 지금 페이지를 `full_snapshot` 으로 찍어 둔다(`PersonTurn`, 비밀번호 넘겨받기의 `handoff_before` 를 일반화 — `TurnKind::{Password(field), TakeOver}`). 에이전트에게는 아무것도 보고하지 않는다(`report` 를 안 부르므로 ID 발급·console 소비·`last_reported` 이동 없음).
+  2. Worker 의 `Parked` 는 그대로 두고 `waiting` 만 `Waiting::TakenOver { action }` 으로 바꾼다. 돌려받을 `GatedAction` 은 `Parked.taken` 에.
+  3. 패널 카드가 **"Your turn"** 으로 바뀐다(주황 2px 테두리 — 사람이 답해야 하는 카드). 대상 요소의 주황 테두리는 그대로, 옆 말풍선은 "Your turn — the agent was going to press this".
+- **park 규칙은 승인 카드와 똑같다** — 새 코드가 거의 없다:
+  - 45초(`PARK_REPLY_AFTER`)가 지나면 `still_waiting` 으로 먼저 답하고(message: "they are doing \"POST …\" themselves in the browser window and hand control back when done."), **같은 tool·같은 인자로 다시 부르면 다시 붙는다**. `since` 는 넘겨받는 순간 다시 재지 않는다 — 승인 카드에서 이미 40초 기다린 호출이 다시 45초를 기다리면 HTTP 60초 컷을 넘기 때문.
+  - 그 사이 다른 호출은 `handoff_pending`(사람이 단계를 쥐고 있다는 점에서 비밀번호 넘겨받기와 같은 코드) — "Another call is waiting for the person: they are doing … themselves …". 기다림 코드라 "Stop repeating" 으로 안 바뀐다.
+  - 일시정지 중에도 "Your turn" 카드는 그대로 답할 수 있다(승인 카드와 같음 — 이미 사람이 하고 있는 일의 결과 전달이지 에이전트 실행이 아니다).
+  - 창을 닫으면 `browser_closed`, 엔진 패닉이면 `engine_crashed`(기존 경로).
+- **I'm done — hand back to the agent** (`Answer::HandBack`): `AgentBrowser::finish_take_over(true)` — settle 후 지금 관찰(`report` — 이제야 ID 발급) + **넘겨받은 순간부터의 `changed:`**(`Changes::between(snapshot, now)`, 값은 비밀번호처럼 길이만) + trusted note `the person did this step themselves in the window and handed control back to you`. 사람이 새 문서로 옮겼으면 기존 "the person used the window … Ids from before are invalid" note 도 붙는다. 이걸 **에러 코드 `taken_over`** 로 돌려준다(관찰 동봉).
+  - 왜 성공(관찰)이 아니라 에러 코드인가: 에이전트가 부른 "click e29" 는 **실행되지 않았다**. 사람이 다른 방식으로(다른 값으로, 다른 버튼으로) 했을 수 있다. 성공으로 돌려주면 에이전트가 "내 클릭이 먹혔다" 로 읽는다. 코드로 먼저 알리고, 관찰은 "지금 페이지에서 이어 가라" 의 근거.
+  - message: "The person watching did this step themselves in the browser window and handed control back. The observation below is the page now; `changed:` says what changed while they had it." hint: "Don't repeat the action: the person already did it. Read the observation and continue from the page as it is now."
+- **I won't do it** (`Answer::WontDo`) — 시안엔 없는 취소 경로. 사람이 넘겨받고 보니 안 하는 게 맞다고 판단한 경우. `finish_take_over(false)` 관찰 + note `the person took this step over, then chose not to do it` 를 **`approval_denied`** 로(`ToolError::NotDone`). 거절이므로 거절 기억에 남고 **거절 영수증**을 남긴다. 사람이 중간에 뭔가 바꿨다면 `changed:` 에 보인다.
+- **거절인가?** (원래 G4 결정 "Do it myself 는 거절 기억에 포함", 2026-11-14 을 고침):
+  - 사람이 쥐고 있는 동안은 거절 기억에 있다 — 하지만 그 사이 에이전트 호출은 어차피 `handoff_pending` 이라 실질적 의미는 없다.
+  - **넘겨주면 잊는다**(`forget_denial`). 넘겨주기 = "내가 했다" 지 "하지 마" 가 아니다. 거절 키는 (POST, 정확한 대상 URL) / (이동, 대상 origin) 이라, 남겨 두면 같은 폼으로 **두 번째 항목을 추가**하는 정당한 행동이 세션 끝까지 묻지도 않고 `approval_denied` 가 된다(그리고 사람이 풀 방법이 없다 — 영수증도 없으니). 잊으면 다음 시도는 Ask 모드에서 **다시 카드로** 물으므로 사람이 계속 결정권을 가진다.
+  - 이중 제출 걱정: 에이전트는 `taken_over` + "Don't repeat" + 사람이 바꾼 `changed:` 를 받는다. 그래도 반복하면 새 카드가 뜬다(Ask). 사람이 그 사이 Allow 로 바꿨다면 그건 사람의 선택.
+  - **I won't do it 은 거절로 남는다** — Deny 와 같은 무게. 영수증의 Forget 으로 풀 수 있다.
+- **에이전트가 떠나 있을 때**: 승인과 같은 `unclaimed` 규칙. 아무도 안 붙어 있을 때 넘겨주면 결과를 보관했다가 **다음 같은 요청**(같은 tool·인자)에 돌려주고, 다른 요청이 오면 버린다(에이전트가 넘어간 것 — 페이지 변화는 그 요청의 관찰에 어차피 보인다). 테스트 `a_hand_back_while_the_agent_was_away_waits_for_its_next_call`.
+- **타임라인·기록·재생**: 넘겨받는 순간엔 타임라인에 아무것도 안 쓴다(아직 결과가 없다). 넘겨줄 때 `click e29 (handed back by the person) · taken_over`. 세션 로그는 그때 한 줄, `resolved_by: "person_handed_back"`. **재생은 그 단계에서 멈춘다**(`NEEDS_PERSON`, "the person did this step themselves in the window — that isn't in the log") — 사람이 창에서 한 일은 로그에 없고, 지어내지 않는다는 기존 규칙. "I won't do it" 은 `resolved_by: "person_denied"` 로 기록해 재생이 Deny 처럼(`resolve_approval(false)`) 다시 돈다 — 사람이 중간에 페이지를 바꿨다면 결과가 달라져 회귀 지점으로 보고된다. 2026-11-22 이전 로그의 `person_took_over` 는 예전 의미(즉시 `taken_over`)로 그대로 재생.
+- **서버 instructions** (`prompts.rs` 규칙 4, `click` 설명): "The person may also choose to do the step themselves: your call keeps waiting (`still_waiting` → repeat it) until they hand back, then returns `taken_over` with the page as it is now and a `changed:` line … The step is done: don't repeat it; continue from that observation." `prompts::fingerprint` 가 바뀌므로 eval 은 새 그룹으로 집계된다.
+
+#### 거절 영수증 + Forget this refusal
+
+목표: Deny 를 누르면 카드가 그냥 사라지는 대신 **무엇을 거절했는지** 남기고, 마음이 바뀌면 그 거절 하나만 풀 수 있게.
+
+- **언제 생기나**: 사람의 거절 — 승인 카드의 **Deny**, "Your turn" 의 **I won't do it**. 규칙의 거절(Refuse 모드, 리다이렉트 hop)은 영수증이 없다(사람이 한 결정이 아니고, 모드를 바꾸면 이미 잊힌다).
+- **카드** (`overlay::refusal_card`, 회색 1px 테두리 — 답을 기다리는 카드가 아니므로): 빨간 X 아이콘 + **Refused**, 카드가 보였던 그대로의 대상(mono 상자, 이동이면 "Navigation to " 를 떼고 URL), 그리고
+  - POST: "Nothing was sent." / 이동: "The page didn't change." / I won't do it: "You took this over and didn't do it."
+  - 이어서 "The agent was told approval_denied and won't ask for this again this session."
+  - **Forget this refusal** (글자 폭 버튼, 흰 바탕 — 시안 그대로).
+- **Forget** = `overlay::Control::ForgetRefusal` → `Worker::forget_refusal()` → `AgentBrowser::forget_refusal(&GatedAction)` → `AgentPolicy::forget_denial`. 사람의 거절(`denied`)과, 혹시 같은 키가 있으면 규칙의 거절(`refused_by_rule`)까지 지운다 — "아무도 거절하기 전" 상태로. 그 뒤 에이전트가 같은 행동을 하면 지금 모드대로: Ask 면 **새 카드**, Refuse 면 규칙으로 거절, Allow 면 실행. 영수증은 사라진다. stderr 에 `the person forgot a refusal`(URL 은 쿼리가 있을 수 있어 안 남김).
+  - 키는 거절 기억과 같다: POST 는 (method, 정확한 URL), 이동은 **origin**. 그래서 이동 거절을 잊으면 그 origin 으로의 이동 전체가 다시 물어진다.
+- **얼마나 남나**: 잊거나, **다음 사람의 거절이 덮어쓸 때까지**(영수증은 하나 — 마지막 것만). 자동으로 사라지지 않는 이유: 사람이 몇 분 뒤 "아까 그거 허락할 걸" 할 때 풀 곳이 이 카드뿐이다(거절 목록 화면은 아직 없다 — 다음 작업 "Allowed sites" 대화상자에서 같이 볼 수 있음). 엔진 패닉으로 브라우저를 새로 만들면 거절 기억이 비므로 영수증도 지운다.
+- **카드 순서**: 일시정지 → 질문(승인·비밀번호·Your turn) → **거절 영수증** → wait_for → 기록 → HTTP 붙기. 다음 질문이 떠도 영수증은 그 아래 남는다.
+- **사람 전용**: Forget 은 `Control`(일시정지·승인 모드·기록과 같은 자리)이다. `worker::Request`·MCP tool 에 대응이 없다 — 에이전트가 거절을 지우고 같은 POST 를 다시 시도하는 경로가 구조적으로 없다 (AGENTS.md "사람의 조종은 MCP 로 열지 않는다" 에 추가).
+- **미리보기**: `--preview-click ID --preview-answer deny|take-over` (Ask 모드에서 클릭이 띄운 카드에 답한 상태를 찍음). 위 그림은 스크래치 가입 폼(POST `/signup`)으로 찍었다.
+
+#### 시안과 다른 점
+
+- 시안의 Your turn 문구 "The agent was told taken_over and is waiting for you" → 우리 설계에선 에이전트가 **아직 아무것도 못 들었다**(넘겨줄 때 `taken_over` 를 받는다). 그래서 "Do this step in the page yourself. The agent's call waits; when you hand back, it gets the page as it is then, with what you changed." + 대상 mono 상자 + "The agent checks back every 45 s".
+- 시안에 없는 **I won't do it** 버튼(흰 바탕, 36px)을 hand back 아래에 뒀다 — 사람이 넘겨받은 채 돌아오지 않으면 에이전트는 45초마다 다시 붙으며 영원히 기다린다. 끝낼 길이 필요하다.
+- 시안의 `approval_denied` 인라인 mono 표기는 패널 문단이 한 글꼴이라 일반 글자로.
+- 패널 머리말의 "Claude Code"(클라이언트 이름)는 여전히 "Agent" — `clientInfo` 미보관.
+
 ## 디자인 적용
 
 > 2026-11-22 디자인 트랙 2차. 시안(작업명 "Agent Browser", 아티팩트 보드 11장)을 **이미 있는 화면에** 입혔다. 새 기능은 만들지 않았다 — 시안에만 있는 기능은 아래 "후속" 목록. 시안은 HTML 목업이고 우리 렌더러는 사각형·둥근 사각형(채우기만)·1–2px 선·텍스트만 그리므로, "렌더러가 허락하는 만큼 가깝게"가 기준.
@@ -459,6 +514,8 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 - **카드 공통**: 흰 바탕 r14, 사람이 답해야 하는 카드는 2px 주황 테두리(`framed_card` — 내용을 먼저 배치하고 높이를 안 뒤 테두리를 뒤에 깐다).
   - **승인**: 32px 연주황 원 안에 "!", 제목은 행동 종류로 — POST → "Submit this form?", 이동 → "Go to another site?", 그 밖 → "Allow this action?". panel 회색 mono 상자에 대상(URL 은 `/` 뒤에서 줄바꿈), "Nothing has been sent yet." / "The page hasn't changed yet.", **Approve**(초록 채움)·**Deny**(흰 바탕·빨강 글자·빨강 테두리) 한 줄, 아래 전체 폭 **"I'll do it myself"**, "Waiting m:ss · the agent checks back every 45 s"(`Worker::waiting_since` — 화면 표시용 벽시계, 에이전트에게는 안 감).
   - **비밀번호 넘겨받기**: 자물쇠 원, "Type the password yourself", "Field e24 is outlined… The agent never sees what you type — only how many characters.", Done(초록)·Cancel. 시안의 "8 characters entered" 는 칸의 길이를 패널에 연결해야 해서 후속.
+  - **Your turn** (D4, 보드 9): 승인 카드에서 "I'll do it myself" 를 누른 뒤. 주황 2px, "Your turn" + 대상 mono 상자 + 설명, 검은 **I'm done — hand back to the agent** 44px, 흰 **I won't do it** 36px, "The agent checks back every 45 s".
+  - **거절 영수증** (D4, 보드 9): 회색 1px, 빨간 X + "Refused", 대상 mono 상자, "Nothing was sent. / The page didn't change. …", 흰 **Forget this refusal**. 질문 카드 바로 아래.
   - **일시정지**(보드 7 의 배너 내용을 카드로): 주황 1px 테두리, "Agent paused · you have the wheel", 설명, 보관 호출이 있으면 "1 call is waiting for you to resume" + mono 상자 + "ids are re-checked first", 검은 **Resume agent** 44px.
   - **wait_for**: agent border 카드, "Waiting for \"…\"", 6px 진행 막대(`overlay::progress` = 지난 비율, `Worker::page_wait_total`), "N s left · you can keep using the page".
   - **HTTP 붙기**: "Let an agent drive this window", Endpoint/Token(가린 형태) 라벨 + mono 값, 파란 **Copy setup command** 44px, 안내 문장. 카드 순서는 사람이 지금 답해야 하는 것(일시정지·질문) 먼저, 붙기 카드는 그 아래.
@@ -511,8 +568,8 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 - ~~**Record this session** 토글 + "REC" 알약 + 기록 카드 (보드 7)~~ → D3 ([세션 기록 토글](#세션-기록-토글-record-this-session)).
 - ~~**What the agent sees** (보드 8)~~ → D3 ([에이전트가 보는 것](#에이전트가-보는-것-what-the-agent-sees)).
 - **허용 사이트 편집**(`--allow-origin` 을 실행 중에) (보드 8, 메뉴 회색 항목).
-- **"I'll do it myself" 뒤 넘겨주기** — "Your turn" 카드 + "I'm done — hand back to the agent" (보드 9). 지금은 `taken_over` 로 끝.
-- **거절 영수증 + "Forget this refusal"** (보드 9), **연결 끊김 카드**("Claude Code left 2 min ago", Last session 요약·재생 링크).
+- ~~**"I'll do it myself" 뒤 넘겨주기**~~ · ~~**거절 영수증 + "Forget this refusal"**~~ (보드 9) → D4 ([넘겨주기와 거절 영수증](#넘겨주기와-거절-영수증-보드-9)).
+- **연결 끊김 카드** (보드 9 오른쪽 — "Claude Code left 2 min ago", Last session 요약·재생 링크).
 - 넘겨받기 카드의 "N characters entered", 패널 머리말의 클라이언트 이름(`clientInfo`).
 - **다크 모드·좁은 창 레이아웃** (보드 10) — 지금 700px 미만은 패널을 빼고 ⋮ 메뉴만.
 - Inter·JetBrains Mono 번들, 탭 여러 개(×·+).
@@ -876,6 +933,7 @@ claude mcp add --scope project mini-browser -- /abs/path/to/target/release/mb-mc
 | `--preview-menu` | — | `--preview` 에 ⋮ 메뉴를 연 상태로 |
 | `--preview-pause` | — | `--preview-click` 전에 에이전트를 일시정지 — 클릭들이 재개를 기다리는 일시정지 화면 |
 | `--preview-agent-view on-screen\|whole-page` | — | `--preview` 에 "What the agent sees" 뷰어를 연 상태로 (D3). 기록 중 화면은 `--log DIR/` 로 띄워서 |
+| `--preview-answer deny\|take-over` | — | `--preview-click` 이 띄운 승인 카드에 답한 상태로 — 거절 영수증 / "Your turn" 카드 (D4). `--approve ask` 와 같이 |
 | `--viewport WxH` | `1280x800` | 페이지 뷰포트 크기 (크롬 UI 102px 는 별도로 위에 붙는다) |
 | `--start-url URL` | `about:blank` | 시작 페이지 |
 | `--allow-origin ORIGIN` (반복) | 없음 | 이동 가능한 origin 화이트리스트. 지정하면 목록 밖 이동은 즉시 `navigation_blocked`. 미지정이면 모든 origin 가능하되 origin 이동은 승인 대상 |
@@ -954,6 +1012,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | **D1** ⋮ 메뉴 1차 ✅ (디자인 트랙) | [⋮ 메뉴](#-메뉴-사람의-조종석): `overlay::{menu, paused_pill, paused_card}`, `window_mode::route_menu_input`, `Worker::{pause, resume, held_call, set_approve_mode, approve_mode}`, 에러 코드 `paused`, `AgentBrowser::set_approve_mode`, `AgentPolicy::{set_approve, record_rule_refusal}`(거절 기억 두 갈래), 세션 로그 단계별 `approve` + 재생 적용, 서버 instructions 규칙 4 에 `paused`, `--preview-menu` / `--preview-pause` | 시안의 나머지 항목(Allowed sites 편집·Record·What the agent sees·Disconnect·Zoom·패널 토글)은 회색 표시만. 단축키 없음. **실제 창 클릭은 사용자 확인 필요** (GUI) | ![⋮ 메뉴](images/menu-open.png) ![일시정지](images/agent-paused.png) — Worker 6 (보관·재개 실행·45초 `paused`·재부착·떼어진 호출 버림·wait_for 종료·카드 유지·모드 전환·로그+재생) · 정책 1 (모드 변경 시 거절 기억) · 메뉴·알약·패널 5 · 클릭 라우팅 1 (733 green) |
 | **D2** 시안 적용 ✅ (디자인 트랙) | [디자인 적용](#디자인-적용): `mb_engine::palette`(역할 색·중립색·`text_width`·`centered_text_y`), 크롬 재배치(탭 줄 44 + 툴바 52 = `CHROME_HEIGHT` 96, `ChromeExtras` 알약 자리·탭 점·⋮ 눌림, 스킴 칩), `overlay::Pill`, 패널 340·카드 4종·그린 아이콘·배지·대상 메모, ⋮ 메뉴 그림자 제거, 재생 패널(진행 막대·diff 카드), `Worker::{waiting_since, page_wait_total}` | 시안의 새 기능·다크·좁은 창은 [후속](#디자인-적용). `mb-shell` 실제 창은 사용자 확인 필요 (GUI, 미리보기 경로 없음) | 이미지 7장 다시 생성 — palette 1 · 크롬 배치 3 · 알약·대상 메모·진행 막대·대기 비율·픽셀 줄바꿈·HTTP 머리말 6 − 옛 알약 1 (742 green) |
 | **D3** 메뉴 새 기능 1차 ✅ (디자인 트랙) | [에이전트가 보는 것](#에이전트가-보는-것-what-the-agent-sees): `Worker::{seen, deliver}`(실제 전달된 관찰만), `overlay::agent_view`(두 블록 분리·강제 줄바꿈·행 스크롤·"… N more lines"), `window_mode::{route_viewer_input, paint_viewer}`(모달, Whole page = `full_snapshot`). [세션 기록 토글](#세션-기록-토글-record-this-session): `Worker::{start_recording, stop_recording, recording}`, `SessionLog::{starting_at, steps, file}`, `DEFAULT_RECORD_DIR`, 기록 세대·첫 단계 기준점, `Pill::Recording` + `overlay::{pills, pills_width}`, 기록 카드, 메뉴 RECORD/VIEW 섹션. `mb_shell::window::run_with`(Escape 를 입력으로), `--preview-agent-view` | Allowed sites 편집·넘겨주기·거절 잊기·다크·좁은 창은 다음. **실제 창 클릭·휠·Escape·복사는 사용자 확인 필요** (GUI) | ![에이전트가 보는 것](images/agent-view.png) ![기록 중](images/recording.png) — 메뉴·알약·기록 카드·뷰어 분리·긴 글 스크롤 5 · 기록 켜기/끄기/지연 생성·첫 단계 기준점·기록 폴더·마지막 받은 관찰 4 · Escape/메뉴 라우팅·모달 뷰어·Whole page 무발급 3 (768 green) |
+| **D4** 승인 흐름: 넘겨주기·거절 영수증 ✅ (디자인 트랙) | [넘겨주기와 거절 영수증](#넘겨주기와-거절-영수증-보드-9): `AgentBrowser::{take_over, finish_take_over, forget_refusal}`(`PersonTurn` — 비밀번호 넘겨받기와 공유), `AgentPolicy::forget_denial`, `Waiting::TakenOver` + `Answer::{HandBack, WontDo}`(park 그대로: 45초 `still_waiting`·재부착·`unclaimed`), `ToolError::NotDone`(`approval_denied`), `Worker::{refusal, forget_refusal}` + `Control::ForgetRefusal`, `overlay::{turn_card, refusal_card}`, `resolved_by: person_handed_back`(재생은 멈춤), `--preview-answer`, prompts 규칙 4·click 설명 | 연결 끊김 카드·Allowed sites·다크·좁은 창은 다음. **실제 창 클릭과 실연결 에이전트의 `taken_over` 반응은 사용자 확인 필요** | ![Your turn](images/your-turn.png) ![거절 영수증](images/refusal-receipt.png) — 정책 잊기 1 · Worker 넘겨주기 park·재부착·busy / 넘겨준 뒤 다시 묻기·I won't do it 기억 / 떠난 에이전트(unclaimed) / Deny 영수증·잊기 / 기록·재생 멈춤 5 (기존 take-over 테스트 1개 대체) · 패널 카드 2 (775 green) |
 
 - G4 의 게이트 **판정 로직**은 G1 에서 입력 출처 태그와 함께 먼저 들어간다 (`--approve auto|deny` 만). G4 는 사람에게 묻는 UI(`ask`)·넘겨받기·elicitation 을 붙이는 단계.
 - `<select>` 는 G1 이후 필요해질 때 (`select(id, option)` tool 추가).
@@ -1004,7 +1063,7 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-15 | 토큰은 실행마다 랜덤, `MB_MCP_TOKEN` 으로 고정 가능. 창에는 가려서 + 복사 버튼 | 매번 재등록은 번거로움 ↔ 고정 토큰은 유출 시 오래 유효. 기본은 안전 쪽, 선택은 사용자 |
 | 2026-11-14 | 사람이 창에서 페이지를 바꾸면(링크·뒤로 등) 다음 결과의 trusted 블록에 `note: the page changed since your last result without you — the person used the window` 한 번 표시 (`Observation::changed_by_person`, 기준 = 마지막으로 내준 관찰의 문서 세대·URL) | ask 모드 실연결 테스트: 사람의 이동이 에이전트에게 안 보여 이전 ID·가정으로 행동할 수 있었음. 페이지 스크립트는 이동 API 가 없어 "에이전트가 안 한 문서 변경 = 사람" 으로 판정 가능 |
 | 2026-11-14 | 넘겨받기 Done 응답에 `changed:` 요약 (`AgentBrowser::{begin_handoff, finish_handoff}`) | 실연결 테스트: 사람이 무엇을 했는지(값 입력·제출로 새 문서) 에이전트가 관찰을 diff 하지 않고 알 수 있게 |
-| 2026-11-14 | G4: "Do it myself" 는 거절 기억에 포함 | 사람이 직접 하기로 한 행동을 에이전트가 다른 경로로 다시 시도하지 않게 |
+| 2026-11-14 | G4: "Do it myself" 는 거절 기억에 포함 (2026-11-22: 넘겨주면 뺌 — 아래) | 사람이 직접 하기로 한 행동을 에이전트가 다른 경로로 다시 시도하지 않게 |
 | 2026-11-14 | G4: `ask` 모드의 다른 origin 리다이렉트 hop 은 거절 | 로더 스레드에서 판정 중이라 물어볼 수 없음. 사람은 직접 따라갈 수 있음 |
 | 2026-11-14 | 창은 논리 크기(CSS px)로 레이아웃하고 그릴 때만 배율 적용 (`window::Frame`, `render::scale_display_list`) | 관전 창 실연결 테스트에서 Retina 물리 픽셀(2620×1702)이 CSS px 로 쓰여 글자가 반 크기, 에이전트 레이아웃도 headless 와 달랐음. 명령 좌표·글자 크기를 곱해서 글리프를 큰 크기로 래스터 → 선명. mb-shell 도 같이 고쳐짐. 스프라이트(source offset) 이미지는 1:1 로 남는 한계 |
 | 2026-11-14 | 체크박스 = 파란 채움 + 흰 ✓(회전 막대 2개), 라디오 = 둥근 점 | 작은 채운 사각형은 체크 여부가 잘 안 보였음 (실연결 테스트) |
@@ -1044,6 +1103,14 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-22 | "Record this session" = 사람 전용 `Control`, `--log DIR/` 와 같은 `SessionLog`(원자 생성·0600·lazy) — 새 기록 경로 없음. 폴더 = `--log` 폴더 또는 `./mb-runs/`, `--log FILE` 은 다시 열지 않음 | 에이전트가 자기 기록을 끄거나 켤 수 있으면 감사 흔적이 무의미해진다. 같은 코드를 써야 재생·eval 이 그대로 읽는다. 파일을 다시 열면 첫 기록을 덮어쓴다 |
 | 2026-11-22 | 중간에 켠 기록: 헤더 `start_url` = 켠 순간 URL, 첫 단계 `person_moved` 는 켠 순간 기준, 시작·끝이 다른 기록에 걸친 단계는 안 씀(`log_generation`) | 재생은 헤더 URL 에서 시작하므로 켠 페이지여야 한다. 켜기 전 사람 이동은 시작점이지 기록 속 행동이 아니다(아니면 재생이 1단계에서 멈춤). 반쪽 단계는 target 이 없어 비밀번호 판정이 흔들린다 |
 | 2026-11-22 | REC 시계는 1초마다 깨우기 스레드로 한 프레임, 계속 그리기 아님 | 기록은 몇십 분 켜 둘 수 있다. 매 프레임 그리기면 유휴 CPU 가 계속 든다 |
+| 2026-11-22 | "I'll do it myself" 뒤 에이전트 호출은 **park 유지** → 사람이 넘겨주면 `taken_over`(지금 관찰 + 넘겨받은 뒤 `changed:` + note), 비밀번호 넘겨받기와 같은 모양(`PersonTurn`) | 즉시 `taken_over` 면 에이전트는 사람이 언제 끝낼지 몰라 `observe` 를 찔러 보거나 사용자에게 물어야 했다. park·45초 `still_waiting`·재부착·`unclaimed` 를 그대로 쓰면 새 대기 규칙이 없다 |
+| 2026-11-22 | 넘겨준 결과는 성공이 아니라 에러 코드 `taken_over`(관찰 동봉) | 에이전트가 부른 행동은 실행되지 않았다 — 사람이 다른 값·다른 버튼으로 했을 수 있다. 성공으로 주면 "내 클릭이 먹혔다" 로 읽는다 |
+| 2026-11-22 | 넘겨주면 그 행동을 거절 기억에서 **뺀다**(2026-11-14 "Do it myself 는 거절 기억에 포함" 을 고침). "I won't do it" 은 거절로 남김 | 넘겨주기는 "내가 했다" 지 "하지 마" 가 아니다. 거절 키가 (POST, URL) 이라 남기면 같은 폼으로 두 번째 항목을 넣는 정당한 행동이 세션 내내 묻지도 않고 거절된다. 빼도 Ask 모드에선 다시 카드로 물으니 사람이 결정권을 유지 |
+| 2026-11-22 | "Your turn" 에 **I won't do it** 추가 (시안에 없음) → `approval_denied` + 거절 영수증 | 넘겨받은 채 끝낼 길이 없으면 에이전트는 45초마다 다시 붙으며 끝없이 기다린다 |
+| 2026-11-22 | 넘겨받는 순간 park 의 `since` 를 다시 재지 않음 | 승인 카드에서 이미 40초 기다린 호출이 다시 45초를 기다리면 HTTP 60초 컷을 넘는다 |
+| 2026-11-22 | 넘겨준 단계는 재생에서 멈춘다(`person_handed_back` → `NEEDS_PERSON`) | 사람이 창에서 한 일은 로그에 없다. 지어내지 않는다는 기존 규칙(`person_moved`) |
+| 2026-11-22 | 거절 영수증은 사람의 거절(Deny·I won't do it)에만, 하나만(마지막 것), 잊거나 덮어쓸 때까지 | 규칙의 거절은 모드를 바꾸면 이미 잊힌다. 자동으로 사라지면 몇 분 뒤 마음이 바뀐 사람이 풀 곳이 없다(거절 목록 화면은 아직 없음) |
+| 2026-11-22 | Forget this refusal = 사람 전용 `Control::ForgetRefusal` → `AgentPolicy::forget_denial`(사람·규칙 거절 둘 다 지움), MCP 경로 없음 | 에이전트가 거절을 지울 수 있으면 거절 기억(우회·스팸 차단)이 무의미. 둘 다 지워 "아무도 거절하기 전" 으로 — 그 뒤는 지금 모드가 정한다 |
 
 ## 열린 결정
 

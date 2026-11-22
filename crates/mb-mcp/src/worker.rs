@@ -13,6 +13,7 @@ use mb_agent::{
     Screenshot, WaitCondition,
 };
 use mb_runtime::dom::NodeId;
+use mb_runtime::state::policy::GatedAction;
 use tokio::sync::oneshot;
 
 use crate::cli::Options;
@@ -215,6 +216,21 @@ pub struct Worker {
     // repeating it).
     paused: bool,
     held: Option<Held>,
+    // The receipt the last refusal card left (Deny, or "I won't do it"
+    // after taking a step over): what was refused, with "Forget this
+    // refusal". Until forgotten or replaced by the next one.
+    refusal: Option<Refusal>,
+}
+
+/// A refusal the person made on a card, as its receipt shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Refusal {
+    /// As the card showed it ("POST http://…/signup").
+    pub action: String,
+    /// "I won't do it" after taking the step over (vs Deny).
+    pub taken_over: bool,
+    // What the refusal memory holds, for "Forget this refusal".
+    gated: GatedAction,
 }
 
 /// An agent call that arrived while the agent was paused.
@@ -309,6 +325,7 @@ impl Worker {
             seen: None,
             paused: false,
             held: None,
+            refusal: None,
         }
     }
 
@@ -553,6 +570,7 @@ impl Worker {
                     waiting,
                     since: std::time::Instant::now(),
                     context,
+                    taken: None,
                 });
             }
             None => {
@@ -641,7 +659,7 @@ impl Worker {
 
     /// The person's answer to the parked request; sends its reply.
     pub fn answer(&mut self, answer: Answer) {
-        let Some(parked) = self.parked.take() else {
+        let Some(mut parked) = self.parked.take() else {
             return;
         };
         let (result, outcome) = match (&parked.waiting, answer) {
@@ -659,31 +677,81 @@ impl Worker {
                 }),
                 "approved",
             ),
-            (Waiting::Approval { .. }, Answer::Deny) => (
-                self.execute_guarded(&parked.request, |b| {
+            (Waiting::Approval { action }, Answer::Deny) => {
+                let shown = action.clone();
+                let gated = self.browser.state().held_action().cloned();
+                let result = self.execute_guarded(&parked.request, |b| {
                     b.resolve_approval(false)
                         .map(observation_reply)
                         .map_err(ToolError::from)
-                }),
-                "refused",
-            ),
-            (Waiting::Approval { .. }, Answer::TakeOver) => (
-                self.execute_guarded(&parked.request, |b| match b.resolve_approval(false) {
-                    Err(AgentError::ApprovalDenied { observation, .. }) => {
-                        Err(ToolError::TakenOver(observation.to_blocks()))
+                });
+                if let Some(gated) = gated {
+                    self.refusal = Some(Refusal {
+                        action: shown,
+                        taken_over: false,
+                        gated,
+                    });
+                }
+                (result, "refused")
+            }
+            (Waiting::Approval { action }, Answer::TakeOver) => {
+                // Not answered yet: the call stays parked (same 45 s
+                // `still_waiting` and re-attach) while the person has the
+                // step, and gets its result when they hand back.
+                let action = action.clone();
+                match self
+                    .execute_guarded(&parked.request, |b| b.take_over().map_err(ToolError::from))
+                {
+                    Ok(gated) => {
+                        parked.waiting = Waiting::TakenOver { action };
+                        parked.taken = Some(gated);
+                        self.parked = Some(parked);
+                        return;
                     }
-                    other => other.map(observation_reply).map_err(ToolError::from),
-                }),
-                "person took over",
-            ),
+                    Err(error) => (Err(error), "person took over"),
+                }
+            }
+            (Waiting::TakenOver { .. }, Answer::HandBack) => {
+                let result = self.execute_guarded(&parked.request, |b| {
+                    Err(ToolError::TakenOver(b.finish_take_over(true).to_blocks()))
+                });
+                // Done by the person, not refused: the agent asking for it
+                // again (a second item through the same form) is a new
+                // question, not a remembered `approval_denied`.
+                if let Some(gated) = &parked.taken {
+                    self.browser.forget_refusal(gated);
+                }
+                (result, "handed back by the person")
+            }
+            (Waiting::TakenOver { action }, Answer::WontDo) => {
+                let shown = action.clone();
+                let result = self.execute_guarded(&parked.request, |b| {
+                    Err(ToolError::NotDone(b.finish_take_over(false).to_blocks()))
+                });
+                if let Some(gated) = parked.taken.take() {
+                    self.refusal = Some(Refusal {
+                        action: shown,
+                        taken_over: true,
+                        gated,
+                    });
+                }
+                (result, "taken over, not done")
+            }
             (Waiting::Handoff { .. }, Answer::HandoffDone) => (
                 self.execute_guarded(&parked.request, |b| {
                     Ok(observation_reply(b.finish_handoff()))
                 }),
                 "filled in by the person",
             ),
-            (Waiting::Handoff { .. }, _) => (Err(ToolError::HandoffDeclined), "declined"),
-            (Waiting::Approval { .. }, _) => (Err(ToolError::HandoffDeclined), "declined"),
+            (Waiting::Handoff { .. }, Answer::HandoffCancel) => {
+                (Err(ToolError::HandoffDeclined), "declined")
+            }
+            // A button from another card (a stale frame): not this
+            // question's answer.
+            _ => {
+                self.parked = Some(parked);
+                return;
+            }
         };
         let reply = self.conclude(&parked.request, result, Some(outcome));
         self.log_step(&parked.request, &parked.context, Some(outcome), &reply);
@@ -694,6 +762,20 @@ impl Worker {
             _ => self.unclaimed = Some((parked.request, reply)),
         }
         self.run_deferred();
+    }
+
+    /// The receipt of the person's last refusal, for the panel.
+    pub fn refusal(&self) -> Option<&Refusal> {
+        self.refusal.as_ref()
+    }
+
+    /// "Forget this refusal" on the receipt. Person-only: no MCP tool or
+    /// `Request` reaches this. The agent asking for that action again
+    /// shows a new card (or follows the mode: Refuse refuses it by rule).
+    pub fn forget_refusal(&mut self) {
+        if let Some(refusal) = self.refusal.take() {
+            self.browser.forget_refusal(&refusal.gated);
+        }
     }
 
     /// Window mode, once per frame (after the person's input was applied):
@@ -887,6 +969,8 @@ impl Worker {
                     let _ = self.browser.navigate(&url);
                 }
                 self.parked = None;
+                // The new browser remembers no refusals: nothing to forget.
+                self.refusal = None;
                 Err(ToolError::Crashed)
             }
         }
@@ -937,6 +1021,9 @@ pub enum Waiting {
     Approval { action: String },
     /// A password field the person has to fill in themselves.
     Handoff { id: String },
+    /// The person chose "I'll do it myself" on the approval card for this
+    /// action and has the step ("Your turn") until they hand back.
+    TakenOver { action: String },
 }
 
 /// The person's answer from the window.
@@ -945,6 +1032,10 @@ pub enum Answer {
     Approve,
     Deny,
     TakeOver,
+    /// "I'm done — hand back to the agent" on the "Your turn" card.
+    HandBack,
+    /// "I won't do it" on the "Your turn" card.
+    WontDo,
     HandoffDone,
     HandoffCancel,
 }
@@ -956,6 +1047,24 @@ struct Parked {
     waiting: Waiting,
     since: std::time::Instant,
     context: StepContext,
+    // Taken over: the refused action, forgotten again on hand-back.
+    taken: Option<GatedAction>,
+}
+
+#[cfg(test)]
+impl Refusal {
+    /// A receipt for panel tests (the refusal memory isn't involved).
+    pub(crate) fn sample(action: &str, taken_over: bool) -> Self {
+        Refusal {
+            action: action.into(),
+            taken_over,
+            gated: GatedAction {
+                kind: mb_runtime::state::policy::GatedKind::Submit,
+                method: "POST".into(),
+                target: mb_runtime::net::Url::parse("http://127.0.0.1:8765/signup").unwrap(),
+            },
+        }
+    }
 }
 
 impl Request {
@@ -1034,8 +1143,11 @@ pub(crate) enum ToolError {
     Agent(AgentError),
     InvalidId(String),
     InvalidArguments(&'static str),
-    /// The person chose to do the held action themselves.
+    /// The person did the held action themselves and handed back: the
+    /// page now, with what they changed.
     TakenOver((String, String)),
+    /// The person took the held action over, then chose not to do it.
+    NotDone((String, String)),
     /// The person declined to fill in the field handed to them.
     HandoffDeclined,
     /// The engine panicked; the browser was rebuilt.
@@ -1055,10 +1167,13 @@ impl ToolError {
             ToolError::InvalidId(_) => "invalid_id",
             ToolError::InvalidArguments(_) => "invalid_arguments",
             ToolError::TakenOver(_) => "taken_over",
+            ToolError::NotDone(_) => "approval_denied",
             ToolError::HandoffDeclined => "handoff_declined",
             ToolError::Crashed => "engine_crashed",
             ToolError::Busy(Waiting::Approval { .. }) => "approval_pending",
-            ToolError::Busy(Waiting::Handoff { .. }) => "handoff_pending",
+            ToolError::Busy(Waiting::Handoff { .. } | Waiting::TakenOver { .. }) => {
+                "handoff_pending"
+            }
             ToolError::StillWaiting(_) => "still_waiting",
             ToolError::Paused => "paused",
         }
@@ -1070,7 +1185,10 @@ impl ToolError {
             ToolError::InvalidId(raw) => format!("{raw:?} is not an element id."),
             ToolError::InvalidArguments(why) => (*why).to_string(),
             ToolError::TakenOver(_) => {
-                "The person watching chose to do this step themselves.".into()
+                "The person watching did this step themselves in the browser window and handed control back. The observation below is the page now; `changed:` says what changed while they had it.".into()
+            }
+            ToolError::NotDone(_) => {
+                "The person watching took this step over, then decided not to do it; your action was not done and is refused for the rest of this session.".into()
             }
             ToolError::HandoffDeclined => {
                 "The person watching declined to fill in that field.".into()
@@ -1095,6 +1213,9 @@ impl ToolError {
                     Waiting::Handoff { id } => format!(
                         "they are typing the password into field {id} in the browser window and press Done when finished."
                     ),
+                    Waiting::TakenOver { action } => format!(
+                        "they are doing \"{action}\" themselves in the browser window and hand control back when done."
+                    ),
                 };
                 format!("{prefix}{what}")
             }
@@ -1109,7 +1230,10 @@ impl ToolError {
             }
             ToolError::InvalidArguments(_) => "Check the tool's parameters.",
             ToolError::TakenOver(_) => {
-                "Don't repeat it. Call `observe` later to see what they did, or ask them."
+                "Don't repeat the action: the person already did it. Read the observation and continue from the page as it is now."
+            }
+            ToolError::NotDone(_) => {
+                "Do not retry or look for a workaround; report this to the user."
             }
             ToolError::HandoffDeclined => "Ask the user how they want to proceed.",
             ToolError::Crashed => "Call `observe` to see the reloaded page; form input was lost.",
@@ -1128,7 +1252,7 @@ impl ToolError {
     fn observation_blocks(&self) -> Option<(String, String)> {
         match self {
             ToolError::Agent(e) => e.observation().map(Observation::to_blocks),
-            ToolError::TakenOver(blocks) => Some(blocks.clone()),
+            ToolError::TakenOver(blocks) | ToolError::NotDone(blocks) => Some(blocks.clone()),
             _ => None,
         }
     }
@@ -1381,6 +1505,7 @@ pub(crate) mod tests {
             preview_menu: false,
             preview_pause: false,
             preview_agent_view: None,
+            preview_answer: None,
             http_port: None,
             attach: None,
             log,
@@ -1537,22 +1662,28 @@ pub(crate) mod tests {
         drop(rx); // the client timed out
         worker.tick();
         assert!(worker.waiting().is_some(), "the card stays up");
-        worker.answer(Answer::TakeOver);
+        worker.answer(Answer::Deny);
         assert!(worker.waiting().is_none());
 
         // The agent repeats its call and gets the person's answer.
         let mut again = submit(&mut worker, click.clone());
         let Ok(Reply::Error(report)) = again.try_recv() else {
-            panic!("expected taken_over")
+            panic!("expected approval_denied")
         };
-        assert_eq!(report.code, "taken_over");
+        assert_eq!(report.code, "approval_denied");
+        assert!(report.message.contains("refused by"), "{}", report.message);
         // Only once: the next identical call runs normally (and is refused
-        // from memory, since "do it myself" counts as a refusal).
+        // from memory).
         let mut third = submit(&mut worker, click);
         let Ok(Reply::Error(report)) = third.try_recv() else {
             panic!("expected approval_denied")
         };
         assert_eq!(report.code, "approval_denied");
+        assert!(
+            report.message.contains("already refused"),
+            "{}",
+            report.message
+        );
     }
 
     #[test]
@@ -1639,6 +1770,7 @@ pub(crate) mod tests {
             preview_menu: false,
             preview_pause: false,
             preview_agent_view: None,
+            preview_answer: None,
             http_port: None,
             attach: None,
             log: None,
@@ -2041,31 +2173,210 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn held_navigation_answers_deny_and_take_over() {
-        let base = serve_page();
-        let (mut worker, _, link) = worker_on(&base, mb_agent::ApproveMode::Ask);
-
-        let mut rx = submit(&mut worker, Request::Click { id: link.clone() });
+    // The agent clicks the cross-origin link (Ask mode: a card) and the
+    // person picks "I'll do it myself".
+    fn take_over_link(worker: &mut Worker, link: &str) -> oneshot::Receiver<Reply> {
+        let mut rx = submit(worker, Request::Click { id: link.into() });
         assert!(matches!(worker.waiting(), Some(Waiting::Approval { .. })));
         worker.answer(Answer::TakeOver);
-        let Ok(Reply::Error(report)) = rx.try_recv() else {
-            panic!("expected an error reply")
+        assert!(rx.try_recv().is_err(), "the call stays parked");
+        rx
+    }
+
+    #[test]
+    fn taking_over_parks_until_the_person_hands_back() {
+        let base = serve_page();
+        let (mut worker, _, link) = worker_on(&base, mb_agent::ApproveMode::Ask);
+        worker.park_reply_after = Duration::ZERO;
+        let mut first = take_over_link(&mut worker, &link);
+        let Some(Waiting::TakenOver { action }) = worker.waiting() else {
+            panic!("expected the Your turn card")
         };
-        assert_eq!(report.code, "taken_over");
+        assert!(action.starts_with("Navigation to"), "{action}");
+        assert!(worker.refusal().is_none(), "not a refusal (yet)");
+
+        // HTTP clients give up at ~60 s: the call answers `still_waiting`
+        // and the same call re-attaches.
+        worker.tick();
+        let Ok(Reply::Error(report)) = first.try_recv() else {
+            panic!("expected still_waiting")
+        };
+        assert_eq!(report.code, "still_waiting");
+        assert!(report.message.contains("themselves"), "{}", report.message);
+        worker.park_reply_after = Duration::from_secs(60);
+        let mut again = submit(&mut worker, Request::Click { id: link.clone() });
+        assert!(again.try_recv().is_err(), "re-attached");
+        // Anything else meanwhile is told the step is the person's.
+        let mut other = submit(&mut worker, Request::Scroll { dy: 10.0 });
+        let Ok(Reply::Error(busy)) = other.try_recv() else {
+            panic!("expected handoff_pending")
+        };
+        assert_eq!(busy.code, "handoff_pending");
         assert!(
-            report.observation.is_some(),
-            "the page comes back with the error"
+            busy.message.contains("hand control back"),
+            "{}",
+            busy.message
         );
 
-        // Taking over counts as a refusal for the agent: asking again for
-        // the same origin is refused without a new card.
-        let mut again = submit(&mut worker, Request::Click { id: link });
-        assert!(worker.waiting().is_none());
+        // The person follows the link themselves (human input isn't gated)
+        // and hands back.
+        person_click(&mut worker, &link);
+        worker.answer(Answer::HandBack);
         let Ok(Reply::Error(report)) = again.try_recv() else {
-            panic!("expected a refusal")
+            panic!("expected taken_over")
+        };
+        assert_eq!(report.code, "taken_over");
+        assert!(report.message.contains("handed control back"));
+        assert!(report.hint.contains("Don't repeat"), "{}", report.hint);
+        let (browser, page) = report.observation.expect("the page comes back");
+        assert!(page.contains("Arrived"), "{page}");
+        assert!(
+            browser.contains(
+                "note: the person did this step themselves in the window and handed control back to you"
+            ),
+            "{browser}"
+        );
+        let changed = browser.lines().find(|l| l.starts_with("changed:")).unwrap();
+        assert!(changed.contains("new document"), "{changed}");
+        assert!(worker.waiting().is_none());
+        assert_eq!(
+            worker.seen().map(|s| s.from.as_str()),
+            Some(format!("click {link} · taken_over").as_str()),
+            "what the agent sees is the hand-back result"
+        );
+        let last = worker.timeline().last().unwrap();
+        assert_eq!(
+            last.label,
+            format!("click {link} (handed back by the person)")
+        );
+    }
+
+    #[test]
+    fn a_handed_back_step_is_asked_again_but_wont_do_is_remembered() {
+        let base = serve_page();
+        let (mut worker, _, link) = worker_on(&base, mb_agent::ApproveMode::Ask);
+        // Handed back without doing anything: done by the person, not
+        // refused — the agent asking again gets a new card.
+        let mut rx = take_over_link(&mut worker, &link);
+        worker.answer(Answer::HandBack);
+        let Ok(Reply::Error(report)) = rx.try_recv() else {
+            panic!("expected taken_over")
+        };
+        assert_eq!(report.code, "taken_over");
+        assert!(worker.refusal().is_none());
+
+        // This time the person won't do it: a refusal, with a receipt.
+        let mut rx = take_over_link(&mut worker, &link);
+        worker.answer(Answer::WontDo);
+        let Ok(Reply::Error(report)) = rx.try_recv() else {
+            panic!("expected approval_denied")
         };
         assert_eq!(report.code, "approval_denied");
+        let (browser, _) = report.observation.expect("the page comes back");
+        assert!(
+            browser.contains("note: the person took this step over, then chose not to do it"),
+            "{browser}"
+        );
+        let refusal = worker.refusal().expect("a receipt");
+        assert!(refusal.taken_over);
+        assert!(refusal.action.starts_with("Navigation to"));
+        // Remembered: no card the next time.
+        let mut rx = submit(&mut worker, Request::Click { id: link });
+        assert!(worker.waiting().is_none());
+        let Ok(Reply::Error(report)) = rx.try_recv() else {
+            panic!("expected approval_denied")
+        };
+        assert!(
+            report.message.contains("already refused"),
+            "{}",
+            report.message
+        );
+    }
+
+    #[test]
+    fn a_hand_back_while_the_agent_was_away_waits_for_its_next_call() {
+        let base = serve_page();
+        let (mut worker, _, link) = worker_on(&base, mb_agent::ApproveMode::Ask);
+        let rx = take_over_link(&mut worker, &link);
+        drop(rx); // the agent's client gave up
+        worker.tick();
+        assert!(
+            matches!(worker.waiting(), Some(Waiting::TakenOver { .. })),
+            "the Your turn card stays up"
+        );
+        person_click(&mut worker, &link);
+        worker.answer(Answer::HandBack);
+        assert!(worker.waiting().is_none());
+        // Its next identical call gets the hand-back result…
+        let mut again = submit(&mut worker, Request::Click { id: link.clone() });
+        let Ok(Reply::Error(report)) = again.try_recv() else {
+            panic!("expected taken_over")
+        };
+        assert_eq!(report.code, "taken_over");
+        assert!(report.observation.unwrap().1.contains("Arrived"));
+        // …once; the agent reading the page afterwards just observes.
+        let mut next = submit(&mut worker, observe());
+        assert!(matches!(next.try_recv(), Ok(Reply::Observation { .. })));
+    }
+
+    #[test]
+    fn deny_leaves_a_receipt_and_forgetting_it_asks_again() {
+        let base = serve_page();
+        let (mut worker, _, link) = worker_on(&base, mb_agent::ApproveMode::Ask);
+        let mut rx = submit(&mut worker, Request::Click { id: link.clone() });
+        worker.answer(Answer::Deny);
+        assert!(matches!(rx.try_recv(), Ok(Reply::Error(r)) if r.code == "approval_denied"));
+        let refusal = worker.refusal().expect("a receipt");
+        assert!(!refusal.taken_over);
+        assert!(refusal.action.starts_with("Navigation to"));
+
+        // Refused from memory: no card.
+        let mut rx = submit(&mut worker, Request::Click { id: link.clone() });
+        assert!(worker.waiting().is_none());
+        assert!(matches!(rx.try_recv(), Ok(Reply::Error(r)) if r.code == "approval_denied"));
+
+        // The person forgets it: the receipt goes, and the agent asking
+        // again gets a new card.
+        worker.forget_refusal();
+        assert!(worker.refusal().is_none());
+        let mut rx = submit(&mut worker, Request::Click { id: link });
+        assert!(matches!(worker.waiting(), Some(Waiting::Approval { .. })));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_handed_back_step_is_logged_and_stops_replay() {
+        let base = serve_page();
+        let path = std::env::temp_dir().join(format!("mb-handback-{}.jsonl", std::process::id()));
+        let (mut worker, _, link) =
+            worker_logging(&base, mb_agent::ApproveMode::Ask, Some(path.clone()));
+        let mut rx = take_over_link(&mut worker, &link);
+        person_click(&mut worker, &link);
+        worker.answer(Answer::HandBack);
+        assert!(matches!(rx.try_recv(), Ok(Reply::Error(r)) if r.code == "taken_over"));
+        drop(worker);
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            log.contains(r#""resolved_by":"person_handed_back""#),
+            "{log}"
+        );
+        let options = crate::cli::ReplayOptions {
+            file: path.clone(),
+            secrets: Vec::new(),
+            ignore_text: false,
+            window: false,
+            preview: None,
+            preview_steps: 0,
+            preview_scale: 1.0,
+        };
+        let stop = crate::replay::replay(&options).unwrap_err();
+        assert_eq!(stop.code, crate::replay::NEEDS_PERSON, "{}", stop.message);
+        assert!(
+            stop.message.contains("did this step themselves"),
+            "{}",
+            stop.message
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
