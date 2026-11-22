@@ -9,7 +9,7 @@
 
 use std::process::ExitCode;
 
-use mb_runtime::chrome::CHROME_HEIGHT;
+use mb_runtime::chrome::{CHROME_HEIGHT, ChromeExtras};
 use mb_runtime::dom::NodeId;
 use mb_runtime::input::WindowInput;
 use mb_runtime::render::{DisplayCommand, rasterize, scale_display_list};
@@ -18,8 +18,9 @@ use crate::cli::ReplayOptions;
 use crate::overlay::{self, PanelAction, ReplayControl, ReplayPanelInfo, StepMark};
 use crate::replay::{NEEDS_PERSON, Replayer, SAME, StepOutcome};
 
-// Panel text width in characters (PANEL_WIDTH minus padding, ~7 px each).
-const PANEL_CHARS: usize = (overlay::PANEL_WIDTH - 24) / 7;
+// Result-card text width in characters (PANEL_WIDTH minus the panel's and
+// the card's padding, ~7 px each).
+const PANEL_CHARS: usize = (overlay::PANEL_WIDTH - 72) / 7;
 
 #[derive(Default)]
 struct View {
@@ -132,12 +133,20 @@ fn compose(
     };
     let (page_width, _) = replayer.viewport();
     let browser = replayer.browser();
+    // Board 5: the chrome says the page only replays.
+    let pill = overlay::Pill::Replaying;
+    browser.state_mut().chrome_extras = ChromeExtras {
+        accessory_width: pill.width(),
+        ..ChromeExtras::default()
+    };
     let mut commands = browser.human_frame(input);
+    commands.extend(pill.commands(page_width as f32));
     let scroll_y = browser.state().scroll_offset;
     let elements = browser.element_boxes();
     commands.extend(overlay::page_overlay(
         &elements,
         target,
+        None,
         scroll_y,
         window_height as f32,
     ));

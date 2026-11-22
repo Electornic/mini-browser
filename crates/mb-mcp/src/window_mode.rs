@@ -19,9 +19,12 @@
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, OnceLock};
 
-use mb_runtime::chrome::{CHROME_HEIGHT, menu_button_rect};
+use std::time::Duration;
+
+use mb_runtime::chrome::{CHROME_HEIGHT, ChromeExtras, menu_button_rect};
 use mb_runtime::input::WindowInput;
 use mb_runtime::layout::Rect;
+use mb_runtime::palette;
 use mb_runtime::render::{DisplayCommand, rasterize, scale_display_list};
 
 use crate::cli::Options;
@@ -299,7 +302,16 @@ fn compose(
     let (page_width, panel_width) = overlay::layout(window_width);
     let page_height = window_height.saturating_sub(CHROME_HEIGHT as usize);
     worker.browser().set_viewport(page_width, page_height);
+    // The chrome of an agent window (board 2): a pill saying who drives,
+    // the agent dot on the tab, ⋮ pressed while its menu is open.
+    let pill = agent_pill(worker);
+    worker.browser().state_mut().chrome_extras = ChromeExtras {
+        accessory_width: pill.width(),
+        tab_marker: (pill != overlay::Pill::NoAgent).then_some(palette::AGENT),
+        menu_open: view.menu_open,
+    };
     let mut commands = worker.browser().human_frame(input);
+    commands.extend(pill.commands(page_width as f32));
     let scroll_y = worker.browser().state().scroll_offset;
     let target = worker.browser().last_target();
     let mut elements = worker.browser().element_boxes();
@@ -308,15 +320,19 @@ fn compose(
         // handed to them (a card still up) keeps its outline.
         elements.retain(|e| worker.waiting().is_some() && Some(e.id) == target);
     }
+    // What the outlined target is waiting on (board 3).
+    let note = match worker.waiting() {
+        Some(worker::Waiting::Approval { .. }) => Some("The agent wants to press this"),
+        Some(worker::Waiting::Handoff { .. }) => Some("Type the password here"),
+        None => None,
+    };
     commands.extend(overlay::page_overlay(
         &elements,
         target,
+        note,
         scroll_y,
         window_height as f32,
     ));
-    if worker.paused() {
-        commands.extend(overlay::paused_pill(page_width as f32));
-    }
     let mut buttons = Vec::new();
     if panel_width > 0 {
         let agent = &worker.options().agent;
@@ -327,12 +343,15 @@ fn compose(
                 allow_origins: &agent.allow_origins,
                 timeline: worker.timeline(),
                 waiting: worker.waiting(),
+                waited: worker
+                    .waiting_since()
+                    .map_or(Duration::ZERO, |since| since.elapsed()),
                 page_wait: worker.page_wait().map(|(condition, left)| {
                     let what = match condition {
                         mb_agent::WaitCondition::Text(text) => format!("\"{text}\""),
                         mb_agent::WaitCondition::Element(id) => format!("e{}", id.raw()),
                     };
-                    (what, left.as_secs())
+                    (what, left, worker.page_wait_total().unwrap_or(left))
                 }),
                 attach: worker.options().attach.as_ref(),
                 copied: view.copied,
@@ -362,6 +381,22 @@ fn compose(
         commands,
         buttons,
         menu,
+    }
+}
+
+// Who drives, for the chrome pill. `--http` before any call: nobody yet
+// (the HTTP server doesn't tell us about sessions; the first call does).
+fn agent_pill(worker: &Worker) -> overlay::Pill {
+    if worker.paused() {
+        overlay::Pill::Paused
+    } else if worker.options().attach.is_some()
+        && worker.timeline().is_empty()
+        && worker.waiting().is_none()
+        && worker.page_wait().is_none()
+    {
+        overlay::Pill::NoAgent
+    } else {
+        overlay::Pill::Attached(worker.approve_mode())
     }
 }
 

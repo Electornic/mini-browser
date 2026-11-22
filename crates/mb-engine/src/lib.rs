@@ -9,6 +9,7 @@
 //                  walker; the per-frame view assembler is the sibling `view`
 //                  module below)
 //   chrome   = address-bar + back/forward UI as paint commands
+//   palette  = design tokens (role colors, neutrals) shared with mb-mcp
 //   view         = per-frame DocumentView assembler (paint commands + link
 //                  rects + layout root) and hit testing for hover / clicks
 //   font_system  = shared cosmic-text FontSystem + swash glyph cache
@@ -26,5 +27,6 @@ pub mod chrome;
 pub mod font_system;
 pub mod input;
 pub mod layout;
+pub mod palette;
 pub mod render;
 pub mod view;

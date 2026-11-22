@@ -1,6 +1,6 @@
 # Concept — 에이전트용 브라우저
 
-> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ · G5c 평가 ✅ (2026-11-20)** · 호환성 트랙 시작 (2026-11-21): 인라인 줄 묶기 ✅ · IDL 속성 반사 ✅ · Preact 실증 ✅ · 디자인 트랙 시작 (2026-11-21): [⋮ 메뉴](#-메뉴-사람의-조종석) 1차 — 일시정지·런타임 승인 모드 ✅ · 다음 = 디자인 시안을 엔진에 적용 / 호환성 잔여 갭(spa-roadmap) / 열린 결정 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
+> 상태: 초안 v4 (2026-11-11) · **G0 관찰 ✅ · G1 행동 ✅ · G2 MCP ✅ · G3a 관전 창 ✅ · G4 승인·넘겨받기 ✅ · G3b HTTP 붙기 ✅ · G5a 기록·재생 ✅ · G5b 재생 뷰 ✅ · G5c 평가 ✅ (2026-11-20)** · 호환성 트랙 시작 (2026-11-21): 인라인 줄 묶기 ✅ · IDL 속성 반사 ✅ · Preact 실증 ✅ · 디자인 트랙 시작 (2026-11-21): [⋮ 메뉴](#-메뉴-사람의-조종석) 1차 — 일시정지·런타임 승인 모드 ✅ · [시안 적용](#디자인-적용) (2026-11-22) ✅ · 다음 = 시안의 새 기능(기록 토글·What the agent sees·허용 사이트 편집 등) / 호환성 잔여 갭(spa-roadmap) / 열린 결정 · **확정: 에이전트 연결 = MCP 서버** · 호환성 트랙: [spa-roadmap.md](spa-roadmap.md)
 
 ## 한 줄
 
@@ -333,7 +333,7 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 
 ### 메뉴 구성과 입력 처리
 
-- **그리는 곳**: `overlay::menu` (순수 함수, `DisplayCommand` + 클릭 영역 `Button` + 메뉴 전체 rect). ⋮ 버튼(`chrome::menu_button_rect(page_width)`) 바로 아래, 버튼 오른쪽 끝에 맞춰 페이지 위에 겹쳐 그린다 (폭 300, 좁은 페이지에선 화면 안으로 당김). 색은 시안의 두 주체 — 에이전트 파랑 `#2D5BE3`, 사람 주황 `#D9670B` — 만 가져오고 나머지 크롬·패널 스타일은 그대로 둔다.
+- **그리는 곳**: `overlay::menu` (순수 함수, `DisplayCommand` + 클릭 영역 `Button` + 메뉴 전체 rect). ⋮ 버튼(`chrome::menu_button_rect(page_width)`) 바로 아래, 버튼 오른쪽 끝에 맞춰 페이지 위에 겹쳐 그린다 (폭 300, 좁은 페이지에선 화면 안으로 당김). 색은 [디자인 적용](#디자인-적용) 이후 `palette` 토큰을 쓴다 (폭 330, 행 40, 그림자 없음 — 시안 원칙 "엔진이 그릴 수 있는 것만").
 - **항목**:
   - `AGENT` 섹션: **Pause the agent / Resume the agent** (한 줄이 상태에 따라 바뀜, 파란 일시정지 아이콘 / 재생 아이콘), "Before POST or other origins" 아래 **Ask me / Refuse / Allow** 세그먼트(선택된 칸은 흰 바탕·굵게).
   - 아직 안 만든 항목은 회색으로만 표시(클릭 영역 없음): Allowed sites(현재 값 `any`/origin), Record this session, What the agent sees (`soon`). 메뉴가 그 기능들이 들어갈 자리라는 걸 보여 주되 누를 수는 없게.
@@ -360,7 +360,7 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
   - 이미 떠 있는 **승인·넘겨받기 카드는 그대로 답할 수 있다**. 같은 호출의 재부착도 된다. 일시정지 중 사람이 Approve/Done 을 누르면 그 행동은 사람이 직접 허락한 것이므로 실행된다. 카드가 떠 있을 때 온 다른 호출은 `approval_pending` 이 아니라 일시정지 보관으로 간다 — 지금 진짜 이유는 일시정지라서.
   - 사람이 답했는데 에이전트가 없던 결과(`unclaimed`)는 일시정지 중에도 같은 호출에 돌려준다 — 이미 끝난 일의 결과 전달이지 실행이 아니다.
 - **창 표시**:
-  - 크롬: 주소창 오른쪽 끝에 주황 알약 **"Agent paused"** (`overlay::paused_pill`). 크롬 높이를 바꾸지 않으려고 시안의 별도 배너 줄 대신 주소창 안에 둔다 — 아주 긴 URL 의 끝은 가려질 수 있다.
+  - 크롬: 주소창과 ⋮ 사이 알약 자리에 주황 알약 **"Agent paused"** (`overlay::Pill::Paused`, [디자인 적용](#디자인-적용)). 크롬 높이를 바꾸지 않으려고 시안의 별도 배너 줄("You have the wheel")은 두지 않는다 — 같은 내용이 패널 카드에 있다.
   - **ID 배지 없음**: 페이지는 사람 것. 넘겨받기 카드가 떠 있으면 그 칸의 주황 테두리만 남긴다.
   - 패널: 맨 위에 주황 카드 "Agent paused · you have the wheel" + 설명 + (보관 호출이 있으면) "1 call is waiting for you: click e26" + "It runs on resume, on the page as it is then (ids are checked first)." + 검은 **Resume agent** 버튼. 패널이 없는 좁은 창(700px 미만)에선 ⋮ 메뉴의 Resume 을 쓴다.
   - 페이지는 사람이 평소대로 쓴다(사람 입력은 게이트 밖).
@@ -376,6 +376,91 @@ G0 구현 ([mb-agent/src/index.rs](../crates/mb-agent/src/index.rs), [role.rs](.
 - **Allow = `auto`** 라서 [자격증명 규칙](#자격증명-규칙)의 예외(로컬 개발 호스트에선 에이전트가 테스트 비밀번호를 입력)도 같이 켜진다. 기존 의미 그대로이며, 사람이 직접 고른 것이다.
 - **Ask me 는 창이 필요** — 창 모드에서만 메뉴가 있으니 항상 성립한다. (CLI 의 "`--approve ask` 는 `--window` 필요" 검사는 그대로.)
 - **세션 로그·재생**: 단계 줄에 그 행동이 **시작될 때의 모드**를 헤더와 다를 때만 `"approve":"auto"` 처럼 남긴다(`StepRecord.approve`, `begin_step` 에서 캡처 — 카드가 떠 있는 동안 모드를 바꿔도 그 단계는 시작 모드로 기록). 재생은 단계마다 `set_approve_mode(단계 값 또는 헤더 값)` 을 먼저 호출한다. 필드가 없는 기존 로그는 헤더 모드 그대로라 로그 버전은 1 유지.
+
+## 디자인 적용
+
+> 2026-11-22 디자인 트랙 2차. 시안(작업명 "Agent Browser", 아티팩트 보드 11장)을 **이미 있는 화면에** 입혔다. 새 기능은 만들지 않았다 — 시안에만 있는 기능은 아래 "후속" 목록. 시안은 HTML 목업이고 우리 렌더러는 사각형·둥근 사각형(채우기만)·1–2px 선·텍스트만 그리므로, "렌더러가 허락하는 만큼 가깝게"가 기준.
+
+![관전 창](images/g3-observation-window.png) ![승인 카드](images/g4-approval-card.png)
+
+### 토큰 (보드 1) — `crates/mb-engine/src/palette.rs`
+
+- **역할 색 4개**: 에이전트 파랑 `#2D5BE3`(배지·알약·타임라인 진행), 사람 주황 `#D9670B`(대상 테두리·승인·넘겨받기·일시정지 — 채우기/테두리만, 그 위 글자는 늘 ink), 완료 초록 `#1E7A46`(Approve·Done·✓·재생 일치), 정지 빨강 `#C2362B`(거절·실패·재생 다름). 각 역할의 tint/border/ink 변형도 시안 값 그대로(`AGENT_TINT #EEF2FD` 등).
+- **중립색**: ink `#15171C`, muted `#4A5060`, faint `#8A909C`, disabled `#A3A8B3`, line `#E2E4E8`, frame `#D5D8DE`, panel `#F4F5F7`, strip `#E9EBEF`, page `#FFFFFF`.
+- 크롬(`mb-engine`, `mb-shell` 과 공유)과 오버레이(`mb-mcp`)가 모두 여기서 칠한다 — 색 결정은 한 곳. `mb_runtime::palette` 로 재노출. 런타임 상태 문구 색(`loaded`·`loading…`·에러)도 토큰으로 옮겼다.
+- **글꼴 갭**: 시안은 Inter(인터페이스)·JetBrains Mono(ID·URL·origin). 우리 폰트 시스템은 macOS 폴백(AppleSDGothicNeo·Menlo)만 올리므로 sans = 기본, mono = 제네릭 `monospace`(→ Menlo). 굵기는 600 이상이 bold 한 단계뿐이라 시안의 500(medium)은 400 으로. 두 글꼴을 번들하는 건 후속(라이선스 확인 + `install_fonts` 에 추가).
+- 헬퍼: `palette::text_width`(실제 칠할 글꼴·굵기로 측정), `palette::centered_text_y`(줄 상자 1.2×size 를 행 가운데에).
+
+### 크롬 (보드 2·6) — `chrome.rs`
+
+- **탭 줄 44 + 흰 툴바 52 = `CHROME_HEIGHT` 96** (이전 42 + 60 = 102). 이 상수는 에이전트 클릭 좌표·스크린샷 자르기·창 크기(= viewport + chrome)와 묶여 있지만 **에이전트의 페이지 viewport 와는 독립**이라 상수만 바뀐다 — 관찰·골든은 그대로.
+- 버튼 36×36 r8(호버 = panel 색), 뒤로/앞으로 쉐브론은 16px 아이콘 비율로 다시, 비활성은 `#A3A8B3`. 주소창 r10, 쉴 때 panel 회색 우물 + line 테두리, 편집 중엔 흰 바탕 + muted 테두리(파랑은 에이전트 색이라 포커스 링에 쓰지 않음). URL 은 mono 14.
+- **스킴 칩**: 쉬는 동안 `http://` 같은 비 https 주소는 왼쪽 칩("http")과 나머지 주소로 나눠 보인다(`split_scheme`). https 는 자물쇠 + 호스트부터. 편집 중엔 원문 그대로(캐럿·선택 측정이 원문 기준).
+- **탭**: 240×34 흰 탭이 줄 아래 끝에 붙는다. 제목이 넘치면 말줄임. ×·+ 는 그리지 않는다 — 탭이 하나라 눌러도 아무 일이 없는 컨트롤이 된다.
+- **`ChromeExtras`** (`BrowserState::chrome_extras`): 임베더가 기본 크롬에 더하는 것 — `accessory_width`(주소창과 ⋮ 사이 알약 자리, `address_bar_rect_with`/`accessory_rect`, 주소창 클릭 hit-test 도 같은 폭으로), `tab_marker`(탭 제목 앞 8px 점), `menu_open`(⋮ 눌림 = line 색 바탕). `mb-shell` 은 기본값 = **보드 6 의 평범한 브라우저**(알약·점 없음). 시안 보드 6 의 "No agent" 알약과 "Let an agent attach…" 카드는 `mb-shell` 에 붙을 에이전트가 없어 빼었다.
+- **상태 문구**: 시안의 아래쪽 상태 바 대신 **탭 줄 오른쪽 끝**(12px). 아래쪽 바는 페이지 높이를 줄여서 에이전트 viewport·스크린샷 자르기·스크롤 계산을 같이 바꿔야 한다(그리고 바가 페이지를 덮으면 에이전트가 보는 것과 사람이 보는 것이 달라짐). 같은 이유로 보드 2 의 파란 "에이전트가 이 탭을 운전 중" 줄도 두지 않는다 — 그 정보는 알약과 패널에 있다.
+
+### 알약 (보드 2·6·7) — `overlay::Pill`
+
+| 상태 | 언제 | 모양 |
+|---|---|---|
+| `Attached(mode)` | 에이전트가 있음 (stdio 는 항상) | agent tint + border, 파란 점, "Agent attached · ask/refuse/allow" |
+| `NoAgent` | `--http` 이고 아직 아무 호출도 없음 | 흰 바탕, 빈 회색 고리, "No agent" |
+| `Paused` | 사람이 일시정지 | person tint, 주황 일시정지 아이콘, "Agent paused" |
+| `Replaying` | `replay --window` | panel 회색, "Read-only · replaying" |
+
+- HTTP 서버가 세션 연결을 알려 주지 않아서 **"첫 호출이 오면 붙은 것"** 으로 본다(`window_mode::agent_pill`, 패널 머리말 `PanelInfo::no_agent_yet` 도 같은 기준). 연결만 하고 아무것도 안 부른 클라이언트는 "No agent" 로 보인다 — 실제 해는 없다.
+- 알약 폭은 프레임마다 글자 폭으로 재서 `chrome_extras.accessory_width` 에 넣고, 크롬이 그만큼 주소창을 줄인다. 에이전트 창은 탭에 파란 점(아무도 없으면 없음).
+
+### 패널·카드 (보드 3·4·7·9) — `overlay::panel`
+
+- 폭 **340** (300 → 시안 340~380 중 작은 쪽, 페이지 폭은 그대로라 창만 넓어짐), 바탕 panel, 왼쪽 1px line.
+- **머리말**: 점 + "Agent" + "attached over stdio / HTTP" (일시정지면 주황 점 "Agent · paused", HTTP 대기면 빈 고리 "No agent attached"). 시안의 "Claude Code" 같은 클라이언트 이름은 MCP `clientInfo` 를 아직 안 들고 있어서 "Agent".
+- **정책 칩**: Ask = "Asks before POST"·"Asks before other origins", Refuse = "Refuses …", Allow = "Allows POST and other origins", 그리고 "Sites: any / origin / N origins". 칩은 폭이 넘치면 줄바꿈.
+- **카드 공통**: 흰 바탕 r14, 사람이 답해야 하는 카드는 2px 주황 테두리(`framed_card` — 내용을 먼저 배치하고 높이를 안 뒤 테두리를 뒤에 깐다).
+  - **승인**: 32px 연주황 원 안에 "!", 제목은 행동 종류로 — POST → "Submit this form?", 이동 → "Go to another site?", 그 밖 → "Allow this action?". panel 회색 mono 상자에 대상(URL 은 `/` 뒤에서 줄바꿈), "Nothing has been sent yet." / "The page hasn't changed yet.", **Approve**(초록 채움)·**Deny**(흰 바탕·빨강 글자·빨강 테두리) 한 줄, 아래 전체 폭 **"I'll do it myself"**, "Waiting m:ss · the agent checks back every 45 s"(`Worker::waiting_since` — 화면 표시용 벽시계, 에이전트에게는 안 감).
+  - **비밀번호 넘겨받기**: 자물쇠 원, "Type the password yourself", "Field e24 is outlined… The agent never sees what you type — only how many characters.", Done(초록)·Cancel. 시안의 "8 characters entered" 는 칸의 길이를 패널에 연결해야 해서 후속.
+  - **일시정지**(보드 7 의 배너 내용을 카드로): 주황 1px 테두리, "Agent paused · you have the wheel", 설명, 보관 호출이 있으면 "1 call is waiting for you to resume" + mono 상자 + "ids are re-checked first", 검은 **Resume agent** 44px.
+  - **wait_for**: agent border 카드, "Waiting for \"…\"", 6px 진행 막대(`overlay::progress` = 지난 비율, `Worker::page_wait_total`), "N s left · you can keep using the page".
+  - **HTTP 붙기**: "Let an agent drive this window", Endpoint/Token(가린 형태) 라벨 + mono 값, 파란 **Copy setup command** 44px, 안내 문장. 카드 순서는 사람이 지금 답해야 하는 것(일시정지·질문) 먼저, 붙기 카드는 그 아래.
+- **타임라인** "Agent actions": ✓/✗ 글리프 대신 **그린 아이콘**(14px 상자에 2px 사각형을 선 따라 찍음 — 초록 체크·빨강 X), 실패는 "click e30 · approval_denied". 진행 중 `wait_for` 는 마지막 줄에 파란 고리 + 굵게 "wait_for · in progress".
+- 글자 줄바꿈은 픽셀 기준 `wrap_px`(실제 글꼴로 재서 넘치면 마지막 공백에서 다시 자름).
+
+### 페이지 위 (보드 1·3)
+
+- **ID 배지**: mono 11 semibold, 흰 글자, 불투명 파랑, r4, 높이 16. 요소 왼쪽 3px 띄워서, 자리 없으면 요소 모서리(이전과 같은 규칙).
+- **대상 테두리**: 주황 2px, 요소에서 2px 띄움. **모서리는 각짐** — 렌더러의 둥근 사각형은 채우기만 되고 속 빈 둥근 선을 못 그린다. 배지 **위에** 그린다(여백이 좁은 체크박스는 배지가 테두리를 덮었음).
+- **대상 메모**(보드 3 "The agent wants to press this"): 승인 카드가 떠 있으면 대상 오른쪽에 연주황 라벨, 넘겨받기면 "Type the password here". 넘치면 나중에 칠하는 패널이 덮는다.
+
+### ⋮ 메뉴 (보드 2b)·재생 (보드 5)
+
+- 메뉴: 폭 330, 행 40, 세그먼트 38, **BoxShadow 제거**(시안 원칙: 그림자·블러 없음) → frame 색 1px 테두리. 열린 동안 ⋮ 버튼이 눌린 모양.
+- 재생 패널: 제목 15 bold + "step n of N · m matched"(멈췄으면 "Stopped at step …"), **진행 막대**(`progress_segments` — 단계마다 한 칸: 일치 초록·다름 빨강·사람 필요 주황·남음 회색, 칸이 3px 보다 좁아지면 여러 단계를 한 칸에 묶고 "가장 나쁜" 표시가 이김), 40px 버튼 4개(Next 는 ink 채움, 진행할 게 없으면 Next·Run all 회색), 단계 목록(아이콘 + 글자, 멈춘 단계는 빨강/주황 tint 행), 마지막 결과 카드(diff 줄은 mono 12 를 빨강/초록 tint 바탕에). 크롬 알약 = "Read-only · replaying".
+
+![재생 뷰](images/g5b-replay-window.png) ![회귀 지점](images/g5b-replay-regression.png)
+
+### 시안과 맞춘 것 / 못 맞춘 것
+
+| | 맞춤 | 다름 (이유) |
+|---|---|---|
+| 색·간격·문구 | 역할 4색·중립색·카드 r14·버튼 44/r8·칩·배지 r4·대상 2px | 굵기 500 → 400 (bold 한 단계뿐) |
+| 글꼴 | sans/mono 구분 | Inter·JetBrains Mono 아님 (폰트 시스템에 없음) |
+| 크롬 | 탭 줄·흰 툴바·36px 버튼·주소 우물·스킴 칩·알약·⋮ 눌림 | 상태 바 → 탭 줄 오른쪽, 에이전트 운전 줄 없음, 탭 ×·+ 없음 (크롬 높이 고정·기능 없음) |
+| 대상 테두리 | 주황 2px·2px 띄움 | 각진 모서리 (속 빈 둥근 선 불가) |
+| 아이콘 | 체크·X·고리·일시정지·자물쇠·"!" | 사각형을 찍어 만든 근사 — 확대하면 계단 |
+| 메뉴 | 구성·세그먼트·회색 항목 | 단축키·Disconnect·Zoom·About 없음 (D1 결정 그대로) |
+| 이름 | — | "Claude Code" 대신 "Agent" (`clientInfo` 미보관) |
+
+### 후속 (시안에만 있는 기능 — 이번 범위 밖)
+
+- **Record this session** 토글(`--log` 를 창에서 켜기) + 크롬의 빨간 "REC" 알약 + 기록 카드 (보드 7).
+- **What the agent sees** — 이 페이지의 관찰 텍스트를 읽기 전용으로 (보드 8).
+- **허용 사이트 편집**(`--allow-origin` 을 실행 중에) (보드 8, 메뉴 회색 항목).
+- **"I'll do it myself" 뒤 넘겨주기** — "Your turn" 카드 + "I'm done — hand back to the agent" (보드 9). 지금은 `taken_over` 로 끝.
+- **거절 영수증 + "Forget this refusal"** (보드 9), **연결 끊김 카드**("Claude Code left 2 min ago", Last session 요약·재생 링크).
+- 넘겨받기 카드의 "N characters entered", 패널 머리말의 클라이언트 이름(`clientInfo`).
+- **다크 모드·좁은 창 레이아웃** (보드 10) — 지금 700px 미만은 패널을 빼고 ⋮ 메뉴만.
+- Inter·JetBrains Mono 번들, 탭 여러 개(×·+).
 
 ## 결정성
 
@@ -803,13 +888,14 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | **G0** 관찰 ✅ | `mb-agent::observe` — Observation (trusted/untrusted 분리, `e{NodeId}` ID, viewport scope, 상한·cursor, 문서 순서 고정, `field=` 힌트) | 불필요했음 (인라인 rect 이미 존재) | L2 골든 5개 + 결정성·위조 방지·비밀번호 은닉 테스트 (609 green) |
 | **G1** 행동 ✅ | `AgentBrowser` ([browser.rs](../crates/mb-agent/src/browser.rs)): `navigate`/`click`/`type_text`/`press`/`scroll`/`back`/`forward`, settle, `changed:` 요약, 에러 코드([error.rs](../crates/mb-agent/src/error.rs)), 문서 세대별 ID 검증, 리스너 기반 clickable. 정책 게이트 [policy.rs](../crates/mb-runtime/src/state/policy.rs)(`Auto`/`Deny`, allow-list, 거절 기억) | POST 폼, 컨트롤 인라인화, password 마스킹, checkbox/radio 토글·`<label>`, Tab·Escape, 타이머 마감 API, 대화상자 shim, console 버퍼, 가상 시계·시드 난수 연결, **인라인 `on*` 핸들러**, **hover/포커스 경로 버그 수정**. 보류: ←→/Home/End/Delete(캐럿 모델), `<select>` 고르기, `new Date()`/`performance.now` | L3 12개 (fixture 서버 POST 회원가입·303 리다이렉트, Deny/거절 기억, 비밀번호 넘겨받기, allow-list, **리다이렉트 hop 게이트·307 body**, settle, 대화상자, 스크롤, stale, Tab, 결정성) |
 | **G2** MCP ✅ | [`crates/mb-mcp`](../crates/mb-mcp): `cli.rs`(옵션), `prompts.rs`, `worker.rs`(브라우저 스레드·`Job` 채널·`repeat_count`·패닉 시 재생성), `server.rs`(rmcp tool 10개, 관찰=텍스트 2개 / 에러=JSON+관찰 / 스크린샷=PNG image). mb-agent 에 `screenshot`·`wait_for`·`to_blocks`·`system_fonts` 추가. 추천 skill [`examples/claude-skill/mini-browser-testing`](../examples/claude-skill/mini-browser-testing/SKILL.md), 데모 페이지 [`examples/agent-demo`](../examples/agent-demo) | `--window`(G3), `--approve ask`(G4), `--log`(G5) 는 아직 — 넘기면 명확한 에러 | L4 e2e 4개(실제 바이너리 + JSON-RPC: tools/list, navigate→click→back, 에러·repeat_count, PNG), CLI·worker 단위 테스트. **Claude Code 실연결 데모는 사용자 등록 후 확인 필요** (중첩 `claude -p` 는 이 환경에서 401) |
-| **G3a** 관전 창 ✅ | `mb-mcp --window` ([window_mode.rs](../crates/mb-mcp/src/window_mode.rs), [overlay.rs](../crates/mb-mcp/src/overlay.rs)): 메인 스레드 winit 루프가 프레임마다 에이전트 Job 을 처리(MCP 스레드가 큐에 넣고 wake), 사람 입력은 `human_frame`(게이트 대상 아님), ID 배지(요소 왼쪽 여백, 자리 없으면 모서리)·마지막 대상 주황 테두리·오른쪽 300px 패널(정책·타임라인, 700px 미만이면 생략). 창 닫힘 → 이후 호출 `browser_closed`, 클라이언트 종료 → 프로세스 종료. `--preview` PNG 렌더 | `mb-shell` = lib + bin, `Worker` 구조체(헤드리스·창 공용, 타임라인), `AgentBrowser::{set_viewport, human_frame, element_boxes, last_target}` | ![관전 창](images/g3-observation-window.png) — 오버레이·패널 단위 테스트 5개. **실제 창은 사용자 확인 필요** (GUI) |
+| **G3a** 관전 창 ✅ | `mb-mcp --window` ([window_mode.rs](../crates/mb-mcp/src/window_mode.rs), [overlay.rs](../crates/mb-mcp/src/overlay.rs)): 메인 스레드 winit 루프가 프레임마다 에이전트 Job 을 처리(MCP 스레드가 큐에 넣고 wake), 사람 입력은 `human_frame`(게이트 대상 아님), ID 배지(요소 왼쪽 여백, 자리 없으면 모서리)·마지막 대상 주황 테두리·오른쪽 패널(정책·타임라인, 300px → D2 에서 340px, 패널 포함 최소 폭 미만이면 생략). 창 닫힘 → 이후 호출 `browser_closed`, 클라이언트 종료 → 프로세스 종료. `--preview` PNG 렌더 | `mb-shell` = lib + bin, `Worker` 구조체(헤드리스·창 공용, 타임라인), `AgentBrowser::{set_viewport, human_frame, element_boxes, last_target}` | ![관전 창](images/g3-observation-window.png) — 오버레이·패널 단위 테스트 5개. **실제 창은 사용자 확인 필요** (GUI) |
 | **G3b** 붙기 모드 ✅ | `mb-mcp --http [--port N]` (`http.rs`: 127.0.0.1 바인딩, Bearer 토큰·Origin·경로 게이트 + rmcp Host 검사, hyper http1), `MB_MCP_TOKEN`, 패널의 붙기 섹션(URL·가린 토큰·Copy setup command), 창 닫으면 종료, 클라이언트는 브라우저 공유 | 동시 접속 제한 없음(결정 기록) · **실연결 확인 (2026-11-17)**: Claude Code `--transport http` 로 붙어 todo 추가·45초 `still_waiting` 재부착(승인 2분 10초·비밀번호 2분 22초)·비차단 `wait_for`·`note:` 동작. 1차 테스트에서 창 멈춤·60초 잠김을 찾아 고침 | ![붙기 패널](images/g3b-attach-panel.png) — L4 HTTP e2e 2개(실 바이너리: 401·403(Origin)·403(Host)·404, 두 클라이언트가 같은 페이지), gate·토큰 단위 3, 패널 1, CLI 1 + 실연결 수정 테스트 (689 green) |
 | **G4** 승인·넘겨받기 ✅ | `ApproveMode::Ask` + `PolicyDecision::Held`, `BrowserState::{held_action, resolve_held}`, `AgentBrowser::{pending_approval, resolve_approval}`, `Worker::{submit, waiting, answer}`(응답 park), 패널의 승인 카드(Approve / Deny / Do it myself)·넘겨받기 카드(Done / Cancel), 데모 `signin.html`·localhost 링크 | elicitation 은 미구현(headless ask 거부) | ![승인 카드](images/g4-approval-card.png) — 정책 2·AgentBrowser 통합 2·Worker 2·카드 3·CLI 1 테스트 + 실연결 피드백 2건(사람이 바꾼 페이지 표시, 넘겨받기 `changed:`) — AgentBrowser 통합 1 + Worker 넘겨받기 테스트 보강 (673 green). **실연결 확인**: 승인 카드 Approve → POST·리다이렉트, 비밀번호 넘겨받기 → "Signed in", 관찰에 비밀번호 없음 |
 | **G5a** 기록·재생 ✅ | `session_log.rs`(`--log`: 헤더 + 최종 결과마다 한 줄, target role·name·nth, 결과 요소 목록, 비밀번호 칸 입력 `<redacted>`, `prompts::fingerprint`), `replay.rs`(`mb-mcp replay FILE [--secret NAME=VALUE]`: headless·가상 시계, `worker::execute` 그대로, 요소 재해석, 기록대로 승인 재현, 넘겨받기는 `AgentBrowser::fill_as_person` 로 사람 경로 입력, 회귀 지점 diff, exit 0/1/2/3) | **실사용 확인 (2026-11-17)**: 실제 Claude Code 세션 10단계 기록 → 재생 10/10 일치, 페이지 변경 시 회귀 지점 보고 | session_log 2 · replay 5(일치, 회귀 지점, 문구만 변경, **L6 같은 실행 = 같은 바이트**, diff) · 창 세션(승인+비밀번호) 재생 1 · 실 바이너리 e2e 1 · CLI 1 (699 green) |
 | **G5b** 재생 뷰 ✅ | `replay_window.rs` + `overlay::replay_panel` ([재생 뷰](#재생-뷰-g5b-mb-mcp-replay-file---window)): `Replayer`(열기·한 단계·처음부터·n 단계로, headless 재생과 공유), Next(Enter)/Back/Run all/Restart, 다음 대상 주황 테두리, 단계 목록 ✓✗⏸▶·, 마지막 단계 결과(일치 / diff 빨강·초록), 페이지 읽기 전용(스크롤만), 창·미리보기는 시스템 폰트, `--preview PATH --preview-steps N` | 실제 창 클릭은 사용자 확인 필요 | ![재생 뷰](images/g5b-replay-window.png) ![회귀 지점](images/g5b-replay-regression.png) — Replayer 뒤로·다시 같은 상태 1 · 패널 1 · 읽기 전용 입력 1 · 보안 2 (704 green) |
 | **G5c** `mb-eval` ✅ | [평가](#평가-g5c-mb-mcp-eval): `eval.rs`(시나리오 `success`/`forbid` 판정, `prompts` 해시별 집계, `--json`, `--min-success`), `--log DIR/`(실행마다 파일), 시나리오 `eval/scenarios/{todo-add,about-injection}.json`, `scripts/eval-run.sh`(claude -p N회) | **첫 기준선 (2026-11-20, Claude Code 세션 6개, prompts `02a705f5`)**: todo-add 3/3 (단계 3.7 ± 0.5 — 2회는 Add 클릭, 1회는 `type … submit`), about-injection 3/3 (2.0 ± 0, 인젝션 문구를 따른 실행 0, 안전 위반 0) | 판정·집계 3 · CLI 1 · `--log DIR/` 1 · 빈 실행 안 남김 1 (710 green). 실 바이너리 모의 실행 2/3 + `--min-success` exit 1 확인 |
 | **D1** ⋮ 메뉴 1차 ✅ (디자인 트랙) | [⋮ 메뉴](#-메뉴-사람의-조종석): `overlay::{menu, paused_pill, paused_card}`, `window_mode::route_menu_input`, `Worker::{pause, resume, held_call, set_approve_mode, approve_mode}`, 에러 코드 `paused`, `AgentBrowser::set_approve_mode`, `AgentPolicy::{set_approve, record_rule_refusal}`(거절 기억 두 갈래), 세션 로그 단계별 `approve` + 재생 적용, 서버 instructions 규칙 4 에 `paused`, `--preview-menu` / `--preview-pause` | 시안의 나머지 항목(Allowed sites 편집·Record·What the agent sees·Disconnect·Zoom·패널 토글)은 회색 표시만. 단축키 없음. **실제 창 클릭은 사용자 확인 필요** (GUI) | ![⋮ 메뉴](images/menu-open.png) ![일시정지](images/agent-paused.png) — Worker 6 (보관·재개 실행·45초 `paused`·재부착·떼어진 호출 버림·wait_for 종료·카드 유지·모드 전환·로그+재생) · 정책 1 (모드 변경 시 거절 기억) · 메뉴·알약·패널 5 · 클릭 라우팅 1 (733 green) |
+| **D2** 시안 적용 ✅ (디자인 트랙) | [디자인 적용](#디자인-적용): `mb_engine::palette`(역할 색·중립색·`text_width`·`centered_text_y`), 크롬 재배치(탭 줄 44 + 툴바 52 = `CHROME_HEIGHT` 96, `ChromeExtras` 알약 자리·탭 점·⋮ 눌림, 스킴 칩), `overlay::Pill`, 패널 340·카드 4종·그린 아이콘·배지·대상 메모, ⋮ 메뉴 그림자 제거, 재생 패널(진행 막대·diff 카드), `Worker::{waiting_since, page_wait_total}` | 시안의 새 기능·다크·좁은 창은 [후속](#디자인-적용). `mb-shell` 실제 창은 사용자 확인 필요 (GUI, 미리보기 경로 없음) | 이미지 7장 다시 생성 — palette 1 · 크롬 배치 3 · 알약·대상 메모·진행 막대·대기 비율·픽셀 줄바꿈·HTTP 머리말 6 − 옛 알약 1 (742 green) |
 
 - G4 의 게이트 **판정 로직**은 G1 에서 입력 출처 태그와 함께 먼저 들어간다 (`--approve auto|deny` 만). G4 는 사람에게 묻는 UI(`ask`)·넘겨받기·elicitation 을 붙이는 단계.
 - `<select>` 는 G1 이후 필요해질 때 (`select(id, option)` tool 추가).
@@ -886,6 +972,11 @@ stdio transport 에서 **stdout 은 JSON-RPC 전용**이다. 한 줄이라도 �
 | 2026-11-11 | 첫 행동 데모 = POST 폼 (엔진에 POST 추가) | 에이전트 작업의 대부분이 폼. GET 데모로 피하지 않음 |
 | 2026-11-11 | LLM 오류는 감안. 안전 = 게이트, 품질 = 프롬프트+tool 설계+에러 피드백, 개선 = 측정 | 프롬프트는 무시될 수 있는 부드러운 제어라 안전을 맡길 수 없음. 품질은 최대한 프롬프트로 끌어올리되 `mb-eval` 숫자로 확인 |
 | 2026-11-11 | 비결정성은 LLM 판단에만 허용, 브라우저는 결정적 | LLM 비결정성은 에이전틱 브라우저의 본질로 감안. 대신 엔진·관찰·정책·시간은 결정적으로 → 실패 원인 구분 가능, 탐색 결과를 결정적 스크립트로 재사용 |
+| 2026-11-22 | 시안 적용: 색은 `mb_engine::palette` 한 곳에, 크롬·오버레이가 같이 씀 | 크롬(`mb-shell` 공유)과 오버레이(`mb-mcp`)가 따로 상수를 들고 있어 어긋났음. 역할 색의 의미("누가 하고 있나, 사람이 필요한가")를 코드에서도 한 군데서 지키려고 |
+| 2026-11-22 | `CHROME_HEIGHT` 102 → 96 (탭 줄 44 + 툴바 52), 아래쪽 상태 바·에이전트 운전 줄은 두지 않음 | 크롬 높이는 상수만 바꾸면 되지만, 크롬 줄을 창 종류마다 다르게 하거나 아래쪽 바를 두면 에이전트 viewport·스크린샷 자르기·스크롤이 같이 바뀐다. 상태 문구는 탭 줄 오른쪽, 운전 정보는 알약·패널로 |
+| 2026-11-22 | 에이전트 알약은 `ChromeExtras.accessory_width` 로 비운 자리에 임베더가 그림, `mb-shell` 은 기본값(알약 없음) | 크롬 코드에 에이전트 개념을 넣지 않고 자리만 빌려줌. `mb-shell` 엔 붙을 에이전트가 없어 "No agent" 도 오해만 만든다 |
+| 2026-11-22 | HTTP 의 "No agent" = 아직 호출이 하나도 없음 | rmcp HTTP 서버가 세션 연결을 알려 주지 않음. 첫 호출을 붙은 것으로 보면 틀려도 해가 없다(연결만 하고 안 부른 클라이언트) |
+| 2026-11-22 | 그림자 제거, 대상 테두리 각진 모서리 유지 | 시안 원칙 "엔진이 그릴 수 있는 것만". 속 빈 둥근 선은 렌더러에 없어 각진 2px 로 — 새 그리기 명령은 디자인 적용 범위 밖 |
 
 ## 열린 결정
 

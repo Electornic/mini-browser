@@ -41,7 +41,7 @@ impl std::fmt::Debug for NavigationWake {
 }
 
 use crate::{
-    chrome::{CHROME_HEIGHT, ChromeAction, ChromeState, chrome_commands},
+    chrome::{CHROME_HEIGHT, ChromeAction, ChromeExtras, ChromeState, chrome_commands},
     css, dom,
     dom::{NodeId, NodeType},
     html, input, js, layout,
@@ -104,6 +104,9 @@ pub struct BrowserState {
     // UI state that is shown in the chrome.
     pub status_text: String,
     pub status_color: css::Color,
+    /// What the embedder adds to the chrome (an agent window's pill slot,
+    /// tab marker, ⋮ pressed). `mb-shell` leaves it at the default.
+    pub chrome_extras: ChromeExtras,
     pub scroll_offset: f32,
 
     // History stores whole snapshots so back/forward can restore instantly without refetching.
@@ -321,6 +324,7 @@ impl BrowserState {
             current_url,
             status_text: status_text.into(),
             status_color: css::Color::BLACK,
+            chrome_extras: ChromeExtras::default(),
             scroll_offset: 0.0,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
@@ -943,6 +947,7 @@ impl BrowserState {
             tab_title,
             is_https,
             tab_favicon: self.favicon.as_ref(),
+            extras: self.chrome_extras,
         }));
         commands
     }
@@ -1041,15 +1046,7 @@ impl BrowserState {
             }
             Err(build_error) => {
                 eprintln!("{build_error}");
-                self.set_status(
-                    "render failed",
-                    css::Color {
-                        r: 180,
-                        g: 60,
-                        b: 60,
-                        a: 255,
-                    },
-                );
+                self.set_status("render failed", crate::palette::STOP);
                 // Tear down any stale cached view from before the failure
                 // so a subsequent recovery rebuilds against current inputs.
                 self.cached_view = None;

@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use crate::{css, navigation::error_document};
+use crate::navigation::error_document;
 
 use super::{BrowserState, HistoryEntry};
 
@@ -98,12 +98,7 @@ impl BrowserState {
             external_scripts: HashMap::new(),
             current_url: None,
             status_text: title.into(),
-            status_color: css::Color {
-                r: 180,
-                g: 60,
-                b: 60,
-                a: 255,
-            },
+            status_color: crate::palette::STOP,
         }
     }
 }

@@ -243,15 +243,7 @@ impl BrowserState {
             kind: PendingKind::Navigate { error_title },
             receiver,
         });
-        self.set_status(
-            "loading…",
-            css::Color {
-                r: 80,
-                g: 100,
-                b: 140,
-                a: 255,
-            },
-        );
+        self.set_status("loading…", crate::palette::MUTED);
     }
 
     pub(super) fn set_status(&mut self, text: impl Into<String>, color: css::Color) {
@@ -288,15 +280,7 @@ impl BrowserState {
         }
 
         let Some(url) = self.current_url.clone() else {
-            self.set_status(
-                "nothing to refresh",
-                css::Color {
-                    r: 154,
-                    g: 160,
-                    b: 166,
-                    a: 255,
-                },
-            );
+            self.set_status("nothing to refresh", crate::palette::FAINT);
             return;
         };
 
@@ -319,15 +303,7 @@ impl BrowserState {
             kind: PendingKind::Refresh,
             receiver,
         });
-        self.set_status(
-            "loading…",
-            css::Color {
-                r: 80,
-                g: 100,
-                b: 140,
-                a: 255,
-            },
-        );
+        self.set_status("loading…", crate::palette::MUTED);
     }
 
     // Drain at most one completed result from the worker channel. Called at
@@ -364,15 +340,7 @@ impl BrowserState {
             // A refused hop leaves the page exactly as it was: no error
             // page, no history entry.
             LoadOutcome::Refused => {
-                self.set_status(
-                    "blocked by policy",
-                    css::Color {
-                        r: 170,
-                        g: 60,
-                        b: 40,
-                        a: 255,
-                    },
-                );
+                self.set_status("blocked by policy", crate::palette::STOP);
                 return;
             }
         };
@@ -414,12 +382,7 @@ impl BrowserState {
                     external_scripts: loaded.external_scripts,
                     current_url: Some(loaded.final_url),
                     status_text: "loaded".into(),
-                    status_color: css::Color {
-                        r: 40,
-                        g: 120,
-                        b: 40,
-                        a: 255,
-                    },
+                    status_color: crate::palette::MUTED,
                 };
                 self.commit_navigation(next_entry);
                 // Favicon is owned by `BrowserState` rather than
@@ -455,15 +418,7 @@ impl BrowserState {
                 self.font_data = loaded.font_data;
                 self.favicon = loaded.favicon;
                 self.scroll_offset = 0.0;
-                self.set_status(
-                    "loaded",
-                    css::Color {
-                        r: 40,
-                        g: 120,
-                        b: 40,
-                        a: 255,
-                    },
-                );
+                self.set_status("loaded", crate::palette::MUTED);
             }
             Err(error) => {
                 eprintln!("{error}");

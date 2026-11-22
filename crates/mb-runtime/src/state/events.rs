@@ -9,10 +9,10 @@
 
 use crate::{
     chrome::{
-        CHROME_HEIGHT, ChromeAction, address_bar_rect, back_button_rect, forward_button_rect,
+        CHROME_HEIGHT, ChromeAction, address_bar_rect_with, back_button_rect, forward_button_rect,
         menu_button_rect, refresh_button_rect,
     },
-    css, input,
+    input,
     view::{LinkTarget, point_in_rect},
 };
 
@@ -43,15 +43,7 @@ impl BrowserState {
                     // The dropdown itself is not implemented yet, but acknowledging the click
                     // proves the hit region works and prevents the click from falling through
                     // to the page underneath.
-                    ChromeAction::Menu => self.set_status(
-                        "menu (todo)",
-                        css::Color {
-                            r: 60,
-                            g: 64,
-                            b: 67,
-                            a: 255,
-                        },
-                    ),
+                    ChromeAction::Menu => self.set_status("menu (todo)", crate::palette::MUTED),
                 }
                 self.address_bar_focused = false;
                 self.address_bar_selected = false;
@@ -59,7 +51,11 @@ impl BrowserState {
             }
 
             if let Some((mouse_x, mouse_y)) = input.mouse_position {
-                if point_in_rect(mouse_x, mouse_y, address_bar_rect(viewport_width as f32)) {
+                let address = address_bar_rect_with(
+                    viewport_width as f32,
+                    self.chrome_extras.accessory_width,
+                );
+                if point_in_rect(mouse_x, mouse_y, address) {
                     self.address_bar_focused = true;
                     self.address_bar_selected = true;
                 } else {

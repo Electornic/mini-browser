@@ -139,6 +139,11 @@ impl PendingWait {
     pub fn remaining(&self) -> Duration {
         self.timeout.saturating_sub(self.started.elapsed())
     }
+
+    /// The whole `wait_timeout`, for a progress bar (display only).
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
 }
 
 /// What `wait_for` waits for.

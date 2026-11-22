@@ -2689,17 +2689,17 @@ mod tests {
         );
 
         let commands = browser.display_list(800, 600, &input::WindowInput::default());
-        let lock_color = css::Color {
-            r: 95,
-            g: 99,
-            b: 104,
-            a: 255,
-        };
+        let lock_color = mb_runtime::palette::MUTED;
         let lock_paints = commands
             .iter()
             .filter(|cmd| match cmd {
-                render::DisplayCommand::SolidRect(color, _) => *color == lock_color,
-                render::DisplayCommand::RoundedRect(color, _, _) => *color == lock_color,
+                // Icon-sized only: the focused field's border shares the color.
+                render::DisplayCommand::SolidRect(color, r) => {
+                    *color == lock_color && r.width <= 12.0
+                }
+                render::DisplayCommand::RoundedRect(color, r, _) => {
+                    *color == lock_color && r.width <= 12.0
+                }
                 _ => false,
             })
             .count();
@@ -2741,17 +2741,17 @@ mod tests {
         );
 
         let commands = browser.display_list(800, 600, &input::WindowInput::default());
-        let lock_color = css::Color {
-            r: 95,
-            g: 99,
-            b: 104,
-            a: 255,
-        };
+        let lock_color = mb_runtime::palette::MUTED;
         let lock_paints = commands
             .iter()
             .filter(|cmd| match cmd {
-                render::DisplayCommand::SolidRect(color, _) => *color == lock_color,
-                render::DisplayCommand::RoundedRect(color, _, _) => *color == lock_color,
+                // Icon-sized only: the focused field's border shares the color.
+                render::DisplayCommand::SolidRect(color, r) => {
+                    *color == lock_color && r.width <= 12.0
+                }
+                render::DisplayCommand::RoundedRect(color, r, _) => {
+                    *color == lock_color && r.width <= 12.0
+                }
                 _ => false,
             })
             .count();

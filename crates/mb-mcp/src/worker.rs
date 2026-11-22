@@ -594,6 +594,16 @@ impl Worker {
             .map(|(_, wait, _)| (wait.condition(), wait.remaining()))
     }
 
+    /// The pending `wait_for`'s whole timeout (the panel's progress bar).
+    pub fn page_wait_total(&self) -> Option<Duration> {
+        self.page_wait.as_ref().map(|(_, wait, _)| wait.timeout())
+    }
+
+    /// When the question card went up (the card's "Waiting m:ss").
+    pub fn waiting_since(&self) -> Option<std::time::Instant> {
+        self.parked.as_ref().map(|p| p.since)
+    }
+
     // Before an action: what the session log needs to know about it.
     fn begin_step(&mut self, request: &Request) -> StepContext {
         if self.log.is_none() {

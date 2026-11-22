@@ -23,7 +23,8 @@
 ├── crates/mb-engine   (layout + paint)     cosmic-text, taffy, tiny-skia
 │   - layout/          taffy 브릿지 + boundary block/inline/flex/grid/table
 │   - render/          DisplayList paint commands + tiny-skia + swash (`render/raster/` 별도)
-│   - chrome           주소창 / 뒤로앞 / 메뉴 페인트 명령
+│   - chrome           탭 줄 / 주소창 / 뒤로앞 / 메뉴 페인트 명령 + ChromeExtras (임베더 알약 자리)
+│   - palette          디자인 토큰 (역할 색·중립색·글자 폭 헬퍼) — 크롬과 mb-mcp 오버레이가 공유
 │   - view             DocumentView 빌더 + hit-testing (per-frame entry)
 │   - font_system      shared FontSystem + SwashCache OnceLock 슬롯
 │   - input            WindowInput 데이터 (winit driver 는 mb-shell)
@@ -58,7 +59,7 @@
 │   - replay           mb-mcp replay FILE: Replayer(한 단계씩) — worker::execute 로 결정적 재생 + 회귀 지점 diff
 │   - replay_window    replay --window: 단계별 재생 뷰 (Next/Back/Run all/Restart), --preview PNG
 │   - eval             mb-mcp eval SCENARIO LOGS: 시나리오 판정 + 성공률·에러·실패 지점·안전 위반 집계 (에이전트는 안 돌림)
-│   - overlay          ID 배지·대상 테두리·에이전트 패널·⋮ 메뉴·일시정지 표시 (DisplayCommand 순수 함수)
+│   - overlay          ID 배지·대상 테두리·크롬 알약(Pill)·에이전트 패널·카드·⋮ 메뉴·재생 패널 (DisplayCommand 순수 함수, palette 색)
 │
 └── crates/mb-shell    (lib + [[bin]] mb-shell)  anyhow, softbuffer, winit
     - lib.rs           pub mod window — mb-mcp --window 도 같은 창 코드를 씀
@@ -100,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 733 (workspace 합계, 2026-11-21 디자인 트랙 1차 — ⋮ 메뉴의 일시정지·런타임 승인 모드). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 742 (workspace 합계, 2026-11-22 디자인 트랙 2차 — 시안 적용: palette·크롬 배치·알약·패널 카드·재생 패널). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -197,6 +198,11 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - ureq 는 헤더 이름을 wire 에 lowercase 로 보냄 (RFC 9110 §5.1 적합). 헤더 contains 검증 테스트는 `to_ascii_lowercase()` 후 비교.
 - redirect 정책: 301/302/303 → GET 다운그레이드 + body drop, 307/308 → method+body 유지.
 - body cap 50 MB (`limit().read_to_vec`).
+
+### 디자인 토큰
+- 크롬·오버레이 색은 `mb_runtime::palette` 에서만 가져온다 (시안 "Agent Browser" 보드 1). 주황(사람) 위 글자는 늘 ink. 새 색이 필요하면 palette 에 이름을 붙여 추가.
+- 오버레이 글자에 `⋮` 같은 기호를 쓰지 말 것 — 패널 폰트에 글리프가 없어 깨진다. ✓/✗ 도 글리프 대신 `overlay` 의 그린 아이콘.
+- `CHROME_HEIGHT` 는 에이전트 클릭 좌표·스크린샷 자르기·창 크기와 묶여 있다. 크롬 줄을 창 종류마다 다르게 하거나 아래쪽 바를 두지 말 것 (docs/concept.md "디자인 적용").
 
 ### Font System
 - `font_system::shared_font_system()` 가 `None` 이면 unit test 환경 — `font_size * 0.75` fallback 으로 토이 측정.
