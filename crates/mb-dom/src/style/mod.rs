@@ -372,6 +372,36 @@ mod tests {
     }
 
     #[test]
+    fn ua_hides_hidden_attribute_hidden_inputs_and_templates() {
+        // Naver's search form has 13 `<input type="hidden">` that painted as
+        // a grid of empty boxes; GitHub's `<template>`s laid out their inert
+        // content; `[hidden]` is the UA's `display: none` too.
+        let (document, root) = parse_html(
+            r#"<div><input type="hidden" name="a"><input type="HIDDEN" name="b"><input name="c"><p hidden>x</p><template><p>y</p></template></div>"#,
+        );
+        let styled = style::style_tree(&document, root, &[parse_css(".shown { display: block }")]);
+        let displays: Vec<Option<&Value>> = styled
+            .children
+            .iter()
+            .map(|child| child.value("display"))
+            .collect();
+        let none = Some(&Value::Keyword("none".into()));
+        assert_eq!(displays[0], none, "type=hidden");
+        assert_eq!(displays[1], none, "type=HIDDEN");
+        assert_ne!(displays[2], none, "a text input stays");
+        assert_eq!(displays[3], none, "[hidden]");
+        assert_eq!(displays[4], none, "template");
+
+        // Author CSS still wins over the UA default.
+        let (document, root) = parse_html(r#"<div><p hidden class="shown">x</p></div>"#);
+        let styled = style::style_tree(&document, root, &[parse_css(".shown { display: block }")]);
+        assert_eq!(
+            styled.children[0].value("display"),
+            Some(&Value::Keyword("block".into()))
+        );
+    }
+
+    #[test]
     fn inherits_color_and_font_size_from_parent() {
         let (document, root) = parse_html(r#"<div id="app"><span>Text</span></div>"#);
         let stylesheet = parse_css(

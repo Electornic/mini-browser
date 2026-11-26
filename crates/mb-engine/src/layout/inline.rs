@@ -187,8 +187,7 @@ fn layout_inline_node(node: &StyledNode, x: f32, y: f32, parent_width: f32) -> L
     let margin = edge_sizes(node, "margin", parent_width);
     let padding = edge_sizes(node, "padding", parent_width);
     let border = edge_sizes(node, "border", parent_width);
-    let content_width = inline_content_width(node, parent_width);
-    let content_height = inline_content_height(node, parent_width);
+    let (content_width, content_height) = inline_content_size(node, parent_width);
     let content_x = x + margin.left + border.left + padding.left;
     let content_y = y + margin.top + border.top + padding.top;
 
@@ -428,17 +427,18 @@ fn inline_total_size(node: &StyledNode, parent_width: f32) -> Rect {
     let margin = edge_sizes(node, "margin", parent_width);
     let padding = edge_sizes(node, "padding", parent_width);
     let border = edge_sizes(node, "border", parent_width);
+    let (content_width, content_height) = inline_content_size(node, parent_width);
     let width = margin.left
         + border.left
         + padding.left
-        + inline_content_width(node, parent_width)
+        + content_width
         + padding.right
         + border.right
         + margin.right;
     let height = margin.top
         + border.top
         + padding.top
-        + inline_content_height(node, parent_width)
+        + content_height
         + padding.bottom
         + border.bottom
         + margin.bottom;
@@ -537,6 +537,7 @@ pub(super) fn layout_inline_block_node(
         let children = node
             .children
             .iter()
+            .filter(|child| !is_display_none(child))
             .map(|child| layout_node(child, content_x, &mut child_cursor_y, content_width))
             .collect::<Vec<_>>();
         (children, child_height(node, content_y, child_cursor_y))
@@ -564,53 +565,54 @@ pub(super) fn layout_inline_block_node(
     layout_box
 }
 
-fn inline_content_width(node: &StyledNode, parent_width: f32) -> f32 {
-    // Text width comes from `measure_inline_text`, which prefers cosmic-text
-    // shaped advance widths when fonts are installed and falls back to a
-    // `font_size * 0.75` per-char estimate for tests. Phase 4.4c caps the
-    // measured run at `parent_width` so a paragraph wider than its container
-    // settles into a single content box at the container width — paint will
-    // then ask cosmic-text to soft-wrap inside the same width budget, and
-    // `inline_content_height` reserves vertical space for the line count
-    // produced by the same wrap.
-    length_value(node, "width", parent_width)
-        .or_else(|| intrinsic_width(node))
-        .unwrap_or_else(|| match &node.node_type {
-            NodeType::Text(text) => {
-                measure_inline_text(node, &collapsed_text(node, text)).min(parent_width)
-            }
-            NodeType::Element(element) if element.tag_name == "img" => 200.0,
-            NodeType::Element(_) => node
-                .children
-                .iter()
-                .map(|child| inline_total_size(child, parent_width).width)
-                .sum(),
-        })
-}
-
-fn inline_content_height(node: &StyledNode, parent_width: f32) -> f32 {
-    // Same caveat as block height: percent on inline height should reference the parent's
-    // height, but we only have parent_width on hand. Toy pages have not exercised this yet.
-    length_value(node, "height", parent_width).unwrap_or_else(|| match &node.node_type {
-        // Text reserves `line_count * line_height`. Phase 4.4c: we ask
-        // cosmic-text to soft-wrap the run at `parent_width`, then multiply
-        // the chosen line-height by the resulting line count so a long
-        // paragraph allocates the correct vertical space. The empty-fonts
-        // test path falls back to a single line — which preserves the
-        // pre-4.4c `inline_line_height_px` shape and keeps every layout
-        // assertion that bakes in single-line text intact.
+/// Content-box width and height of an inline box. One function for both
+/// because both come from the same walk over the children: measuring them
+/// separately visited every child twice per nesting level (2^depth on
+/// Wikipedia's nested spans).
+///
+/// Width: text uses `measure_inline_text` (cosmic-text advances when fonts
+/// are installed, a `font_size * 0.75` per-char estimate in tests), capped at
+/// `parent_width` so a paragraph wider than its container settles into one
+/// content box that paint soft-wraps in the same budget. Height: text
+/// reserves `line_count * line_height` for that same wrap (one line in the
+/// no-fonts test path). Percent heights should reference the parent's
+/// height, but only `parent_width` is on hand — toy pages haven't needed it.
+fn inline_content_size(node: &StyledNode, parent_width: f32) -> (f32, f32) {
+    let declared_width =
+        length_value(node, "width", parent_width).or_else(|| intrinsic_width(node));
+    let declared_height = length_value(node, "height", parent_width);
+    if let (Some(width), Some(height)) = (declared_width, declared_height) {
+        return (width, height);
+    }
+    let (width, height) = match &node.node_type {
         NodeType::Text(text) => {
-            let lines = inline_text_line_count(node, &collapsed_text(node, text), parent_width);
-            inline_line_height_px(node) * lines.max(1) as f32
+            let text = collapsed_text(node, text);
+            let width = match declared_width {
+                Some(width) => width,
+                None => measure_inline_text(node, &text).min(parent_width),
+            };
+            let height = match declared_height {
+                Some(height) => height,
+                None => {
+                    let lines = inline_text_line_count(node, &text, parent_width);
+                    inline_line_height_px(node) * lines.max(1) as f32
+                }
+            };
+            (width, height)
         }
-        NodeType::Element(element) if element.tag_name == "img" => intrinsic_height(node),
-        NodeType::Element(_) => node
-            .children
-            .iter()
-            .map(|child| inline_total_size(child, parent_width).height)
-            .fold(0.0, f32::max)
-            .max(intrinsic_height(node)),
-    })
+        NodeType::Element(element) if element.tag_name == "img" => (200.0, intrinsic_height(node)),
+        NodeType::Element(_) => {
+            let (width, height) = node.children.iter().fold((0.0, 0.0_f32), |(w, h), child| {
+                let size = inline_total_size(child, parent_width);
+                (w + size.width, h.max(size.height))
+            });
+            (width, height.max(intrinsic_height(node)))
+        }
+    };
+    (
+        declared_width.unwrap_or(width),
+        declared_height.unwrap_or(height),
+    )
 }
 
 fn inline_text_line_count(node: &StyledNode, text: &str, wrap_width: f32) -> u32 {

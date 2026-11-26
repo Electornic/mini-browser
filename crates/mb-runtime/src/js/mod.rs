@@ -356,7 +356,7 @@ impl JsRuntime {
     pub fn execute(&mut self, source: &str) -> Result<String, String> {
         let result: Result<String, String> = self.context.with(|ctx| {
             let value: Value = ctx
-                .eval::<Value, _>(source)
+                .eval_with_options::<Value, _>(source.as_bytes().to_vec(), classic_script_options())
                 .catch(&ctx)
                 .map_err(format_caught_error)?;
             let formatter: Function = ctx
@@ -387,7 +387,7 @@ impl JsRuntime {
             return self.execute(source);
         }
         let result: Result<String, String> = self.context.with(|ctx| {
-            let mut options = EvalOptions::default();
+            let mut options = classic_script_options();
             options.filename = Some(url.to_string());
             let value: Value = ctx
                 .eval_with_options::<Value, _>(source.as_bytes().to_vec(), options)
@@ -643,6 +643,16 @@ fn format_caught_error(err: CaughtError) -> String {
     }
 }
 
+/// How page scripts are compiled: like a classic `<script>`, i.e. sloppy
+/// mode. rquickjs's default forces strict mode, which breaks the implicit
+/// globals real pages rely on (`RLQ = window.RLQ || []` on Wikipedia). A
+/// script's own `"use strict"` still applies.
+fn classic_script_options() -> EvalOptions {
+    let mut options = EvalOptions::default();
+    options.strict = false;
+    options
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,6 +674,24 @@ mod tests {
         let mut rt = fresh();
         rt.execute("var page = 41;").unwrap();
         assert_eq!(rt.execute("page + 1").unwrap(), "42");
+    }
+
+    #[test]
+    fn classic_scripts_run_in_sloppy_mode() {
+        // Browsers run classic `<script>`s sloppy. Wikipedia's very first
+        // line is `(RLQ=window.RLQ||[]).push(…)` — an implicit global, which
+        // forced strict mode turns into "RLQ is not defined".
+        let mut rt = fresh();
+        rt.execute("implicitGlobal = 5;").unwrap();
+        assert_eq!(rt.execute("window.implicitGlobal").unwrap(), "5");
+        rt.execute_with_url(
+            "(RLQ = window.RLQ || []).push(1);",
+            "https://example.com/a.js",
+        )
+        .unwrap();
+        assert_eq!(rt.execute("RLQ.length").unwrap(), "1");
+        // `"use strict"` in the source still opts in.
+        assert!(rt.execute("'use strict'; undeclared = 1;").is_err());
     }
 
     #[test]

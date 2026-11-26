@@ -420,7 +420,24 @@ pub(super) fn default_values(document: &Document, node_id: NodeId) -> PropertyMa
         _ => {}
     }
 
+    if is_hidden_by_ua(element) {
+        values.insert("display".into(), Value::Keyword("none".into()));
+    }
+
     values
+}
+
+/// The HTML UA stylesheet's other `display: none` rules: `[hidden]`,
+/// `input[type=hidden]` and `<template>` (whose content is inert). They sit
+/// at UA level, so author CSS can still show the element.
+fn is_hidden_by_ua(element: &crate::dom::ElementData) -> bool {
+    element.attributes.contains_key("hidden")
+        || element.tag_name == "template"
+        || (element.tag_name == "input"
+            && element
+                .attributes
+                .get("type")
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("hidden")))
 }
 
 fn edge_defaults(values: &mut PropertyMap, prefix: &str, amount: f32) {

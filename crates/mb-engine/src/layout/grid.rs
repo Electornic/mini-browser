@@ -57,11 +57,9 @@ pub(super) fn layout_grid_children<'a>(
     // Out-of-flow children skip the grid entirely — they sit at the container
     // origin during pass 0 and the absolute reposition pass at the tree root
     // moves them to their containing block.
-    let track_decls = match container.value("grid-template-columns") {
-        Some(Value::TrackList(tracks)) if !tracks.is_empty() => Some(tracks.as_slice()),
-        _ => None,
-    };
-    let n_cols = track_decls.map(|t| t.len()).unwrap_or(1).max(1);
+    let column_tracks = effective_column_tracks(container);
+    let track_decls = (!column_tracks.is_empty()).then_some(column_tracks.as_slice());
+    let n_cols = column_tracks.len().max(1);
 
     let mut boxes: Vec<LayoutBox> = Vec::with_capacity(children.len());
     // For each in-flow item: its area + boxes index + source styled node.
@@ -211,6 +209,33 @@ pub(super) fn layout_grid_children<'a>(
 
     let auto_content_height: f32 = row_heights.iter().sum();
     (boxes, auto_content_height)
+}
+
+/// `grid-template-columns`, widened to the column count
+/// `grid-template-areas` implies. Areas may name more columns than the track
+/// list declares (or the track list may use a value we can't parse — Vector
+/// on Wikipedia does both); every named cell needs a track or placement
+/// indexes past the table. Spec-wise the extra columns are implicit `auto`
+/// tracks; with no track list at all we split the width evenly instead,
+/// since this toy doesn't stretch `auto` tracks into free space.
+fn effective_column_tracks(container: &StyledNode) -> Vec<TrackSize> {
+    let mut tracks = match container.value("grid-template-columns") {
+        Some(Value::TrackList(tracks)) => tracks.clone(),
+        _ => Vec::new(),
+    };
+    let area_columns = match container.value("grid-template-areas") {
+        Some(Value::TemplateAreas(rows)) => rows.iter().map(Vec::len).max().unwrap_or(0),
+        _ => 0,
+    };
+    let filler = if tracks.is_empty() {
+        TrackSize::Fraction(1.0)
+    } else {
+        TrackSize::Auto
+    };
+    while tracks.len() < area_columns {
+        tracks.push(filler);
+    }
+    tracks
 }
 
 fn grid_area_from_template(container: &StyledNode, item: &StyledNode) -> Option<GridArea> {

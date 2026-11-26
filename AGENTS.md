@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 793 (workspace 합계, 2026-11-23 좁은 창 +5). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 803 (workspace 합계, 2026-11-26 호환성 2차 실사이트 조사 +10). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -208,6 +208,12 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - ID 배지 자리는 `overlay::place_badges`(순수 함수)가 정한다 — 배지를 그리는 새 경로를 만들면 `text_obstacles` 와 `page_area` 를 같이 넘길 것 (안 넘기면 배지가 글자·크롬을 덮는다). 프레임마다 도는 코드라 문서 전체를 훑는 일(화면 밖 글자 측정 등)은 먼저 위치로 거를 것. 규칙은 docs/concept.md "배지 자리".
 - `CHROME_HEIGHT` 는 에이전트 클릭 좌표·스크린샷 자르기·창 크기와 묶여 있다. 크롬 줄을 창 종류마다 다르게 하거나 아래쪽 바를 두지 말 것 (docs/concept.md "디자인 적용"). 페이지 위에 띠를 겹쳐 그리는 것도 안 된다(에이전트만 보는 영역이 생김). 크롬에 임베더 것을 넣을 자리는 툴바 `accessory_width`(알약)와 탭 줄 `strip_reserved`(좁은 창의 에이전트 바) 둘 — docs/concept.md "좁은 창".
 
+### CSS 파서는 조용히 버린다
+- 선언 값은 `parse_entirely` 안에서 읽혀서, 전용 파서가 없는 속성은 토큰이 둘 이상이면(`border: 1px solid`, `!important`, 쉼표 목록, `calc()`) **선언 통째로** 사라진다. 지원 안 하는 의사 클래스 하나가 있으면 **규칙 통째로**(콤마로 묶인 셀렉터까지), `@media` 외 at-rule 은 **본문 통째로**. `@media` 조건은 평가하지 않고 전부 참. 실사이트에서 "왜 이 스타일이 안 먹지?" 는 먼저 `css::parse_with_report` 로 확인.
+
+### rquickjs 기본 eval 은 strict
+- `EvalOptions::default()` 는 `strict: true` 다. 페이지 스크립트는 `js::classic_script_options()`(sloppy)로 평가할 것 — 안 그러면 암묵 전역(`RLQ = window.RLQ || []`)이 터진다.
+
 ### Font System
 - `font_system::shared_font_system()` 가 `None` 이면 unit test 환경 — `font_size * 0.75` fallback 으로 토이 측정.
 - `install_fonts()` 가 SwashCache 도 같이 재생성 — 글리프 캐시 키가 FontSystem 의 font id 에 의존하므로.
@@ -239,4 +245,5 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 ## Tooling Notes
 
 - `crates/mb-dom/examples/css_diag.rs` — CSS 파서 진단 (`cargo run -p mb-dom --example css_diag -- <file.css>`).
+- 실사이트 호환성 조사 ([docs/compat-survey.md](docs/compat-survey.md)): `MB_NET_CACHE=DIR` 이면 모든 fetch 가 디스크 캐시를 거친다 (첫 실행만 네트워크, `MB_NET_CACHE_OFFLINE=1` 은 재생 전용). `crates/mb-agent/examples/compat_probe.rs URL OUT_DIR` 가 관찰·CSS 버림(`css::parse_with_report`)·레이아웃 이상을 덤프. 캐시와 출력은 반드시 git-ignored `compat-cache/` 에 — 실사이트 HTML/CSS/이미지/스크린샷은 커밋 금지(저작권, 공개 저장소). 테스트는 손으로 쓴 작은 페이지로.
 - `scripts/package-macos.sh` — `mb-shell` release 빌드를 `dist/mini-browser.app` + `.dmg` 로 패키징.

@@ -18,6 +18,8 @@ use ureq::{
 // existing `crate::net::Url` paths keep resolving.
 pub use mb_dom::url::{NetworkError, Url};
 
+mod cache;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpResponse {
     pub status_code: u16,
@@ -155,7 +157,7 @@ pub fn fetch_with_request(
     extra_headers: &[(String, String)],
     body: &[u8],
 ) -> Result<FetchResult, NetworkError> {
-    fetch_with_agent(agent(), url, method, extra_headers, body)
+    cached_fetch(true, url, method, extra_headers, body)
 }
 
 /// Like `fetch_with_request`, but a 3xx comes back as the response instead
@@ -169,7 +171,30 @@ pub fn fetch_without_redirects(
     extra_headers: &[(String, String)],
     body: &[u8],
 ) -> Result<FetchResult, NetworkError> {
-    fetch_with_agent(agent_without_redirects(), url, method, extra_headers, body)
+    cached_fetch(false, url, method, extra_headers, body)
+}
+
+/// Goes through the `MB_NET_CACHE` record/replay cache when it is set (real
+/// site surveys, see `cache.rs`), straight to the wire otherwise.
+fn cached_fetch(
+    follows_redirects: bool,
+    url: &Url,
+    method: &str,
+    extra_headers: &[(String, String)],
+    body: &[u8],
+) -> Result<FetchResult, NetworkError> {
+    let fetch = || {
+        let agent = if follows_redirects {
+            agent()
+        } else {
+            agent_without_redirects()
+        };
+        fetch_with_agent(agent, url, method, extra_headers, body)
+    };
+    match cache::Cache::from_env() {
+        Some(cache) => cache.fetch((url, method, follows_redirects, body), fetch),
+        None => fetch(),
+    }
 }
 
 fn fetch_with_agent(

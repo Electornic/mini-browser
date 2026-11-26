@@ -5,3 +5,6 @@ dist
 .claude/worktrees
 eval/runs/
 mb-runs/
+
+# Real-site snapshots for compat surveys (third-party content, never commit)
+compat-cache/

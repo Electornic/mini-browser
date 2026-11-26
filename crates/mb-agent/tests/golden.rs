@@ -22,7 +22,11 @@ fn fixtures_dir() -> PathBuf {
 fn observe_fixture(name: &str, scroll_y: f32, options: ObserveOptions) -> Observation {
     let source = std::fs::read_to_string(fixtures_dir().join(format!("{name}.html")))
         .unwrap_or_else(|e| panic!("read fixture {name}: {e}"));
-    let document = html::parse(&source).expect("fixture must parse");
+    observe_source(name, &source, scroll_y, options)
+}
+
+fn observe_source(name: &str, source: &str, scroll_y: f32, options: ObserveOptions) -> Observation {
+    let document = html::parse(source).expect("fixture must parse");
     let stylesheet = css::Stylesheet::default();
     let view = build_document_view(
         &document,
@@ -173,4 +177,23 @@ fn password_value_never_appears() {
     let text = observe_fixture("signup_form", 0.0, ObserveOptions::default()).to_text();
     assert!(!text.contains("hunter22"));
     assert!(text.contains("value=(hidden, 8 chars)"));
+}
+
+#[test]
+fn style_and_script_text_stay_out_of_accessible_names() {
+    // Google nests a `<style>` inside its buttons; its CSS text became the
+    // button's name ("…{display:none}…") because names gathered every
+    // descendant text node.
+    let observation = observe_source(
+        "style_in_button",
+        r#"<html><body><button><style>.x{display:none}</style><script>var a=1</script>Search</button></body></html>"#,
+        0.0,
+        ObserveOptions::default(),
+    );
+    let names: Vec<&str> = observation
+        .elements
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    assert_eq!(names, ["Search"]);
 }

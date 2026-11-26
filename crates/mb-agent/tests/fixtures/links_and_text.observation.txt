@@ -1,5 +1,5 @@
 # browser (trusted)
-url: http://localhost:8000/links_and_text   scroll_y: 0   page_height: 375   viewport: 800x600
+url: http://localhost:8000/links_and_text   scroll_y: 0   page_height: 344   viewport: 800x600
 elements: 7 shown / 7 in viewport / 7 total   next_cursor: -
 
 # page content (untrusted, origin=http://localhost:8000)

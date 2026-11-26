@@ -172,8 +172,10 @@ impl<'a> DomIndex<'a> {
         };
         match &node.node_type {
             NodeType::Text(text) => push_text_piece(out, text),
-            NodeType::Element(_) => {
-                if skip(id) {
+            NodeType::Element(element) => {
+                // Never-rendered content has no text to a reader; Google
+                // nests `<style>` in its buttons.
+                if skip(id) || is_unrendered_text_container(&element.tag_name) {
                     return;
                 }
                 for &child in &node.children {
@@ -182,6 +184,10 @@ impl<'a> DomIndex<'a> {
             }
         }
     }
+}
+
+fn is_unrendered_text_container(tag: &str) -> bool {
+    matches!(tag, "script" | "style" | "template" | "noscript")
 }
 
 /// Border-box rect of `id` in the current layout (document coordinates),

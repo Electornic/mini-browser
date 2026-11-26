@@ -227,11 +227,11 @@ fn collect_stylesheet_urls(
                 .get("rel")
                 .is_some_and(|value| value.eq_ignore_ascii_case("stylesheet"))
         {
-            let href = element
-                .attributes
-                .get("href")
-                .ok_or(ResourceError::MissingHref)?;
-            urls.push(base_url.resolve(href)?);
+            // A link without a usable href loads nothing, like in browsers —
+            // it must not fail the page.
+            if let Some(url) = resolve_attr(element.attributes.get("href"), base_url) {
+                urls.push(url);
+            }
         }
     }
 
@@ -256,8 +256,10 @@ fn collect_script_src_pairs(
     {
         // Inline scripts (no `src`) are handled later by walking the parsed
         // document directly; only external scripts need fetching here.
-        if let Some(src) = element.attributes.get("src") {
-            out.push((src.clone(), base_url.resolve(src)?));
+        if let Some(src) = element.attributes.get("src")
+            && let Some(url) = resolve_attr(Some(src), base_url)
+        {
+            out.push((src.clone(), url));
         }
         // `<script>` content is never nested HTML — don't recurse into it.
         return Ok(());
@@ -268,6 +270,16 @@ fn collect_script_src_pairs(
     }
 
     Ok(())
+}
+
+/// A subresource URL from an attribute, or `None` when it's missing, empty
+/// or doesn't resolve. One bad attribute skips that resource only.
+fn resolve_attr(value: Option<&String>, base_url: &Url) -> Option<Url> {
+    let raw = value?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    base_url.resolve(raw).ok()
 }
 
 fn collect_image_urls(
@@ -282,11 +294,11 @@ fn collect_image_urls(
     if let NodeType::Element(element) = &node.node_type {
         // Images are fetched lazily from DOM attributes after the main document is parsed.
         if element.tag_name == "img" {
-            let src = element
-                .attributes
-                .get("src")
-                .ok_or(ResourceError::MissingSrc)?;
-            urls.push(base_url.resolve(src)?);
+            // `<img>` without src is common (JS fills it in, lazy loaders
+            // use `data-src`); it just shows nothing.
+            if let Some(url) = resolve_attr(element.attributes.get("src"), base_url) {
+                urls.push(url);
+            }
         }
     }
 
@@ -408,7 +420,37 @@ mod tests {
 
     use crate::{html, net::Url};
 
-    use super::{favicon_url, load_images, load_scripts, load_stylesheets};
+    use super::{
+        favicon_url, image_urls, load_images, load_scripts, load_stylesheets, stylesheet_urls,
+    };
+
+    #[test]
+    fn img_without_src_or_link_without_href_is_skipped_not_fatal() {
+        // Google's home page has an `<img>` whose src JS fills in later;
+        // GitHub has a `<link rel=stylesheet>` without href. Either one used
+        // to fail the whole navigation ("image missing src").
+        let document = html::parse(
+            r#"<html><head>
+                <link rel="stylesheet">
+                <link rel="stylesheet" href="/a.css">
+              </head><body>
+                <img alt="later">
+                <img src="/b.png">
+              </body></html>"#,
+        )
+        .unwrap();
+        let base = Url::parse("https://example.com/").unwrap();
+        let sheets = stylesheet_urls(&document, &base).expect("not fatal");
+        let images = image_urls(&document, &base).expect("not fatal");
+        assert_eq!(
+            sheets.iter().map(|u| u.to_string()).collect::<Vec<_>>(),
+            ["https://example.com/a.css"]
+        );
+        assert_eq!(
+            images.iter().map(|u| u.to_string()).collect::<Vec<_>>(),
+            ["https://example.com/b.png"]
+        );
+    }
 
     #[test]
     fn favicon_url_resolves_link_rel_icon_against_base_url() {

@@ -9,6 +9,7 @@ mod error;
 mod gradient;
 mod grid;
 mod parse;
+mod report;
 mod selector;
 mod shadow;
 mod shorthand;
@@ -16,6 +17,7 @@ mod transform;
 
 use grid::{parse_grid_placement, parse_grid_template_areas, parse_grid_track_list};
 use parse::parse_value;
+pub use report::{AtRuleSeen, ParseReport, parse_with_report};
 use selector::SelectorParserImpl;
 pub use selector::{CssString, MiniBrowserSelectorImpl, NonTSPseudoClass, PseudoElement, Selector};
 use shadow::{parse_box_shadow_value, parse_text_shadow_value};
@@ -278,9 +280,7 @@ pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
     // discard the errors — same semantic as the previous `skip_to_end_of_block`.
     // Each yielded item is a Vec<Rule>: top-level qualified rules contribute
     // a single entry, `@media` blocks contribute N (Phase 6.F).
-    for batch in iter.flatten() {
-        rules.extend(batch);
-    }
+    collect_rules(iter, &mut rules);
     Ok(Stylesheet { rules })
 }
 
@@ -329,6 +329,25 @@ fn convert_selector_error(
 // =============================================================================
 
 struct StylesheetHandler;
+
+/// Keep every parsed rule; note the selector of each one dropped (an
+/// at-rule that failed is already in the report under its name).
+fn collect_rules<'i, I>(iter: I, rules: &mut Vec<Rule>)
+where
+    I: Iterator<
+        Item = Result<Vec<Rule>, (CssParseError<CssError>, &'i str, cssparser::SourceLocation)>,
+    >,
+{
+    for item in iter {
+        match item {
+            Ok(batch) => rules.extend(batch),
+            Err((_, source, _)) if !source.trim_start().starts_with('@') => {
+                report::record(|r| r.dropped_rules.push(report::rule_prelude(source)))
+            }
+            Err(_) => {}
+        }
+    }
+}
 
 /// Bundle a parsed selector list with the source location where it
 /// started, so `parse_block` can build a `Rule` with the original prelude.
@@ -405,11 +424,19 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
         // pretending every condition matches is the right default for a
         // desktop-window toy browser, where most pages are mobile-first
         // and the desktop overrides are the ones that should win.
-        if name.eq_ignore_ascii_case("media") {
-            // Consume the prelude tokens (the condition list) so cssparser
-            // can move on to `parse_block`. We don't store anything from
-            // the condition — it's a no-op match.
-            while input.next().is_ok() {}
+        let is_media = name.eq_ignore_ascii_case("media");
+        let start = input.position();
+        // Consume the prelude (for `@media`, the condition list) so cssparser
+        // moves on to the block. The condition is a no-op match today.
+        while input.next().is_ok() {}
+        report::record(|r| {
+            r.at_rules.push(report::AtRuleSeen {
+                name: name.to_ascii_lowercase(),
+                prelude: report::excerpt(input.slice_from(start)),
+                kept: is_media,
+            })
+        });
+        if is_media {
             return Ok(AtRulePrelude::Media);
         }
         // Other at-rules (@charset, @keyframes, @font-face, …) keep the
@@ -434,9 +461,7 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
                 let mut handler = StylesheetHandler;
                 let iter = StyleSheetParser::new(input, &mut handler);
                 let mut rules = Vec::new();
-                for inner in iter.flatten() {
-                    rules.extend(inner);
-                }
+                collect_rules(iter, &mut rules);
                 Ok(rules)
             }
             AtRulePrelude::Reject => Ok(Vec::new()),
@@ -465,8 +490,14 @@ fn parse_declaration_block<'i>(input: &mut CssParser<'i>) -> Result<Vec<Declarat
     let mut declarations = Vec::new();
     let mut handler = DeclHandler;
     let iter = cssparser::RuleBodyParser::new(input, &mut handler);
-    for decls in iter.flatten() {
-        declarations.extend(decls);
+    for item in iter {
+        match item {
+            Ok(decls) => declarations.extend(decls),
+            Err((_, source, _)) => report::record(|r| {
+                r.dropped_declarations
+                    .push(report::excerpt(source.trim_end_matches(';')))
+            }),
+        }
     }
     Ok(declarations)
 }

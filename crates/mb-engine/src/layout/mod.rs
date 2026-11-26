@@ -2937,6 +2937,100 @@ mod tests {
     }
 
     #[test]
+    fn display_none_children_get_no_box_in_any_container() {
+        // Google nests `<style>` inside a button; its CSS text was laid out
+        // and painted although `style` is `display: none`.
+        fn has_style_box(layout: &super::LayoutBox) -> bool {
+            let own = box_styled_node(layout).is_some_and(|node| {
+                matches!(&node.node_type, crate::dom::NodeType::Element(e) if e.tag_name == "style")
+            });
+            own || layout.children.iter().any(has_style_box)
+        }
+        for display in [
+            "block",
+            "inline",
+            "inline-block",
+            "flex",
+            "inline-flex",
+            "grid",
+            "table-cell",
+        ] {
+            let styled = styled_root(
+                &format!(
+                    r#"<div><p>x <button style="display:{display}"><style>.x{{color:red}}</style>Search</button> y</p></div>"#
+                ),
+                "",
+            );
+            let layout = layout_tree(&styled, 800.0);
+            assert!(
+                !has_style_box(&layout),
+                "display:{display} container laid out its <style>"
+            );
+            // Google's shape: the button is itself a flex item.
+            let styled = styled_root(
+                &format!(
+                    r#"<div style="display:flex"><button style="display:{display}; position:relative"><style>.x{{color:red}}</style><div><div></div></div><div></div><div><span>Search</span></div></button></div>"#
+                ),
+                "",
+            );
+            let layout = layout_tree(&styled, 800.0);
+            assert!(
+                !has_style_box(&layout),
+                "display:{display} flex item laid out its <style>"
+            );
+        }
+    }
+
+    #[test]
+    fn deeply_nested_inline_elements_lay_out_in_linear_time() {
+        // Measuring an inline box walked its children once for the width and
+        // again for the height, and each child did the same: 2^depth work.
+        // Wikipedia's nested `<span>`s took minutes. 28 levels would be
+        // ~268M visits the old way; one walk is a few hundred.
+        let depth = 28;
+        let html = format!(
+            "<div>{}x{}</div>",
+            "<span>".repeat(depth),
+            "</span>".repeat(depth)
+        );
+        let styled = styled_root(&html, "");
+        let started = std::time::Instant::now();
+        let _ = layout_tree(&styled, 800.0);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn grid_template_areas_wider_than_column_tracks_does_not_panic() {
+        // Wikipedia's Vector skin: `grid-template-areas` names two columns
+        // while `grid-template-columns` uses a value we can't parse, so only
+        // the areas say how wide the grid is. The area in column 2 used to
+        // index past the one-column track table and panic the layout.
+        let styled = styled_root(
+            r#"<div id="g"><div class="side"></div><div class="main"></div></div>"#,
+            r#"
+                #g {
+                    display: grid;
+                    grid-template-areas: "side main";
+                    width: 200px;
+                }
+                .side { grid-area: side; height: 10px; }
+                .main { grid-area: main; height: 10px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let side = &layout.children[0];
+        let main = &layout.children[1];
+        assert!(
+            main.dimensions.content.x > side.dimensions.content.x,
+            "main sits right of side"
+        );
+    }
+
+    #[test]
     fn grid_explicit_item_width_keeps_declared_size() {
         // When the item has explicit width, the post-hoc track-fill stays out
         // of its way — the item keeps its 50px width inside the 100px track.

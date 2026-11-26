@@ -1,6 +1,6 @@
 # SPA Rendering Roadmap
 
-> 상태: **Tier 0·1 코드 완료 (593 green, 2026-06-14)** · **Tier 1.5 Preact 실증 ✅ (720 green, 2026-11-21)** · 다음 = Tier 1.5 잔여 갭(아래) 또는 Tier 2 모듈 로더 — [결정](#tier-2-결정-2026-11-21) 참고
+> 상태: **Tier 0·1 코드 완료 (593 green, 2026-06-14)** · **Tier 1.5 Preact 실증 ✅ (720 green, 2026-11-21)** · **호환성 2차 = 실사이트 조사 ✅ (803 green, 2026-11-26) → [compat-survey.md](compat-survey.md)** · 다음 = 조사의 [호환성 3차 순서](compat-survey.md#호환성-3차-제안-순서) (CSS 파서·`@media` 먼저, Tier 2 모듈은 8번째 — naver 본문)
 
 이 문서는 mini-browser가 **SPA(React/Vue/Svelte 류 client-rendered 앱)를 화면에 그리기까지**의 단계별 로드맵이다. 각 Tier는 *눈에 보이는 산출물*을 하나씩 만들도록 쪼갰다. 무게중심은 "from-scratch"가 아니라 기존 글루(rquickjs 브릿지 + mutate→재렌더 루프) 위에 빠진 표면을 메우는 것.
 
@@ -104,6 +104,8 @@ Tier 1은 **API 갭을 메운 것**이지 실제 프레임워크를 띄워 본 �
 - **스펙과 다른 점**: `checked`/`selected` 는 스펙에선 속성이 *기본값*일 뿐이고 현재 상태는 별도 슬롯이다. 이 엔진은 클릭 토글도 속성에 쓰므로(현재 상태 = 속성) 속성 setter 도 속성으로 맞췄다. 나중에 `defaultChecked` 를 구분해야 하면 그때 분리.
 
 ### Tier 2 결정 (2026-11-21)
+
+> **2026-11-26 갱신**: [실사이트 조사](compat-survey.md) 에서 naver.com 본문(뉴스·메뉴·바로가기)이 전부 `<script type="module">` 로 그려진다는 게 확인됐다 — 5곳 중 1곳이지만 조사 계기가 된 사이트. 다만 다른 사이트들을 무너뜨리는 건 CSS 파서·`@media` 쪽이라 3차 순서에선 8번째로 둔다.
 
 **지금은 Tier 2(모듈 로더)를 하지 않는다.** classic/UMD 번들 프레임워크는 Tier 1.5 로 동작이 확인됐고, 에이전트 데모 대상 페이지(로컬 픽스처·데모)는 모듈을 안 쓴다. Tier 2 는 "실제 `vite build` 산출물을 에이전트로 테스트하고 싶다"는 수요가 생길 때 연다 — 그때 선행은 그대로 `features = ["macro", "loader"]` 한 줄. 그 전에 위 잔여 갭 중 `location` setter(게이트 경유)와 `a.href` 절대 URL 이 실제 SPA 에서 먼저 막힐 가능성이 높다.
 
