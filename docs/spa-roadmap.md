@@ -1,6 +1,6 @@
 # SPA Rendering Roadmap
 
-> 상태: **Tier 0·1 코드 완료 (593 green, 2026-06-14)** · **Tier 1.5 Preact 실증 ✅ (720 green, 2026-11-21)** · **호환성 2차 = 실사이트 조사 ✅ (803 green, 2026-11-26) → [compat-survey.md](compat-survey.md)** · 다음 = 조사의 [호환성 3차 순서](compat-survey.md#호환성-3차-제안-순서) (CSS 파서·`@media` 먼저, Tier 2 모듈은 8번째 — naver 본문)
+> 상태: **Tier 0·1 코드 완료 (593 green, 2026-06-14)** · **Tier 1.5 Preact 실증 ✅ (720 green, 2026-11-21)** · **호환성 2차 = 실사이트 조사 ✅ (803 green, 2026-11-26) → [compat-survey.md](compat-survey.md)** · 다음 = **[호환성 3차 설계 (compat-round3.md)](compat-round3.md)** — 실행 순서 0 견고성 → 2.1 `@media` 평가 → 1 값 파서(`!important`) → 2.2·2.3 `@layer`/`@supports` → 3 클리핑 → 4 셀렉터 → 5 `calc`/트랙. Tier 2 모듈(naver 본문)은 4차 이후, 별도 설계 문서
 
 이 문서는 mini-browser가 **SPA(React/Vue/Svelte 류 client-rendered 앱)를 화면에 그리기까지**의 단계별 로드맵이다. 각 Tier는 *눈에 보이는 산출물*을 하나씩 만들도록 쪼갰다. 무게중심은 "from-scratch"가 아니라 기존 글루(rquickjs 브릿지 + mutate→재렌더 루프) 위에 빠진 표면을 메우는 것.
 
