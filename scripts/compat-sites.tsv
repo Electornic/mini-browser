@@ -1,0 +1,31 @@
+# Compat round 3 corpus (docs/compat-round3.md 0.2) — the canonical list; the doc's table is a summary.
+# name<TAB>url<TAB>expected controls: role:name-substring;… (role = link|button|textbox|checkbox|radio|combobox|clickable,
+# name matched case-insensitively; a|b = either, for sites that pick the language by IP). Short UI labels only — never page content.
+# Expected = what a person looks for first on the page (search, main navigation, a few body links), checked against the
+# site's own markup at record time — not against what our engine happens to find. Empty = the page has no controls
+# (example.com today is text only).
+naver	https://www.naver.com/	combobox:검색;button:검색;link:메일;link:카페;link:뉴스
+daum	https://www.daum.net/	textbox:검색;button:검색;link:메일;link:뉴스
+yna	https://www.yna.co.kr/	link:정치;link:경제;link:사회
+hani	https://www.hani.co.kr/	link:정치;link:경제;link:사회
+11st	https://www.11st.co.kr/	textbox:검색;link:로그인;link:베스트
+kakaocorp	https://www.kakaocorp.com/	textbox:검색어;link:채용;link:뉴스
+korea-kr	https://www.korea.kr/	textbox:검색;link:정책
+kowiki	https://ko.wikipedia.org/wiki/%EC%9B%B9_%EB%B8%8C%EB%9D%BC%EC%9A%B0%EC%A0%80	textbox:검색;link:대문;link:로그인
+velog	https://velog.io/	link:트렌딩;button:로그인
+d2	https://d2.naver.com/home	link:helloworld
+google	https://www.google.com/	combobox:검색|search;button:google 검색|google search;link:gmail
+enwiki	https://en.wikipedia.org/wiki/Web_browser	textbox:search;link:main page;link:log in
+mdn	https://developer.mozilla.org/en-US/docs/Web/HTML	link:references;link:guides;link:elements
+docsrs	https://docs.rs/tokio	textbox:search;link:all items;link:source
+rustlang	https://www.rust-lang.org/	link:install;link:learn;link:get started
+cratesio	https://crates.io/	textbox:search;link:browse all crates
+github	https://github.com/tokio-rs/tokio	link:sign in;link:issues;link:pull requests
+stackoverflow	https://stackoverflow.com/questions/11227809/why-is-processing-a-sorted-array-faster-than-processing-an-unsorted-array	link:questions;textbox:search
+hn	https://news.ycombinator.com/	link:new;link:past;link:comments;link:login
+bbc	https://www.bbc.com/news	link:home;link:sport;link:business
+oldreddit	https://old.reddit.com/	link:hot;link:new;link:login
+apple	https://www.apple.com/	link:store;link:mac;link:iphone
+microsoft	https://www.microsoft.com/en-us	link:microsoft 365;link:windows
+example	https://example.com/	
+w3c	https://www.w3.org/	link:standards;link:about

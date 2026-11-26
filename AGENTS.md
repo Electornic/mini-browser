@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 829 (workspace 합계, 2026-11-26 호환성 3차 0a — 견고성 규칙·검토 수정 + 스크립트 에러 위치 + 3차 골든 +23). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 842 (workspace 합계, 2026-11-27 호환성 3차 0b — 조사 캐시 GET 전용·속성 표·버림 사유 분류 + 코퍼스에서 찾은 settle·오류 페이지·`queueMicrotask` 수정 +13). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -216,6 +216,9 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - quickjs-ng 의 `not a function` 열은 호출 모양마다 다른 토큰을 가리킨다(최상위 `a.b()` → `.`, 함수 안 → 속성 이름, `foo()` → 앞 공백, `foo( 1)` → `(` 뒤). `near` 는 셋 다 처리한다 — 열 위치를 한 가지로 가정하지 말 것.
 - `near`·메시지는 페이지 문자열이다: page 블록 `console:` 에만, trusted `note:` 엔 절대 넣지 않는다.
 
+### settle 의 두 예산
+- `AgentBrowser::settle` 은 프레임 상한(`MAX_SETTLE_FRAMES` 600)과 벽시계(`settle_timeout`) 둘로 끝난다. **이동 대기 프레임은 프레임 상한에 안 센다** — 로드 스레드를 기다리는 건 실제 네트워크 시간이라 벽시계만 자를 수 있다. 세면 ~1.5초보다 느린 사이트가 로드 전 빈 화면(URL 없음, `settled: false`)으로 관찰된다(3차 코퍼스 daum·yna). 테스트 서버는 빠르니 이 차이는 실사이트나 `/slow` 같은 지연 라우트로만 보인다.
+
 ### rquickjs 기본 eval 은 strict
 - `EvalOptions::default()` 는 `strict: true` 다. 페이지 스크립트는 `js::classic_script_options()`(sloppy)로 평가할 것 — 안 그러면 암묵 전역(`RLQ = window.RLQ || []`)이 터진다.
 
@@ -261,5 +264,6 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
 - `crates/mb-dom/examples/css_diag.rs` — CSS 파서 진단 (`cargo run -p mb-dom --example css_diag -- <file.css>`).
 - 실사이트 호환성 조사 ([docs/compat-survey.md](docs/compat-survey.md)): `MB_NET_CACHE=DIR` 이면 모든 fetch 가 디스크 캐시를 거친다 (첫 실행만 네트워크, `MB_NET_CACHE_OFFLINE=1` 은 재생 전용). `crates/mb-agent/examples/compat_probe.rs URL OUT_DIR` 가 관찰·CSS 버림(`css::parse_with_report`)·레이아웃 이상을 덤프. 캐시와 출력은 반드시 git-ignored `compat-cache/` 에 — 실사이트 HTML/CSS/이미지/스크린샷은 커밋 금지(저작권, 공개 저장소). 테스트는 손으로 쓴 작은 페이지로.
+- 3차 코퍼스(~25곳, [compat-round3.md 0.2](docs/compat-round3.md#02-코퍼스-점검)): `scripts/compat-sites.tsv`(이름·URL·기대 컨트롤, 커밋됨) + `scripts/compat-corpus.sh record|run [라벨]|diff A B`. 녹화는 이미 끝났고 캐시 `compat-cache/net/` 는 **3차 동안 동결** — 단계 전후 측정은 `MB_NET_CACHE=$PWD/compat-cache/net scripts/compat-corpus.sh run <라벨>`(항상 오프라인, release) → `compat-cache/corpus/<라벨>/corpus-report.tsv`. `record` 는 녹화된 사이트를 다시 방문하지 않는다(보충은 `--supplement`, 규칙은 문서). 캐시가 켜져 있으면 GET 이 아닌 요청은 보내지 않는다(`net/cache.rs`). 버림 사유·ours/browser-too 분류는 `css/report.rs` `DropReason` + `css/properties.rs`(Chrome 이 아는 속성 표) — 동결된 표는 문서 "0b 분류표".
 - `crates/mb-agent/tests/fixtures/compat3.html` — 호환성 3차 **추적용** 골든(손으로 쓴 sr-only·`@media`·`!important`·체크박스 해킹·캐러셀). 골든은 오늘의 **틀린** 렌더링을 일부러 기록한다 — 3차 단계가 들어갈 때마다 diff 를 파일 맨 위 주석의 "Chrome 이라면" 목록과 대조. `examples/agent-demo/compat3.html` 은 이 파일의 심볼릭 링크(eval `compat3-menu` 가 씀, 오늘은 실패가 정상).
 - `scripts/package-macos.sh` — `mb-shell` release 빌드를 `dist/mini-browser.app` + `.dmg` 로 패키징.

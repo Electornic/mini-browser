@@ -1,6 +1,6 @@
 # 호환성 3차 설계 — 견고성 + CSS 파서·캐스케이드
 
-> 상태: **설계 확정 (2026-11-26, 1차 검토 + 다각도 검토 — 코드 대조·웹 표준·실행/측정 — 반영) · 0a 구현 완료(미커밋, 829 green)** — 0b(코퍼스)·0c(퍼저) 남음 · 근거 = [compat-survey.md](compat-survey.md) (호환성 2차 실사이트 조사) · 기준선 `4588aba` 804 → 조사 캐시 2차 수정 후 **806** → 0a **829** · 진행은 [진행 표](#진행-표)
+> 상태: **설계 확정 (2026-11-26, 1차 검토 + 다각도 검토 — 코드 대조·웹 표준·실행/측정 — 반영) · 0a 완료(`d6801bb`, 829) · 0b 구현·녹화·기준선 완료(미커밋, 842 green)** — 0c(퍼저)·K4(JS 타임아웃 3곳) 남음 · 근거 = [compat-survey.md](compat-survey.md) (호환성 2차 실사이트 조사) · 기준선 `4588aba` 804 → 조사 캐시 2차 수정 후 **806** → 0a **829** → 0b **842** · 진행은 [진행 표](#진행-표)
 
 이 문서만 읽고 어느 단계든 이어받을 수 있게 쓴다. 단계마다 **목표 → 세부 항목 → 설계 결정 → 테스트 → 측정·완료 기준 → 위험 → 노력** 순서다. 2차 조사의 수치·용어(슬리버, 버린 선언, `compat_probe`, `MB_NET_CACHE`)는 [compat-survey.md 방법](compat-survey.md#방법) 참고.
 
@@ -88,6 +88,8 @@ AGENTS.md "Agent-track Rules" 옆에 **"Robustness Rules"** 절을 추가한다(
 | 기업·마케팅 (CSS 무거움) | www.apple.com, www.microsoft.com |
 | 기준선 | example.com, www.w3.org |
 
+**확정(0b, 2026-11-26 녹화)**: 위 25곳 그대로 `scripts/compat-sites.tsv` 에(실제 URL: 위키 문서·`stackoverflow.com/questions/11227809/…`·`www.microsoft.com/en-us`·`d2.naver.com/home`). robots 금지로 **녹화 안 함 2곳** — `www.11st.co.kr`, `old.reddit.com`(둘 다 `User-agent: *` 에 `Disallow: /`). 녹화했지만 **403 차단 2곳** — stackoverflow, w3.org. 결과는 [부록 B](#부록-b--0b-코퍼스에서-찾은-것-알려진-문제--담당).
+
 봇 차단이 예상되는 곳(쿠팡·나무위키 등)은 **넣지 않는다** — 차단 페이지는 엔진 정보가 없고 녹화가 차단 회피처럼 보일 수 있다. 녹화 중 예상 밖으로 차단되면 `blocked` 로만 남긴다.
 
 **예의**: 녹화는 사이트당 문서 1회 + 하위 리소스 1회씩, 사이트 사이 2초 간격, 순차. UA 는 엔진 기본(데스크톱 Chrome 문자열) — **결정 기록**: 식별 토큰(`… mini-browser-compat`)을 붙이면 사이트가 다른 내용(봇용 페이지)을 줄 수 있어 측정 목적에 반하므로 붙이지 않는다. 대신 방문 횟수를 1회로 묶고 robots 를 지키는 것으로 예의를 갖춘다. **보충 녹화**(엔진이 새 요청을 내기 시작해 `offline-miss` 가 생길 때): 단계당 최대 1회, 같은 사이트의 GET 하위 리소스만, 같은 간격. 이후 모든 실행은 `MB_NET_CACHE_OFFLINE=1`. 2차 캐시는 요청 정보 줄이 없어(`4588aba`) 전부 미스이므로 원래 5곳도 이때 한 번 다시 녹화된다.
@@ -105,6 +107,41 @@ MB_NET_CACHE=$PWD/compat-cache/net MB_NET_CACHE_OFFLINE=1 scripts/compat-corpus.
 - **안전장치**: `MB_NET_CACHE` 는 절대 경로만 받고, 캐시 디렉터리가 없거나 비었으면 `run` 은 즉시 에러(새 클론·워크트리에서 30곳 전부 `nav-fail` 로 찍히는 것 방지). 출력 경로가 `git check-ignore` 로 무시 대상인지 확인하고 아니면 멈춘다(실사이트 원문이 커밋되는 사고 방지).
 
 **판정**: 모든 `nav-fail`/`panic`/`timeout` 은 원인 확인 → 손으로 쓴 최소 재현 → 실패 테스트 → 수정. `blocked` 는 표에 사유만.
+
+#### 0b 구현 메모 (도구 — 설계와 달라진 점 포함)
+
+- **경로**: 캐시 `compat-cache/net/`(새로 녹화, 3차 동안 동결 — 2차 캐시는 `compat-cache/round2/` 로 옮겨 섞지 않음). 녹화 기록 `compat-cache/corpus/recorded.tsv`(이름·URL·robots 판정·근거 규칙·HTTP 코드·UTC 날짜·결과), robots 원문 `compat-cache/corpus/robots/<이름>.txt`, 실행 결과 `compat-cache/corpus/<라벨>/<이름>/`(probe 출력 + stdout/stderr) 와 **`compat-cache/corpus/<라벨>/corpus-report.tsv`**(위 설계의 `compat-cache/corpus-report.tsv` 대신 라벨별 — 단계 전후 실행을 나란히 두려고). `run [라벨]`(기본 `latest`), `diff 라벨A 라벨B` = 사이트별 요소 줄 diff(`elements.txt` 를 정렬해 `comm`, 사라진 `-`/새 `+`).
+- **robots**: 스크립트가 `curl` 로 사이트당 1회, `*` 그룹만(UA 에 식별 토큰이 없으므로), RFC 9309/Google 규칙 — 가장 긴 패턴이 이기고 같으면 Allow, `*`·`$` 지원. 4xx = 제한 없음, 5xx·네트워크 실패 = 전부 금지(보수적). robots 요청과 문서 요청 사이에도 2초.
+- **한 번만**: `recorded.tsv` 에 있는 사이트는 `record` 가 다시 방문하지 않는다(동결). 보충 녹화는 `record --supplement 이름…` 로만(robots 허용이었던 사이트만) — 위 보충 녹화 규칙을 지키는 건 사람 몫.
+- **`run` 은 항상 오프라인**: 스크립트가 `MB_NET_CACHE_OFFLINE=1` 을 직접 export 한다(설계의 명령줄에 안 붙여도 네트워크에 안 나감). `record` 는 반대로 그 변수가 있으면 거부.
+- **GET 만**: 캐시가 켜져 있으면(녹화·재생 모두) GET 이 아닌 요청은 보내지 않고 실패, 개수를 `non_get_refused` 열에. 오프라인 미스는 `offline_miss`·`miss_kinds`(확장자로 css/js/img/font/other) 열과 `summary.txt` 의 `miss:` 줄(쿼리 제거). 둘 다 `net::survey_stats()` — 프로세스 전역 카운터, probe 만 읽는다(결정성 무관: 관찰·행동엔 안 들어감).
+- **결과 판정**(`summary.tsv` 의 `result`): 오류 페이지(현재 URL 없음)면 `nav-fail`, 그 문구가 `http status 401/403/429/503` 이면 `blocked` → settle 이 20초 벽시계를 넘겼으면 `settle-timeout` → 오프라인 미스가 있으면 `ok*` → `ok`. 스크립트가 종료 코드 124 → `timeout`, 101·134(스택 오버플로 abort) → `panic` 으로 덮어쓴다. robots 금지는 `skipped`, 녹화 안 된 사이트는 `not-recorded`.
+- **열**(`compat_probe --header` 가 정본 — 스크립트가 앞에 `name · robots · budget_lines` 를 붙임): `url result load_ms elements viewport_elements text_blocks decl_drop_ours decl_drop_browser rule_drop_ours rule_drop_browser slivers script_errors console_errors offline_miss miss_kinds non_get_refused controls_found controls_missing decl_kept rule_kept keyword_fallback parse_only at_skipped_ours at_skipped_browser at_skipped_bytes import nesting media decl_reasons css_bytes document_height final_url`. `script_errors` = `Uncaught …` 콘솔 줄, `console_errors` = error 수준 전부. `load_ms` = `navigate`(settle 포함) 벽시계.
+- **IACVT 열은 1단계 probe 변경으로 미룸**: 지금 엔진엔 "계산값 시점 무효" 가 없다 — 풀리지 않은 `var()` 는 `Keyword("initial")` 로 바뀔 뿐(`style/variables.rs`)이고 `Unparsed` 가 아직 없어 선언 단위로 셀 지점이 없다. 1단계 ①(probe 커밋)에서 `Unparsed` 치환 실패 수를 이 표에 넣는다.
+- **기대 컨트롤**: `scripts/compat-sites.tsv` 셋째 열 `역할:이름부분;…`(`a|b` = 둘 중 하나 — IP 로 언어를 고르는 사이트용). 전체 페이지 관찰에서 역할 일치 + 이름 부분 일치(대소문자 무시)면 발견.
+- Chrome 스크린샷(설계 "녹화 시점에 `compat-cache/chrome/`")은 **이번엔 생략** — 쓸 수 있는 브라우저 도구가 화면을 파일로 저장하지 못하고, 찍으려면 사이트를 한 번 더 방문해야 해서(예의 규칙 위반). 사람 비교가 필요하면 그 단계에서 사람이 직접.
+
+#### 0b 분류표 (동결 — 바꾸려면 이 표를 먼저 고친다)
+
+버림 사유는 `css/report.rs` 의 `DropReason`, ours/browser-too 는 `DropReason::origin`(1:1 고정). "아는 속성" = `css/properties.rs` 의 표(Chrome 이 받는 표준 속성 전부 + 커스텀 `--*` + 표에 있는 속성의 `-webkit-` 별칭 + Chrome 의 `-webkit-` 전용 속성 목록). 선언 사유는 아래 순서로 처음 맞는 것:
+
+| 대상 | 사유 코드 | 판정 기준 | 분류 |
+|---|---|---|---|
+| 선언 | `nested-rule` | 블록 안 중첩 규칙(원문에 `{`) — `&:hover{…}`, `.child{…}` | ours (선언 수에서 빼고 `nesting` 열에만) |
+| 선언 | `unknown-property` | 속성 표에 없음 — 오타, `-moz-`/`-ms-`/`-o-`/`-khtml-`, 모르는 `-webkit-`, `*zoom` 같은 IE 이름 핵 | browser-too |
+| 선언 | `legacy-hack` | 아는 속성 + 값에 `progid:`·`expression(`·`\9`·`\0`·`!ie` | browser-too |
+| 선언 | `important` | 값에 `!important`(`!` 와 단어 사이 공백 허용) | ours |
+| 선언 | `multi-token` | 전용 파서 없는 속성인데 최상위 토큰 2개 이상(함수·괄호 = 1개) | ours |
+| 선언 | `invalid-value` | 그 밖(전용 파서가 거절, 또는 토큰 1개를 아무도 못 받음) — Chrome 이 받을지 모름 | ours (애매하면 ours) |
+| 규칙 | `foreign-selector` | 셀렉터에 `::-moz-`·`:-moz-`·`::-ms-`·`:-ms-`·`::-o-`·`:-o-` (Chrome 도 규칙째 버림) | browser-too |
+| 규칙 | `unsupported-selector` | 그 밖 — `::-webkit-*` 도 여기(Chrome 은 상당수를 받음) | ours |
+| at-rule | `foreign-at-rule` | 이름이 다른 엔진 접두사(`@-moz-document`) | browser-too |
+| at-rule | `skipped-at-rule` | `@media` 외 본문을 건너뛴 at-rule(`@supports`·`@layer`·`@font-face`·`@keyframes`·`@import`…, `@charset` 은 cssparser 가 먹어서 안 옴) | ours |
+
+- **`keyword_fallback`**: 남은 선언 중 속성 표의 값 종류가 `Other` 가 아닌(길이·숫자·색·키워드 목록·이미지·전용 파서) 속성인데 값이 그 종류가 받지 않는 `Keyword`(전역 키워드 `inherit/initial/unset/revert/revert-layer` 제외) — `width: 100vw`, 따옴표 문자열 등.
+- **`parse_only`**: 남은 선언 중 아래쪽(레이아웃·페인트·인덱스)이 아무도 안 읽는 속성(probe 의 `CONSUMED` 목록 밖, `--*` 제외). 1단계에서 `transition`/`animation` 이 "파싱만" 으로 살아나면 버림이 이 열로 옮겨 간다.
+- 토큰이 하나인 모르는 속성(`-moz-appearance: none`)은 지금 파서가 **버리지 않고 보관**한다 — 버림이 아니라 `parse_only` 로 잡힌다(정상: 아무도 안 읽음).
+- 2차 기준선(7,593 / 1,931)은 다른 날 스냅샷이고 2차 캐시는 요청 정보 줄이 없어 재생이 안 되므로 **둘로 나눠 다시 적지 않는다** — 새 캐시의 같은 5곳 합계가 대신한다(아래 [진행 표](#진행-표) 0행).
 
 ### 0.3 퍼징
 
@@ -576,14 +613,14 @@ GitHub 간격(`margin-top: calc(var(--base-size-8) + var(--Layout-row-gap))` 류
 
 ## 진행 표
 
-버린 선언·규칙 목표(≤1,500 · ≤380 등)는 [공통 규칙](#범위와-순서)대로 `ours` 기준이다 — 0단계에서 기준선을 둘로 나눈 뒤 목표 수치도 그 비율로 다시 확인한다.
+버린 선언·규칙 목표(≤1,500 · ≤380 등)는 [공통 규칙](#범위와-순서)대로 `ours` 기준이다 — 0b 기준선(2차 5곳, 새 캐시)으로 다시 환산하면 **버린 선언 ours 7,389 → 1단계 −80% = ≤1,478, 5단계 −95% = ≤369**(코퍼스 17곳 합계로는 13,251 → ≤2,650 / ≤663). browser-too(5곳 15, 17곳 236)는 목표 밖.
 
 단계를 마칠 때마다 이 표와 [compat-survey.md](compat-survey.md) 의 사이트별 수치를 갱신한다. 수치는 `scripts/compat-corpus.sh run` 의 `corpus-report.tsv` 합계(코퍼스 전체)와, 비교용으로 2차 5곳 합계를 따로.
 
 | 단계 | 상태 | 커밋 | 테스트 수 | 코퍼스 fail/panic/timeout | 버린 선언 (5곳) | 버린 규칙 (5곳) | sr-only 슬리버 | 에이전트 컨트롤 누락 사이트 | 메모 |
 |---|---|---|---|---|---|---|---|---|---|
 | 2차 기준 | ✅ | `78bedff`·`4588aba` | 804 | (5곳) 0/0/0 | 7,593 (ours/browser-too 분리는 0단계에서) | 1,931 (같음) | 19 (GitHub 17·위키 2; naver "검색" 은 2글자라 probe 기준 밖) | naver(모듈) | 출발점 |
-| 0 견고성 | 🔶 0a 완료(미커밋) | | 806 → 829 (0a) | 목표 0/0/0 (전체, release) | 새 기준선(ours/browser-too) | 새 기준선 | 새 기준선 | | **0a**: Robustness Rules(AGENTS.md) + `[mb-budget]` 워치독 · 검토 표 [부록 A](#부록-a--04-표적-코드-검토-표-0a)(grep 140곳: 안전 117·수정 10·보류 2·거짓 양성 11 + grep 밖 발견 수정 5 — 패닉 4: 멀티바이트 `#색`·`bgcolor`·`@font-face`, colspan 오버플로 / 할당 폭주 1: 거대 grid 줄) · 리소스 수집 `Result` 제거 · 스크립트 에러 위치(콘솔) · `compat3` 골든 + `compat3-menu` eval(오늘은 실패가 정상). 남음: 0b 코퍼스·0c 퍼저, 코퍼스 동결 |
+| 0 견고성 | 🔶 0a·0b 완료(0b 미커밋) — 0c 남음 | `d6801bb`(0a) | 806 → 829 (0a) → 842 (0b) | **0b 기준선(25곳)**: ok 16 + ok* 1 · nav-fail 1(crates.io K5) · panic 0 · timeout 3(daum·hani·bbc K4) · blocked 2 · robots skip 2 · `[mb-budget]` 0. 목표 0/0/0 미달 → K4·K5 | 5곳 **ours 7,389 / browser-too 15** (17곳 13,251 / 236) | 5곳 **ours 1,745 / browser-too 11** (17곳 10,114 / 53) | 5곳 17 (17곳 249) | 6/17: naver·korea-kr·velog·d2·google·enwiki | **0a**: Robustness Rules(AGENTS.md) + `[mb-budget]` 워치독 · 검토 표 [부록 A](#부록-a--04-표적-코드-검토-표-0a)(grep 140곳: 안전 117·수정 10·보류 2·거짓 양성 11 + grep 밖 발견 수정 5 — 패닉 4: 멀티바이트 `#색`·`bgcolor`·`@font-face`, colspan 오버플로 / 할당 폭주 1: 거대 grid 줄) · 리소스 수집 `Result` 제거 · 스크립트 에러 위치(콘솔) · `compat3` 골든 + `compat3-menu` eval(오늘은 실패가 정상). **0b**: 코퍼스 도구(`compat-corpus.sh`·`compat-sites.tsv`·probe `summary.tsv`)·조사 캐시 GET 전용·`css/properties.rs`·버림 사유 코드·[분류표](#0b-분류표-동결--바꾸려면-이-표를-먼저-고친다) 동결 · 녹화 2026-11-26(캐시 동결) · 발견 수정 K1 settle·K2 빈 오류 페이지·K3 `queueMicrotask` ([부록 B](#부록-b--0b-코퍼스에서-찾은-것-알려진-문제--담당)) · 사이트별 표 [survey](compat-survey.md#3차-코퍼스-기준선-0b). 남음: 0c 퍼저, K4 |
 | 1 값 파서 | ⏳ | | | 0/0/0 | 목표 ours −80% (2차 환산 ≤1,500) | — | — | | 2.1 뒤에 실행 |
 | 2 @media/@layer/@supports | ⏳ | | | 0/0/0 | — | — | — | | 2.1 먼저, 2.2·2.3 은 1 뒤. GitHub 라이트 |
 | 3 클리핑 | ⏳ | | | 0/0/0 | — | — | 목표 0 | | |
@@ -652,3 +689,27 @@ grep 패턴은 `[ident]`·`[ident ± 1]` 만 잡아서 `&s[0..2]` 같은 **문�
 | D1 | 스타일·레이아웃·리소스 수집·접근성 이름의 **재귀** 전반 | 보류 | 수만 단계 중첩 HTML 이면 스택 오버플로 = **abort**(패닉이 아니라 `catch_unwind` 무력). html5ever 는 깊이 상한이 없다. 해법 후보 = 파서 단계에서 Blink 처럼 깊이 512 에서 평탄화. 0c 퍼저(깊이 0~40)는 못 잡으니 0c 에 "깊이 10,000 한 케이스" 를 추가하고 그때 정한다 |
 | D2 | `render/raster/`, `mb-dom/src/resource.rs` `decode_image` | 보류(범위 밖) | grep 범위 밖. 이미지 디코딩은 `image` crate 기본 한도(할당 512MB)에 기댐 — 0c 에서 이미지 바이트 퍼징을 할지 정한다 |
 | D3 | 레이아웃의 f32 나눗셈 | 보류 | 0 으로 나눠도 패닉이 아니라 NaN/무한대 — 0c 퍼저의 NaN·1e7px 판정이 담당 |
+
+---
+
+## 부록 B — 0b 코퍼스에서 찾은 것 (알려진 문제 → 담당)
+
+2026-11-26 녹화 · 2026-11-27 기준선(`compat-cache/corpus/baseline-0b/`). 사이트별 수치는 [compat-survey.md 3차 코퍼스 기준선](compat-survey.md#3차-코퍼스-기준선-0b).
+
+**0b 에서 고친 것** (각각 손으로 쓴 재현 → 실패 테스트 → 수정):
+
+| # | 증상 (사이트) | 원인 | 수정 · 테스트 |
+|---|---|---|---|
+| K1 | 로드가 ~1.5초보다 느린 페이지가 **로드 전 빈 화면**으로 관찰됨 — `url: (none)`, 요소 0, `settled: false` (녹화 중 daum·yna) | `AgentBrowser::settle` 이 이동 대기 프레임도 `MAX_SETTLE_FRAMES`(600 × ~2.5ms)에 셌다. 실제 MCP 세션의 느린 사이트도 같음 | 이동 대기 프레임은 프레임 상한에 안 셈(벽시계 `settle_timeout` 만 자름) · `settle_waits_for_a_slow_document_load_within_the_wall_clock_budget`(2.5초 지연 라우트) |
+| K2 | 문서 로드가 실패하면 에이전트가 **이유를 못 봄** — 오류 페이지가 비어 `url: (none)`·요소 0·글자 0 (crates.io 404, stackoverflow·w3c 403) | `error_document`/`text_document` 가 `<div>…</div>` 앞뒤 공백을 남겨 조각 파싱의 마지막 루트(=그려지는 유일한 것)가 공백 텍스트 (AGENTS.md "테스트 HTML 과 루트" 함정 그대로) | HTML 을 `trim` · `failed_load_tells_the_agent_why`(404 → 관찰에 `load failed`·`http status 404`), `canned_documents_parse_to_a_single_root`. **`text/plain` 문서도 같은 이유로 빈 화면이었다** |
+| K3 | core-js 의 Promise 폴리필 안에서 스택 소진 (hani·bbc·daum, 임시 인터럽트로 위치 확인) | `queueMicrotask` 심이 호출 때마다 전역 `Promise` 를 찾음 → 페이지가 `Promise` 를 폴리필로 바꾸고 그 반응을 `queueMicrotask` 로 예약하면 서로를 끝없이 부름 | 엔진 `Promise` 를 부트스트랩 때 한 번 묶음 · `queue_microtask_survives_a_page_replacing_promise` |
+
+**남은 것**:
+
+| # | 증상 | 확인한 것 | 담당 |
+|---|---|---|---|
+| K4 | **hani·bbc·daum `timeout`**(120초) — K3 를 고친 뒤에도 페이지 JS 가 끝나지 않음 | 프레임마다 마이크로태스크 큐가 비지 않는다: 임시 계측(되돌림)으로 드레인 한 번에 30만 개+, 100초 동안 140~200번. `drain_pending_jobs` 의 마이크로태스크 안쪽 루프엔 상한이 없다(바깥 타이머 교대만 1024). 실제 Chrome 에선 안 멈추므로 우리 환경 차이(폴리필이 켜지는 조건 — core-js 가 네이티브 Promise 를 불신하는 이유, 빠진 API)로 보이지만 원인 미확정. 상한만 두면 매 프레임 다시 차서 여전히 느림 | **0단계 안**(0c 전에 원인 조사 — 타임박스 규칙상 넘길 수 있으나 3곳이라 우선). JS 런타임 문제라 CSS 단계와 무관 — 이 3곳은 CSS 수치가 없어 1~5단계 비교에서 빠진다 |
+| K5 | crates.io `nav-fail`: 문서 요청에 **404·빈 본문·Content-Type 없음** | 엔진의 문서 요청에 `Accept` 헤더가 없다. crates.io 는 HTML 을 받는다고 밝힌 요청에만 앱 껍데기를 주는 것으로 보인다(**추정** — 확인하려면 재방문이 필요해 안 함) | 4차(네트워크) — 고치면 캐시 정체성에 헤더가 없으므로 보충 녹화로도 안 바뀐다. 그 사이트만 캐시 항목을 지우고 다시 녹화해야 함(재방문 = 사용자 결정) |
+| K6 | stackoverflow·w3c `blocked`(403 챌린지), robots.txt 도 418/403 | 우회하지 않음(규칙) | 없음 — 표에 사유만 |
+| K7 | JS `fetch('/path')`·XHR 상대 URL 이 실패(`invalid URL`) | `js/fetch.rs` 가 `String(url)` 을 기준 URL 없이 `Url::parse` | 4차(JS 소소) |
+| K8 | 11st·old.reddit 는 robots.txt 가 `*` 에 `Disallow: /` | 녹화 안 함 | 없음 — 녹화 23곳, 그중 측정된(ok/ok*) 17곳 |

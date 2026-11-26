@@ -9,6 +9,7 @@ mod error;
 mod gradient;
 mod grid;
 mod parse;
+pub mod properties;
 mod report;
 mod selector;
 mod shadow;
@@ -17,7 +18,9 @@ mod transform;
 
 use grid::{parse_grid_placement, parse_grid_template_areas, parse_grid_track_list};
 use parse::parse_value;
-pub use report::{AtRuleSeen, ParseReport, parse_with_report};
+pub use report::{
+    AtRuleSeen, DropReason, DroppedDeclaration, DroppedRule, Origin, ParseReport, parse_with_report,
+};
 use selector::SelectorParserImpl;
 pub use selector::{CssString, MiniBrowserSelectorImpl, NonTSPseudoClass, PseudoElement, Selector};
 use shadow::{parse_box_shadow_value, parse_text_shadow_value};
@@ -342,7 +345,7 @@ where
         match item {
             Ok(batch) => rules.extend(batch),
             Err((_, source, _)) if !source.trim_start().starts_with('@') => {
-                report::record(|r| r.dropped_rules.push(report::rule_prelude(source)))
+                report::record(|r| r.dropped_rules.push(report::dropped_rule(source)))
             }
             Err(_) => {}
         }
@@ -434,6 +437,7 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
                 name: name.to_ascii_lowercase(),
                 prelude: report::excerpt(input.slice_from(start)),
                 kept: is_media,
+                skipped_bytes: 0,
             })
         });
         if is_media {
@@ -464,7 +468,19 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
                 collect_rules(iter, &mut rules);
                 Ok(rules)
             }
-            AtRulePrelude::Reject => Ok(Vec::new()),
+            AtRulePrelude::Reject => {
+                if report::is_active() {
+                    let start = input.position();
+                    while input.next().is_ok() {}
+                    let bytes = input.slice_from(start).len();
+                    report::record(|r| {
+                        if let Some(seen) = r.at_rules.last_mut() {
+                            seen.skipped_bytes = bytes;
+                        }
+                    });
+                }
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -495,7 +511,7 @@ fn parse_declaration_block<'i>(input: &mut CssParser<'i>) -> Result<Vec<Declarat
             Ok(decls) => declarations.extend(decls),
             Err((_, source, _)) => report::record(|r| {
                 r.dropped_declarations
-                    .push(report::excerpt(source.trim_end_matches(';')))
+                    .push(report::dropped_declaration(source))
             }),
         }
     }

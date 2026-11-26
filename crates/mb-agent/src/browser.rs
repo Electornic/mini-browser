@@ -1113,18 +1113,27 @@ impl AgentBrowser {
     /// navigation in flight, no timer due within `TIMER_HORIZON_MS`, and
     /// the DOM revision unchanged for `QUIET_FRAMES` frames in a row.
     /// Returns false when the frame or wall-clock budget ran out first.
+    ///
+    /// Frames spent waiting on the load thread don't count against the
+    /// frame budget: that wait is real network time, which only the wall
+    /// clock (`settle_timeout`) may cut short. Counting them made any page
+    /// slower than ~1.5 s look blank (compat round 3 corpus).
     pub fn settle(&mut self) -> bool {
         let started = Instant::now();
         let mut quiet = 0;
+        let mut frames = 0;
         let mut last_revision = self.revision();
         let mut last_url = self.state.current_url.clone();
-        for _ in 0..MAX_SETTLE_FRAMES {
+        while frames < MAX_SETTLE_FRAMES {
             if let Some(clock) = &self.clock {
                 clock.advance(FRAME_MS);
             }
             self.frame(WindowInput::default());
 
             let navigating = self.state.has_pending_navigation();
+            if !navigating {
+                frames += 1;
+            }
             let timer_soon = self.state.js.next_timer_deadline().is_some_and(|deadline| {
                 deadline.saturating_sub(self.state.js.clock_now_ms()) <= TIMER_HORIZON_MS
             });

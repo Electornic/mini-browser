@@ -156,6 +156,16 @@ fn route(
             String::new(),
         ),
         ("GET", "/long") => ("200 OK", String::new(), long_page()),
+        // A real site over a real network: the document (plus its
+        // subresources) takes longer than settle's frame budget lasts.
+        ("GET", "/slow") => {
+            thread::sleep(std::time::Duration::from_millis(2500));
+            (
+                "200 OK",
+                String::new(),
+                "<html><body><p>slow page loaded</p><a href=\"/signup\">Next</a></body></html>".into(),
+            )
+        }
         ("GET", "/script-error") => (
             "200 OK",
             String::new(),
@@ -429,6 +439,40 @@ fn cross_origin_link_is_refused_in_deny_mode_and_blocked_by_allow_list() {
     let page = b.navigate(&server.url("/signup")).unwrap();
     let other = find(&page, Role::Link, "Other origin");
     assert_eq!(b.click(other).unwrap_err().code(), "navigation_blocked");
+}
+
+#[test]
+fn failed_load_tells_the_agent_why() {
+    // The canned error page used to be a `<div>` followed by whitespace,
+    // so the fragment's last root (the only one laid out) was that
+    // whitespace: the agent saw `url: (none)`, 0 elements and no text —
+    // no way to tell a 404 from a bot block (compat round 3: crates.io,
+    // stackoverflow).
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/no-such-page")).unwrap();
+    let text = page.to_text();
+    assert!(text.contains("load failed"), "{text}");
+    assert!(text.contains("http status 404"), "{text}");
+}
+
+#[test]
+fn settle_waits_for_a_slow_document_load_within_the_wall_clock_budget() {
+    // Waiting on the load thread used to spend settle's frame budget
+    // (600 frames × ~2.5 ms ≈ 1.5 s), so a page slower than that was
+    // observed before it existed: blank, no URL, `settled: false`
+    // (compat round 3 corpus: daum, yna). Only the wall clock
+    // (`settle_timeout`, 5 s by default) may cut a load short.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/slow")).unwrap();
+    assert_eq!(path_of(&page), "/slow", "{}", page.to_text());
+    assert!(
+        page.text.iter().any(|t| t == "slow page loaded"),
+        "{:?}",
+        page.text
+    );
+    assert_eq!(page.settled, Some(true));
 }
 
 #[test]

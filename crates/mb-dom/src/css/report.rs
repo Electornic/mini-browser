@@ -5,24 +5,125 @@
 //! are dropped silently (that's the CSS error-recovery contract). On a real
 //! site those silent drops are most of what goes wrong, so
 //! [`parse_with_report`] runs the same parse and also hands back the dropped
-//! pieces. Normal parsing never records anything.
+//! pieces, each with a [`DropReason`]. Normal parsing never records (or
+//! classifies) anything.
+//!
+//! [`DropReason::origin`] splits drops into **ours** (Chrome would keep it —
+//! an engine gap to close) and **browser-too** (Chrome drops it as well — not
+//! a target). The split is frozen for compat round 3
+//! (docs/compat-round3.md "0b 분류표"); change the doc before the code.
 
 use std::cell::RefCell;
 
+use cssparser::Parser as CssParser;
+
 use super::Stylesheet;
+use super::properties::{self, ValueKind};
 
 /// Longest source excerpt kept per dropped item.
 const EXCERPT_LIMIT: usize = 160;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ParseReport {
-    /// Selector text of rules dropped because the selector didn't parse.
-    pub dropped_rules: Vec<String>,
-    /// `name: value` text of declarations dropped because the value didn't
-    /// parse (including any `!important` ones — the flag isn't modelled).
-    pub dropped_declarations: Vec<String>,
+    /// Rules dropped because the selector didn't parse.
+    pub dropped_rules: Vec<DroppedRule>,
+    /// Declarations dropped because the value (or the name) didn't parse —
+    /// including nested rules inside a block, which the declaration parser
+    /// sees as one broken declaration ([`DropReason::NestedRule`]).
+    pub dropped_declarations: Vec<DroppedDeclaration>,
     /// Every at-rule seen, in source order.
     pub at_rules: Vec<AtRuleSeen>,
+}
+
+/// Why something was dropped. Mechanical (what the parser hit), checked in
+/// the order the variants are listed for declarations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DropReason {
+    /// The block held a nested rule (`&:hover{…}`, `.child{…}`) — CSS
+    /// nesting, which Chrome supports and we don't parse.
+    NestedRule,
+    /// No browser knows the property: a typo, `-moz-`/`-ms-`/`-o-`, an
+    /// unknown `-webkit-` name, an IE hack name (`*zoom`).
+    UnknownProperty,
+    /// A known property with an old-IE value hack (`progid:`,
+    /// `expression(`, `\9`, `\0`, `!ie`) — invalid in every modern browser.
+    LegacyHack,
+    /// The value carries `!important`, which the parser doesn't model.
+    Important,
+    /// A known property without a dedicated parser got more than one
+    /// token (`border: 1px solid`, comma lists, `calc(a) b`).
+    MultiToken,
+    /// A known property's value didn't parse for another reason (a
+    /// dedicated parser rejected it, or one token nothing accepts). Chrome
+    /// may or may not accept it; ambiguous counts as ours.
+    InvalidValue,
+    /// A rule whose selector uses something we don't parse.
+    UnsupportedSelector,
+    /// A selector with another engine's prefix (`::-moz-selection`,
+    /// `:-ms-input-placeholder`) — Chrome drops the whole rule too.
+    ForeignSelector,
+    /// An at-rule whose body is skipped (`@supports`, `@layer`, `@font-face`…).
+    SkippedAtRule,
+    /// An at-rule with another engine's prefix (`@-moz-document`).
+    ForeignAtRule,
+}
+
+/// Whether a drop is an engine gap ([`Origin::Ours`]) or what a real
+/// browser does too ([`Origin::BrowserToo`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Origin {
+    Ours,
+    BrowserToo,
+}
+
+impl DropReason {
+    /// Stable short code for reports (`summary.tsv`, `css.txt`).
+    pub fn code(self) -> &'static str {
+        match self {
+            DropReason::NestedRule => "nested-rule",
+            DropReason::UnknownProperty => "unknown-property",
+            DropReason::LegacyHack => "legacy-hack",
+            DropReason::Important => "important",
+            DropReason::MultiToken => "multi-token",
+            DropReason::InvalidValue => "invalid-value",
+            DropReason::UnsupportedSelector => "unsupported-selector",
+            DropReason::ForeignSelector => "foreign-selector",
+            DropReason::SkippedAtRule => "skipped-at-rule",
+            DropReason::ForeignAtRule => "foreign-at-rule",
+        }
+    }
+
+    /// The frozen ours / browser-too table.
+    pub fn origin(self) -> Origin {
+        match self {
+            DropReason::UnknownProperty
+            | DropReason::LegacyHack
+            | DropReason::ForeignSelector
+            | DropReason::ForeignAtRule => Origin::BrowserToo,
+            DropReason::NestedRule
+            | DropReason::Important
+            | DropReason::MultiToken
+            | DropReason::InvalidValue
+            | DropReason::UnsupportedSelector
+            | DropReason::SkippedAtRule => Origin::Ours,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DroppedDeclaration {
+    /// Lower-cased property name as written (`""` for a nested rule).
+    pub property: String,
+    /// `name: value` excerpt.
+    pub text: String,
+    pub reason: DropReason,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DroppedRule {
+    /// Selector excerpt (the end is kept: that's where it usually fails).
+    pub selector: String,
+    pub reason: DropReason,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +135,22 @@ pub struct AtRuleSeen {
     /// Whether the body's rules were kept (`@media`, always treated as
     /// matching) or the whole rule skipped.
     pub kept: bool,
+    /// Size of a skipped body in source bytes (0 when kept or block-less).
+    pub skipped_bytes: usize,
+}
+
+impl AtRuleSeen {
+    /// Why the rule was dropped, or `None` when nothing was lost: a kept
+    /// body, or `@charset` (an encoding hint, no content).
+    pub fn drop_reason(&self) -> Option<DropReason> {
+        if self.kept || self.name == "charset" {
+            None
+        } else if properties::is_foreign_vendor_prefix(&self.name) {
+            Some(DropReason::ForeignAtRule)
+        } else {
+            Some(DropReason::SkippedAtRule)
+        }
+    }
 }
 
 thread_local! {
@@ -58,6 +175,92 @@ pub(super) fn record(update: impl FnOnce(&mut ParseReport)) {
     });
 }
 
+pub(super) fn is_active() -> bool {
+    REPORT.with(|slot| slot.borrow().is_some())
+}
+
+/// Classify a declaration the parser rejected, from its full source text.
+pub(super) fn dropped_declaration(source: &str) -> DroppedDeclaration {
+    let source = source.trim().trim_end_matches(';');
+    let text = excerpt(source);
+    if source.contains('{') {
+        return DroppedDeclaration {
+            property: String::new(),
+            text,
+            reason: DropReason::NestedRule,
+        };
+    }
+    let (name, value) = source.split_once(':').unwrap_or((source, ""));
+    let property = name.trim().to_ascii_lowercase();
+    let reason = declaration_reason(&property, value);
+    DroppedDeclaration {
+        property,
+        text,
+        reason,
+    }
+}
+
+fn declaration_reason(property: &str, value: &str) -> DropReason {
+    let Some(kind) = properties::lookup(property) else {
+        return DropReason::UnknownProperty;
+    };
+    let lower = value.to_ascii_lowercase();
+    if ["progid:", "expression(", "\\9", "\\0", "!ie"]
+        .iter()
+        .any(|hack| lower.contains(hack))
+    {
+        return DropReason::LegacyHack;
+    }
+    if has_important(&lower) {
+        return DropReason::Important;
+    }
+    if kind != ValueKind::Dedicated && top_level_tokens(value) > 1 {
+        return DropReason::MultiToken;
+    }
+    DropReason::InvalidValue
+}
+
+/// `!important` with any whitespace or comment between `!` and the word.
+fn has_important(lower_value: &str) -> bool {
+    lower_value.match_indices('!').any(|(at, _)| {
+        lower_value[at + 1..]
+            .trim_start()
+            .trim_start_matches("/**/")
+            .trim_start()
+            .starts_with("important")
+    })
+}
+
+/// Tokens at the top level of a value (a function or block is one).
+fn top_level_tokens(value: &str) -> usize {
+    let mut parser = CssParser::new(value);
+    let mut count = 0;
+    while parser.next().is_ok() {
+        count += 1;
+    }
+    count
+}
+
+/// Classify a rule whose selector didn't parse.
+pub(super) fn dropped_rule(source: &str) -> DroppedRule {
+    let prelude = source
+        .split('{')
+        .next()
+        .unwrap_or(source)
+        .to_ascii_lowercase();
+    let foreign = ["::-moz-", ":-moz-", "::-ms-", ":-ms-", "::-o-", ":-o-"]
+        .iter()
+        .any(|prefix| prelude.contains(prefix));
+    DroppedRule {
+        selector: rule_prelude(source),
+        reason: if foreign {
+            DropReason::ForeignSelector
+        } else {
+            DropReason::UnsupportedSelector
+        },
+    }
+}
+
 fn excerpt_unbounded(source: &str) -> String {
     source.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -71,7 +274,7 @@ pub(super) fn excerpt(source: &str) -> String {
 }
 
 /// The selector part of a dropped rule's source (everything before `{`).
-pub(super) fn rule_prelude(source: &str) -> String {
+fn rule_prelude(source: &str) -> String {
     let prelude = source.split('{').next().unwrap_or(source);
     // Keep the end: the part a selector fails on is usually the last
     // compound (`…:before`), which a front excerpt would cut off.
@@ -84,7 +287,7 @@ pub(super) fn rule_prelude(source: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_with_report;
+    use super::{DropReason, Origin, dropped_declaration, dropped_rule, parse_with_report};
 
     #[test]
     fn report_lists_dropped_rules_declarations_and_at_rules() {
@@ -95,24 +298,43 @@ mod tests {
              @supports (display: grid) { .d { display: grid } }",
         );
         assert_eq!(sheet.rules.len(), 2, "the .a rule and the @media .c rule");
-        assert_eq!(report.dropped_rules, vec![".b:frobnicate".to_string()]);
+        let rules: Vec<_> = report
+            .dropped_rules
+            .iter()
+            .map(|r| (r.selector.as_str(), r.reason))
+            .collect();
+        assert_eq!(rules, [(".b:frobnicate", DropReason::UnsupportedSelector)]);
+        let decls: Vec<_> = report
+            .dropped_declarations
+            .iter()
+            .map(|d| (d.property.as_str(), d.text.as_str(), d.reason))
+            .collect();
         assert_eq!(
-            report.dropped_declarations,
-            vec![
-                "width: 1px !important".to_string(),
-                "colour-ish: 1 2 3".to_string()
+            decls,
+            [
+                ("width", "width: 1px !important", DropReason::Important),
+                (
+                    "colour-ish",
+                    "colour-ish: 1 2 3",
+                    DropReason::UnknownProperty
+                )
             ]
         );
         let at_rules: Vec<_> = report
             .at_rules
             .iter()
-            .map(|a| (a.name.as_str(), a.prelude.as_str(), a.kept))
+            .map(|a| (a.name.as_str(), a.prelude.as_str(), a.kept, a.skipped_bytes))
             .collect();
         assert_eq!(
             at_rules,
             [
-                ("media", "(min-width: 1px)", true),
-                ("supports", "(display: grid)", false)
+                ("media", "(min-width: 1px)", true, 0),
+                (
+                    "supports",
+                    "(display: grid)",
+                    false,
+                    " .d { display: grid } ".len()
+                )
             ]
         );
     }
@@ -122,5 +344,79 @@ mod tests {
         let _ = super::super::parse(".b:frobnicate { color: blue }");
         let (_, report) = parse_with_report(".a { color: red }");
         assert!(report.dropped_rules.is_empty());
+    }
+
+    #[test]
+    fn declaration_reasons_follow_the_frozen_order() {
+        let reason = |source: &str| dropped_declaration(source).reason;
+        assert_eq!(reason("&:hover { color: red }"), DropReason::NestedRule);
+        assert_eq!(
+            reason("-moz-appearance: none !important"),
+            DropReason::UnknownProperty
+        );
+        assert_eq!(reason("*zoom: 1"), DropReason::UnknownProperty);
+        assert_eq!(reason("-webkit-frobnicate: 1"), DropReason::UnknownProperty);
+        assert_eq!(
+            reason("filter: progid:DXImageTransform.Microsoft.gradient(enabled=false)"),
+            DropReason::LegacyHack
+        );
+        assert_eq!(reason("width: 100px\\9"), DropReason::LegacyHack);
+        assert_eq!(reason("color: red ! important"), DropReason::Important);
+        assert_eq!(reason("border: 1px solid red"), DropReason::MultiToken);
+        assert_eq!(reason("--shadow: 0 1px 2px red"), DropReason::MultiToken);
+        assert_eq!(
+            reason("-webkit-transition: opacity .2s"),
+            DropReason::MultiToken
+        );
+        assert_eq!(
+            reason("margin: 1px 2px 3px 4px 5px"),
+            DropReason::InvalidValue
+        );
+        assert_eq!(reason("width: calc(100% - 2px)"), DropReason::InvalidValue);
+        assert_eq!(dropped_declaration("Color: red;").property, "color");
+    }
+
+    #[test]
+    fn origin_table_is_frozen() {
+        use DropReason::*;
+        let ours = [
+            NestedRule,
+            Important,
+            MultiToken,
+            InvalidValue,
+            UnsupportedSelector,
+            SkippedAtRule,
+        ];
+        let browser_too = [UnknownProperty, LegacyHack, ForeignSelector, ForeignAtRule];
+        assert!(ours.iter().all(|r| r.origin() == Origin::Ours));
+        assert!(browser_too.iter().all(|r| r.origin() == Origin::BrowserToo));
+    }
+
+    #[test]
+    fn foreign_selectors_and_at_rules_are_browser_too() {
+        assert_eq!(
+            dropped_rule("a::-moz-selection, a::selection { }").reason,
+            DropReason::ForeignSelector
+        );
+        assert_eq!(
+            dropped_rule("input:-ms-input-placeholder{}").reason,
+            DropReason::ForeignSelector
+        );
+        assert_eq!(
+            dropped_rule("::-webkit-scrollbar{}").reason,
+            DropReason::UnsupportedSelector
+        );
+        // (`@charset` never reaches the at-rule parser: cssparser eats it.)
+        let (_, report) = parse_with_report(
+            "@charset \"utf-8\"; @-moz-document url-prefix() { a{} } @font-face { src: url(a) }",
+        );
+        let reasons: Vec<_> = report.at_rules.iter().map(|a| a.drop_reason()).collect();
+        assert_eq!(
+            reasons,
+            [
+                Some(DropReason::ForeignAtRule),
+                Some(DropReason::SkippedAtRule)
+            ]
+        );
     }
 }

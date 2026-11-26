@@ -52,13 +52,24 @@ pub(super) fn register_window_aliases(
     // piggy-backs on rquickjs' microtask queue (drained from
     // `JsRuntime::drain_pending_jobs`) and throws TypeError for
     // non-callable arguments to match real browsers.
+    //
+    // The engine's own `Promise` is bound here, once: pages replace
+    // `globalThis.Promise` (core-js does when it distrusts the native one)
+    // and then schedule that polyfill's reactions *through*
+    // `queueMicrotask` — looking `Promise` up at call time made the two
+    // feed each other until the stack ran out (seen inside core-js on
+    // hani, bbc and daum in the compat round 3 corpus).
     let qmt_src = r#"
-        globalThis.queueMicrotask = function (cb) {
-            if (typeof cb !== 'function') {
-                throw new TypeError('queueMicrotask: argument must be a function');
-            }
-            Promise.resolve().then(cb);
-        };
+        (function () {
+            var resolved = Promise.resolve();
+            var then = Promise.prototype.then;
+            globalThis.queueMicrotask = function (cb) {
+                if (typeof cb !== 'function') {
+                    throw new TypeError('queueMicrotask: argument must be a function');
+                }
+                then.call(resolved, cb);
+            };
+        })();
     "#;
     ctx.eval::<(), _>(qmt_src)?;
 

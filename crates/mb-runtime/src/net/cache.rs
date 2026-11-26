@@ -13,6 +13,13 @@
 //! value (a page-chosen fetch method, a URL, a body) can pose as another
 //! field; the method must also be a valid HTTP token before the cache looks.
 //!
+//! Only `GET` ever reaches the network while the cache is on: a survey runs
+//! real page scripts, and their beacons, `POST`s and `fetch(method≠GET)`
+//! would send fake impressions and form traffic to third parties. Those
+//! requests fail locally instead (always — there is no switch; the cache is
+//! survey-only, so normal browsing is unaffected). Some script paths change
+//! because of it, which a survey accepts (docs/compat-round3.md 0.2).
+//!
 //! The cache holds third-party content, so `DIR` must stay out of the
 //! repository (`compat-cache/` is git-ignored). Nothing here runs unless the
 //! variable is set: normal browsing and every test go straight to the wire.
@@ -21,6 +28,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use super::{FetchResult, HttpResponse, NetworkError, Url};
@@ -28,6 +36,33 @@ use super::{FetchResult, HttpResponse, NetworkError, Url};
 pub(super) struct Cache {
     dir: PathBuf,
     offline: bool,
+}
+
+/// What the cache refused this process, for the survey probe's report
+/// (`compat_probe` reads it once at the end; nothing in the browser does).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SurveyCacheStats {
+    /// `METHOD url` (query kept: the probe classifies by path) of each
+    /// offline replay that had no entry.
+    pub offline_misses: Vec<String>,
+    /// Requests with a method other than `GET`, failed without sending.
+    pub refused_non_get: usize,
+}
+
+static STATS: Mutex<SurveyCacheStats> = Mutex::new(SurveyCacheStats {
+    offline_misses: Vec::new(),
+    refused_non_get: 0,
+});
+
+/// Snapshot of [`SurveyCacheStats`] since the process started.
+pub fn survey_stats() -> SurveyCacheStats {
+    STATS.lock().map(|stats| stats.clone()).unwrap_or_default()
+}
+
+fn note(update: impl FnOnce(&mut SurveyCacheStats)) {
+    if let Ok(mut stats) = STATS.lock() {
+        update(&mut stats);
+    }
 }
 
 impl Cache {
@@ -49,6 +84,12 @@ impl Cache {
         // Rejected here exactly as the wire request would be: a method that
         // isn't an HTTP token never reaches the cache.
         let method = normalize_method(method)?;
+        if method != "GET" {
+            note(|stats| stats.refused_non_get += 1);
+            return Err(NetworkError::Io(format!(
+                "MB_NET_CACHE: survey sends GET only, {method} {url} not sent"
+            )));
+        }
         let url_text = url.to_string();
         let identity = identity_line(&url_text, &method, follows_redirects, body);
         let key = cache_key(&url_text, &method, follows_redirects, body);
@@ -58,6 +99,7 @@ impl Cache {
             return Ok(hit);
         }
         if self.offline {
+            note(|stats| stats.offline_misses.push(format!("{method} {url}")));
             return Err(NetworkError::Io(format!("not in MB_NET_CACHE: {url}")));
         }
         let result = fetch()?;
@@ -194,7 +236,7 @@ mod tests {
 
     use super::{
         Cache, FetchResult, HttpResponse, NetworkError, Url, cache_key, identity_bytes,
-        normalize_method,
+        normalize_method, survey_stats,
     };
 
     fn response(body: &str) -> Result<FetchResult, NetworkError> {
@@ -229,6 +271,43 @@ mod tests {
         // Standard methods normalize like fetch(); others keep their case.
         assert_eq!(normalize_method("get").unwrap(), "GET");
         assert_eq!(normalize_method("Patch").unwrap(), "Patch");
+    }
+
+    #[test]
+    fn recording_sends_only_get_and_fails_other_methods_locally() {
+        let url = Url::parse("https://beacon.test/collect").unwrap();
+        let cache = temp_cache("get-only", false);
+        let refused_before = survey_stats().refused_non_get;
+        for method in ["POST", "post", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"] {
+            let result = cache.fetch((&url, method, true, b"payload"), || {
+                panic!("{method} must not reach the network while recording")
+            });
+            assert!(result.is_err(), "{method} was sent");
+        }
+        assert!(!cache.dir.exists(), "nothing recorded for refused methods");
+        // Other tests may run in parallel, so only a lower bound holds.
+        assert!(survey_stats().refused_non_get >= refused_before + 7);
+
+        let fetched = Cell::new(false);
+        let result = cache.fetch((&url, "get", true, b""), || {
+            fetched.set(true);
+            response("ok")
+        });
+        assert!(fetched.get() && result.is_ok(), "GET still goes out");
+        let _ = std::fs::remove_dir_all(&cache.dir);
+    }
+
+    #[test]
+    fn offline_miss_is_counted_for_the_survey_report() {
+        let url = Url::parse("https://a.test/never-recorded.css").unwrap();
+        let cache = temp_cache("miss", true);
+        let result = cache.fetch((&url, "GET", true, b""), || panic!("offline never fetches"));
+        assert!(result.is_err());
+        assert!(
+            survey_stats()
+                .offline_misses
+                .contains(&"GET https://a.test/never-recorded.css".to_string())
+        );
     }
 
     #[test]

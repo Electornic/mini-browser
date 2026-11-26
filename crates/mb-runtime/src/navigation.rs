@@ -277,7 +277,9 @@ pub fn error_document(title: &str, message: &str, target: &str) -> (String, Stri
     "#
     .to_string();
 
-    (html, css)
+    // Trimmed: whitespace around the wrapper would become sibling roots of
+    // the fragment, and only the last root is laid out (a blank page).
+    (html.trim().to_string(), css)
 }
 
 pub fn text_document(body: &str, target: &str) -> (String, String) {
@@ -317,7 +319,9 @@ pub fn text_document(body: &str, target: &str) -> (String, String) {
     "#
     .to_string();
 
-    (html, css)
+    // Trimmed: whitespace around the wrapper would become sibling roots of
+    // the fragment, and only the last root is laid out (a blank page).
+    (html.trim().to_string(), css)
 }
 
 fn escape_html(value: &str) -> String {
@@ -486,5 +490,19 @@ mod tests {
         // an empty address bar).
         let (html, _) = error_document("oops", "details", "");
         assert!(!html.contains("<p></p>"));
+    }
+
+    #[test]
+    fn canned_documents_parse_to_a_single_root() {
+        // `html::parse` of a fragment makes every top-level sibling a root
+        // and only the last one is laid out (AGENTS.md "테스트 HTML 과 루트"),
+        // so whitespace after the wrapper `<div>` made these pages blank.
+        for (html, _) in [
+            error_document("load failed", "http status 404", "https://a.test/"),
+            text_document("plain body", "https://a.test/a.txt"),
+        ] {
+            let document = html::parse(&html).expect("canned html parses");
+            assert_eq!(document.roots().len(), 1, "{html:?}");
+        }
     }
 }

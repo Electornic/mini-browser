@@ -907,6 +907,27 @@ mod tests {
         assert_eq!(rt.execute("ran").unwrap(), "true");
     }
 
+    #[test]
+    fn queue_microtask_survives_a_page_replacing_promise() {
+        // core-js swaps in its own `Promise` when it distrusts the native
+        // one and schedules that polyfill's reactions with
+        // `queueMicrotask`. A shim that looked `Promise` up at call time
+        // fed the polyfill back into itself until the stack ran out (seen
+        // inside core-js on hani, bbc and daum in the compat round 3
+        // corpus).
+        let mut rt = fresh();
+        rt.execute(
+            "var ran = false;
+             globalThis.Promise = function () {};
+             globalThis.Promise.resolve = function () {
+                 return { then: function (f) { queueMicrotask(f); } };
+             };
+             queueMicrotask(function () { ran = true; });",
+        )
+        .unwrap();
+        assert_eq!(rt.execute("ran").unwrap(), "true");
+    }
+
     // -------- 4.8b DOM bridge tests --------
 
     fn rt_with_html(source: &str) -> JsRuntime {

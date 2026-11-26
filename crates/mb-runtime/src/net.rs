@@ -19,6 +19,7 @@ use ureq::{
 pub use mb_dom::url::{NetworkError, Url};
 
 mod cache;
+pub use cache::{SurveyCacheStats, survey_stats};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpResponse {
