@@ -9,6 +9,9 @@
 //! name; each entry also stores the full request identity and only an exact
 //! match is a hit (a mismatch is a miss, or an error offline). Without that a
 //! colliding — or crafted — request would be served another one's response.
+//! The identity is length-prefixed fields, never delimited text, so no field
+//! value (a page-chosen fetch method, a URL, a body) can pose as another
+//! field; the method must also be a valid HTTP token before the cache looks.
 //!
 //! The cache holds third-party content, so `DIR` must stay out of the
 //! repository (`compat-cache/` is git-ignored). Nothing here runs unless the
@@ -43,9 +46,12 @@ impl Cache {
         fetch: impl FnOnce() -> Result<FetchResult, NetworkError>,
     ) -> Result<FetchResult, NetworkError> {
         let (url, method, follows_redirects, body) = key_parts;
+        // Rejected here exactly as the wire request would be: a method that
+        // isn't an HTTP token never reaches the cache.
+        let method = normalize_method(method)?;
         let url_text = url.to_string();
-        let identity = identity_line(&url_text, method, follows_redirects, body);
-        let key = cache_key(&url_text, method, follows_redirects, body);
+        let identity = identity_line(&url_text, &method, follows_redirects, body);
+        let key = cache_key(&url_text, &method, follows_redirects, body);
         let meta_path = self.dir.join(format!("{key}.meta"));
         let body_path = self.dir.join(format!("{key}.body"));
         if let Some(hit) = read_entry(&meta_path, &body_path, &identity) {
@@ -96,12 +102,52 @@ impl Cache {
     }
 }
 
-/// The `.meta` file's first line: everything that identifies the request,
-/// compared byte for byte on read. The body is hex so it stays on one line.
+/// `method` as the cache keys it: an HTTP token (RFC 9110 `tchar`s), with
+/// the six standard methods upper-cased like fetch() normalizes them (others
+/// stay case-sensitive, as in the Fetch spec).
+fn normalize_method(method: &str) -> Result<String, NetworkError> {
+    let is_tchar = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+    if method.is_empty() || !method.bytes().all(is_tchar) {
+        return Err(NetworkError::InvalidUrl(format!(
+            "invalid http method: {method:?}"
+        )));
+    }
+    let upper = method.to_ascii_uppercase();
+    Ok(
+        if matches!(
+            upper.as_str(),
+            "DELETE" | "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT"
+        ) {
+            upper
+        } else {
+            method.to_string()
+        },
+    )
+}
+
+/// The request identity, unambiguously: each variable field is its byte
+/// length (u64 little-endian) followed by the bytes, plus one flag byte.
+/// Both the file name and the stored identity derive from this.
+fn identity_bytes(url: &str, method: &str, follows_redirects: bool, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(32 + method.len() + url.len() + body.len());
+    for field in [method.as_bytes(), url.as_bytes()] {
+        out.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        out.extend_from_slice(field);
+    }
+    out.push(u8::from(follows_redirects));
+    out.extend_from_slice(&(body.len() as u64).to_le_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
+/// The `.meta` file's first line: the whole identity, hex-encoded (so it is
+/// one line whatever the fields hold), compared in full on read.
 fn identity_line(url: &str, method: &str, follows_redirects: bool, body: &[u8]) -> String {
-    let flag = if follows_redirects { "F" } else { "N" };
-    let body_hex: String = body.iter().map(|byte| format!("{byte:02x}")).collect();
-    format!("identity\t{method}\t{flag}\t{url}\t{body_hex}")
+    let hex: String = identity_bytes(url, method, follows_redirects, body)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("identity {hex}")
 }
 
 fn read_entry(meta_path: &Path, body_path: &Path, identity: &str) -> Option<FetchResult> {
@@ -130,16 +176,14 @@ fn read_entry(meta_path: &Path, body_path: &Path, identity: &str) -> Option<Fetc
     })
 }
 
-/// FNV-1a over the request identity. Stable across runs and Rust versions
-/// (unlike `DefaultHasher`), which is all a file name needs.
+/// FNV-1a over the identity bytes. Stable across runs and Rust versions
+/// (unlike `DefaultHasher`), which is all a file name needs — collisions are
+/// caught by the full identity comparison.
 fn cache_key(url: &str, method: &str, follows_redirects: bool, body: &[u8]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let flag = if follows_redirects { b"F" } else { b"N" };
-    for part in [method.as_bytes(), flag, url.as_bytes(), body] {
-        for byte in part.iter().chain(std::iter::once(&0u8)) {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0100_0000_01b3);
-        }
+    for byte in identity_bytes(url, method, follows_redirects, body) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     format!("{hash:016x}")
 }
@@ -148,7 +192,10 @@ fn cache_key(url: &str, method: &str, follows_redirects: bool, body: &[u8]) -> S
 mod tests {
     use std::cell::Cell;
 
-    use super::{Cache, FetchResult, HttpResponse, NetworkError, Url, cache_key};
+    use super::{
+        Cache, FetchResult, HttpResponse, NetworkError, Url, cache_key, identity_bytes,
+        normalize_method,
+    };
 
     fn response(body: &str) -> Result<FetchResult, NetworkError> {
         Ok(FetchResult {
@@ -166,6 +213,33 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mb-net-cache-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         Cache { dir, offline }
+    }
+
+    #[test]
+    fn method_with_tab_or_newline_is_rejected_before_the_cache() {
+        let url = Url::parse("https://a.test/").unwrap();
+        let cache = temp_cache("method", false);
+        for method in ["GET\tx", "GET\nidentity", "PO ST", "", "GET\r"] {
+            let result = cache.fetch((&url, method, true, b""), || {
+                panic!("an invalid method must never be fetched or cached")
+            });
+            assert!(result.is_err(), "{method:?} accepted");
+        }
+        assert!(!cache.dir.exists(), "nothing was written");
+        // Standard methods normalize like fetch(); others keep their case.
+        assert_eq!(normalize_method("get").unwrap(), "GET");
+        assert_eq!(normalize_method("Patch").unwrap(), "Patch");
+    }
+
+    #[test]
+    fn identity_fields_cannot_pose_as_each_other() {
+        // With delimiters, moving bytes between fields could produce the
+        // same identity; length prefixes make every split distinct.
+        let a = identity_bytes("https://a.test/xy", "GET", true, b"");
+        let b = identity_bytes("https://a.test/x", "GET", true, b"y");
+        let c = identity_bytes("https://a.test/xy", "GET", false, b"");
+        assert_ne!(a, b);
+        assert_ne!(a, c);
     }
 
     #[test]

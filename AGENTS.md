@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 803 (workspace 합계, 2026-11-26 호환성 2차 실사이트 조사 +10). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 806 (workspace 합계, 2026-11-26 호환성 2차 실사이트 조사 + 조사 캐시 요청 정보 검증 +3). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
