@@ -5,6 +5,11 @@
 //! while the site sees one visit. `MB_NET_CACHE_OFFLINE=1` turns a miss into
 //! an error instead of a fetch (replay only, never touch the network).
 //!
+//! File names are a 64-bit hash of the request, so two requests can share a
+//! name; each entry also stores the full request identity and only an exact
+//! match is a hit (a mismatch is a miss, or an error offline). Without that a
+//! colliding — or crafted — request would be served another one's response.
+//!
 //! The cache holds third-party content, so `DIR` must stay out of the
 //! repository (`compat-cache/` is git-ignored). Nothing here runs unless the
 //! variable is set: normal browsing and every test go straight to the wire.
@@ -38,10 +43,12 @@ impl Cache {
         fetch: impl FnOnce() -> Result<FetchResult, NetworkError>,
     ) -> Result<FetchResult, NetworkError> {
         let (url, method, follows_redirects, body) = key_parts;
-        let key = cache_key(&url.to_string(), method, follows_redirects, body);
+        let url_text = url.to_string();
+        let identity = identity_line(&url_text, method, follows_redirects, body);
+        let key = cache_key(&url_text, method, follows_redirects, body);
         let meta_path = self.dir.join(format!("{key}.meta"));
         let body_path = self.dir.join(format!("{key}.body"));
-        if let Some(hit) = read_entry(&meta_path, &body_path) {
+        if let Some(hit) = read_entry(&meta_path, &body_path, &identity) {
             return Ok(hit);
         }
         if self.offline {
@@ -49,7 +56,7 @@ impl Cache {
         }
         let result = fetch()?;
         // A failed write only costs a refetch next time; never fail the load.
-        let _ = self.write_entry(&meta_path, &body_path, url, &result);
+        let _ = self.write_entry(&meta_path, &body_path, &identity, url, &result);
         Ok(result)
     }
 
@@ -57,12 +64,16 @@ impl Cache {
         &self,
         meta_path: &Path,
         body_path: &Path,
+        identity: &str,
         url: &Url,
         result: &FetchResult,
     ) -> std::io::Result<()> {
         fs::create_dir_all(&self.dir)?;
         let response = &result.response;
-        let mut meta = format!("{}\n{}\n", response.status_code, result.final_url);
+        let mut meta = format!(
+            "{identity}\n{}\n{}\n",
+            response.status_code, result.final_url
+        );
         for (name, value) in &response.headers {
             meta.push_str(&format!("{name}\t{value}\n"));
         }
@@ -85,10 +96,23 @@ impl Cache {
     }
 }
 
-fn read_entry(meta_path: &Path, body_path: &Path) -> Option<FetchResult> {
+/// The `.meta` file's first line: everything that identifies the request,
+/// compared byte for byte on read. The body is hex so it stays on one line.
+fn identity_line(url: &str, method: &str, follows_redirects: bool, body: &[u8]) -> String {
+    let flag = if follows_redirects { "F" } else { "N" };
+    let body_hex: String = body.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("identity\t{method}\t{flag}\t{url}\t{body_hex}")
+}
+
+fn read_entry(meta_path: &Path, body_path: &Path, identity: &str) -> Option<FetchResult> {
     let meta = fs::read_to_string(meta_path).ok()?;
-    let body = fs::read(body_path).ok()?;
     let mut lines = meta.lines();
+    // Another request that hashed to the same file name, or an entry from
+    // before identities were stored: not ours.
+    if lines.next()? != identity {
+        return None;
+    }
+    let body = fs::read(body_path).ok()?;
     let status_code: u16 = lines.next()?.parse().ok()?;
     let final_url = Url::parse(lines.next()?).ok()?;
     let headers = lines
@@ -122,7 +146,87 @@ fn cache_key(url: &str, method: &str, follows_redirects: bool, body: &[u8]) -> S
 
 #[cfg(test)]
 mod tests {
-    use super::cache_key;
+    use std::cell::Cell;
+
+    use super::{Cache, FetchResult, HttpResponse, NetworkError, Url, cache_key};
+
+    fn response(body: &str) -> Result<FetchResult, NetworkError> {
+        Ok(FetchResult {
+            final_url: Url::parse("https://a.test/").unwrap(),
+            response: HttpResponse {
+                status_code: 200,
+                reason_phrase: String::new(),
+                headers: vec![("content-type".into(), "text/plain".into())],
+                body: body.as_bytes().to_vec(),
+            },
+        })
+    }
+
+    fn temp_cache(name: &str, offline: bool) -> Cache {
+        let dir = std::env::temp_dir().join(format!("mb-net-cache-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Cache { dir, offline }
+    }
+
+    #[test]
+    fn hit_requires_the_stored_request_identity_to_match() {
+        let url = Url::parse("https://a.test/page").unwrap();
+        let other = Url::parse("https://evil.test/other").unwrap();
+        let cache = temp_cache("identity", false);
+
+        // Record `other`, then move its files to the name `url` hashes to —
+        // what a hash collision (or a crafted request) would look like.
+        let _ = cache.fetch((&other, "GET", true, b""), || response("other's body"));
+        let other_key = cache_key(&other.to_string(), "GET", true, b"");
+        let key = cache_key(&url.to_string(), "GET", true, b"");
+        for ext in ["meta", "body"] {
+            std::fs::rename(
+                cache.dir.join(format!("{other_key}.{ext}")),
+                cache.dir.join(format!("{key}.{ext}")),
+            )
+            .unwrap();
+        }
+
+        let fetched = Cell::new(false);
+        let result = cache
+            .fetch((&url, "GET", true, b""), || {
+                fetched.set(true);
+                response("real body")
+            })
+            .unwrap();
+        assert!(fetched.get(), "a mismatched entry must be a miss");
+        assert_eq!(result.response.body, b"real body");
+
+        // Now recorded under its own identity: a hit, no fetch.
+        let again = cache
+            .fetch((&url, "GET", true, b""), || panic!("should be cached"))
+            .unwrap();
+        assert_eq!(again.response.body, b"real body");
+
+        // Offline, a mismatch is an error rather than someone else's response:
+        // copy `url`'s entry to a third request's file name and replay it.
+        let third = Url::parse("https://a.test/third").unwrap();
+        let third_key = cache_key(&third.to_string(), "GET", true, b"");
+        for ext in ["meta", "body"] {
+            std::fs::copy(
+                cache.dir.join(format!("{key}.{ext}")),
+                cache.dir.join(format!("{third_key}.{ext}")),
+            )
+            .unwrap();
+        }
+        let offline = Cache {
+            dir: cache.dir.clone(),
+            offline: true,
+        };
+        assert!(
+            offline
+                .fetch((&third, "GET", true, b""), || panic!(
+                    "offline never fetches"
+                ))
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&cache.dir);
+    }
 
     #[test]
     fn cache_key_separates_method_redirect_mode_and_body() {
