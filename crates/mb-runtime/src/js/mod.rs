@@ -42,6 +42,7 @@ mod dialogs;
 mod document;
 mod dom_globals;
 mod element;
+pub mod error_location;
 mod event;
 mod fetch;
 mod storage;
@@ -119,6 +120,41 @@ pub struct JsRuntime {
     pending_jobs: Rc<Cell<u32>>,
     console: console::ConsoleBuffer,
     dialogs: dialogs::DialogBuffer,
+    // Script label → source, for cutting `near "callee"` out of errors
+    // that surface after the top-level run (listeners, timers). Lives as
+    // long as the runtime, i.e. one document (a new page gets a new
+    // runtime), and is only ever looked up, never iterated.
+    sources: console::ScriptSources,
+}
+
+/// A page script that threw at top level, located (docs/compat-round3.md 0.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptError {
+    pub message: String,
+    pub location: Option<error_location::Location>,
+    /// The callee cut from the source for `not a function` — page text.
+    pub near: Option<String>,
+    stack: Option<String>,
+}
+
+impl ScriptError {
+    /// `{message} (near "x") at {url}:{line}:{col}` — what the console gets.
+    pub fn summary(&self) -> String {
+        error_location::describe(&self.message, self.location.as_ref(), self.near.as_deref())
+    }
+}
+
+impl std::fmt::Display for ScriptError {
+    // stderr form: the summary, plus the raw stack under MB_JS_STACK.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.summary())?;
+        if std::env::var_os("MB_JS_STACK").is_some()
+            && let Some(stack) = &self.stack
+        {
+            write!(f, "\n{stack}")?;
+        }
+        Ok(())
+    }
 }
 
 impl JsRuntime {
@@ -154,11 +190,12 @@ impl JsRuntime {
         let pending_jobs: Rc<Cell<u32>> = Rc::new(Cell::new(0));
         let console_buffer: console::ConsoleBuffer = Rc::new(RefCell::new(Vec::new()));
         let dialog_buffer: dialogs::DialogBuffer = Rc::new(RefCell::new(Vec::new()));
+        let sources: console::ScriptSources = Rc::new(RefCell::new(HashMap::new()));
 
         context.with(|ctx| {
             ctx.eval::<(), _>(DISPLAY_HELPER)
                 .expect("display helper should compile");
-            console::register_console(&ctx, console_buffer.clone())
+            console::register_console(&ctx, console_buffer.clone(), sources.clone())
                 .expect("console should register");
             // DOM constructor ladder must land BEFORE element/document
             // registration so the wrappers (and future per-instance
@@ -201,6 +238,7 @@ impl JsRuntime {
             pending_jobs,
             console: console_buffer,
             dialogs: dialog_buffer,
+            sources,
         }
     }
 
@@ -264,6 +302,13 @@ impl JsRuntime {
     /// `console.*` messages since the last call.
     pub fn take_console_messages(&self) -> Vec<ConsoleMessage> {
         std::mem::take(&mut *self.console.borrow_mut())
+    }
+
+    /// Put a browser-made `console.error` line in the buffer without
+    /// running JS (top-level script errors). No stderr echo — the caller
+    /// logs its own line.
+    pub fn report_console_error(&self, text: String) {
+        console::push(&self.console, "error", text);
     }
 
     /// `alert`/`confirm`/`prompt`/`window.open` calls since the last call.
@@ -354,20 +399,9 @@ impl JsRuntime {
     }
 
     pub fn execute(&mut self, source: &str) -> Result<String, String> {
-        let result: Result<String, String> = self.context.with(|ctx| {
-            let value: Value = ctx
-                .eval_with_options::<Value, _>(source.as_bytes().to_vec(), classic_script_options())
-                .catch(&ctx)
-                .map_err(format_caught_error)?;
-            let formatter: Function = ctx
-                .globals()
-                .get("__mb_display")
-                .map_err(|err| err.to_string())?;
-            formatter
-                .call::<_, String>((value,))
-                .catch(&ctx)
-                .map_err(format_caught_error)
-        });
+        let result: Result<String, String> = self
+            .eval_and_display(source, classic_script_options())
+            .map_err(|caught| caught.with_stack_if_asked());
         // Promise/microtask drain mirrors boa's behaviour: the top-level
         // script completing should not leave a pending `Promise.resolve()
         // .then(...)` undelivered. Timers (4.8c) hook into the same drain.
@@ -375,20 +409,58 @@ impl JsRuntime {
         result
     }
 
-    pub fn execute_with_url(&mut self, source: &str, url: &str) -> Result<String, String> {
+    pub fn execute_with_url(
+        &mut self,
+        source: &str,
+        url: &str,
+    ) -> Result<String, Box<ScriptError>> {
         // When the caller knows the script's origin URL, hand it to rquickjs
         // as `EvalOptions::filename`. QuickJS uses this string both as the
         // source label on the compiled function and as the `Error.stack`
-        // frame name — so a polyfill that throws ten levels deep on a
-        // minified third-party bundle reports `polyfill.js:1:NNN` instead
-        // of the anonymous label `<eval>` we'd otherwise get. Diagnostic
-        // value only; runtime behaviour is unchanged.
+        // frame name, which is how errors get located (`error_location`).
+        // The source is kept under the same label so a listener defined
+        // here can still be pointed at after the top-level run.
         if url.is_empty() {
-            return self.execute(source);
+            return self.execute(source).map_err(|message| {
+                Box::new(ScriptError {
+                    message,
+                    location: None,
+                    near: None,
+                    stack: None,
+                })
+            });
         }
-        let result: Result<String, String> = self.context.with(|ctx| {
-            let mut options = classic_script_options();
-            options.filename = Some(url.to_string());
+        self.sources
+            .borrow_mut()
+            .insert(url.to_string(), Rc::from(source));
+        let mut options = classic_script_options();
+        options.filename = Some(url.to_string());
+        let result = self.eval_and_display(source, options);
+        self.drain_pending_jobs();
+        result.map_err(|caught| {
+            let location = caught.stack.as_deref().and_then(error_location::locate);
+            let sources = self.sources.borrow();
+            let near = location
+                .as_ref()
+                .filter(|_| error_location::wants_near(&caught.message))
+                .and_then(|l| error_location::near(sources.get(&l.url)?, l.line, l.col));
+            Box::new(ScriptError {
+                message: caught.message,
+                location,
+                near,
+                stack: caught.stack,
+            })
+        })
+    }
+
+    // Evaluate `source` and render the completion value through
+    // `__mb_display`, catching a JS exception as message + stack.
+    fn eval_and_display(
+        &self,
+        source: &str,
+        options: EvalOptions,
+    ) -> Result<String, CaughtMessage> {
+        self.context.with(|ctx| {
             let value: Value = ctx
                 .eval_with_options::<Value, _>(source.as_bytes().to_vec(), options)
                 .catch(&ctx)
@@ -396,14 +468,12 @@ impl JsRuntime {
             let formatter: Function = ctx
                 .globals()
                 .get("__mb_display")
-                .map_err(|err| err.to_string())?;
+                .map_err(|err| CaughtMessage::plain(err.to_string()))?;
             formatter
                 .call::<_, String>((value,))
                 .catch(&ctx)
                 .map_err(format_caught_error)
-        });
-        self.drain_pending_jobs();
-        result.map_err(|err| format!("{url}: {err}"))
+        })
     }
 
     /// Drain microtasks (Promise jobs) and any due timers, alternating
@@ -602,44 +672,56 @@ globalThis.__mb_display = function (v) {
 };
 "#;
 
-fn format_caught_error(err: CaughtError) -> String {
+// A caught JS exception: QuickJS's bare message plus its `stack` string
+// (frames baked with the `EvalOptions::filename` label).
+struct CaughtMessage {
+    message: String,
+    stack: Option<String>,
+}
+
+impl CaughtMessage {
+    fn plain(message: String) -> Self {
+        Self {
+            message,
+            stack: None,
+        }
+    }
+
+    // `execute`'s string error: the message, plus the stack under
+    // MB_JS_STACK (off by default so logs stay terse).
+    fn with_stack_if_asked(self) -> String {
+        match self.stack {
+            Some(stack) if std::env::var_os("MB_JS_STACK").is_some() => {
+                format!("{}\n{stack}", self.message)
+            }
+            _ => self.message,
+        }
+    }
+}
+
+fn format_caught_error(err: CaughtError) -> CaughtMessage {
     match err {
         CaughtError::Exception(exc) => {
-            // Match boa's `err.to_string()` shape closely enough for the
-            // integration tests that grep for substrings (e.g. "missing"
-            // for `missing.prop`). exc.message() is the bare error text;
-            // we prefix it with a familiar label when present.
-            let message = exc.message().unwrap_or_default();
-            let base = if message.is_empty() {
-                "exception".to_string()
-            } else {
-                message
-            };
-            // When MB_JS_STACK is set, append the JS-side stack trace if
-            // rquickjs can produce one. Helps diagnose `cannot read
-            // property X of undefined` on minified third-party bundles
-            // where the message alone doesn't tell you which call site
-            // tripped. Off by default so production logs stay terse.
-            // (rquickjs 0.11's Exception doesn't expose file/line as
-            // separate accessors — those frames are baked into the
-            // stack string by QuickJS when EvalOptions::filename was
-            // supplied.)
-            if std::env::var_os("MB_JS_STACK").is_none() {
-                return base;
-            }
-            match exc.stack().filter(|s| !s.is_empty()) {
-                Some(stack) => format!("{base}\n{stack}"),
-                None => base,
+            // exc.message() is the bare error text (`not a function`); the
+            // stack carries the positions (rquickjs 0.11 has no separate
+            // file/line accessors).
+            let message = exc
+                .message()
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| "exception".to_string());
+            CaughtMessage {
+                message,
+                stack: exc.stack().filter(|s| !s.is_empty()),
             }
         }
         // A bare `throw 42;` — render the value through stringification.
-        CaughtError::Value(v) => match v.as_string() {
+        CaughtError::Value(v) => CaughtMessage::plain(match v.as_string() {
             Some(js_str) => js_str
                 .to_string()
                 .unwrap_or_else(|_| "thrown value".to_string()),
             None => format!("{v:?}"),
-        },
-        CaughtError::Error(e) => e.to_string(),
+        }),
+        CaughtError::Error(e) => CaughtMessage::plain(e.to_string()),
     }
 }
 
@@ -705,14 +787,29 @@ mod tests {
     }
 
     #[test]
-    fn execute_with_url_prefixes_errors() {
+    fn execute_with_url_locates_errors() {
         let mut rt = fresh();
         let err = rt
-            .execute_with_url("missing.prop", "https://example.com/app.js")
+            .execute_with_url("var a = 1;\nmissing.prop", "https://example.com/app.js?v=3")
             .unwrap_err();
-        assert!(
-            err.starts_with("https://example.com/app.js: "),
-            "got: {err}"
+        assert_eq!(err.message, "missing is not defined");
+        let location = err.location.as_ref().expect("located");
+        assert_eq!((location.line, location.col), (2, 1));
+        assert_eq!(
+            err.summary(),
+            "missing is not defined at https://example.com/app.js:2:1"
+        );
+    }
+
+    #[test]
+    fn execute_with_url_names_the_callee_of_a_failed_call() {
+        let mut rt = fresh();
+        let err = rt
+            .execute_with_url("document.nope()", "https://example.com/p#inline-0")
+            .unwrap_err();
+        assert_eq!(
+            err.summary(),
+            "not a function (near \"document.nope\") at https://example.com/p#inline-0:1:9"
         );
     }
 
@@ -720,7 +817,7 @@ mod tests {
     fn execute_with_url_returns_bare_error_when_url_is_empty() {
         let mut rt = fresh();
         let err = rt.execute_with_url("missing.prop", "").unwrap_err();
-        assert!(!err.starts_with(": "), "got: {err}");
+        assert_eq!(err.summary(), "missing is not defined");
     }
 
     #[test]

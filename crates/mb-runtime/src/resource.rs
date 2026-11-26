@@ -12,13 +12,15 @@ use crate::{
 // keep resolving.
 pub use mb_dom::resource::{LoadedImage, ResourceError, decode_image};
 
-pub fn load_stylesheets(document: &Document, base_url: &Url) -> Result<Vec<String>, ResourceError> {
-    let stylesheet_urls = stylesheet_urls(document, base_url)?;
+// Subresource loaders return plain collections, never `Result`: one bad
+// link, src or response skips that resource only and must not fail the
+// navigation (AGENTS.md "Robustness Rules" 1). Keep it that way — a `?`
+// here would bring back the blank-page bug.
+pub fn load_stylesheets(document: &Document, base_url: &Url) -> Vec<String> {
+    let stylesheet_urls = stylesheet_urls(document, base_url);
     // Fetch all stylesheets in parallel; per-resource failures are silently
     // dropped so one broken link does not kill the whole page.
-    Ok(parallel_fetch(&stylesheet_urls, |url| {
-        net::load_css(url).ok()
-    }))
+    parallel_fetch(&stylesheet_urls, |url| net::load_css(url).ok())
 }
 
 // Fetches every `<script src="…">` body referenced by `document` in parallel
@@ -29,16 +31,13 @@ pub fn load_stylesheets(document: &Document, base_url: &Url) -> Result<Vec<Strin
 //
 // Per-script failures are dropped (the entry is simply absent from the map),
 // mirroring how `load_stylesheets` and `load_images` degrade.
-pub fn load_scripts(
-    document: &Document,
-    base_url: &Url,
-) -> Result<HashMap<String, String>, ResourceError> {
+pub fn load_scripts(document: &Document, base_url: &Url) -> HashMap<String, String> {
     let mut pairs = Vec::new();
     for &root in document.roots() {
-        collect_script_src_pairs(document, root, base_url, &mut pairs)?;
+        collect_script_src_pairs(document, root, base_url, &mut pairs);
     }
     if pairs.is_empty() {
-        return Ok(HashMap::new());
+        return HashMap::new();
     }
     // Custom scoped-thread fan-out (rather than reusing `parallel_fetch`)
     // because we need to keep the raw `src` key paired with its fetched body
@@ -60,25 +59,25 @@ pub fn load_scripts(
             .filter_map(|handle| handle.join().ok().flatten())
             .collect()
     });
-    Ok(fetched.into_iter().collect())
+    fetched.into_iter().collect()
 }
 
 pub fn load_images(
     document: &Document,
     stylesheets: &[String],
     base_url: &Url,
-) -> Result<Vec<LoadedImage>, ResourceError> {
-    let mut urls = image_urls(document, base_url)?;
+) -> Vec<LoadedImage> {
+    let mut urls = image_urls(document, base_url);
     urls.extend(stylesheet_image_urls(stylesheets, base_url));
     // De-dupe by stringified URL — the same asset is often referenced from
     // both an `<img>` tag and a CSS rule, and fetching twice is a waste.
     let mut seen = std::collections::HashSet::new();
     urls.retain(|url| seen.insert(url.to_string()));
     // Same parallel pattern as stylesheets: failures drop, order is preserved.
-    Ok(parallel_fetch(&urls, |url| {
+    parallel_fetch(&urls, |url| {
         let bytes = net::load_image(url).ok()?;
         decode_image(url.clone(), &bytes).ok()
-    }))
+    })
 }
 
 // Parses every stylesheet body looking for `background-image: url(...)`
@@ -190,34 +189,25 @@ fn first_favicon_link(document: &Document, id: NodeId, base_url: &Url) -> Option
     None
 }
 
-fn stylesheet_urls(document: &Document, base_url: &Url) -> Result<Vec<Url>, ResourceError> {
+fn stylesheet_urls(document: &Document, base_url: &Url) -> Vec<Url> {
     let mut urls = Vec::new();
-
     for &root in document.roots() {
-        collect_stylesheet_urls(document, root, base_url, &mut urls)?;
+        collect_stylesheet_urls(document, root, base_url, &mut urls);
     }
-
-    Ok(urls)
+    urls
 }
 
-fn image_urls(document: &Document, base_url: &Url) -> Result<Vec<Url>, ResourceError> {
+fn image_urls(document: &Document, base_url: &Url) -> Vec<Url> {
     let mut urls = Vec::new();
-
     for &root in document.roots() {
-        collect_image_urls(document, root, base_url, &mut urls)?;
+        collect_image_urls(document, root, base_url, &mut urls);
     }
-
-    Ok(urls)
+    urls
 }
 
-fn collect_stylesheet_urls(
-    document: &Document,
-    id: NodeId,
-    base_url: &Url,
-    urls: &mut Vec<Url>,
-) -> Result<(), ResourceError> {
+fn collect_stylesheet_urls(document: &Document, id: NodeId, base_url: &Url, urls: &mut Vec<Url>) {
     let Some(node) = document.get(id) else {
-        return Ok(());
+        return;
     };
     if let NodeType::Element(element) = &node.node_type {
         // Only explicit stylesheet links are treated as CSS resources.
@@ -236,10 +226,8 @@ fn collect_stylesheet_urls(
     }
 
     for &child in &node.children {
-        collect_stylesheet_urls(document, child, base_url, urls)?;
+        collect_stylesheet_urls(document, child, base_url, urls);
     }
-
-    Ok(())
 }
 
 fn collect_script_src_pairs(
@@ -247,9 +235,9 @@ fn collect_script_src_pairs(
     id: NodeId,
     base_url: &Url,
     out: &mut Vec<(String, Url)>,
-) -> Result<(), ResourceError> {
+) {
     let Some(node) = document.get(id) else {
-        return Ok(());
+        return;
     };
     if let NodeType::Element(element) = &node.node_type
         && element.tag_name.eq_ignore_ascii_case("script")
@@ -262,14 +250,12 @@ fn collect_script_src_pairs(
             out.push((src.clone(), url));
         }
         // `<script>` content is never nested HTML — don't recurse into it.
-        return Ok(());
+        return;
     }
 
     for &child in &node.children {
-        collect_script_src_pairs(document, child, base_url, out)?;
+        collect_script_src_pairs(document, child, base_url, out);
     }
-
-    Ok(())
 }
 
 /// A subresource URL from an attribute, or `None` when it's missing, empty
@@ -282,14 +268,9 @@ fn resolve_attr(value: Option<&String>, base_url: &Url) -> Option<Url> {
     base_url.resolve(raw).ok()
 }
 
-fn collect_image_urls(
-    document: &Document,
-    id: NodeId,
-    base_url: &Url,
-    urls: &mut Vec<Url>,
-) -> Result<(), ResourceError> {
+fn collect_image_urls(document: &Document, id: NodeId, base_url: &Url, urls: &mut Vec<Url>) {
     let Some(node) = document.get(id) else {
-        return Ok(());
+        return;
     };
     if let NodeType::Element(element) = &node.node_type {
         // Images are fetched lazily from DOM attributes after the main document is parsed.
@@ -303,10 +284,8 @@ fn collect_image_urls(
     }
 
     for &child in &node.children {
-        collect_image_urls(document, child, base_url, urls)?;
+        collect_image_urls(document, child, base_url, urls);
     }
-
-    Ok(())
 }
 
 pub fn load_fonts(css_sources: &[String], base_url: &Url) -> Vec<Vec<u8>> {
@@ -345,16 +324,18 @@ fn extract_font_urls(css: &str) -> Vec<String> {
             None => break,
         };
 
-        // Find the matching '}'.
+        // Find the matching '}'. An unclosed block ends the scan: there is
+        // no well-formed `@font-face` after it, and resuming one byte past
+        // the `{` could land inside a multibyte character.
         let mut depth = 1;
-        let mut block_end = brace_start;
+        let mut block_end = None;
         for (i, ch) in css[brace_start..].char_indices() {
             match ch {
                 '{' => depth += 1,
                 '}' => {
                     depth -= 1;
                     if depth == 0 {
-                        block_end = brace_start + i;
+                        block_end = Some(brace_start + i);
                         break;
                     }
                 }
@@ -362,6 +343,9 @@ fn extract_font_urls(css: &str) -> Vec<String> {
             }
         }
 
+        let Some(block_end) = block_end else {
+            break;
+        };
         let block = &css[brace_start..block_end];
         if let Some(url) = extract_url_value(block) {
             urls.push(url);
@@ -386,13 +370,15 @@ fn extract_url_value(block: &str) -> Option<String> {
         let (url, skip) = if rest.starts_with('"') || rest.starts_with('\'') {
             let quote = rest.as_bytes()[0] as char;
             let inner = &rest[1..];
+            // Resume right after the closing quote (ASCII, so a char
+            // boundary) — not one byte further, which may split a char.
             match inner.find(quote) {
-                Some(end) => (&inner[..end], start + end + 2),
+                Some(end) => (&inner[..end], start + 1 + end + 1),
                 None => break,
             }
         } else {
             match rest.find(')') {
-                Some(end) => (rest[..end].trim(), start + end),
+                Some(end) => (rest[..end].trim(), start + end + 1),
                 None => break,
             }
         };
@@ -400,7 +386,7 @@ fn extract_url_value(block: &str) -> Option<String> {
         if !url.is_empty() {
             urls.push(url.to_string());
         }
-        search_pos = skip + 1;
+        search_pos = skip;
     }
 
     // Only pick TTF/OTF — what cosmic-text's fontdb backend can ingest directly.
@@ -421,8 +407,22 @@ mod tests {
     use crate::{html, net::Url};
 
     use super::{
-        favicon_url, image_urls, load_images, load_scripts, load_stylesheets, stylesheet_urls,
+        extract_font_urls, favicon_url, image_urls, load_images, load_scripts, load_stylesheets,
+        stylesheet_urls,
     };
+
+    #[test]
+    fn font_face_scan_survives_multibyte_text_after_a_brace_or_quote() {
+        // An unclosed `@font-face {` (or a quoted url not followed by `)`)
+        // advanced the scan one *byte* past an ASCII delimiter; when the
+        // next character was multibyte the slice landed inside it and the
+        // whole navigation panicked.
+        assert!(extract_font_urls("@font-face{\u{d55c}").is_empty());
+        assert_eq!(
+            extract_font_urls("@font-face{src:url(\"a.ttf\")\u{d55c}}"),
+            vec!["a.ttf".to_string()]
+        );
+    }
 
     #[test]
     fn img_without_src_or_link_without_href_is_skipped_not_fatal() {
@@ -440,8 +440,8 @@ mod tests {
         )
         .unwrap();
         let base = Url::parse("https://example.com/").unwrap();
-        let sheets = stylesheet_urls(&document, &base).expect("not fatal");
-        let images = image_urls(&document, &base).expect("not fatal");
+        let sheets = stylesheet_urls(&document, &base);
+        let images = image_urls(&document, &base);
         assert_eq!(
             sheets.iter().map(|u| u.to_string()).collect::<Vec<_>>(),
             ["https://example.com/a.css"]
@@ -527,7 +527,7 @@ mod tests {
         });
 
         let base_url = Url::parse(&format!("http://127.0.0.1:{port}/articles/index.html")).unwrap();
-        let stylesheets = load_stylesheets(&document, &base_url).unwrap();
+        let stylesheets = load_stylesheets(&document, &base_url);
 
         server.join().unwrap();
         assert_eq!(stylesheets.len(), 2);
@@ -577,7 +577,7 @@ mod tests {
         });
 
         let base_url = Url::parse(&format!("http://127.0.0.1:{port}/pages/index.html")).unwrap();
-        let scripts = load_scripts(&document, &base_url).unwrap();
+        let scripts = load_scripts(&document, &base_url);
 
         server.join().unwrap();
         assert_eq!(scripts.len(), 2);
@@ -598,7 +598,7 @@ mod tests {
         let document =
             html::parse("<html><body><script>var x = 1;</script></body></html>").unwrap();
         let base = Url::parse("http://example.com/").unwrap();
-        let scripts = load_scripts(&document, &base).unwrap();
+        let scripts = load_scripts(&document, &base);
         assert!(scripts.is_empty());
     }
 
@@ -641,7 +641,7 @@ mod tests {
         });
 
         let base_url = Url::parse(&format!("http://127.0.0.1:{port}/index.html")).unwrap();
-        let images = load_images(&document, &[], &base_url).unwrap();
+        let images = load_images(&document, &[], &base_url);
 
         server.join().unwrap();
         assert_eq!(images.len(), 1);

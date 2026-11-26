@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 806 (workspace 합계, 2026-11-26 호환성 2차 실사이트 조사 + 조사 캐시 요청 정보 검증 +3). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 829 (workspace 합계, 2026-11-26 호환성 3차 0a — 견고성 규칙·검토 수정 + 스크립트 에러 위치 + 3차 골든 +23). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -211,6 +211,11 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 ### CSS 파서는 조용히 버린다
 - 선언 값은 `parse_entirely` 안에서 읽혀서, 전용 파서가 없는 속성은 토큰이 둘 이상이면(`border: 1px solid`, `!important`, 쉼표 목록, `calc()`) **선언 통째로** 사라진다. 지원 안 하는 의사 클래스 하나가 있으면 **규칙 통째로**(콤마로 묶인 셀렉터까지), `@media` 외 at-rule 은 **본문 통째로**. `@media` 조건은 평가하지 않고 전부 참. 실사이트에서 "왜 이 스타일이 안 먹지?" 는 먼저 `css::parse_with_report` 로 확인.
 
+### 스크립트 에러 위치
+- 페이지 스크립트는 `EvalOptions::filename` 에 **라벨**을 달고 평가된다: 외부 = 원래 `src` 속성 값, 인라인 = `{쿼리 뺀 문서 URL}#inline-{n}`(0부터, 문서 순서). 에러 줄은 `js/error_location.rs` 한 곳에서 만든다 — `{message} (near "callee") at {url}:{line}:{col}`(URL 은 쿼리·프래그먼트 제거, `#inline-n` 만 유지). 최상위 에러는 `execute_with_url` 의 `ScriptError` → `install_document` 가 콘솔 버퍼에 `Uncaught in script: …`, 리스너·타이머·rAF 는 `__mb_report_error` 가 `err.stack` 을 Rust 로 넘겨 같은 함수를 탄다. 새 에러 경로를 만들면 이 둘 중 하나로 — `String(err)` 만 남기지 말 것.
+- quickjs-ng 의 `not a function` 열은 호출 모양마다 다른 토큰을 가리킨다(최상위 `a.b()` → `.`, 함수 안 → 속성 이름, `foo()` → 앞 공백, `foo( 1)` → `(` 뒤). `near` 는 셋 다 처리한다 — 열 위치를 한 가지로 가정하지 말 것.
+- `near`·메시지는 페이지 문자열이다: page 블록 `console:` 에만, trusted `note:` 엔 절대 넣지 않는다.
+
 ### rquickjs 기본 eval 은 strict
 - `EvalOptions::default()` 는 `strict: true` 다. 페이지 스크립트는 `js::classic_script_options()`(sloppy)로 평가할 것 — 안 그러면 암묵 전역(`RLQ = window.RLQ || []`)이 터진다.
 
@@ -240,10 +245,21 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - **ID 는 관찰만 발급한다**: `AgentBrowser` 의 발급 집합(`issued`)에 넣는 건 관찰을 돌려줄 때뿐. 다른 경로(wait_for 등)가 ID 를 유효하게 만들면 stale 가드가 무너진다.
 - **HTTP 는 127.0.0.1 + 토큰 + Origin 거절**: `--http` 의 모든 요청은 `http::gate`(경로·Origin·Bearer)와 rmcp `allowed_hosts`(Host)를 지난다. 외부 인터페이스 바인딩·토큰 없는 경로·Origin 허용을 만들지 말 것. 토큰 원문은 실행 시 stderr 한 번과 클립보드에만 — 화면·`Debug`·타임라인에는 가린 형태로.
 - **`panic = "abort"` 로 바꾸지 말 것**: 엔진 패닉 복구가 unwind 에 의존한다.
-- **브라우저는 결정적이어야 한다**: 관찰·행동·정책 출력에 `HashMap` 순회 순서, 벽시계, 비시드 난수가 새어 나가면 안 된다. 시간은 엔진 시계(`ClockSource`)만, 순서는 문서 순서로. 비결정성은 LLM 판단에만 허용 ([concept.md#결정성](docs/concept.md#결정성)).
+- **브라우저는 결정적이어야 한다**: 관찰·행동·정책 출력에 `HashMap` 순회 순서, 벽시계, 비시드 난수가 새어 나가면 안 된다. 시간은 엔진 시계(`ClockSource`)만, 순서는 문서 순서로. 비결정성은 LLM 판단에만 허용 ([concept.md#결정성](docs/concept.md#결정성)). **명시적 예외 하나**: `[mb-budget]` 워치독(`state/budget.rs`)이 스타일+레이아웃 시간을 벽시계로 재지만 결과는 stderr 한 줄뿐 — 관찰·행동·정책·세션 로그엔 절대 안 들어간다(리뷰 체크 항목).
+
+## Robustness Rules
+
+[compat-round3.md 0.1](docs/compat-round3.md#01-불변식을-규칙으로) 에서 승격. 2차 실사이트 조사에서 에이전트를 막은 버그는 세 종류였다 — 이동 전체 실패, 패닉, 끝없는 시간. 페이지 HTML·CSS·JS·이미지 바이트·속성 값은 전부 **신뢰할 수 없는 입력**이다.
+
+1. **하위 리소스·요소 하나가 이동 전체를 실패시키지 않는다.** 문서 로드가 실패할 수 있는 건 문서 응답 자체(네트워크 에러, 상태 코드, 지원 안 하는 Content-Type, 인코딩)뿐. CSS·스크립트·이미지·폰트·파비콘·속성 값 하나의 실패는 그 리소스만 건너뛴다. 코드 규칙: `resource.rs` 의 수집·로드 함수는 `Result` 가 아니라 `Vec`/`HashMap` 을 돌려준다(0a 에서 시그니처를 바꿈) — `?` 로 `ResourceError` 를 다시 올리지 말 것. 속성은 `resolve_attr` 로(없음·빈 값·해석 실패 = 건너뜀).
+2. **어떤 입력에도 패닉하지 않는다.** 레이아웃·스타일·페인트·파서에서 인덱싱은 `get()`, 정수 나눗셈은 0 검사, `unwrap()`/`expect()` 는 불변식이 코드로 보장될 때만 — 그 자리에 이유를 주석으로. 자주 밟는 것: **문자열을 바이트 인덱스로 자르기**(`&s[0..2]`, `s.len() == 3` 후 슬라이스 — 멀티바이트 글자 한가운데서 패닉; 먼저 `is_ascii()` 또는 `char_indices`), **페이지가 주는 개수로 할당**(`colspan`, `grid-row: 2000000000`, `span N` — HTML/브라우저 상한으로 자를 것: colspan 1000, 그리드 줄 1000), 덧셈 오버플로(debug 에서 패닉). 최후 방어선 `mb-mcp/src/worker.rs` 의 `catch_unwind`(브라우저 재생성)는 **세션 손실**이라 해결책이 아니다.
+3. **스타일·레이아웃은 시간 예산 안에서 끝난다.** 노드 수에 대해 거의 선형 — 자식을 두 번 훑는 재귀 금지(2차 C3 의 2^깊이), 같은 서브트리를 다시 재는 측정은 메모하거나 한 번에. 예산 초과는 감지해서 보고한다: `BrowserState` 가 `build_document_view` 를 재고 release 2초(debug ×10)를 넘으면 stderr 에 `[mb-budget] style+layout took {ms}ms on {쿼리 뺀 URL} ({n} nodes, {µs}µs/node)`. 중단하지 않는다(반쪽 화면이 더 혼란스럽다).
+
+검토 기록: [compat-round3.md 부록 A](docs/compat-round3.md#부록-a--04-표적-코드-검토-표-0a) — 지점별 안전/수정/보류. 새 파서·레이아웃 코드를 쓰면 같은 기준으로.
 
 ## Tooling Notes
 
 - `crates/mb-dom/examples/css_diag.rs` — CSS 파서 진단 (`cargo run -p mb-dom --example css_diag -- <file.css>`).
 - 실사이트 호환성 조사 ([docs/compat-survey.md](docs/compat-survey.md)): `MB_NET_CACHE=DIR` 이면 모든 fetch 가 디스크 캐시를 거친다 (첫 실행만 네트워크, `MB_NET_CACHE_OFFLINE=1` 은 재생 전용). `crates/mb-agent/examples/compat_probe.rs URL OUT_DIR` 가 관찰·CSS 버림(`css::parse_with_report`)·레이아웃 이상을 덤프. 캐시와 출력은 반드시 git-ignored `compat-cache/` 에 — 실사이트 HTML/CSS/이미지/스크린샷은 커밋 금지(저작권, 공개 저장소). 테스트는 손으로 쓴 작은 페이지로.
+- `crates/mb-agent/tests/fixtures/compat3.html` — 호환성 3차 **추적용** 골든(손으로 쓴 sr-only·`@media`·`!important`·체크박스 해킹·캐러셀). 골든은 오늘의 **틀린** 렌더링을 일부러 기록한다 — 3차 단계가 들어갈 때마다 diff 를 파일 맨 위 주석의 "Chrome 이라면" 목록과 대조. `examples/agent-demo/compat3.html` 은 이 파일의 심볼릭 링크(eval `compat3-menu` 가 씀, 오늘은 실패가 정상).
 - `scripts/package-macos.sh` — `mb-shell` release 빌드를 `dist/mini-browser.app` + `.dmg` 로 패키징.

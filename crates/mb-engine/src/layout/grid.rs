@@ -24,6 +24,11 @@ struct GridArea {
     col_end: usize, // exclusive
 }
 
+/// Grid lines past this are clamped, like Blink's implicit-grid cap. The
+/// occupancy map and the track tables allocate one entry per line, so an
+/// author value like `grid-row: 2000000000` must not reach them as is.
+const MAX_GRID_LINES: usize = 1000;
+
 #[derive(Debug, Clone, Copy)]
 struct AxisHint {
     explicit_start: Option<usize>, // 0-indexed cell
@@ -114,6 +119,12 @@ pub(super) fn layout_grid_children<'a>(
 
     // Per-column natural max outer width — feeds auto track sizing. Spanned
     // items contribute to col_start only (toy simplification).
+    //
+    // Indexing below is in bounds by construction: `box_idx` was pushed
+    // with its assignment; every `col_start < n_cols == columns.len()`
+    // (place_grid_item clamps starts to `n_cols - span`, template areas
+    // widen the tracks in effective_column_tracks); `row_start < row_end
+    // <= n_rows` and resolve_grid_rows returns `n_rows` heights.
     let mut natural_max_per_col = vec![0.0_f32; n_cols];
     for &(area, box_idx, _) in &cell_assignments {
         let w = outer_rect(&boxes[box_idx]).width;
@@ -287,24 +298,28 @@ fn axis_hint_from(value: Option<&Value>) -> AxisHint {
             };
         }
     };
-    match (placement.start, placement.end) {
+    // Lines are 1-based (the parser rejects <= 0). Clamp the start so at
+    // least one cell fits, then the span so start + span stays in bounds.
+    let start = |s: u32| (s.max(1) as usize - 1).min(MAX_GRID_LINES - 1);
+    let span = |from: usize, n: usize| n.clamp(1, MAX_GRID_LINES - from);
+    let hint = match (placement.start, placement.end) {
         (GridLine::Index(s), GridLine::Index(e)) if e > s => AxisHint {
-            explicit_start: Some((s - 1) as usize),
+            explicit_start: Some(start(s)),
             span: (e - s) as usize,
         },
         (GridLine::Index(s), GridLine::Span(n)) => AxisHint {
-            explicit_start: Some((s - 1) as usize),
-            span: n.max(1) as usize,
+            explicit_start: Some(start(s)),
+            span: n as usize,
         },
         (GridLine::Index(s), GridLine::Auto) => AxisHint {
-            explicit_start: Some((s - 1) as usize),
+            explicit_start: Some(start(s)),
             span: 1,
         },
         // `span <n>` as the start side: no explicit anchor, but the item
         // claims n cells when auto-placed.
         (GridLine::Span(n), _) => AxisHint {
             explicit_start: None,
-            span: n.max(1) as usize,
+            span: n as usize,
         },
         // Anything else (e.g. `auto / 3` — end-only) falls back to a
         // single-cell auto placement. Toy doesn't try to honor end-only
@@ -314,6 +329,10 @@ fn axis_hint_from(value: Option<&Value>) -> AxisHint {
             explicit_start: None,
             span: 1,
         },
+    };
+    AxisHint {
+        span: span(hint.explicit_start.unwrap_or(0), hint.span),
+        ..hint
     }
 }
 
@@ -544,4 +563,29 @@ fn resolve_grid_columns(
             TrackSize::Fraction(_) => 0.0,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AxisHint, MAX_GRID_LINES, axis_hint_from};
+    use crate::css::{GridLine, GridPlacement, Value};
+
+    fn hint(start: GridLine, end: GridLine) -> AxisHint {
+        axis_hint_from(Some(&Value::GridPlacement(GridPlacement { start, end })))
+    }
+
+    #[test]
+    fn huge_grid_lines_and_spans_are_clamped() {
+        // `grid-row: 2000000000` / `span 1000000000` made the occupancy map
+        // and the row table allocate one entry per line — gigabytes, then
+        // an abort. Browsers cap the implicit grid (Blink: 1000 lines).
+        let far = hint(GridLine::Index(2_000_000_000), GridLine::Auto);
+        assert!(far.explicit_start.unwrap() < MAX_GRID_LINES);
+        let wide = hint(GridLine::Span(1_000_000_000), GridLine::Auto);
+        assert!(wide.span <= MAX_GRID_LINES);
+        let both = hint(GridLine::Index(1), GridLine::Index(u32::MAX));
+        assert!(both.span <= MAX_GRID_LINES);
+        let anchored = hint(GridLine::Index(u32::MAX), GridLine::Span(u32::MAX));
+        assert!(anchored.explicit_start.unwrap() + anchored.span <= MAX_GRID_LINES);
+    }
 }

@@ -659,6 +659,60 @@ mod tests {
         assert!(browser.js.execute("leaked").is_err());
     }
 
+    fn console_errors(browser: &BrowserState) -> Vec<String> {
+        browser
+            .js
+            .take_console_messages()
+            .into_iter()
+            .filter(|m| m.level == "error")
+            .map(|m| m.text)
+            .collect()
+    }
+
+    #[test]
+    fn install_document_reports_top_level_script_error_with_location() {
+        // Top-level errors used to go to stderr only, as a bare `not a
+        // function`; now the agent's console gets where and what.
+        let browser = browser_with_html("<div><script>document.nope()</script></div>");
+        let errors = console_errors(&browser);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        let text = &errors[0];
+        assert!(
+            text.starts_with("Uncaught in script: not a function"),
+            "{text}"
+        );
+        assert!(text.contains("near \"document.nope\""), "{text}");
+        assert!(text.contains("#inline-0:1:"), "{text}");
+    }
+
+    #[test]
+    fn listener_error_has_location() {
+        // The listener is defined by the top-level run and throws later —
+        // same locator, source found again by the script label.
+        let mut browser = browser_with_html_and_css(
+            "<script>var a = 1;</script><script>document.getElementById('host').addEventListener('click', function () {\n  window.nope();\n});</script><div id=\"host\"></div>",
+            "#host { width: 200px; height: 100px; }",
+        );
+        assert!(console_errors(&browser).is_empty());
+        let _ = browser.display_list(
+            800,
+            600,
+            &input::WindowInput {
+                mouse_position: Some((10.0, CHROME_HEIGHT + 5.0)),
+                left_mouse_pressed: true,
+                ..input::WindowInput::default()
+            },
+        );
+        let errors = console_errors(&browser);
+        assert_eq!(
+            errors,
+            vec![
+                "Uncaught in click listener: TypeError: not a function (near \"window.nope\") at about:blank#inline-1:2:10"
+                    .to_string()
+            ]
+        );
+    }
+
     fn browser_with_externals(html: &str, externals: HashMap<String, String>) -> BrowserState {
         BrowserState::new(
             "about:blank".into(),

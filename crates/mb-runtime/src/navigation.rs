@@ -181,24 +181,23 @@ fn document_from_response(fetch_result: net::FetchResult) -> Result<LoadedDocume
         .map_err(|_| describe_network_error(&net::NetworkError::InvalidBodyEncoding))?;
     let document = profile::time_block("navigation::parse_html", || html::parse(&html))
         .map_err(|error| format!("html parse error {}", error.position))?;
+    // Subresources below never fail the navigation — only the document
+    // response above can (AGENTS.md "Robustness Rules" 1).
     let stylesheets = profile::time_block("navigation::load_stylesheets", || {
         resource::load_stylesheets(&document, &final_url)
-    })
-    .map_err(|error| describe_resource_error(&error))?;
+    });
     let font_data = profile::time_block("navigation::load_fonts", || {
         resource::load_fonts(&stylesheets, &final_url)
     });
     let images = profile::time_block("navigation::load_images", || {
         resource::load_images(&document, &stylesheets, &final_url)
     })
-    .map_err(|error| describe_resource_error(&error))?
     .into_iter()
     .map(|image| (image.url.to_string(), image))
     .collect();
     let external_scripts = profile::time_block("navigation::load_scripts", || {
         resource::load_scripts(&document, &final_url)
-    })
-    .map_err(|error| describe_resource_error(&error))?;
+    });
     // Favicon failures (no `<link rel="icon">`, broken URL, network 404,
     // unsupported codec) silently fall back to "no icon" — the rest of
     // the page is still useful, mirroring how broken stylesheets and

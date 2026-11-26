@@ -192,6 +192,11 @@ fn parse_html_color(raw: &str) -> Option<crate::css::Color> {
 }
 
 fn parse_hex_color_body(body: &str) -> Option<crate::css::Color> {
+    // The byte-index slicing below is only sound on ASCII; a multibyte
+    // attribute value of 3 or 6 bytes (`"한글"`) isn't hex anyway.
+    if !body.is_ascii() {
+        return None;
+    }
     let bytes = body.as_bytes();
     let (r, g, b) = match bytes.len() {
         3 => (
@@ -237,4 +242,21 @@ fn named_html_color(name: &str) -> Option<crate::css::Color> {
         _ => return None,
     };
     Some(crate::css::Color { r, g, b, a: 255 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_html_color;
+
+    #[test]
+    fn non_ascii_color_attribute_is_ignored_not_a_panic() {
+        // Three or six *bytes* but multibyte characters: slicing by byte
+        // index used to land inside a character and panic (any page with
+        // `bgcolor="한글"` took the whole style pass down).
+        for raw in ["한글", "#한글", "é1", "#é1", "ab€"] {
+            assert_eq!(parse_html_color(raw), None, "{raw:?}");
+        }
+        assert!(parse_html_color("#fff").is_some());
+        assert!(parse_html_color("ffffff").is_some());
+    }
 }

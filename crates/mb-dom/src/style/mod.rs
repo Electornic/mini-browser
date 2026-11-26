@@ -266,6 +266,9 @@ fn style_tree_inner(
     // The selectors crate walks the live DOM via the `Element` trait
     // implementation in `dom_select.rs`, so we no longer need to thread an
     // explicit ancestor chain through the recursion.
+    // Arena invariant: children lists only hold live ids — every removal
+    // path (remove_child, replace_with_text, innerHTML, replace_child)
+    // detaches before tombstoning. The root comes from the caller.
     let node_data = document
         .get(node_id)
         .expect("style_tree_inner called with invalid NodeId");

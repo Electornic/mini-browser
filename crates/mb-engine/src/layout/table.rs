@@ -148,6 +148,7 @@ pub(super) fn layout_table_children(
             let mut col_idx = 0usize;
             for cell in cells {
                 let span = cell_colspan(cell).min(column_count.saturating_sub(col_idx));
+                // span == 1 implies col_idx < column_count, so the index holds.
                 if span == 1 {
                     let measured = measure_cell_max_width(cell);
                     if measured > col_widths[col_idx] {
@@ -307,8 +308,12 @@ fn cell_colspan(cell: &StyledNode) -> usize {
         .get("colspan")
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|n| *n >= 1)
-        .unwrap_or(1)
+        // HTML: "if colspan is greater than 1000, let it be 1000". Without
+        // the cap a huge value overflows the column-count sum.
+        .map_or(1, |n| n.min(MAX_COLSPAN))
 }
+
+const MAX_COLSPAN: usize = 1000;
 
 fn measure_cell_max_width(cell: &StyledNode) -> f32 {
     // Run the cell through the inline-block path with effectively unbounded
@@ -558,6 +563,22 @@ mod tests {
         // to 100. Both should report the same content height.
         assert_eq!(cell0.dimensions.content.height, 100.0);
         assert_eq!(cell1.dimensions.content.height, 100.0);
+    }
+
+    #[test]
+    fn absurd_colspan_is_clamped_like_html_says() {
+        // HTML clamps colspan to 1000. Unclamped, `usize::MAX` overflowed
+        // the column-count sum / the column table allocation and panicked.
+        let styled = styled_root(
+            r#"<table><tr><td colspan="18446744073709551615">a</td><td colspan="99999">b</td></tr></table>"#,
+            r#"table { border-spacing: 0; } td { padding: 0; }"#,
+        );
+        let layout = layout_tree(&styled, 400.0);
+        assert_eq!(layout.children.len(), 2);
+        for cell in &layout.children {
+            assert!(cell.dimensions.content.width.is_finite());
+            assert!(cell.dimensions.content.x.is_finite());
+        }
     }
 
     #[test]

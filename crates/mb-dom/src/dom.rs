@@ -103,6 +103,11 @@ impl Document {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    /// Nodes not tombstoned. Walks the arena — for diagnostics, not hot paths.
+    pub fn live_node_count(&self) -> usize {
+        self.nodes.iter().filter(|slot| slot.is_some()).count()
+    }
+
     pub fn get(&self, id: NodeId) -> Option<&NodeData> {
         self.nodes.get(id.index())?.as_ref()
     }

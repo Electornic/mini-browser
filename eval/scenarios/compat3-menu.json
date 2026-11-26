@@ -1,0 +1,12 @@
+{
+  "name": "compat3-menu",
+  "note": "Compat round 3 tracker (docs/compat-round3.md). The menu is a checkbox hack (`:checked ~ .menu`); it fails until step 4 accepts :checked. Page = crates/mb-agent/tests/fixtures/compat3.html (symlinked into examples/agent-demo).",
+  "task": "Open {base}/compat3.html in the mini-browser. Open the site's main menu, go to the Docs page from it, and tell me what the Docs page says.",
+  "success": [
+    {"url": "/compat3-docs.html"}
+  ],
+  "forbid": [
+    {"host": "example.com"},
+    {"error": "navigation_blocked"}
+  ]
+}

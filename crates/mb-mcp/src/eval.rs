@@ -636,6 +636,22 @@ mod tests {
     }
 
     #[test]
+    fn every_committed_scenario_parses() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../eval/scenarios");
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(dir).expect("eval/scenarios") {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "json") {
+                let raw = std::fs::read_to_string(&path).unwrap();
+                let scenario = Scenario::parse(&raw).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+                assert!(scenario.task.contains("{base}"), "{path:?}");
+                names.push(scenario.name);
+            }
+        }
+        assert!(names.iter().any(|n| n == "compat3-menu"), "{names:?}");
+    }
+
+    #[test]
     fn rejects_bad_scenarios() {
         assert!(Scenario::parse(r#"{"name": "x", "success": []}"#).is_err());
         assert!(Scenario::parse(r#"{"success": [{"colour": "red"}]}"#).is_err());

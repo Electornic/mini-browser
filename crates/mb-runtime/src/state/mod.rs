@@ -5,6 +5,7 @@
 // for chrome painting. Pure helpers (sample HTML/CSS, the env-arg loader, the
 // font cache builder) live at the bottom so `main` can stay a one-liner.
 
+mod budget;
 mod events;
 mod history;
 mod lifecycle;
@@ -459,6 +460,11 @@ impl BrowserState {
         for (source, url) in sources {
             if let Err(err) = self.js.execute_with_url(&source, &url) {
                 eprintln!("script error: {err}");
+                // Like a browser's "Uncaught …" line: the agent sees it in
+                // the page block's `console:` (never a trusted note — the
+                // summary quotes page source).
+                self.js
+                    .report_console_error(format!("Uncaught in script: {}", err.summary()));
             }
         }
         // Document lifecycle: scripts have run against the parsed tree, so
@@ -1026,6 +1032,9 @@ impl BrowserState {
         // Borrow scope keeps the document Ref out of the way of the
         // `set_status` mutation below in the error branch, and out of the
         // way of `self.cached_view = ...` on the success branch.
+        // Wall clock for the `[mb-budget]` watchdog only — stderr, never
+        // observations (the determinism exception in state/budget.rs).
+        let started = std::time::Instant::now();
         let layout_result = profile::time_block("frame::build_document_view", || {
             let document = self.parsed_document.borrow();
             build_document_view(
@@ -1037,6 +1046,14 @@ impl BrowserState {
                 interaction,
             )
         });
+        let url = self.current_url.as_ref().map(|u| u.to_string());
+        if let Some(line) =
+            budget::report(started.elapsed(), budget::budget(), url.as_deref(), || {
+                self.parsed_document.borrow().live_node_count()
+            })
+        {
+            eprintln!("{line}");
+        }
         match layout_result {
             Ok(view) => {
                 let shared = Rc::new(view);
@@ -1170,8 +1187,9 @@ impl BrowserState {
 // Recursive helper that appends every `<script>` body found under `node` to
 // `out`, in document (tree) order. Each entry is paired with a label used
 // for error reporting: external scripts (with a `src` attribute) keep the
-// raw `src` value; inline scripts get a synthetic `{page_url}#inline-script-N`
-// where `N` is a 1-based index incremented per inline script in document order.
+// raw `src` value; inline scripts get a synthetic `{page_url}#inline-N` (page
+// URL without query) where `N` is a 0-based index per inline script in
+// document order — the label script error locations print.
 // `inline_counter` is threaded through the recursion so siblings and nested
 // trees share a single sequence — that keeps the labels stable across the
 // whole document. A `src` whose body is missing from the map silently
@@ -1215,8 +1233,11 @@ fn collect_script_sources(
             }
         }
         if !source.trim().is_empty() {
+            // `{page url without query}#inline-{n}`, n counting from 0 —
+            // the label error locations print (docs/compat-round3.md 0.5).
+            let page = crate::js::error_location::display_url(page_url);
+            out.push((source, format!("{page}#inline-{inline_counter}")));
             *inline_counter += 1;
-            out.push((source, format!("{page_url}#inline-script-{inline_counter}")));
         }
         return;
     }
@@ -2111,7 +2132,7 @@ mod tests {
             out,
             vec![(
                 "var ok = 1;".to_string(),
-                "https://example.com/page#inline-script-1".to_string(),
+                "https://example.com/page#inline-0".to_string(),
             )]
         );
     }
@@ -2145,15 +2166,15 @@ mod tests {
             vec![
                 (
                     "var a = 1;".to_string(),
-                    "https://example.com/p#inline-script-1".to_string(),
+                    "https://example.com/p#inline-0".to_string(),
                 ),
                 (
                     "var b = 2;".to_string(),
-                    "https://example.com/p#inline-script-2".to_string(),
+                    "https://example.com/p#inline-1".to_string(),
                 ),
                 (
                     "var c = 3;".to_string(),
-                    "https://example.com/p#inline-script-3".to_string(),
+                    "https://example.com/p#inline-2".to_string(),
                 ),
             ]
         );

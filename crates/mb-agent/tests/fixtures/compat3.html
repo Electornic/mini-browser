@@ -1,0 +1,81 @@
+<!doctype html>
+<html>
+<head>
+<title>Acme Tools</title>
+<!--
+  Compat round 3 tracker (docs/compat-round3.md, common rules "손으로 쓴 3차
+  골든 + eval"). Hand-written; patterns only, no real-site content.
+
+  compat3.observation.txt records TODAY's rendering ON PURPOSE, wrong parts
+  included. Each round-3 step should move it in a known direction; review
+  the golden diff against this list (what Chrome shows at 800px):
+
+  1. "Skip to content" — sr-only (1px, overflow:hidden, clip): listed as a
+     link, but its text paints nowhere. Today: overflow isn't clipped, so
+     the 1px box spills its text (step 3, clipping).
+  2. Search form (.hide-sm) — visible at 800px: its `display:none
+     !important` sits in a max-width:600px @media. Today it shows only by
+     accident (!important declarations are dropped); once step 1 keeps
+     !important it must stay visible, which needs step 2.1 (@media
+     evaluation) first.
+  3. Mobile @media — desktop nav (Features, Pricing) visible, "Open
+     navigation" hidden. Today every @media applies: inverted (step 2.1).
+  4. Checkbox-hack menu — "Menu" label toggles the hidden checkbox and
+     `:checked ~ .menu` opens the list (Docs, Contact). Today the
+     `:checked` rule is dropped whole, so the menu never opens (step 4).
+  5. Carousel — 300px window with overflow:hidden: only slide one is
+     visible; slides two and three are clipped out (step 3).
+
+  eval/scenarios/compat3-menu.json drives item 4 ("open the menu, go to
+  Docs"); it fails today by design.
+-->
+<style>
+  body { margin: 0; font-size: 16px; }
+  header { padding: 8px; }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .mobile-toggle { display: none; }
+  @media (max-width: 600px) {
+    .desktop-nav { display: none; }
+    .mobile-toggle { display: block; }
+    .hide-sm { display: none !important; }
+  }
+  .menu-box { position: absolute; left: -9999px; }
+  .menu { display: none; }
+  .menu-box:checked ~ .menu { display: block; }
+  .carousel { width: 300px; height: 100px; overflow: hidden; white-space: nowrap; }
+  .slide { display: inline-block; width: 300px; height: 100px; }
+</style>
+</head>
+<body>
+<a class="sr-only" href="#main">Skip to content</a>
+<header>
+  <nav class="desktop-nav"><a href="#features">Features</a> <a href="#pricing">Pricing</a></nav>
+  <button class="mobile-toggle">Open navigation</button>
+  <form class="hide-sm" action="#search"><input type="search" name="q" aria-label="Search docs"> <button>Search</button></form>
+  <div class="main-menu">
+    <input type="checkbox" id="menu" class="menu-box">
+    <label for="menu">Menu</label>
+    <ul class="menu">
+      <li><a href="compat3-docs.html">Docs</a></li>
+      <li><a href="#contact">Contact</a></li>
+    </ul>
+  </div>
+</header>
+<main id="main">
+  <h1>Acme Tools</h1>
+  <p>Build, ship and watch your services from one place.</p>
+  <div class="carousel"><div class="slide">Slide one: fast builds</div><div class="slide">Slide two: <a href="#safe">safe deploys</a></div><div class="slide">Slide three: <a href="#teams">happy teams</a></div></div>
+  <p id="contact">Questions? Write to the team.</p>
+</main>
+</body>
+</html>

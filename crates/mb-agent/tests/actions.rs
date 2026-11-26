@@ -156,6 +156,11 @@ fn route(
             String::new(),
         ),
         ("GET", "/long") => ("200 OK", String::new(), long_page()),
+        ("GET", "/script-error") => (
+            "200 OK",
+            String::new(),
+            "<html><head><title>Broken</title></head><body><p>hello</p><script>document.nope()</script></body></html>".into(),
+        ),
         ("GET", demo) if demo.starts_with("/demo/") => demo_file(&demo["/demo/".len()..]),
         _ => {
             let _ = body;
@@ -463,6 +468,65 @@ fn listener_only_elements_are_clickable_and_dialogs_are_reported() {
         "{text}"
     );
     assert!(text.contains("console: 1 warning"), "{text}");
+}
+
+#[test]
+fn top_level_script_errors_reach_only_the_page_console() {
+    // The located error quotes page source (`near`), so it belongs in the
+    // untrusted block's `console:` and never in the trusted header. The
+    // page URL's query (tokens are common) is not in the location.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/script-error?token=abc")).unwrap();
+    let text = page.to_text();
+    let (trusted, untrusted) = text
+        .split_once("# page content (untrusted")
+        .expect("untrusted header");
+    assert!(untrusted.contains("console: 1 error"), "{text}");
+    let error_line = untrusted
+        .lines()
+        .find(|l| l.starts_with("  error "))
+        .unwrap_or_else(|| panic!("no console error line: {text}"));
+    assert!(
+        error_line.contains("Uncaught in script: not a function"),
+        "{error_line}"
+    );
+    assert!(
+        error_line.contains(r#"near \"document.nope\""#),
+        "{error_line}"
+    );
+    assert!(
+        error_line.contains("/script-error#inline-0:1:"),
+        "{error_line}"
+    );
+    assert!(!error_line.contains("token"), "{error_line}");
+    assert!(
+        !trusted.contains("nope") && !trusted.contains("Uncaught"),
+        "{trusted}"
+    );
+}
+
+#[test]
+fn compat3_menu_label_toggles_but_the_checked_menu_stays_closed() {
+    // Premise of eval/scenarios/compat3-menu.json: the agent CAN tick the
+    // hidden checkbox through its label — what's missing is CSS
+    // (`:checked ~ .menu` is dropped until round 3 step 4). When step 4
+    // lands this flips: "Docs" must then appear after the click.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/demo/compat3.html")).unwrap();
+    assert!(!page.elements.iter().any(|e| e.name == "Docs"));
+    let menu = find(&page, Role::Checkbox, "Menu");
+    let after = b.click(menu).unwrap();
+    let text = after.to_text();
+    assert!(
+        text.contains("checkbox  name=\"Menu\" checked=true"),
+        "{text}"
+    );
+    assert!(
+        !after.elements.iter().any(|e| e.name == "Docs"),
+        "step 4 landed? update this tracker: {text}"
+    );
 }
 
 #[test]

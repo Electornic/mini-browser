@@ -1,6 +1,6 @@
 # 호환성 3차 설계 — 견고성 + CSS 파서·캐스케이드
 
-> 상태: **설계 확정 (2026-11-26, 1차 검토 + 다각도 검토 — 코드 대조·웹 표준·실행/측정 — 반영), 구현 전** · 근거 = [compat-survey.md](compat-survey.md) (호환성 2차 실사이트 조사) · 기준선 `4588aba` 804 → 조사 캐시 2차 수정 후 **806 green** · 진행은 [진행 표](#진행-표)
+> 상태: **설계 확정 (2026-11-26, 1차 검토 + 다각도 검토 — 코드 대조·웹 표준·실행/측정 — 반영) · 0a 구현 완료(미커밋, 829 green)** — 0b(코퍼스)·0c(퍼저) 남음 · 근거 = [compat-survey.md](compat-survey.md) (호환성 2차 실사이트 조사) · 기준선 `4588aba` 804 → 조사 캐시 2차 수정 후 **806** → 0a **829** · 진행은 [진행 표](#진행-표)
 
 이 문서만 읽고 어느 단계든 이어받을 수 있게 쓴다. 단계마다 **목표 → 세부 항목 → 설계 결정 → 테스트 → 측정·완료 기준 → 위험 → 노력** 순서다. 2차 조사의 수치·용어(슬리버, 버린 선언, `compat_probe`, `MB_NET_CACHE`)는 [compat-survey.md 방법](compat-survey.md#방법) 참고.
 
@@ -147,6 +147,16 @@ grep -naE '\?;|\.unwrap\(\)|\.expect\(|\[[a-z_]+\]|\[[a-z_]+ *[-+] *1\]' \
 - **`not a function` 보강 `near`**: QuickJS 는 호출 대상 이름을 안 준다. 원문에서 열 위치 직전의 멤버 식(`[\w$.]+` 를 뒤로)을 잘라 `near "document.getElementsByTagName"`. 주의: quickjs-ng 의 호출 위치 열은 `(` **다음** 토큰을 가리키므로(`rquickjs-sys` 의 `quickjs.c` `emit_source_loc`), 먼저 `(` 와 공백을 뒤로 건너뛴 뒤 식을 자른다. 원문은 `BrowserState` 가 스크립트 이름 → 원문 맵으로 보관(최상위 실행 후에도 리스너 에러에서 찾을 수 있게; 문서 교체 때 비움). 잘라낸 식은 페이지 문자열이므로 trusted 블록엔 절대 안 넣는다(page 블록 `console:` 만 — AGENTS.md 위조 방지 규칙과 충돌 없음).
 - `<eval>`/`new Function` 프레임은 위치를 `<eval>` 로만 표시(원문 맵 없음).
 - **결정 필요(0a 에서)**: Google 에선 이동할 때마다 `console: 6 errors` 가 붙어 LLM 이 페이지 디버깅으로 빠질 수 있다. `prompts.rs` 서버 안내에 "제3자 스크립트 콘솔 에러는 흔하고 대개 무시해도 된다" 한 줄을 넣을지 — 넣으면 `prompts` 지문이 바뀌어 eval 기준선이 갈린다(G5c 규칙).
+
+**0a 구현 메모 (설계와 달라진 점 — 실측·코드 제약 때문)**:
+- **열 위치 실측**: 위 "열은 `(` 다음" 은 일부만 맞다. rquickjs 0.11(quickjs-ng)에서 `not a function` 의 열을 재 보면 호출 모양마다 다르다 — 최상위 `document.nope()` → `.`(1:9), 함수 본문 안 `window.nope()` → 속성 이름 첫 글자, `foo()` → 이름 **앞** 공백, `a.b.c (1)` → 이름 뒤 공백, `foo( 2 )` → `(` 뒤(설계가 말한 경우). 그래서 `near` 는 세 갈래로 찾는다: ① 열 앞(공백 건너뜀)이 `(` 면 그 앞 식 ② 열에서 시작하는 멤버/이름 줄이 `(` 로 이어지면 그 줄 ③ 아니면 열 주변의 멤버/이름 줄(`(0, document.qq)()` 류). 60자 넘는 사슬은 꼬리만. `near` 는 `not a function`·`not a constructor` 메시지에만 붙인다(`cannot read property 'x'`·`x is not defined` 는 메시지가 이미 이름을 말함).
+- **`<input>` 프레임**: rquickjs 는 `eval`·`new Function`·**우리 부트스트랩 JS** 를 모두 `<input>` 으로 라벨한다. 첫 프레임 그대로 쓰면 부트스트랩 shim 이 던진 에러가 페이지 대신 `<eval>` 을 가리키므로, 아래에 페이지 프레임이 있으면 그걸 쓰고 페이지 프레임이 하나도 없을 때만 `at <eval>`(줄·열 없음).
+- **원문 맵 위치**: 설계는 `BrowserState` 보관이었지만 리스너·타이머 에러는 JS→Rust 콜백(`__mb_report_error_native`) 안에서 포맷되어 `BrowserState` 에 닿을 수 없다. 그래서 `JsRuntime` 이 라벨 → 원문 맵(`Rc<str>`)을 들고 콜백과 공유한다. 런타임은 문서마다 새로 만들어지므로 "문서 교체 때 비움" 은 그대로 성립. 조회만 하고 순회하지 않음(결정성).
+- **반환형**: `execute_with_url` → `Result<String, Box<ScriptError>>` (완료 값 문자열은 기존 테스트가 써서 유지, `Box` 는 clippy `result_large_err`). `ScriptError::summary()` = 콘솔 줄, `Display` = stderr 줄(+`MB_JS_STACK` 이면 원 스택).
+- **라벨**: 인라인은 `{쿼리 뺀 문서 URL}#inline-{n}`, n 은 인라인 스크립트만 세는 0부터 카운터(전엔 `#inline-script-{1부터}`). 외부 스크립트 라벨은 **원래 `src` 값 유지**(이전 결정 — HTML 에서 grep 가능; 표시할 때 쿼리만 뗌). 라벨 문자열이 QuickJS 의 `filename` 이자 원문 맵 키.
+- **리스너 메시지 모양**: `String(err)` 그대로라 `TypeError: not a function …` 처럼 에러 이름이 붙는다(최상위는 `exc.message()` 라 이름 없음). Tier 1.5 #18 의 모양을 바꾸지 않으려고 둠.
+- 측정: 최상위 `Uncaught in script: not a function (near "document.nope") at http://…/script-error#inline-0:1:9`, 리스너 `Uncaught in click listener: TypeError: not a function (near "window.nope") at about:blank#inline-1:2:10`.
+- **`prompts.rs` 결정**: 0a 에선 안 바꿨다(사용자 결정 사항). 권고 = **지금은 넣지 않기** — 현재 eval 시나리오 페이지(agent-demo)엔 스크립트 에러가 없어 새 콘솔 줄이 기존 eval 에 영향이 없는데, 안내 한 줄을 넣으면 `prompts` 지문만 갈려 기준선을 다시 재야 한다. 0b 코퍼스로 사이트별 `console:` 에러 수를 잰 뒤, 제3자 에러가 있는 손으로 쓴 eval 페이지로 "LLM 이 페이지 디버깅으로 빠지는지"를 한 번 보고 넣을지 정한다.
 
 ### 테스트 (0단계)
 
@@ -573,7 +583,7 @@ GitHub 간격(`margin-top: calc(var(--base-size-8) + var(--Layout-row-gap))` 류
 | 단계 | 상태 | 커밋 | 테스트 수 | 코퍼스 fail/panic/timeout | 버린 선언 (5곳) | 버린 규칙 (5곳) | sr-only 슬리버 | 에이전트 컨트롤 누락 사이트 | 메모 |
 |---|---|---|---|---|---|---|---|---|---|
 | 2차 기준 | ✅ | `78bedff`·`4588aba` | 804 | (5곳) 0/0/0 | 7,593 (ours/browser-too 분리는 0단계에서) | 1,931 (같음) | 19 (GitHub 17·위키 2; naver "검색" 은 2글자라 probe 기준 밖) | naver(모듈) | 출발점 |
-| 0 견고성 | ⏳ | | | 목표 0/0/0 (전체, release) | 새 기준선(ours/browser-too) | 새 기준선 | 새 기준선 | | 0a·0b·0c, 코퍼스 동결 |
+| 0 견고성 | 🔶 0a 완료(미커밋) | | 806 → 829 (0a) | 목표 0/0/0 (전체, release) | 새 기준선(ours/browser-too) | 새 기준선 | 새 기준선 | | **0a**: Robustness Rules(AGENTS.md) + `[mb-budget]` 워치독 · 검토 표 [부록 A](#부록-a--04-표적-코드-검토-표-0a)(grep 140곳: 안전 117·수정 10·보류 2·거짓 양성 11 + grep 밖 발견 수정 5 — 패닉 4: 멀티바이트 `#색`·`bgcolor`·`@font-face`, colspan 오버플로 / 할당 폭주 1: 거대 grid 줄) · 리소스 수집 `Result` 제거 · 스크립트 에러 위치(콘솔) · `compat3` 골든 + `compat3-menu` eval(오늘은 실패가 정상). 남음: 0b 코퍼스·0c 퍼저, 코퍼스 동결 |
 | 1 값 파서 | ⏳ | | | 0/0/0 | 목표 ours −80% (2차 환산 ≤1,500) | — | — | | 2.1 뒤에 실행 |
 | 2 @media/@layer/@supports | ⏳ | | | 0/0/0 | — | — | — | | 2.1 먼저, 2.2·2.3 은 1 뒤. GitHub 라이트 |
 | 3 클리핑 | ⏳ | | | 0/0/0 | — | — | 목표 0 | | |
@@ -583,3 +593,62 @@ GitHub 간격(`margin-top: calc(var(--base-size-8) + var(--Layout-row-gap))` 류
 "에이전트 컨트롤 누락 사이트" = [compat-survey 에이전트 관점 표](compat-survey.md#에이전트-관점-요약) 처럼 사이트마다 사람이 기대하는 주요 컨트롤(검색창·검색 버튼·주 내비·본문 링크)을 관찰이 찾는지. 코퍼스가 커지면 사이트별 기대 컨트롤 목록을 `compat-cache/sites.tsv` 옆 열로 적고 probe 가 이름 부분 일치로 자동 판정한다(목록은 사람이 처음 한 번 작성).
 
 미리보기 전후 PNG 는 `compat-cache/previews/<단계>/<사이트>.png` 에 남긴다(git-ignored). 문서에는 관찰한 변화를 글로만 적는다.
+
+---
+
+## 부록 A — 0.4 표적 코드 검토 표 (0a)
+
+2026-11-26, `802a836` 기준. [0.4](#04-표적-코드-검토) 의 grep 을 그대로 돌린 **140곳**(테스트 모듈 제외) + 같은 경로에서 grep 이 못 잡는 모양(문자열 바이트 슬라이스, 페이지가 주는 개수로 할당)을 따로 찾은 것. 분류: **안전**(불변식이 코드로 보장 — 필요한 곳엔 주석 추가) · **수정**(테스트 먼저, 고침) · **보류**(이유) · **거짓 양성**(타입 표기·주석·슬라이스 패턴).
+
+| 분류 | 곳 |
+|---|---:|
+| 안전 | 117 |
+| 수정 | 10 (+ grep 밖 5) |
+| 보류 | 2 (+ grep 밖 3) |
+| 거짓 양성 | 11 |
+
+### grep 결과
+
+| 파일 | 줄(`802a836`) | 분류 | 근거 / 조치 |
+|---|---|---|---|
+| `layout/grid.rs` | 119–205 (`boxes[box_idx]`, `natural_*[area.*]`, 슬라이스) 11곳 | 안전 | `box_idx` 는 push 와 함께 기록. `col_start < n_cols == columns.len()`: `place_grid_item` 이 시작을 `n_cols - span` 으로 자르고 템플릿 영역은 `effective_column_tracks` 가 트랙을 넓힘(2차 C2). `row_start < row_end <= n_rows`, `resolve_grid_rows` 는 `n_rows` 개를 돌려줌 → 불변식 주석 추가 |
+| `layout/grid.rs` | 343·356 (`cells[r][c]`) | 안전 | `r < len && c < n_cols` 검사 / `ensure_rows` 후 `c < n_cols` |
+| `layout/grid.rs` | 462–495 (`sizes[i]`) 6곳 | 안전 | `i` 는 `natural_row_heights` enumerate·`take(n_rows)` |
+| `layout/grid.rs` | 515 (`vec![content_width]`) | 거짓 양성 | 배열 리터럴 |
+| `layout/table.rs` | 153–154 (`col_widths[col_idx]`) | 안전 | `span == 1` 이면 `col_idx < column_count`(span = min(colspan, count − idx)) → 주석 추가 |
+| `layout/table.rs` | 193–234 (`column_x_starts[…]`, `col_widths[j]`) 6곳 | 안전 | 길이 `column_count + 1`, `col_idx + span <= column_count` |
+| `layout/inline.rs` | 81·90·311·322 | 안전 | `lines`/`line_widths` 같이 push, `child_idx` 는 enumerate, `i < len` 검사 |
+| `layout/flex.rs` | 94–207 13곳 (`boxes[i]`) | 안전 | `i` 는 `in_flow` 에 push 직전 `boxes.len()` |
+| `layout/block.rs` | 105·111 | 안전 | `group_block_children` 의 인덱스·범위는 `node.children` 안 |
+| `layout/taffy_bridge.rs` | 475·486·504 (`?` on Option) | 안전 | taffy 경로 실패 → `None` → 레거시 레이아웃 폴백 |
+| `layout/taffy_bridge.rs` | 597·605·773 (`node.children[…]`) | 안전 | `native_child_slots(node)` 가 같은 노드에서 만든 인덱스 |
+| `layout/taffy_bridge.rs` | 735·800·805 (`expect`) | 안전 | 같은 트리에서 방금 만든 id; boundary 판정은 build/walk 가 같은 `is_native_block` |
+| `render/display_list.rs` | 430·452·472·482·518·605·636·688 (`?`) | 안전 | 그 상자의 배경·이미지·값을 안 그릴 뿐 |
+| `render/display_list.rs` | 549–578 (그라디언트 `positions[…]`, `unwrap`) 6곳 | 안전 | `n == 0` 은 앞에서 반환, `positions[0]` 를 먼저 채우고 `last_known` 은 Some 인 곳으로만 이동 → 주석 추가 |
+| `style/mod.rs` | 51·52·53·67·134 (`&[usize]`) | 거짓 양성 | 타입 표기 |
+| `style/mod.rs` | 137·138 (`?`) | 안전 | 상호작용 경로가 문서에 없으면 hover/focus 없음 |
+| `style/mod.rs` | 271 (`expect`) | 안전 | arena 불변식: children 목록엔 살아 있는 id 만(`remove_child`·`replace_with_text`·innerHTML·`replace_child` 모두 떼고 나서 묘비) → 주석 추가 |
+| `style/defaults.rs` | 430 (`[hidden]`) | 거짓 양성 | 주석 |
+| `html.rs` | 66 (`parse_fragment(…)?`) | 안전 | 문서 자체 파싱 — 규칙 1 이 허용한 실패(html5ever 는 사실상 실패 안 함) |
+| `css/mod.rs`·`parse.rs`·`transform.rs`·`shadow.rs`(5)·`shorthand.rs`(310)·`css/grid.rs`·`gradient.rs` | 39곳 (`?`) | 안전 | 파서 안의 `?` = 그 선언 하나 버림. 패닉 아님. 버림 자체는 1단계 범위 |
+| `css/shadow.rs` 3·4, `css/shorthand.rs` 42·136 | 4곳 | 거짓 양성 | 주석의 `[blur]`, 슬라이스 패턴 `[v]` |
+| `mb-runtime/src/resource.rs` | 16·38·71·197·207·239·269·306 (`?` on `ResourceError`) | **수정** | 실제로는 이미 실패할 일이 없는 `?`(2차 `resolve_attr`) — 함수 시그니처에서 `Result` 를 빼서(`load_stylesheets`/`load_scripts`/`load_images`/`stylesheet_urls`/`image_urls`/`collect_*`) 다시 생기지 않게. 기존 resource 테스트 green |
+| `mb-runtime/src/resource.rs` | 79·151·152·166 (`?` on Option) | 안전 | 이미지 하나·파비콘 없음으로 끝남 |
+| `mb-runtime/src/navigation.rs` | 187·201 (+ grep 이 못 잡은 194, 줄 끝 `?` 뒤 `.into_iter()`) | **수정** | 위 시그니처 변경으로 `map_err(describe_resource_error)?` 제거 — 하위 리소스가 이동을 실패시킬 경로가 타입에서 사라짐 |
+| `mb-runtime/src/navigation.rs` | 183 (`html parse error`) | 안전 | 문서 응답 자체(규칙 1 허용) |
+| `mb-runtime/src/navigation.rs` | 162·181 (`InvalidBodyEncoding`) | 보류 | 규칙 1 이 허용한 "문서 응답 인코딩" 실패지만, 지금은 `String::from_utf8` 라 **비 UTF-8 문서(EUC-KR 국내 사이트)·잘못된 바이트 하나**에도 이동 전체가 실패한다. 인코딩 감지·변환(`encoding_rs`, `<meta charset>`)은 기능 작업 — 0b 코퍼스에서 실제로 걸리는 사이트가 나오면 우선순위를 정한다 |
+
+### grep 밖에서 찾은 것
+
+grep 패턴은 `[ident]`·`[ident ± 1]` 만 잡아서 `&s[0..2]` 같은 **문자열 바이트 슬라이스**와 **페이지가 주는 개수로 하는 할당**을 놓친다. 같은 경로에 `grep -aE '\[[a-z_0-9.]* *\.\.|\[\.\.[a-z0-9_ +-]+\]|as_bytes\(\)\['` 와 `parse::<usize>`/`vec![…; n]` 을 추가로 돌렸다.
+
+| # | 곳 | 분류 | 증상 → 조치 (테스트) |
+|---|---|---|---|
+| E1 | `css/parse.rs` `parse_hex_color_str` | **수정** (패닉) | `#` 토큰 값은 식별자라 멀티바이트 가능. `color:#é1`(3바이트, 2글자) → `chars[2]` 인덱스 초과, `color:#한글`(6바이트) → 글자 중간 슬라이스. ASCII 아니면 길이 0 취급 → 선언 버림 (`non_ascii_hash_color_drops_the_declaration_not_a_panic`) |
+| E2 | `style/presentational.rs` `parse_hex_color_body` | **수정** (패닉) | `bgcolor="한글"` 같은 속성이 스타일 패스 전체를 패닉. `is_ascii()` 먼저 (`non_ascii_color_attribute_is_ignored_not_a_panic`) |
+| E3 | `mb-runtime/src/resource.rs` `extract_font_urls`/`extract_url_value` | **수정** (패닉, 이동 중) | 닫히지 않은 `@font-face{` 나 `url("a")` 뒤에 `)` 가 없을 때 ASCII 구분자 **한 바이트 뒤**에서 재개 → 다음 글자가 멀티바이트면 슬라이스 패닉. 닫히지 않으면 중단, 따옴표 뒤에서 재개 (`font_face_scan_survives_multibyte_text_after_a_brace_or_quote`) |
+| E4 | `layout/table.rs` `cell_colspan` | **수정** (패닉) | 상한 없음 → `colspan="18446744073709551615"` 에서 열 수 합 오버플로(debug 패닉)·`vec![0.0; usize::MAX]`. HTML 규칙대로 1000 으로 자름 (`absurd_colspan_is_clamped_like_html_says`) |
+| E5 | `layout/grid.rs` `axis_hint_from` | **수정** (할당 폭주) | `grid-row: 2000000000` / `span 1000000000` → 점유 맵·행 표가 줄 수만큼 할당(수 GB → abort, `catch_unwind` 로도 못 잡음). Blink 처럼 줄 1000 상한 (`huge_grid_lines_and_spans_are_clamped`, `grid_item_on_an_absurd_line_number_lays_out_bounded`) |
+| D1 | 스타일·레이아웃·리소스 수집·접근성 이름의 **재귀** 전반 | 보류 | 수만 단계 중첩 HTML 이면 스택 오버플로 = **abort**(패닉이 아니라 `catch_unwind` 무력). html5ever 는 깊이 상한이 없다. 해법 후보 = 파서 단계에서 Blink 처럼 깊이 512 에서 평탄화. 0c 퍼저(깊이 0~40)는 못 잡으니 0c 에 "깊이 10,000 한 케이스" 를 추가하고 그때 정한다 |
+| D2 | `render/raster/`, `mb-dom/src/resource.rs` `decode_image` | 보류(범위 밖) | grep 범위 밖. 이미지 디코딩은 `image` crate 기본 한도(할당 512MB)에 기댐 — 0c 에서 이미지 바이트 퍼징을 할지 정한다 |
+| D3 | 레이아웃의 f32 나눗셈 | 보류 | 0 으로 나눠도 패닉이 아니라 NaN/무한대 — 0c 퍼저의 NaN·1e7px 판정이 담당 |

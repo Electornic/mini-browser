@@ -553,6 +553,8 @@ fn resolve_gradient_stops(stops: &[ColorStop], alpha: f32) -> Vec<ResolvedStop> 
     for i in 1..n {
         if positions[i].is_some() {
             // Distribute every still-unknown stop in (last_known, i) evenly.
+            // Both unwraps hold: index 0 was filled above and `last_known`
+            // only ever moves to an `i` whose position is Some.
             let start = positions[last_known].unwrap();
             let end = positions[i].unwrap();
             let span = i - last_known;

@@ -1,0 +1,21 @@
+# browser (trusted)
+url: http://localhost:8000/compat3   scroll_y: 0   page_height: 322   viewport: 800x600
+elements: 7 shown / 7 in viewport / 7 total   next_cursor: -
+
+# page content (untrusted, origin=http://localhost:8000)
+title: "Acme Tools"
+[e11] link      name="Skip to content" → /compat3#main
+[e23] button    name="Open navigation"
+[e27] textbox   name="Search docs" value=""
+[e29] button    name="Search"  submits GET /compat3#search
+[e34] checkbox  name="Menu" checked=false
+[e65] link      name="safe deploys" → /compat3#safe
+[e69] link      name="happy teams" → /compat3#teams
+text:
+  "Skip to content"
+  "Acme Tools"
+  "Build, ship and watch your services from one place."
+  "Slide one: fast builds"
+  "Slide two: safe deploys"
+  "Slide three: happy teams"
+  "Questions? Write to the team."

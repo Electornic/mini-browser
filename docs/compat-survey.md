@@ -227,6 +227,8 @@ MB_NET_CACHE_OFFLINE=1 ./target/debug/mb-mcp --start-url https://news.ycombinato
 
 제안 (S): 최상위 스크립트 에러를 리스너 에러와 같은 `__mb_report_error` 로 보내 `console.error` 에 남기고, 메시지엔 스택 첫 프레임(`url:줄:열`)을 늘 붙인다(전체 스택은 지금처럼 `MB_JS_STACK`). 가능하면 `not a function` 을 호출 식 이름으로 보강 — QuickJS 가 이름을 안 주므로 원문 열 위치에서 직전 멤버 식을 잘라 붙이는 정도(`… (near "document.getElementsByTagName")`). 관찰의 trusted 블록이 아니라 page 블록 `console:` 줄이므로 페이지 문자열이 섞여도 위조 규칙과 충돌하지 않는다.
 
+→ **3차 0a 에서 구현** ([compat-round3.md 0.5](compat-round3.md#05-스크립트-최상위-에러-위치-보고) "0a 구현 메모"): 최상위 에러도 `console.error("Uncaught in script: …")`, 형식 `{message} (near "x") at {url}:{line}:{col}`(쿼리 제거). naver 광고 두 건의 실측 확인은 0b 코퍼스 녹화 후.
+
 ### 네트워크 / 리소스
 
 - ~~`src`/`href` 없음이 문서 로드 실패~~ — **고침 (C1)**.

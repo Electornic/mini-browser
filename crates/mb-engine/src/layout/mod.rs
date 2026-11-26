@@ -3031,6 +3031,26 @@ mod tests {
     }
 
     #[test]
+    fn grid_item_on_an_absurd_line_number_lays_out_bounded() {
+        // `grid-row: 2000000000` used to size the occupancy map and the row
+        // table by the line number (gigabytes). Lines clamp at 1000 now.
+        let styled = styled_root(
+            r#"<div id="g"><div class="far"></div><div class="wide"></div></div>"#,
+            r#"
+                #g { display: grid; grid-template-columns: 50px 50px; }
+                .far { grid-row: 2000000000; height: 1px; }
+                .wide { grid-row: span 1000000000; height: 1px; }
+            "#,
+        );
+        let started = std::time::Instant::now();
+        let layout = layout_tree(&styled, 800.0);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        for item in &layout.children {
+            assert!(item.dimensions.content.y.is_finite());
+        }
+    }
+
+    #[test]
     fn grid_explicit_item_width_keeps_declared_size() {
         // When the item has explicit width, the post-hoc track-fill stays out
         // of its way — the item keeps its 50px width inside the 100px track.

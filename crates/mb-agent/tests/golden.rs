@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use mb_agent::{Observation, ObserveInput, ObserveOptions, Scope, observe};
 use mb_runtime::net::Url;
-use mb_runtime::{css, html, style, view::build_document_view};
+use mb_runtime::{css, dom, html, style, view::build_document_view};
 
 const VIEWPORT_W: f32 = 800.0;
 const VIEWPORT_H: f32 = 600.0;
@@ -27,7 +27,9 @@ fn observe_fixture(name: &str, scroll_y: f32, options: ObserveOptions) -> Observ
 
 fn observe_source(name: &str, source: &str, scroll_y: f32, options: ObserveOptions) -> Observation {
     let document = html::parse(source).expect("fixture must parse");
-    let stylesheet = css::Stylesheet::default();
+    // The fixture's own `<style>` blocks, as the browser collects them —
+    // compat3 is all about author CSS; the older fixtures have none.
+    let stylesheet = css::parse(&inline_style_css(&document)).unwrap_or_default();
     let view = build_document_view(
         &document,
         std::slice::from_ref(&stylesheet),
@@ -51,6 +53,33 @@ fn observe_source(name: &str, source: &str, scroll_y: f32, options: ObserveOptio
         },
         &options,
     )
+}
+
+fn inline_style_css(document: &dom::Document) -> String {
+    fn walk(document: &dom::Document, id: dom::NodeId, out: &mut String) {
+        let Some(node) = document.get(id) else {
+            return;
+        };
+        if let dom::NodeType::Element(element) = &node.node_type
+            && element.tag_name.eq_ignore_ascii_case("style")
+        {
+            for child in &node.children {
+                if let Some(text) = document.text(*child) {
+                    out.push_str(text);
+                    out.push('\n');
+                }
+            }
+            return;
+        }
+        for child in &node.children {
+            walk(document, *child, out);
+        }
+    }
+    let mut out = String::new();
+    for &root in document.roots() {
+        walk(document, root, &mut out);
+    }
+    out
 }
 
 fn assert_golden(golden_name: &str, actual: &str) {
@@ -86,6 +115,14 @@ fn links_and_text() {
 #[test]
 fn injection() {
     golden("injection");
+}
+
+/// Round-3 tracker: records today's (partly wrong) rendering on purpose —
+/// see the comment at the top of fixtures/compat3.html for what each
+/// diff should look like as the steps land.
+#[test]
+fn compat3() {
+    golden("compat3");
 }
 
 #[test]
@@ -144,7 +181,13 @@ fn long_page_full_scope_paginates() {
 
 #[test]
 fn observation_is_deterministic() {
-    for name in ["signup_form", "links_and_text", "injection", "long_page"] {
+    for name in [
+        "signup_form",
+        "links_and_text",
+        "injection",
+        "long_page",
+        "compat3",
+    ] {
         let a = observe_fixture(name, 0.0, ObserveOptions::default()).to_text();
         let b = observe_fixture(name, 0.0, ObserveOptions::default()).to_text();
         assert_eq!(a, b, "{name} must observe identically twice");

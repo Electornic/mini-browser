@@ -13,6 +13,7 @@
 // fighting with the borrow checker.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use rquickjs::{Ctx, Result, prelude::Func};
@@ -31,23 +32,60 @@ const MAX_BUFFERED: usize = 200;
 
 pub(super) type ConsoleBuffer = Rc<RefCell<Vec<ConsoleMessage>>>;
 
+/// Script label (`EvalOptions::filename`) → source text; see `JsRuntime::sources`.
+pub(super) type ScriptSources = Rc<RefCell<HashMap<String, Rc<str>>>>;
+
+pub(super) fn push(buffer: &ConsoleBuffer, level: &'static str, text: String) {
+    let mut buf = buffer.borrow_mut();
+    if buf.len() >= MAX_BUFFERED {
+        buf.remove(0);
+    }
+    buf.push(ConsoleMessage { level, text });
+}
+
 fn sink(buffer: &ConsoleBuffer, level: &'static str) -> impl Fn(String) + 'static {
     let buffer = buffer.clone();
     move |s: String| {
         eprintln!("[console.{level}] {s}");
-        let mut buf = buffer.borrow_mut();
-        if buf.len() >= MAX_BUFFERED {
-            buf.remove(0);
-        }
-        buf.push(ConsoleMessage { level, text: s });
+        push(&buffer, level, s);
     }
 }
 
-pub(super) fn register_console(ctx: &Ctx<'_>, buffer: ConsoleBuffer) -> Result<()> {
+// `Uncaught in {where}: {message} (near "x") at {url}:{line}:{col}` for
+// listener / timer / rAF errors — same locator as top-level script errors.
+fn error_reporter(
+    buffer: &ConsoleBuffer,
+    sources: &ScriptSources,
+) -> impl Fn(String, String, String) + 'static {
+    let buffer = buffer.clone();
+    let sources = sources.clone();
+    move |place: String, message: String, stack: String| {
+        let line = {
+            let sources = sources.borrow();
+            let stack = Some(stack.as_str()).filter(|s| !s.is_empty());
+            super::error_location::describe_error(&message, stack, |url| {
+                sources.get(url).map(|s| &**s)
+            })
+        };
+        let text = format!("Uncaught in {place}: {line}");
+        eprintln!("[console.error] {text}");
+        push(&buffer, "error", text);
+    }
+}
+
+pub(super) fn register_console(
+    ctx: &Ctx<'_>,
+    buffer: ConsoleBuffer,
+    sources: ScriptSources,
+) -> Result<()> {
     let globals = ctx.globals();
     globals.set("__mb_console_log", Func::from(sink(&buffer, "log")))?;
     globals.set("__mb_console_warn", Func::from(sink(&buffer, "warn")))?;
     globals.set("__mb_console_error", Func::from(sink(&buffer, "error")))?;
+    globals.set(
+        "__mb_report_error_native",
+        Func::from(error_reporter(&buffer, &sources)),
+    )?;
     ctx.eval::<(), _>(CONSOLE_BOOT)?;
     Ok(())
 }
@@ -69,6 +107,7 @@ const CONSOLE_BOOT: &str = r#"
         warn: globalThis.__mb_console_warn,
         error: globalThis.__mb_console_error,
     };
+    var reportNative = globalThis.__mb_report_error_native;
     var make = function (sink) {
         return function () { sink(join(arguments)); };
     };
@@ -80,16 +119,21 @@ const CONSOLE_BOOT: &str = r#"
     // Uncaught exceptions in listeners / timers: browsers keep going and
     // report them to the console, so do we (the agent sees them as
     // `console:` errors). Bound to the captured sink, so a page that
-    // replaces `console` can't hide them.
-    var reportError = make(sinks.error);
+    // replaces `console` can't hide them. `err.stack` goes to Rust so the
+    // line gets `at url:line:col` like a top-level script error. Every
+    // read is guarded: `err` is whatever the page threw.
     Object.defineProperty(globalThis, '__mb_report_error', {
         value: function (where, err) {
-            reportError('Uncaught in ' + where + ': ' + String(err));
+            var message = 'exception', stack = '';
+            try { message = String(err); } catch (e) {}
+            try { if (err && typeof err.stack === 'string') stack = err.stack; } catch (e) {}
+            reportNative('' + where, message, stack);
         },
         enumerable: false,
     });
     delete globalThis.__mb_console_log;
     delete globalThis.__mb_console_warn;
     delete globalThis.__mb_console_error;
+    delete globalThis.__mb_report_error_native;
 })();
 "#;

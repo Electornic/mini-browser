@@ -627,6 +627,25 @@ mod tests {
         TransformOp, Unit, Value, parse,
     };
 
+    #[test]
+    fn non_ascii_hash_color_drops_the_declaration_not_a_panic() {
+        // A `#` token's value is an identifier, so it may hold multibyte
+        // characters. Three or six bytes of those used to index past the
+        // char list or slice inside a character.
+        for css in [
+            "a{color:#\u{e9}1}",
+            "a{color:#\u{d55c}\u{ae00}}",
+            "a{color:#ab\u{20ac}}",
+        ] {
+            let sheet = parse(css).expect("sheet parses");
+            let decls: Vec<_> = sheet.rules.iter().flat_map(|r| &r.declarations).collect();
+            assert!(
+                decls.iter().all(|d| !matches!(d.value, Value::Color(_))),
+                "{css:?}: {decls:?}"
+            );
+        }
+    }
+
     // The selector AST is now opaque (owned by the `selectors` crate),
     // so parser tests assert the public surface (rule count + declarations
     // + selector list length) rather than diving into specific selector

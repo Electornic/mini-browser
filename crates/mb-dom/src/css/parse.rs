@@ -61,7 +61,10 @@ pub(super) fn length_with_unit(value: f32, unit: &str) -> Value {
 }
 
 fn parse_hex_color_str<'i>(hex: &str, input: &CssParser<'i>) -> Result<Value, ParseError> {
-    let (r, g, b) = match hex.len() {
+    // A hash token's value is an identifier and may be multibyte; the
+    // length match and byte slicing below assume ASCII.
+    let len = if hex.is_ascii() { hex.len() } else { 0 };
+    let (r, g, b) = match len {
         3 => {
             let chars: Vec<char> = hex.chars().collect();
             (
