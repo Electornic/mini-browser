@@ -2260,6 +2260,82 @@ mod tests {
 
     const PAGE: &str = r#"<!DOCTYPE html><html data-theme="dark"><head><title>t</title></head><body><div><p>x</p></div></body></html>"#;
 
+    fn styled_p(html_p: &str, css: &str) -> style::StyledNode {
+        let page = format!("<!DOCTYPE html><html><body><div>{html_p}</div></body></html>");
+        find_tag(&style_page(&page, css), "p").unwrap().clone()
+    }
+
+    fn px(v: f32) -> Value {
+        Value::Length(v, Unit::Px)
+    }
+
+    #[test]
+    fn important_beats_more_specific_normal() {
+        let p = styled_p(
+            r#"<p id="x" class="a">x</p>"#,
+            "#x { width: 1px; } .a { width: 2px !important; } p.a { width: 3px; }",
+        );
+        assert_eq!(p.value("width"), Some(&px(2.0)));
+    }
+
+    #[test]
+    fn important_declarations_cascade_by_specificity_then_order() {
+        let p = styled_p(
+            r#"<p id="x" class="a">x</p>"#,
+            "#x { width: 1px !important; } .a { width: 2px !important; }              .a { height: 3px !important; } p { height: 4px !important; } .a { height: 5px !important; }",
+        );
+        assert_eq!(
+            p.value("width"),
+            Some(&px(1.0)),
+            "more specific important wins"
+        );
+        assert_eq!(
+            p.value("height"),
+            Some(&px(5.0)),
+            "later important of equal specificity wins"
+        );
+    }
+
+    #[test]
+    fn important_inline_beats_important_author() {
+        let p = styled_p(
+            r#"<p class="a" style="width: 9px !important; height: 8px">x</p>"#,
+            ".a { width: 1px !important; height: 2px !important; } #none, p { top: 1px; }",
+        );
+        assert_eq!(
+            p.value("width"),
+            Some(&px(9.0)),
+            "inline important > author important"
+        );
+        assert_eq!(
+            p.value("height"),
+            Some(&px(2.0)),
+            "author important > inline normal"
+        );
+    }
+
+    #[test]
+    fn important_shorthand_beats_more_specific_normal_longhand() {
+        let p = styled_p(
+            r#"<p class="a b">x</p>"#,
+            ".a.b { margin-left: 3px; } .a { margin: 1px !important; }",
+        );
+        assert_eq!(p.value("margin-left"), Some(&px(1.0)));
+    }
+
+    #[test]
+    fn important_inside_a_non_matching_media_block_does_not_apply() {
+        let p = styled_p(
+            r#"<p class="a">x</p>"#,
+            ".a { width: 1px; } @media (max-width: 600px) { .a { width: 2px !important; } }",
+        );
+        assert_eq!(
+            p.value("width"),
+            Some(&px(1.0)),
+            "1280px viewport: the block is false"
+        );
+    }
+
     #[test]
     fn root_custom_property_reaches_body_descendants() {
         let styled = style_page(PAGE, ":root { --x: 5px; } p { margin-left: var(--x); }");

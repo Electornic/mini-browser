@@ -375,7 +375,7 @@ impl Gen {
         }
         let style = if self.rng.chance(20) {
             let n = self.rng.range(1, 4);
-            (0..n).map(|_| self.declaration()).collect()
+            (0..n).map(|_| self.flagged_declaration()).collect()
         } else {
             Vec::new()
         };
@@ -439,8 +439,19 @@ impl Gen {
     fn rule(&mut self) -> Rule {
         let selector = self.selector();
         let n = self.rng.range(1, 8);
-        let decls = (0..n).map(|_| self.declaration()).collect();
+        let decls = (0..n).map(|_| self.flagged_declaration()).collect();
         Rule { selector, decls }
+    }
+
+    /// A declaration, sometimes `!important` (step 1a: the two-pass cascade
+    /// — important rules over normal ones, inline important last).
+    fn flagged_declaration(&mut self) -> String {
+        let declaration = self.declaration();
+        if self.rng.chance(12) {
+            format!("{declaration} !important")
+        } else {
+            declaration
+        }
     }
 
     // ------------------------------------------------------- values ----
@@ -2367,6 +2378,8 @@ fn fuzz_generator_covers_its_spec() {
     let mut with_areas = 0;
     let mut with_shorthand = 0;
     let mut with_minmax = 0;
+    let mut important_rules = 0;
+    let mut important_inline = 0;
     let mut korean = 0;
     for seed in 1..=200 {
         let case = Gen::case(seed);
@@ -2382,6 +2395,12 @@ fn fuzz_generator_covers_its_spec() {
         }
         if case.css().contains("minmax(") {
             with_minmax += 1;
+        }
+        if case.css().contains("!important") {
+            important_rules += 1;
+        }
+        if case.html().contains("!important") {
+            important_inline += 1;
         }
         if case.html().contains('한') || case.html().contains('안') || case.html().contains('가')
         {
@@ -2406,6 +2425,14 @@ fn fuzz_generator_covers_its_spec() {
         "{with_shorthand}/200 cases with the grid-template shorthand"
     );
     assert!(with_minmax >= 10, "{with_minmax}/200 cases with minmax()");
+    assert!(
+        important_rules >= 50,
+        "{important_rules}/200 cases with an !important rule declaration"
+    );
+    assert!(
+        important_inline >= 10,
+        "{important_inline}/200 cases with an inline !important"
+    );
     // The CSS soup wraps rules in `@media`, sometimes past the nesting cap.
     let mut media = 0;
     let mut past_cap = 0;

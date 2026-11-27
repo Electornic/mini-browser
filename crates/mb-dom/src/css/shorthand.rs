@@ -50,18 +50,22 @@ pub(super) fn parse_border_radius_shorthand<'i>(
         Declaration {
             name: "border-top-left-radius".into(),
             value: tl,
+            important: false,
         },
         Declaration {
             name: "border-top-right-radius".into(),
             value: tr,
+            important: false,
         },
         Declaration {
             name: "border-bottom-right-radius".into(),
             value: br,
+            important: false,
         },
         Declaration {
             name: "border-bottom-left-radius".into(),
             value: bl,
+            important: false,
         },
     ])
 }
@@ -144,18 +148,22 @@ pub(super) fn parse_box_edge_shorthand<'i>(
         Declaration {
             name: format!("{name}-top"),
             value: top,
+            important: false,
         },
         Declaration {
             name: format!("{name}-right"),
             value: right,
+            important: false,
         },
         Declaration {
             name: format!("{name}-bottom"),
             value: bottom,
+            important: false,
         },
         Declaration {
             name: format!("{name}-left"),
             value: left,
+            important: false,
         },
     ])
 }
@@ -220,16 +228,19 @@ pub(super) fn parse_flex_shorthand<'i>(
         Declaration {
             name: "flex-grow".into(),
             value: Value::Number(grow_value),
+            important: false,
         },
         Declaration {
             name: "flex-shrink".into(),
             value: Value::Number(shrink_value),
+            important: false,
         },
     ];
     if let Some(basis_value) = basis {
         decls.push(Declaration {
             name: "flex-basis".into(),
             value: basis_value,
+            important: false,
         });
     }
     Ok(decls)
@@ -285,12 +296,14 @@ pub(super) fn parse_background_shorthand<'i>(
         decls.push(Declaration {
             name: "background-color".into(),
             value: c,
+            important: false,
         });
     }
     if let Some(i) = image {
         decls.push(Declaration {
             name: "background-image".into(),
             value: i,
+            important: false,
         });
     }
     if decls.is_empty() {
@@ -328,10 +341,12 @@ pub(super) fn parse_background_position<'i>(
         Declaration {
             name: "background-position-x".into(),
             value: x,
+            important: false,
         },
         Declaration {
             name: "background-position-y".into(),
             value: y,
+            important: false,
         },
     ])
 }

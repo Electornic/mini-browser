@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 932 (workspace 합계, 2026-11-27 호환성 3차 1r `<html>` 문서 요소 +13; 1단계 P probe 는 919, 2.1a 위키 그리드는 915). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 943 (workspace 합계, 2026-11-27 호환성 3차 1a `!important` +11; 1r `<html>` 문서 요소는 932, 1단계 P probe 는 919). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -212,7 +212,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - `CHROME_HEIGHT` 는 에이전트 클릭 좌표·스크린샷 자르기·창 크기와 묶여 있다. 크롬 줄을 창 종류마다 다르게 하거나 아래쪽 바를 두지 말 것 (docs/concept.md "디자인 적용"). 페이지 위에 띠를 겹쳐 그리는 것도 안 된다(에이전트만 보는 영역이 생김). 크롬에 임베더 것을 넣을 자리는 툴바 `accessory_width`(알약)와 탭 줄 `strip_reserved`(좁은 창의 에이전트 바) 둘 — docs/concept.md "좁은 창".
 
 ### CSS 파서는 조용히 버린다
-- 선언 값은 `parse_entirely` 안에서 읽혀서, 전용 파서가 없는 속성은 토큰이 둘 이상이면(`border: 1px solid`, `!important`, 쉼표 목록, `calc()`) **선언 통째로** 사라진다. 지원 안 하는 의사 클래스 하나가 있으면 **규칙 통째로**(콤마로 묶인 셀렉터까지), `@media` 외 at-rule 은 **본문 통째로**(`@layer`·`@supports` 포함 — 2.2·2.3 전까지). 실사이트에서 "왜 이 스타일이 안 먹지?" 는 먼저 `css::parse_with_report` 로 확인.
+- 선언 값은 `parse_entirely` 안에서 읽혀서, 전용 파서가 없는 속성은 토큰이 둘 이상이면(`border: 1px solid`, 쉼표 목록, `calc()`) **선언 통째로** 사라진다. `!important` 는 1a 부터 파싱된다 — 값 파서는 `!` 앞까지만 보고(`parse_until_before(Bang)`), 플래그는 `Declaration::important`, 캐스케이드는 두 패스(작성자 일반 < 인라인 일반 < 작성자 중요 < 인라인 중요). 새 값 파서도 `!` 를 신경 쓸 필요 없다. 지원 안 하는 의사 클래스 하나가 있으면 **규칙 통째로**(콤마로 묶인 셀렉터까지), `@media` 외 at-rule 은 **본문 통째로**(`@layer`·`@supports` 포함 — 2.2·2.3 전까지). 실사이트에서 "왜 이 스타일이 안 먹지?" 는 먼저 `css::parse_with_report` 로 확인.
 
 ### `@media` 는 평가된다 (호환성 3차 2.1)
 - 규칙은 `Rule::media`(감싼 블록, 중첩은 `parent` 사슬 = AND)를 달고, 스타일 패스가 시작할 때 `media::evaluate_blocks` 로 블록마다 한 번 평가한다 — 노드마다 평가하지 말 것. 평가 입력은 `MediaContext`(페이지 뷰포트 = 창 − `CHROME_HEIGHT`)뿐, 나머지는 상수(라이트·hover·fine·1dppx·scripting) — 관전 창의 Retina·OS 테마가 페이지에 새면 안 된다(결정성). `matchMedia` 를 만들면 `css::media::evaluate` 를 쓸 것.

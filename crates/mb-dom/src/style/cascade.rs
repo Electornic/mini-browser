@@ -59,7 +59,7 @@ pub(super) fn specified_values(
         .map(|(order, (rule, _))| (order, rule))
     {
         if let Some(specificity) = matching_specificity(&element, &mut ctx, &rule.selectors) {
-            matched.push((specificity, rule_order, &rule.declarations));
+            matched.push((specificity, rule_order, rule));
         }
     }
 
@@ -77,22 +77,32 @@ pub(super) fn specified_values(
             values.insert(name, value);
         }
     }
-    for (_, _, declarations) in matched {
-        apply_declarations(&mut values, declarations);
-    }
-
     // Inline `style="..."` carries the highest author specificity per the CSS
-    // spec — it beats every selector match, even an `!important`-free ID
-    // selector. Apply after the matched-rules sort so a `<td style="width:
-    // 60px">` value lands on top of any author `td { width: 100px; }` rule.
-    // !important inside the inline style is not yet honoured (we don't model
-    // !important anywhere); revisit once important folding is implemented.
-    if let Some(NodeType::Element(elem_data)) = document.get(node_id).map(|n| &n.node_type)
-        && let Some(inline_source) = elem_data.attributes.get("style")
-    {
-        let inline_decls = crate::css::parse_inline_style(inline_source);
-        apply_declarations(&mut values, &inline_decls);
+    // spec — it beats every selector match, even an ID selector. Applied
+    // after the matched rules so a `<td style="width: 60px">` value lands on
+    // top of any author `td { width: 100px; }` rule.
+    let inline_decls = match document.get(node_id).map(|n| &n.node_type) {
+        Some(NodeType::Element(elem_data)) => elem_data
+            .attributes
+            .get("style")
+            .map(|source| crate::css::parse_inline_style(source))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
+    // Two passes in the spec's origin order (CSS Cascade 4 §6.1; no UA
+    // `!important` or user sheets here): author normal < inline normal <
+    // author important < inline important. Within a pass, the
+    // (specificity, source order) sort decides. Rules without an
+    // `!important` declaration skip the second pass (`Rule::has_important`).
+    for (_, _, rule) in &matched {
+        apply_declarations(&mut values, &rule.declarations, false);
     }
+    apply_declarations(&mut values, &inline_decls, false);
+    for (_, _, rule) in matched.iter().filter(|(_, _, rule)| rule.has_important) {
+        apply_declarations(&mut values, &rule.declarations, true);
+    }
+    apply_declarations(&mut values, &inline_decls, true);
 
     // Legacy `<center>` element: real browsers center every block child
     // through quirks-mode magic (effectively `margin: 0 auto`). HN still
@@ -122,9 +132,10 @@ fn parent_is_center(document: &Document, node_id: NodeId) -> bool {
     )
 }
 
-fn apply_declarations(values: &mut PropertyMap, declarations: &[Declaration]) {
-    // Later declarations with the same property name overwrite earlier ones.
-    for declaration in declarations {
+/// Fold the declarations of one importance into `values`; later ones with
+/// the same property name overwrite earlier ones.
+fn apply_declarations(values: &mut PropertyMap, declarations: &[Declaration], important: bool) {
+    for declaration in declarations.iter().filter(|d| d.important == important) {
         values.insert(declaration.name.clone(), declaration.value.clone());
     }
 }

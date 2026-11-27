@@ -14,10 +14,9 @@
      link, but its text paints nowhere. Today: overflow isn't clipped, so
      the 1px box spills its text (step 3, clipping).
   2. Search form (.hide-sm) — visible at 800px: its `display:none
-     !important` sits in a max-width:600px @media. Today it shows only by
-     accident (!important declarations are dropped); once step 1 keeps
-     !important it must stay visible — step 2.1 (@media evaluation, done)
-     keeps that block off at 800px.
+     !important` sits in a max-width:600px @media. Matches Chrome: step 1a
+     keeps !important and step 2.1 (@media evaluation) keeps that block off
+     at 800px (before 2.1 it showed only because !important was dropped).
   3. Mobile @media — desktop nav (Features, Pricing) visible, "Open
      navigation" hidden. Matches Chrome since step 2.1 (@media evaluated);
      before it every @media applied and the two were inverted.

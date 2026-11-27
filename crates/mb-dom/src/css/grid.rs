@@ -76,14 +76,17 @@ pub(super) fn parse_grid_template_shorthand<'i>(
             Declaration {
                 name: "grid-template-rows".into(),
                 value: rows,
+                important: false,
             },
             Declaration {
                 name: "grid-template-columns".into(),
                 value: columns,
+                important: false,
             },
             Declaration {
                 name: "grid-template-areas".into(),
                 value: areas,
+                important: false,
             },
         ]
     };

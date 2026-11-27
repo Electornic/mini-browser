@@ -52,7 +52,9 @@ pub enum DropReason {
     /// A known property with an old-IE value hack (`progid:`,
     /// `expression(`, `\9`, `\0`, `!ie`) — invalid in every modern browser.
     LegacyHack,
-    /// The value carries `!important`, which the parser doesn't model.
+    /// The value carries `!important` and the same declaration without it
+    /// parses — the flag itself broke it (before step 1a: every
+    /// `!important`; since: a bug).
     Important,
     /// A known property without a dedicated parser got more than one
     /// token (`border: 1px solid`, comma lists, `calc(a) b`).
@@ -289,13 +291,45 @@ fn declaration_reason(property: &str, value: &str) -> DropReason {
     {
         return DropReason::LegacyHack;
     }
-    if has_important(&lower) {
-        return DropReason::Important;
+    // A trailing `!important`: blame the flag only if the value before it
+    // is accepted on its own; otherwise classify that value (step 1a — the
+    // flag is parsed, so a drop that carries it is usually the value's).
+    if let Some(before) = strip_trailing_important(value) {
+        if parses_alone(property, before) {
+            return DropReason::Important;
+        }
+        return value_reason(kind, before);
     }
+    if has_important(&lower) {
+        // `!important` followed by more tokens: invalid everywhere.
+        return DropReason::InvalidValue;
+    }
+    value_reason(kind, value)
+}
+
+fn value_reason(kind: ValueKind, value: &str) -> DropReason {
     if kind != ValueKind::Dedicated && top_level_tokens(value) > 1 {
         return DropReason::MultiToken;
     }
     DropReason::InvalidValue
+}
+
+/// `value` without a final `!important` (whitespace/comments allowed
+/// around and inside it), or `None` when it doesn't end with one.
+fn strip_trailing_important(value: &str) -> Option<&str> {
+    let lower = value.to_ascii_lowercase();
+    let at = lower.rfind('!')?;
+    let rest = lower[at + 1..].replace("/**/", " ");
+    (rest.trim() == "important").then(|| &value[..at])
+}
+
+/// Whether `property: value` is a declaration the parser keeps. Runs with
+/// the report put aside so the probe parse doesn't record anything.
+fn parses_alone(property: &str, value: &str) -> bool {
+    let saved = REPORT.with(|slot| slot.borrow_mut().take());
+    let kept = !super::parse_inline_style(&format!("{property}:{value}")).is_empty();
+    REPORT.with(|slot| *slot.borrow_mut() = saved);
+    kept
 }
 
 /// `!important` with any whitespace or comment between `!` and the word.
@@ -370,7 +404,7 @@ mod tests {
     #[test]
     fn report_lists_dropped_rules_declarations_and_at_rules() {
         let (sheet, report) = parse_with_report(
-            ".a { width: 1px !important; color: red }
+            ".a { width: 1px !imp; color: red }
              .b:frobnicate { color: blue }
              @media (min-width: 1px) { .c { colour-ish: 1 2 3 } }
              @supports (display: grid) { .d { display: grid } }",
@@ -390,7 +424,7 @@ mod tests {
         assert_eq!(
             decls,
             [
-                ("width", "width: 1px !important", DropReason::Important),
+                ("width", "width: 1px !imp", DropReason::MultiToken),
                 (
                     "colour-ish",
                     "colour-ish: 1 2 3",
@@ -468,7 +502,21 @@ mod tests {
             DropReason::LegacyHack
         );
         assert_eq!(reason("width: 100px\\9"), DropReason::LegacyHack);
-        assert_eq!(reason("color: red ! important"), DropReason::Important);
+        // `!important` is parsed (step 1a): a drop that carries it is
+        // classified by the value before it — `important` would mean the
+        // flag itself broke an otherwise valid declaration (a bug).
+        assert_eq!(
+            reason("border: 1px solid red !important"),
+            DropReason::MultiToken
+        );
+        assert_eq!(
+            reason("width: calc(100% - 2px) ! important"),
+            DropReason::InvalidValue
+        );
+        assert_eq!(
+            reason("color: red !important foo"),
+            DropReason::InvalidValue
+        );
         assert_eq!(reason("border: 1px solid red"), DropReason::MultiToken);
         assert_eq!(reason("--shadow: 0 1px 2px red"), DropReason::MultiToken);
         assert_eq!(

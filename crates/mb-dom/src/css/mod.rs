@@ -64,12 +64,18 @@ pub struct Rule {
     /// of that block (`None` = applies everywhere). The cascade skips the
     /// rule when the block's chain doesn't match.
     pub media: Option<Rc<MediaBlock>>,
+    /// Some declaration is `!important` — the cascade's second (important)
+    /// pass skips rules without one.
+    pub has_important: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Declaration {
     pub name: String,
     pub value: Value,
+    /// `!important` (compat round 3 step 1a). A shorthand's longhands all
+    /// carry the shorthand's flag.
+    pub important: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -443,6 +449,7 @@ impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler<'_> {
         let declarations = parse_declaration_block(input).map_err(CssParseError::custom)?;
         Ok(vec![Rule {
             selectors: prelude.0,
+            has_important: declarations.iter().any(|d| d.important),
             declarations,
             media: self.media.clone(),
         }])
@@ -568,10 +575,12 @@ fn parse_declaration_block<'i>(input: &mut CssParser<'i>) -> Result<Vec<Declarat
     for item in iter {
         match item {
             Ok(decls) => declarations.extend(decls),
-            Err((_, source, _)) => report::record(|r| {
-                r.dropped_declarations
-                    .push(report::dropped_declaration(source))
-            }),
+            // Classify outside `record`: it may re-parse the declaration.
+            Err((_, source, _)) if report::is_active() => {
+                let dropped = report::dropped_declaration(source);
+                report::record(|r| r.dropped_declarations.push(dropped));
+            }
+            Err(_) => {}
         }
     }
     Ok(declarations)
@@ -593,11 +602,19 @@ impl<'i> cssparser::DeclarationParser<'i> for DeclHandler {
         // value-shape helpers each consume their delimited slice end-to-end so
         // `parse_value` itself just routes by name.
         let name = name.to_string();
-        let result = parse_declaration_value(&name, input);
-        match result {
-            Ok(decls) => Ok(decls),
-            Err(err) => Err(CssParseError::custom(err)),
+        // The value ends before a `!`; what follows must be exactly
+        // `!important` (any case, whitespace/comments allowed) — anything
+        // else (`!ie`, `!important foo`) leaves input behind and the
+        // declaration drops, as in Chrome. Value parsers never see the flag.
+        let mut decls = input.parse_until_before(cssparser::Delimiter::Bang, |input| {
+            parse_declaration_value(&name, input).map_err(CssParseError::custom)
+        })?;
+        if input.try_parse(cssparser::parse_important).is_ok() {
+            for decl in &mut decls {
+                decl.important = true;
+            }
         }
+        Ok(decls)
     }
 }
 
@@ -641,6 +658,7 @@ fn parse_declaration_value<'i>(
         return Ok(vec![Declaration {
             name: name.to_string(),
             value,
+            important: false,
         }]);
     }
     if name == "text-shadow" {
@@ -648,6 +666,7 @@ fn parse_declaration_value<'i>(
         return Ok(vec![Declaration {
             name: name.to_string(),
             value,
+            important: false,
         }]);
     }
     if name == "transform" {
@@ -655,6 +674,7 @@ fn parse_declaration_value<'i>(
         return Ok(vec![Declaration {
             name: name.to_string(),
             value,
+            important: false,
         }]);
     }
     if name == "flex" {
@@ -671,6 +691,7 @@ fn parse_declaration_value<'i>(
         return Ok(vec![Declaration {
             name: name.to_string(),
             value,
+            important: false,
         }]);
     }
     if name == "grid-column" || name == "grid-row" {
@@ -678,6 +699,7 @@ fn parse_declaration_value<'i>(
         return Ok(vec![Declaration {
             name: name.to_string(),
             value,
+            important: false,
         }]);
     }
     if name == "grid-template-areas" {
@@ -685,6 +707,7 @@ fn parse_declaration_value<'i>(
         return Ok(vec![Declaration {
             name: name.to_string(),
             value,
+            important: false,
         }]);
     }
     if name == "grid-template" {
@@ -703,6 +726,7 @@ fn parse_declaration_value<'i>(
     Ok(vec![Declaration {
         name: name.to_string(),
         value,
+        important: false,
     }])
 }
 
@@ -712,6 +736,103 @@ mod tests {
         BoxShadow, Color, GradientDirection, GradientKind, GridLine, Stylesheet, TextShadow,
         TrackSize, TransformOp, Unit, Value, parse,
     };
+
+    /// `(name, value, important)` of every declaration in the sheet.
+    fn flagged(css: &str) -> Vec<(String, Value, bool)> {
+        parse(css)
+            .unwrap()
+            .rules
+            .iter()
+            .flat_map(|r| &r.declarations)
+            .map(|d| (d.name.clone(), d.value.clone(), d.important))
+            .collect()
+    }
+
+    #[test]
+    fn important_declaration_is_kept_and_flagged() {
+        let px = |v| Value::Length(v, Unit::Px);
+        assert_eq!(
+            flagged(".a{width:1px !important; height:2px}"),
+            [
+                ("width".to_string(), px(1.0), true),
+                ("height".to_string(), px(2.0), false)
+            ]
+        );
+        // Whitespace/comments between `!` and the word, any case.
+        for css in [
+            ".a{width:1px ! important}",
+            ".a{width:1px!IMPORTANT}",
+            ".a{width:1px !/**/important }",
+        ] {
+            assert_eq!(
+                flagged(css),
+                [("width".to_string(), px(1.0), true)],
+                "{css}"
+            );
+        }
+        let sheet = parse(".a{width:1px !important} .b{width:1px}").unwrap();
+        assert!(sheet.rules[0].has_important);
+        assert!(!sheet.rules[1].has_important);
+    }
+
+    #[test]
+    fn important_garbage_suffix_drops() {
+        // Anything after `!important`, or a `!` that isn't `!important`
+        // (the old-IE `!ie` hack), drops the declaration — as in Chrome.
+        let decls =
+            flagged(".a{color:red !important foo; width:1px !ie; top:1px !imp; height:2px}");
+        assert_eq!(
+            decls,
+            [("height".to_string(), Value::Length(2.0, Unit::Px), false)]
+        );
+    }
+
+    #[test]
+    fn custom_property_important_strips_flag() {
+        let decls = flagged(":root{--x: 5px !important}");
+        assert_eq!(
+            decls,
+            [("--x".to_string(), Value::Length(5.0, Unit::Px), true)]
+        );
+    }
+
+    #[test]
+    fn shorthand_longhands_inherit_important() {
+        for css in [
+            ".a{margin:1px 2px !important}",
+            ".a{padding:1px !important}",
+            ".a{border-radius:3px !important}",
+            ".a{flex:1 !important}",
+            ".a{background:red !important}",
+        ] {
+            let decls = flagged(css);
+            assert!(!decls.is_empty(), "{css}");
+            assert!(
+                decls.iter().all(|(_, _, important)| *important),
+                "{css}: {decls:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn important_inside_keyframes_is_ignored() {
+        // @keyframes bodies aren't modelled; their `!important` (ignored by
+        // spec) must not leak into normal rules.
+        let sheet = parse("@keyframes k{from{color:red !important}to{color:blue}} .a{color:green}")
+            .unwrap();
+        assert_eq!(sheet.rules.len(), 1);
+        assert!(!sheet.rules[0].has_important);
+    }
+
+    #[test]
+    fn inline_style_important_is_flagged() {
+        let decls = super::parse_inline_style("color: red !important; width: 1px");
+        let flags: Vec<_> = decls
+            .iter()
+            .map(|d| (d.name.as_str(), d.important))
+            .collect();
+        assert_eq!(flags, [("color", true), ("width", false)]);
+    }
 
     #[test]
     fn negative_flex_factors_are_invalid_and_dropped() {
