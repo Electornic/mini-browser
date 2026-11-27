@@ -884,6 +884,9 @@ enum Kind {
     NonFinite,
     TooWide,
     Slow,
+    /// The rule-indexed cascade styled differently from the flat one
+    /// (every selector tried on every node — follow-up F4).
+    IndexMismatch,
 }
 
 #[derive(Clone, Debug)]
@@ -963,6 +966,24 @@ fn run_pipeline(html_src: &str, css_src: &str) -> view::DocumentView {
 
 const MAX_WIDTH: f32 = 1e7;
 
+/// Whether the rule index changes nothing: the styled tree with the
+/// sheet's real index equals the one with every selector tried everywhere.
+fn index_matches_flat(document: &mb_dom::dom::Document, sheet: &css::Stylesheet) -> bool {
+    let Some(&root) = document.roots().last() else {
+        return true;
+    };
+    let flat = sheet.clone().with_flat_index();
+    style::style_tree(document, root, std::slice::from_ref(sheet))
+        == style::style_tree(document, root, &[flat])
+}
+
+fn index_mismatch(css_src: &str) -> Failure {
+    Failure {
+        kind: Kind::IndexMismatch,
+        detail: format!("indexed cascade differs from the flat one — css: {css_src:?}"),
+    }
+}
+
 /// Judge one case on the current thread: panic, then layout invariants.
 fn judge(case: &Case) -> Result<(), Failure> {
     let html_src = case.html();
@@ -979,7 +1000,20 @@ fn judge(case: &Case) -> Result<(), Failure> {
     };
     let check_width = !case.has_unbounded_values();
     check_box(&view.layout_root, check_width, &mut Vec::new())?;
-    check_commands(&view.commands)
+    check_commands(&view.commands)?;
+    let same = quietly(|| {
+        let document = html::parse(&html_src).expect("html5ever never fails");
+        let sheet = css::parse(&css_src).expect("css::parse recovers");
+        index_matches_flat(&document, &sheet)
+    });
+    match same {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(index_mismatch(&css_src)),
+        Err(payload) => Err(Failure {
+            kind: Kind::Panic,
+            detail: panic_message(payload.as_ref()),
+        }),
+    }
 }
 
 fn box_tag(layout_box: &LayoutBox) -> String {
@@ -2177,8 +2211,10 @@ fn css_soup_case(seed: u64) -> Result<usize, Failure> {
             .map(|r| r.declarations.len())
             .sum::<usize>()
             + inline.len();
+        let mut same = true;
         if !sheet.rules.is_empty() {
             let document = html::parse(SOUP_PAGE).expect("html5ever never fails");
+            same = index_matches_flat(&document, &sheet);
             let view = view::build_document_view(
                 &document,
                 &[sheet],
@@ -2193,12 +2229,16 @@ fn css_soup_case(seed: u64) -> Result<usize, Failure> {
             // tiny-skia the way the window and agent screenshots do.
             let _ = mb_engine::render::rasterize(&view.commands, 400, 300);
         }
-        survived
+        (survived, same)
     });
-    outcome.map_err(|payload| Failure {
-        kind: Kind::Panic,
-        detail: format!("{} — css: {source:?}", panic_message(payload.as_ref())),
-    })
+    match outcome {
+        Ok((survived, true)) => Ok(survived),
+        Ok((_, false)) => Err(index_mismatch(&source)),
+        Err(payload) => Err(Failure {
+            kind: Kind::Panic,
+            detail: format!("{} — css: {source:?}", panic_message(payload.as_ref())),
+        }),
+    }
 }
 
 struct SoupReport {

@@ -335,6 +335,8 @@ MB_NET_CACHE_OFFLINE=1 ./target/debug/mb-mcp --start-url https://news.ycombinato
 
 **F3 재측정** (2026-11-28, 라벨 `f3`, `f2` 대비 — 둥근 테두리, [compat-round3.md F3](compat-round3.md#f3--둥근-테두리-2026-11-28)): `load_ms` 외 25곳 모든 열 동일, 요소 목록 diff 없음(페인트만 바뀜). 미리보기에서 GitHub 버튼 테두리가 둥글다.
 
+**F4 재측정** (2026-11-28, 라벨 `f4`, `f3` 대비 — 셀렉터 규칙 색인, [compat-round3.md F4](compat-round3.md#f4--셀렉터-규칙-색인-2026-11-28)): `diff` 비어 있음, `load_ms` 외 모든 열 동일. 스타일 패스(release) GitHub 974 → 130ms · yna 758 → 218 · enwiki 195 → 76 · apple 109 → 13. `load_ms` GitHub 1,168 → 325.
+
 - `ms` = `navigate`(settle 포함) 벽시계, 이 맥에서. 두 실행 사이 차이는 대부분 ±10% 안, 가장 큰 것은 kowiki 256 → 197(−23%)·github 1,829 → 1,562(−15%) — 시간은 비교용이 아니라 timeout 판정용.
 - 기대 컨트롤 **누락 사이트 8곳**(naver·daum·hani·korea-kr·velog·d2·google·enwiki; 0b 때는 측정된 17곳 중 6곳). 원인 분류는 각 단계에서 — 지금 표는 기준선. naver 검색창은 ARIA `combobox` 다(역할 오기를 녹화 후 tsv 에서 고침).
 - **콘솔 에러**(`prompts.rs` "제3자 스크립트 콘솔 에러" 결정용 입력): 측정된 20곳 중 **16곳이 1건 이상**, 합 104건 중 98건이 `Uncaught in script`. 많은 곳 korea-kr 33·bbc 15·yna 13·daum 9·google 6·kakaocorp 6. 대부분 빠진 API(`getElementsByTagName` 류, [JS API 표면 프로브](#js-api-표면-프로브)). naver 광고 2건은 이번 스냅샷에서 `near "document.getElementsByTagName"` / `near "Na"`(gfp-core 의 축약 별칭 — 2차의 `console.debug` 가 이번 빌드에선 지역 변수로 줄여져 있음)로 읽힌다. 0a 권고(지금은 `prompts.rs` 를 안 바꿈)를 바꿀 근거는 아직 없다 — 다음은 제3자 에러가 있는 손으로 쓴 eval 페이지로 확인.

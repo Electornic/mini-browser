@@ -778,6 +778,53 @@ mod tests {
         assert_eq!(layered_color(css), rgb(0, 0, 1));
     }
 
+    // ---- F4: selector rule index ----
+
+    /// The indexed cascade and the flat one (every selector tried on every
+    /// node — the cascade before F4) must agree exactly.
+    fn assert_index_matches_flat(html: &str, css: &str) {
+        let document = html::parse(html).unwrap();
+        let root = *document.roots().last().unwrap();
+        let sheet = parse_css(css);
+        let flat = sheet.clone().with_flat_index();
+        assert_ne!(sheet.index, flat.index, "the real index buckets something");
+        let indexed = style::style_tree(&document, root, std::slice::from_ref(&sheet));
+        let reference = style::style_tree(&document, root, &[flat]);
+        assert_eq!(indexed, reference, "{css}");
+    }
+
+    #[test]
+    fn rule_index_matches_the_flat_cascade() {
+        let html = r##"<!DOCTYPE html><html><body>
+            <div id="x" class="a  b	c"><p class="b">t <span id="X" class="B">u</span></p>
+            <svg class="a"><foreignObject class="f"></foreignObject></svg>
+            <a id="two words" class="c" title="t" href="#">l</a></div></body></html>"##;
+        let css = "
+            #x { color: #000001 } #X { color: #000002 } #two { color: #000003 }
+            .a { margin-top: 1px } .b { margin-top: 2px } .B { margin-top: 3px }
+            div.c { padding-top: 1px } DIV { padding-left: 2px } p .b, span#X { padding-right: 3px }
+            * { line-height: 2 } [title] { width: 7px } a:not(.q) { height: 4px }
+            :not(.a) > span { font-size: 9px } .a.b.c { opacity: 0.5 }
+            foreignobject { width: 1px } .f { height: 2px }
+            p, .nope, #nope { border-top-width: 5px }
+            .b { color: #000004 !important } @layer l { .c { color: #000005 !important } }
+            @media print { .a { color: #000009 } }";
+        assert_index_matches_flat(html, css);
+    }
+
+    #[test]
+    fn rule_index_keeps_source_order_and_specificity_ties() {
+        // Same specificity in different buckets: source order still decides.
+        let html = r#"<div><p id="i" class="k">x</p></div>"#;
+        for css in [
+            ".k { color: #000001 } p { color: #000002 } * { color: #000003 }",
+            "p.k { color: #000001 } #i { color: #000002 } .k { color: #000003 }",
+            "* { color: #000003 } .k, p, #i { color: #000001 }",
+        ] {
+            assert_index_matches_flat(html, css);
+        }
+    }
+
     #[test]
     fn currentcolor_resolves_to_the_color_property() {
         let (document, root) =

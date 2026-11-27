@@ -14,6 +14,7 @@ pub mod media;
 mod parse;
 pub mod properties;
 mod report;
+pub mod rule_index;
 mod selector;
 mod shadow;
 mod shorthand;
@@ -60,6 +61,25 @@ pub struct Stylesheet {
     /// [`Rule::layer`] indexes it. Ranked per style pass across all sheets
     /// by [`layer::document_layer_ranks`].
     pub layers: Vec<layer::Layer>,
+    /// Which rules' selectors each node needs to try (follow-up F4), built
+    /// by [`parse`] from `rules` — rebuild it ([`Stylesheet::reindex`]) if
+    /// you change `rules` afterwards.
+    pub index: rule_index::RuleIndex,
+}
+
+impl Stylesheet {
+    /// Rebuild [`Stylesheet::index`] from the current rules.
+    pub fn reindex(&mut self) {
+        self.index = rule_index::RuleIndex::build(&self.rules);
+    }
+
+    /// This sheet with every selector in the index's universal list: the
+    /// cascade then tries all of them on every node, as before the index.
+    /// For checking that the index changes nothing (tests, fuzzer).
+    pub fn with_flat_index(mut self) -> Self {
+        self.index = rule_index::RuleIndex::flat(&self.rules);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -406,10 +426,12 @@ pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
         // a single entry, `@media` blocks contribute N (Phase 6.F).
         collect_rules(iter, &mut rules);
     }
+    let index = rule_index::RuleIndex::build(&rules);
     Ok(Stylesheet {
         rules,
         media: build.media,
         layers: build.layers.layers,
+        index,
     })
 }
 

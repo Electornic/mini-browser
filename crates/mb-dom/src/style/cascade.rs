@@ -12,7 +12,7 @@ use selectors::context::{
 };
 
 use crate::{
-    css::{Declaration, MiniBrowserSelectorImpl, Rule, Selector, Value, layer::UNLAYERED},
+    css::{Declaration, MiniBrowserSelectorImpl, Rule, Value, layer::UNLAYERED},
     dom::{Document, NodeId, NodeType},
     dom_select::{MatchingElement, MatchingState},
 };
@@ -44,39 +44,73 @@ pub(super) fn specified_values(
     );
 
     // First collect every rule that matches this node together with its
-    // layer rank, specificity and source order.
+    // layer rank, specificity and source order. Only the selectors the
+    // sheet's rule index files under this node's id / classes / tag (plus
+    // the universal ones) can match — the rest are never tried (F4). Rules
+    // come out in source order, as the old all-rules walk produced them.
     // A rule in a `@media` block that doesn't match is skipped; its slot
     // in `rule_order` stays, so source order is unchanged for the rest.
+    let (id, class, tag) = match document.get(node_id).map(|n| &n.node_type) {
+        Some(NodeType::Element(e)) => (
+            e.attributes.get("id").map(String::as_str),
+            e.attributes.get("class").map(String::as_str),
+            Some(e.tag_name.as_str()),
+        ),
+        _ => (None, None, None),
+    };
     let no_ranks = Vec::new();
-    for (rule_order, (rule, ranks)) in cascade
-        .stylesheets
-        .iter()
-        .zip(cascade.media)
-        .enumerate()
-        .flat_map(|(index, (sheet, media))| {
-            let ranks = cascade.layer_ranks.get(index).unwrap_or(&no_ranks);
-            sheet.rules.iter().map(move |rule| (rule, media, ranks))
-        })
-        .enumerate()
-        .filter(|(_, (rule, media, _))| {
-            rule.media
+    let no_media = Vec::new();
+    let mut candidates = Vec::new();
+    let mut sheet_offset = 0usize;
+    for (sheet_i, sheet) in cascade.stylesheets.iter().enumerate() {
+        let media = cascade.media.get(sheet_i).unwrap_or(&no_media);
+        let ranks = cascade.layer_ranks.get(sheet_i).unwrap_or(&no_ranks);
+        candidates.clear();
+        sheet.index.candidates(id, class, tag, &mut candidates);
+        candidates.sort_unstable();
+        candidates.dedup();
+        let mut at = 0;
+        while let Some(&(rule_i, _)) = candidates.get(at) {
+            // This rule's candidate selectors are consecutive.
+            let end = candidates[at..]
+                .iter()
+                .position(|&(r, _)| r != rule_i)
+                .map_or(candidates.len(), |n| at + n);
+            let selectors = &candidates[at..end];
+            at = end;
+            let Some(rule) = sheet.rules.get(rule_i as usize) else {
+                continue;
+            };
+            let applies = rule
+                .media
                 .as_ref()
-                .is_none_or(|block| media.get(block.index).copied().unwrap_or(false))
-        })
-        .map(|(order, (rule, _, ranks))| (order, (rule, ranks)))
-    {
-        if let Some(specificity) = matching_specificity(&element, &mut ctx, &rule.selectors) {
-            let rank = rule
-                .layer
-                .and_then(|layer| ranks.get(layer as usize).copied())
-                .unwrap_or(UNLAYERED);
-            matched.push(Matched {
-                rank,
-                specificity,
-                rule_order,
-                rule,
-            });
+                .is_none_or(|block| media.get(block.index).copied().unwrap_or(false));
+            if !applies {
+                continue;
+            }
+            let list = rule.selectors.list().slice();
+            let specificity = selectors
+                .iter()
+                .filter_map(|&(_, selector_i)| list.get(selector_i as usize))
+                .filter(|selector| {
+                    selectors::matching::matches_selector(selector, 0, None, element, &mut ctx)
+                })
+                .map(|selector| selector.specificity())
+                .max();
+            if let Some(specificity) = specificity {
+                let rank = rule
+                    .layer
+                    .and_then(|layer| ranks.get(layer as usize).copied())
+                    .unwrap_or(UNLAYERED);
+                matched.push(Matched {
+                    rank,
+                    specificity,
+                    rule_order: sheet_offset + rule_i as usize,
+                    rule,
+                });
+            }
         }
+        sheet_offset += sheet.rules.len();
     }
 
     // Lower-priority rules are applied first so later, more specific
@@ -194,24 +228,4 @@ fn apply_all(values: &mut PropertyMap, keyword: &Value) {
             .entry(name.to_string())
             .or_insert_with(|| keyword.clone());
     }
-}
-
-fn matching_specificity(
-    element: &MatchingElement<'_>,
-    ctx: &mut MatchingContext<'_, MiniBrowserSelectorImpl>,
-    selectors: &Selector,
-) -> Option<u32> {
-    // The selectors crate hands us the parsed `SelectorList` (one entry
-    // per `Rule`'s comma-separated selector list). `matches_selector_list`
-    // returns true if any branch matches; for the cascade we also want
-    // the *highest* specificity among the matching branches, so we walk
-    // the list ourselves with `matches_selector` instead.
-    let mut best: Option<u32> = None;
-    for selector in selectors.list().slice() {
-        if selectors::matching::matches_selector(selector, 0, None, *element, ctx) {
-            let spec = selector.specificity();
-            best = Some(best.map_or(spec, |prev| prev.max(spec)));
-        }
-    }
-    best
 }

@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1045 (workspace 합계, 2026-11-28 호환성 3차 후속 F3 둥근 테두리 +4; F2 값 파서 갭은 1041, F1b 는 1035). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1048 (workspace 합계, 2026-11-28 호환성 3차 후속 F4 셀렉터 규칙 색인 +3; F3 둥근 테두리는 1045, F2 는 1041). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -244,6 +244,9 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - 이름 있는 색은 CSS 148개 전부(`css/color.rs` 정렬 표). `currentcolor` 는 파서가 `Keyword("currentcolor")` 하나로 정규화하고 **스타일 패스가 색으로 푼다**(`resolve_current_color` — `color` 자신은 부모 색). 소비자 코드에서 `currentcolor` 키워드를 처리하지 말 것.
 - `-webkit-` 별칭은 Chrome 이 받는 것(`properties::WEBKIT_ALIASES`)만 선언 파서가 **표준 이름으로 바꿔** 그 파서로 읽는다 — 선언 이름도 표준 이름이 된다. `-moz-`/`-ms-` 는 별칭이 아니다. 새 별칭은 이 표에(정렬 유지).
 - `transform` 의 이동은 px·`%`·0 만(`%` = `TransformOp::TranslatePercent`, 페인트가 테두리 상자 기준으로 풂), z 성분은 버림, `none` = 빈 목록. 다른 단위를 px 로 읽지 말 것.
+
+### 셀렉터 규칙 색인 (호환성 3차 후속 F4)
+- 캐스케이드는 노드마다 `Stylesheet::index`(`css/rule_index.rs`)가 주는 후보 셀렉터만 시험한다 — 오른쪽 끝 복합의 id/클래스/태그 버킷 + 범용 목록. 키는 `dom_select` 의 매칭 규칙과 같아야 한다(id·클래스 대소문자 구분, 클래스는 `split_whitespace`, 태그는 ASCII 대소문자 무시): **`dom_select` 의 `has_id`/`has_class`/`has_local_name` 을 바꾸면 색인 키도 같이**. 파싱 뒤 `rules` 를 고치면 `reindex()`. 동등성은 `with_flat_index()`(전부 범용) 와 비교하는 테스트·퍼저(`IndexMismatch`)가 지킨다.
 
 ### 둥근 테두리 (호환성 3차 후속 F3)
 - 모서리 반지름이 있는 상자의 테두리는 `DisplayCommand::RoundedBorder` 하나(고리 — 바깥 둥근 사각형 − 안쪽, 변별 색은 대각선 사다리꼴 마스크), 없으면 네 `SolidRect` 띠. 새 `DisplayCommand` 를 더하면 `display_list::translate`·`bake_axis_aligned`·`scale_display_list`·`view::command_bottom`/`projected_command_bottom`·래스터·퍼저 `check_commands` 를 모두 고칠 것(일부는 `_` 갈래가 없어 컴파일러가 알려 준다).
