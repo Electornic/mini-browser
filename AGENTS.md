@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1048 (workspace 합계, 2026-11-28 호환성 3차 후속 F4 셀렉터 규칙 색인 +3; F3 둥근 테두리는 1045, F2 는 1041). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1049 (workspace 합계, 2026-11-28 호환성 3차 후속 F3b 둥근 테두리 작업량 상한 +1; F4 셀렉터 규칙 색인은 1048, F3 은 1045). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -250,6 +250,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
 ### 둥근 테두리 (호환성 3차 후속 F3)
 - 모서리 반지름이 있는 상자의 테두리는 `DisplayCommand::RoundedBorder` 하나(고리 — 바깥 둥근 사각형 − 안쪽, 변별 색은 대각선 사다리꼴 마스크), 없으면 네 `SolidRect` 띠. 새 `DisplayCommand` 를 더하면 `display_list::translate`·`bake_axis_aligned`·`scale_display_list`·`view::command_bottom`/`projected_command_bottom`·래스터·퍼저 `check_commands` 를 모두 고칠 것(일부는 `_` 갈래가 없어 컴파일러가 알려 준다).
+- 래스터의 스크래치 버퍼(마스크·레이어)는 **명령의 장치 경계 상자 ∩ 픽스맵** 크기로(`shapes.rs` `device_bounds`, F3b) — tiny-skia 마스크는 칠하는 픽스맵과 크기가 같아야 하니 작은 레이어에 칠해 한 번 합성한다. 명령마다 픽스맵 전체 크기를 할당하면 페이지가 명령 수 × 페이지 넓이의 작업을 고를 수 있다.
 
 ### 논리 속성과 인라인 SVG (호환성 3차 후속 F1)
 - `inline-size`·`margin-inline(-start/-end)`·`padding-block`·`inset-inline`·`border-inline(-*)`·`border-start-end-radius` 등은 **파싱 때 물리 속성으로 바뀐다**(`css/logical.rs` — 가로 쓰기·ltr 고정, 이름 바꾸기 / 한두 값을 시작·끝으로 / 같은 값을 양쪽으로). 캐스케이드·레이아웃·페인트는 물리 이름만 본다 — 소비자 코드에서 논리 이름을 찾지 말 것. 새 논리 속성은 `logical::logical` 표에(`longhands_of` 가 같은 표로 `var()` 경로도 펼친다).

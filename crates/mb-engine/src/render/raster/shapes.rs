@@ -4,7 +4,8 @@
 // pixel-pinned tests at the 4×4 / 5×5 surface scales stay deterministic.
 
 use tiny_skia::{
-    FillRule, Mask, Paint, PathBuilder, Pixmap, Rect as TsRect, Transform as TsTransform,
+    FillRule, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Rect as TsRect,
+    Transform as TsTransform,
 };
 
 use crate::css::Color;
@@ -182,6 +183,24 @@ pub(super) fn fill_rounded_border(
     }
     let (l, t) = (rect.x, rect.y);
     let (r, b) = (rect.x + rect.width, rect.y + rect.height);
+    // Per-side colours paint into a scratch layer the size of the box's
+    // device bounding box ∩ the pixmap — a tiny-skia mask must match the
+    // pixmap it clips, and a full-pixmap mask per side made thousands of
+    // small boxes cost boxes × page (F3b). One layer and one mask, reused
+    // across sides; the layer is composited once (source-over is
+    // associative, so this equals painting the sides directly).
+    let Some((ox, oy, w, h)) = device_bounds(rect, transform, pixmap.width(), pixmap.height())
+    else {
+        return;
+    };
+    let (Some(mut layer), Some(mut mask)) = (Pixmap::new(w, h), Mask::new(w, h)) else {
+        return;
+    };
+    #[cfg(test)]
+    count_scratch_pixels(w, h);
+    #[cfg(test)]
+    count_scratch_pixels(w, h);
+    let local = ts.post_translate(-(ox as f32), -(oy as f32));
     let (il, it) = (l + left, t + top);
     let (ir, ib) = (r - right, b - bottom);
     let trapezoids = [
@@ -202,20 +221,77 @@ pub(super) fn fill_rounded_border(
             pb.line_to(x, y);
         }
         pb.close();
-        let (Some(area), Some(mut mask)) =
-            (pb.finish(), Mask::new(pixmap.width(), pixmap.height()))
-        else {
+        let Some(area) = pb.finish() else {
             continue;
         };
-        mask.fill_path(&area, FillRule::Winding, false, ts);
-        pixmap.fill_path(
+        mask.clear();
+        mask.fill_path(&area, FillRule::Winding, false, local);
+        layer.fill_path(
             &ring,
             &solid_paint(color),
             FillRule::EvenOdd,
-            ts,
+            local,
             Some(&mask),
         );
     }
+    pixmap.draw_pixmap(
+        ox,
+        oy,
+        layer.as_ref(),
+        &PixmapPaint::default(),
+        TsTransform::identity(),
+        None,
+    );
+}
+
+/// The integer device-space bounding box of `rect` under `transform`,
+/// clipped to a `width` × `height` pixmap: (x, y, w, h), or `None` when
+/// empty or not finite.
+fn device_bounds(
+    rect: Rect,
+    transform: Affine,
+    width: u32,
+    height: u32,
+) -> Option<(i32, i32, u32, u32)> {
+    let corners = [
+        (rect.x, rect.y),
+        (rect.x + rect.width, rect.y),
+        (rect.x, rect.y + rect.height),
+        (rect.x + rect.width, rect.y + rect.height),
+    ]
+    .map(|(x, y)| transform.apply_point(x, y));
+    let min_x = corners
+        .iter()
+        .map(|c| c.0)
+        .fold(f32::INFINITY, f32::min)
+        .floor();
+    let min_y = corners
+        .iter()
+        .map(|c| c.1)
+        .fold(f32::INFINITY, f32::min)
+        .floor();
+    let max_x = corners
+        .iter()
+        .map(|c| c.0)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil();
+    let max_y = corners
+        .iter()
+        .map(|c| c.1)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil();
+    if !(min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite()) {
+        return None;
+    }
+    let x0 = min_x.max(0.0);
+    let y0 = min_y.max(0.0);
+    let x1 = max_x.min(width as f32);
+    let y1 = max_y.min(height as f32);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    // In range by the clamps above (pixmap sides fit u32 / i32).
+    Some((x0 as i32, y0 as i32, (x1 - x0) as u32, (y1 - y0) as u32))
 }
 
 pub(super) fn to_ts_rect(rect: Rect) -> Option<TsRect> {
@@ -236,4 +312,78 @@ pub(super) fn to_ts_rect(rect: Rect) -> Option<TsRect> {
 // so the direct mapping is sx=a, ky=b, kx=c, sy=d, tx=e, ty=f.
 pub(super) fn affine_to_ts(a: Affine) -> TsTransform {
     TsTransform::from_row(a.a, a.b, a.c, a.d, a.e, a.f)
+}
+
+// Scratch pixels (masks, layers) the rounded-border path allocated on this
+// thread — tests bound it by the boxes' area (F3b).
+#[cfg(test)]
+thread_local! {
+    static SCRATCH_PIXELS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_scratch_pixels(width: u32, height: u32) {
+    SCRATCH_PIXELS.with(|c| c.set(c.get() + u64::from(width) * u64::from(height)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::{CornerRadii, DisplayCommand, RoundedBorderCommand};
+    use super::SCRATCH_PIXELS;
+    use crate::css::Color;
+    use crate::layout::Rect;
+
+    /// A page of many small rounded borders with two colours each must cost
+    /// work proportional to the boxes, not boxes × page: the per-side
+    /// colour split used to allocate a full-pixmap mask per side (F3b — a
+    /// tall full-page raster made that a cheap denial of service).
+    #[test]
+    fn two_colour_rounded_borders_cost_their_own_area() {
+        let red = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let blue = Color {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        };
+        let (count, side, page_height) = (2_000usize, 20.0_f32, 40_000usize);
+        let commands: Vec<DisplayCommand> = (0..count)
+            .map(|i| {
+                DisplayCommand::RoundedBorder(RoundedBorderCommand {
+                    rect: Rect {
+                        x: 10.0,
+                        y: i as f32 * side,
+                        width: side,
+                        height: side,
+                    },
+                    radii: CornerRadii::uniform(6.0),
+                    widths: [3.0; 4],
+                    colors: [red, blue, blue, blue],
+                })
+            })
+            .collect();
+        SCRATCH_PIXELS.with(|c| c.set(0));
+        let started = std::time::Instant::now();
+        let pixels = super::super::rasterize(&commands, 400, page_height);
+        let elapsed = started.elapsed();
+        let scratch = SCRATCH_PIXELS.with(std::cell::Cell::get);
+        // A box's device bounding box is at most (side + 2)² pixels (edge
+        // rounding); a layer and a mask each.
+        let bound = count as u64 * 2 * ((side as u64 + 2) * (side as u64 + 2));
+        assert!(
+            scratch <= bound,
+            "{scratch} scratch pixels for {count} boxes (bound {bound})"
+        );
+        assert!(elapsed.as_secs() < 20, "took {elapsed:?}");
+        // Still painted, both colours: box 1000's top edge red, left blue.
+        let at = |x: usize, y: usize| pixels[y * 400 + x] & 0x00FF_FFFF;
+        let top = 1_000 * side as usize;
+        assert_eq!(at(20, top + 1), 0x00FF_0000);
+        assert_eq!(at(11, top + 10), 0x0000_00FF);
+    }
 }
