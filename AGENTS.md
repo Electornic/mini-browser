@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 996 (workspace 합계, 2026-11-28 호환성 3차 1c 커스텀 속성·`var()` +16 — 깊이 테스트 포함; 1b 값 파서는 980, 1q 는 961). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 997 (workspace 합계, 2026-11-28 호환성 3차 2.2·2.3 P probe +1; 1c 커스텀 속성·`var()` 는 996, 1b 값 파서는 980). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 

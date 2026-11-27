@@ -24,7 +24,7 @@ use grid::{
 use parse::{is_parse_only, parse_clip, parse_font_family, parse_raw, parse_value};
 pub use report::{
     AtRuleSeen, DropReason, DroppedDeclaration, DroppedRule, MediaVerdict, Origin, ParseReport,
-    media_verdict, parse_with_report,
+    media_verdict, parse_with_report, supports_verdict,
 };
 use selector::SelectorParserImpl;
 pub use selector::{CssString, MiniBrowserSelectorImpl, NonTSPseudoClass, PseudoElement, Selector};
@@ -580,7 +580,7 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler<'_> {
                     index: self.blocks.len(),
                 });
                 self.blocks.push(Rc::clone(&block));
-                report::enter_media(seen);
+                report::enter_block(seen);
                 let mut handler = StylesheetHandler {
                     media: Some(block),
                     depth: self.depth + 1,
@@ -589,7 +589,7 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler<'_> {
                 let iter = StyleSheetParser::new(input, &mut handler);
                 let mut rules = Vec::new();
                 collect_rules(iter, &mut rules);
-                report::leave_media(seen, rules.len());
+                report::leave_block(seen, rules.len());
                 Ok(rules)
             }
             AtRulePrelude::Reject => {
@@ -614,6 +614,7 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler<'_> {
         _start: &ParserState,
     ) -> Result<Self::AtRule, ()> {
         // Block-less forms (`@charset "utf-8";`) — drop quietly.
+        report::mark_block_less();
         Ok(Vec::new())
     }
 }

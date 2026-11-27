@@ -34,9 +34,9 @@ pub struct ParseReport {
     pub dropped_declarations: Vec<DroppedDeclaration>,
     /// Every at-rule seen, in source order.
     pub at_rules: Vec<AtRuleSeen>,
-    /// Indexes (into `at_rules`) of the `@media` blocks being parsed, outer
-    /// first — how a nested block finds its [`AtRuleSeen::parent`].
-    open_media: Vec<usize>,
+    /// Indexes (into `at_rules`) of the kept blocks being parsed, outer
+    /// first — how a nested at-rule finds its [`AtRuleSeen::parent`].
+    open_blocks: Vec<usize>,
 }
 
 /// Why something was dropped. Mechanical (what the parser hit), checked in
@@ -143,11 +143,13 @@ pub struct AtRuleSeen {
     pub kept: bool,
     /// Size of a skipped body in source bytes (0 when kept or block-less).
     pub skipped_bytes: usize,
-    /// Rules kept from a kept body, nested `@media` blocks' rules included.
+    /// Rules kept from a kept body, nested blocks' rules included.
     pub rules: usize,
-    /// Index in [`ParseReport::at_rules`] of the `@media` block this one
-    /// sits in (`None` at the top level).
+    /// Index in [`ParseReport::at_rules`] of the kept block (`@media`)
+    /// this one sits in (`None` at the top level).
     pub parent: Option<usize>,
+    /// `false` for the statement form (`@layer a, b;`, `@import …;`).
+    pub has_block: bool,
 }
 
 /// What the engine does with one `@media` block, for surveys.
@@ -173,6 +175,14 @@ pub fn media_verdict(prelude: &str, viewport_width: f32, viewport_height: f32) -
         ),
         invalid_queries: list.invalid_queries(),
     }
+}
+
+/// Whether the engine applies the body of a `@supports` block with this
+/// prelude (on its own; an enclosing block is evaluated separately).
+/// Before compat round 3 step 2.3 every `@supports` body is skipped, so
+/// nothing in one ever applies.
+pub fn supports_verdict(_prelude: &str) -> bool {
+    false
 }
 
 impl AtRuleSeen {
@@ -222,8 +232,9 @@ pub(super) fn record_at_rule(name: &str, prelude: &str, kept: bool) -> Option<us
         let mut slot = slot.borrow_mut();
         let report = slot.as_mut()?;
         let name = name.to_ascii_lowercase();
-        // A media prelude is kept whole: the probe re-reads it as a query.
-        let prelude = if name == "media" {
+        // Conditions and layer name lists are kept whole: the probe
+        // re-reads them.
+        let prelude = if matches!(name.as_str(), "media" | "supports" | "layer") {
             excerpt_unbounded(prelude)
         } else {
             excerpt(prelude)
@@ -234,24 +245,34 @@ pub(super) fn record_at_rule(name: &str, prelude: &str, kept: bool) -> Option<us
             kept,
             skipped_bytes: 0,
             rules: 0,
-            parent: report.open_media.last().copied(),
+            parent: report.open_blocks.last().copied(),
+            has_block: true,
         });
         Some(report.at_rules.len() - 1)
     })
 }
 
-/// Bracket the parse of a kept `@media` body: `enter` before, `leave`
+/// Note that the at-rule just recorded had no block (`@layer a, b;`).
+pub(super) fn mark_block_less() {
+    record(|r| {
+        if let Some(seen) = r.at_rules.last_mut() {
+            seen.has_block = false;
+        }
+    });
+}
+
+/// Bracket the parse of a kept block's body: `enter` before, `leave`
 /// with the number of rules it produced after.
-pub(super) fn enter_media(index: Option<usize>) {
+pub(super) fn enter_block(index: Option<usize>) {
     if let Some(index) = index {
-        record(|r| r.open_media.push(index));
+        record(|r| r.open_blocks.push(index));
     }
 }
 
-pub(super) fn leave_media(index: Option<usize>, rules: usize) {
+pub(super) fn leave_block(index: Option<usize>, rules: usize) {
     if let Some(index) = index {
         record(|r| {
-            r.open_media.pop();
+            r.open_blocks.pop();
             if let Some(seen) = r.at_rules.get_mut(index) {
                 seen.rules = rules;
             }
@@ -469,6 +490,28 @@ mod tests {
                 ("supports", 0, Some(0)),
                 ("media", 2, Some(0)),
                 ("media", 1, None)
+            ]
+        );
+    }
+
+    #[test]
+    fn layer_and_supports_at_rules_are_recorded() {
+        let long = format!("(display: grid){}", " and (gap: 1px)".repeat(20));
+        let (_, report) = parse_with_report(&format!(
+            "@layer reset, base; @layer base {{ .a{{}} }} @layer {{ .b{{}} }} @supports {long} {{ .c{{}} }}"
+        ));
+        let seen: Vec<_> = report
+            .at_rules
+            .iter()
+            .map(|a| (a.name.as_str(), a.prelude.as_str(), a.has_block))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("layer", "reset, base", false),
+                ("layer", "base", true),
+                ("layer", "", true),
+                ("supports", long.as_str(), true),
             ]
         );
     }

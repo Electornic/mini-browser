@@ -415,6 +415,13 @@ fn push_columns(row: &mut Row, columns: Option<&Columns>) {
     col("at_skipped_ours", &|c| c.css.at_ours.to_string());
     col("at_skipped_browser", &|c| c.css.at_browser.to_string());
     col("at_skipped_bytes", &|c| c.css.at_skipped_bytes.to_string());
+    col("at_skipped_pct", &|c| {
+        format!(
+            "{:.1}",
+            c.css.at_skipped_bytes as f64 * 100.0 / c.css_bytes.max(1) as f64
+        )
+    });
+    col("at_skipped_by_name", &|c| c.css.at_skipped_by_name.clone());
     col("import", &|c| c.css.imports.to_string());
     col("nesting", &|c| c.css.nesting.to_string());
     col("media", &|c| c.css.media.to_string());
@@ -428,6 +435,14 @@ fn push_columns(row: &mut Row, columns: Option<&Columns>) {
     col("media_attr_sheets", &|c| {
         c.css.media_attr_sheets.to_string()
     });
+    col("layer_blocks", &|c| c.css.layer_blocks.to_string());
+    col("layer_statements", &|c| c.css.layer_statements.to_string());
+    col("layer_rules", &|c| c.css.layer_rules.to_string());
+    col("supports", &|c| c.css.supports.to_string());
+    col("supports_true", &|c| c.css.supports_true.to_string());
+    col("supports_false", &|c| c.css.supports_false.to_string());
+    col("supports_rules", &|c| c.css.supports_rules.to_string());
+    col("supports_applied", &|c| c.css.supports_applied.to_string());
     col("decl_reasons", &|c| c.css.decl_reasons.clone());
     col("css_bytes", &|c| c.css_bytes.to_string());
     col("document_height", &|c| {
@@ -689,6 +704,8 @@ struct CssCounts {
     at_ours: usize,
     at_browser: usize,
     at_skipped_bytes: usize,
+    /// `name:bytes` of skipped at-rule bodies, largest first.
+    at_skipped_by_name: String,
     /// Kept declarations of a property with a modelled value kind whose
     /// value is a `Keyword` that kind doesn't accept (`width: 100vw`).
     keyword_fallback: usize,
@@ -719,6 +736,22 @@ struct CssCounts {
     media_invalid: usize,
     /// `<link rel=stylesheet>` / `<style>` with a limiting `media` attribute.
     media_attr_sheets: usize,
+    /// `@layer` with a block (named or anonymous; nested ones included,
+    /// once the engine reads layer bodies) / statements (`@layer a, b;`).
+    layer_blocks: usize,
+    layer_statements: usize,
+    /// Rules the engine kept from inside `@layer` blocks.
+    layer_rules: usize,
+    /// `@supports` blocks / of those, whose condition the engine holds
+    /// true or false (on its own, ignoring enclosing blocks).
+    supports: usize,
+    supports_true: usize,
+    supports_false: usize,
+    /// Rules the engine kept from inside `@supports` blocks / of those,
+    /// the ones it applies at the probe's viewport (every enclosing
+    /// condition included).
+    supports_rules: usize,
+    supports_applied: usize,
     /// `code:count` of every declaration drop reason.
     decl_reasons: String,
 }
@@ -753,6 +786,10 @@ fn css_drops(
     let mut at_rules: BTreeMap<String, (usize, bool, usize)> = BTreeMap::new();
     // kind → (blocks, rules, rules applied)
     let mut media_kinds: BTreeMap<&'static str, (usize, usize, usize)> = BTreeMap::new();
+    // prelude → (blocks, verdict, rules, rules applied)
+    let mut supports_conditions: BTreeMap<String, (usize, bool, usize, usize)> = BTreeMap::new();
+    // layer name → (blocks, statements, rules)
+    let mut layer_names: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
 
     for source in [external, inline] {
         let (sheet, report) = css::parse_with_report(source);
@@ -825,7 +862,16 @@ fn css_drops(
                 .or_insert((0, rule.selector.clone()));
             entry.0 += 1;
         }
-        count_media(&report.at_rules, (width, height), &mut c, &mut media_kinds);
+        count_blocks(
+            &report.at_rules,
+            (width, height),
+            &mut c,
+            BlockTables {
+                media_kinds: &mut media_kinds,
+                supports_conditions: &mut supports_conditions,
+                layer_names: &mut layer_names,
+            },
+        );
         for at_rule in &report.at_rules {
             if at_rule.name == "import" {
                 c.imports += 1;
@@ -848,9 +894,20 @@ fn css_drops(
         .map(|(reason, count)| format!("{}:{count}", reason.code()))
         .collect::<Vec<_>>()
         .join(",");
+    let mut skipped_by_name: Vec<_> = at_rules
+        .iter()
+        .filter(|(_, (_, _, bytes))| *bytes > 0)
+        .map(|(name, (_, _, bytes))| (*bytes, name.as_str()))
+        .collect();
+    skipped_by_name.sort_by(|a, b| b.cmp(a));
+    c.at_skipped_by_name = skipped_by_name
+        .iter()
+        .map(|(bytes, name)| format!("{name}:{bytes}"))
+        .collect::<Vec<_>>()
+        .join(",");
 
     let headline = format!(
-        "css: {} rules kept, rules dropped {} ours / {} browser-too, declarations dropped {} ours / {} browser-too ({}), {} declarations kept ({} keyword fallbacks, {} parse-only; computed time: {} invalid (IACVT), {} var keyword fallbacks; drop total {}), {} nested rules, {} @import, {} @media ({} rules, {} applied; {} should not apply, {} of them applied; {} invalid queries), at-rules skipped {} ours / {} browser-too ({} bytes)",
+        "css: {} rules kept, rules dropped {} ours / {} browser-too, declarations dropped {} ours / {} browser-too ({}), {} declarations kept ({} keyword fallbacks, {} parse-only; computed time: {} invalid (IACVT), {} var keyword fallbacks; drop total {}), {} nested rules, {} @import, {} @media ({} rules, {} applied; {} should not apply, {} of them applied; {} invalid queries), {} @layer blocks + {} statements ({} rules), {} @supports ({} true / {} false; {} rules, {} applied), at-rules skipped {} ours / {} browser-too ({} bytes)",
         c.rule_kept,
         c.rule_ours,
         c.rule_browser,
@@ -871,6 +928,14 @@ fn css_drops(
         c.media_wrong,
         c.media_wrong_applied,
         c.media_invalid,
+        c.layer_blocks,
+        c.layer_statements,
+        c.layer_rules,
+        c.supports,
+        c.supports_true,
+        c.supports_false,
+        c.supports_rules,
+        c.supports_applied,
         c.at_ours,
         c.at_browser,
         c.at_skipped_bytes
@@ -927,6 +992,29 @@ fn css_drops(
 
     let _ = writeln!(
         text,
+        "\n## @supports conditions (blocks, engine verdict, rules, rules applied at {width}x{height}; most blocks first)"
+    );
+    let mut conditions: Vec<_> = supports_conditions.into_iter().collect();
+    conditions.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(a.0.cmp(&b.0)));
+    for (prelude, (blocks, verdict, rules, applied)) in conditions.iter().take(60) {
+        let _ = writeln!(
+            text,
+            "{blocks:6} {:5} {rules:6} {applied:6}  {}",
+            if *verdict { "true" } else { "false" },
+            clip(prelude, 100)
+        );
+    }
+
+    let _ = writeln!(
+        text,
+        "\n## @layer names (blocks, statements naming it, rules; '' = anonymous)"
+    );
+    for (name, (blocks, statements, rules)) in &layer_names {
+        let _ = writeln!(text, "{blocks:6} {statements:6} {rules:6}  {name}");
+    }
+
+    let _ = writeln!(
+        text,
         "\n## keyword fallbacks: typed property kept a Keyword it doesn't accept (count, sample)"
     );
     let mut fallbacks: Vec<_> = fallbacks.into_iter().collect();
@@ -966,58 +1054,145 @@ fn css_drops(
     }
 }
 
-/// Fold one sheet's `@media` blocks into the counts. A nested block
-/// applies when it and every enclosing block do; its rules are counted
-/// once, in the innermost block.
-fn count_media(
+/// The per-condition / per-name tables [`count_blocks`] fills.
+struct BlockTables<'a> {
+    media_kinds: &'a mut BTreeMap<&'static str, (usize, usize, usize)>,
+    supports_conditions: &'a mut BTreeMap<String, (usize, bool, usize, usize)>,
+    layer_names: &'a mut BTreeMap<String, (usize, usize, usize)>,
+}
+
+/// What an at-rule's enclosing chain says about the rules directly in it.
+#[derive(Clone, Copy)]
+struct Chain {
+    /// The engine applies them (every enclosing condition holds).
+    applies: bool,
+    /// Some enclosing `@media` should not match at 1280x800 light.
+    wrong: bool,
+    /// The innermost enclosing `@media` (self included): its kind.
+    media_kind: Option<&'static str>,
+    /// The innermost enclosing `@layer` / `@supports` (self included):
+    /// its index in the sheet's at-rules.
+    layer: Option<usize>,
+    supports: Option<usize>,
+}
+
+/// Fold one sheet's at-rules into the counts. A nested block applies when
+/// it and every enclosing block do; a rule is counted once, in the
+/// innermost block, and attributed to every kind of block around it (a
+/// rule in `@layer x { @media … { } }` is both a layer rule and a media
+/// rule).
+fn count_blocks(
     at_rules: &[css::AtRuleSeen],
     (width, height): (f32, f32),
     c: &mut CssCounts,
-    kinds: &mut BTreeMap<&'static str, (usize, usize, usize)>,
+    tables: BlockTables<'_>,
 ) {
-    // Per at-rule: (applies, should-not-apply), the enclosing chain folded in.
-    let mut chain: Vec<(bool, bool)> = Vec::with_capacity(at_rules.len());
+    let mut chain: Vec<Chain> = Vec::with_capacity(at_rules.len());
+    // Rules of the kept blocks directly inside each at-rule.
     let mut nested_rules = vec![0usize; at_rules.len()];
     for at_rule in at_rules {
-        if at_rule.name == "media"
-            && let Some(parent) = at_rule.parent
+        if let Some(parent) = at_rule.parent
             && let Some(slot) = nested_rules.get_mut(parent)
         {
             *slot += at_rule.rules;
         }
     }
+    let top = Chain {
+        applies: true,
+        wrong: false,
+        media_kind: None,
+        layer: None,
+        supports: None,
+    };
     for (index, at_rule) in at_rules.iter().enumerate() {
-        let (outer_applies, outer_wrong) = at_rule
+        let outer = at_rule
             .parent
             .and_then(|p| chain.get(p).copied())
-            .unwrap_or((true, false));
-        if at_rule.name != "media" {
-            chain.push((outer_applies, outer_wrong));
-            continue;
+            .unwrap_or(top);
+        let mut here = outer;
+        match at_rule.name.as_str() {
+            "media" => {
+                let verdict = css::media_verdict(&at_rule.prelude, width, height);
+                let kind = media_kind(&at_rule.prelude);
+                here.applies &= verdict.applies;
+                here.wrong |= kind.contains("(wrong");
+                here.media_kind = Some(kind);
+                c.media += 1;
+                c.media_invalid += verdict.invalid_queries;
+                tables.media_kinds.entry(kind).or_default().0 += 1;
+            }
+            "supports" if at_rule.has_block => {
+                let verdict = css::supports_verdict(&at_rule.prelude);
+                here.applies &= verdict;
+                here.supports = Some(index);
+                c.supports += 1;
+                if verdict {
+                    c.supports_true += 1;
+                } else {
+                    c.supports_false += 1;
+                }
+                let entry = tables
+                    .supports_conditions
+                    .entry(at_rule.prelude.clone())
+                    .or_insert((0, verdict, 0, 0));
+                entry.0 += 1;
+            }
+            "layer" => {
+                if at_rule.has_block {
+                    here.layer = Some(index);
+                    c.layer_blocks += 1;
+                    tables
+                        .layer_names
+                        .entry(at_rule.prelude.trim().to_string())
+                        .or_default()
+                        .0 += 1;
+                } else {
+                    c.layer_statements += 1;
+                    for name in at_rule.prelude.split(',') {
+                        tables
+                            .layer_names
+                            .entry(name.trim().to_string())
+                            .or_default()
+                            .1 += 1;
+                    }
+                }
+            }
+            _ => {}
         }
-        let verdict = css::media_verdict(&at_rule.prelude, width, height);
-        let kind = media_kind(&at_rule.prelude);
-        let applies = outer_applies && verdict.applies;
-        let wrong = outer_wrong || kind.contains("(wrong");
-        chain.push((applies, wrong));
+        chain.push(here);
+        // Rules directly in this block (0 for a skipped one).
         let rules = at_rule.rules.saturating_sub(nested_rules[index]);
-        c.media += 1;
-        c.media_rules += rules;
-        c.media_invalid += verdict.invalid_queries;
-        if applies {
-            c.media_applied += rules;
+        let applied = if here.applies { rules } else { 0 };
+        if let Some(kind) = here.media_kind {
+            c.media_rules += rules;
+            c.media_applied += applied;
+            if here.wrong {
+                c.media_wrong += rules;
+                c.media_wrong_applied += applied;
+            }
+            let entry = tables.media_kinds.entry(kind).or_default();
+            entry.1 += rules;
+            entry.2 += applied;
         }
-        if wrong {
-            c.media_wrong += rules;
-            if applies {
-                c.media_wrong_applied += rules;
+        if let Some(supports) = here.supports {
+            c.supports_rules += rules;
+            c.supports_applied += applied;
+            if let Some(entry) = at_rules
+                .get(supports)
+                .and_then(|s| tables.supports_conditions.get_mut(&s.prelude))
+            {
+                entry.2 += rules;
+                entry.3 += applied;
             }
         }
-        let entry = kinds.entry(kind).or_default();
-        entry.0 += 1;
-        entry.1 += rules;
-        if applies {
-            entry.2 += rules;
+        if let Some(layer) = here.layer {
+            c.layer_rules += rules;
+            if let Some(entry) = at_rules
+                .get(layer)
+                .and_then(|l| tables.layer_names.get_mut(l.prelude.trim()))
+            {
+                entry.2 += rules;
+            }
         }
     }
 }
