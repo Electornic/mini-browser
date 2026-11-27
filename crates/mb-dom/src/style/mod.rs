@@ -2408,6 +2408,17 @@ mod tests {
     }
 
     #[test]
+    fn unitless_zero_through_var_is_a_px_length() {
+        let styled = style_page(
+            PAGE,
+            ":root { --z: 0; } p { top: var(--z); line-height: var(--z); }",
+        );
+        let p = find_tag(&styled, "p").unwrap();
+        assert_eq!(p.value("top"), Some(&Value::Length(0.0, Unit::Px)));
+        assert_eq!(p.value("line-height"), Some(&Value::Number(0.0)));
+    }
+
+    #[test]
     fn html_color_inherits_into_the_body() {
         let styled = style_page(PAGE, "html { color: #00ff00; }");
         assert_eq!(

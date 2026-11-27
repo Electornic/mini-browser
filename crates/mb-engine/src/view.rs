@@ -33,6 +33,13 @@ pub struct DocumentView {
     /// `max-height` against the viewport height (step 1p) — so, unlike the
     /// rest of the view, it changes with a height-only resize.
     pub reads_viewport_height: bool,
+    /// The scrollable height (step 1q), like Chrome's `scrollHeight` minus
+    /// its viewport floor: the furthest of the root's margin-box bottom, any
+    /// box's border-box bottom and any painted content — content can
+    /// overflow a root sized to the viewport (`html, body {height: 100%}`).
+    /// The canvas fill doesn't count. The one source for the scroll limit and
+    /// the agent's `page_height`.
+    pub document_height: f32,
 }
 
 // The deepest layout box under the mouse. `path` is the DOM-order index
@@ -91,9 +98,13 @@ pub fn build_document_view(
     profile::time_block("view::collect_image_commands", || {
         commands.extend(collect_image_commands(&layout, current_url, images));
     });
+    // Measured before the canvas fill goes in (it spans the viewport).
+    let scroll_height = margin_box_bottom(&layout)
+        .max(layout_overflow_bottom(&layout))
+        .max(document_height(&commands));
     if let Some(color) = canvas_background(&layout) {
         // Cover the viewport and the whole document, under everything.
-        let height = (viewport_height as f32).max(document_height(&commands));
+        let height = (viewport_height as f32).max(scroll_height);
         let canvas = layout::Rect {
             x: 0.0,
             y: 0.0,
@@ -118,6 +129,7 @@ pub fn build_document_view(
         links,
         layout_root: layout,
         reads_viewport_height,
+        document_height: scroll_height,
     })
 }
 
@@ -141,6 +153,27 @@ fn canvas_background(layout: &layout::LayoutBox) -> Option<css::Color> {
         )?;
         opaque_color(body)
     })
+}
+
+/// The lowest border-box bottom in the layout tree — Chrome's scrollable
+/// overflow counts boxes, not just what they paint (an empty 3,000px box
+/// still scrolls). Overflow clipping isn't modelled (compat round 3 step 3),
+/// so a clipped subtree still counts. Iterative: layout trees are as deep as
+/// the DOM.
+fn layout_overflow_bottom(root: &layout::LayoutBox) -> f32 {
+    let mut bottom = 0.0_f32;
+    let mut stack = vec![root];
+    while let Some(layout_box) = stack.pop() {
+        let d = &layout_box.dimensions;
+        bottom = bottom.max(d.content.y + d.content.height + d.padding.bottom + d.border.bottom);
+        stack.extend(layout_box.children.iter());
+    }
+    bottom
+}
+
+fn margin_box_bottom(layout_box: &layout::LayoutBox) -> f32 {
+    let d = &layout_box.dimensions;
+    d.content.y + d.content.height + d.padding.bottom + d.border.bottom + d.margin.bottom
 }
 
 pub fn document_height(commands: &[render::DisplayCommand]) -> f32 {
@@ -678,6 +711,43 @@ mod tests {
     }
 
     const SHORT_PAGE: &str = "<html><body><p>x</p></body></html>";
+
+    #[test]
+    fn document_height_counts_content_overflowing_a_viewport_tall_root() {
+        // `html, body {height: 100%}` makes the root box the viewport (1p);
+        // the scrollable height is still the content's — like Chrome's
+        // `scrollHeight` (step 1q).
+        let view = page_view(
+            "<html><body><div class=\"tall\">x</div></body></html>",
+            "html, body { height: 100%; margin: 0; } .tall { height: 3000px; }",
+        );
+        assert_eq!(
+            view.layout_root.dimensions.content.height, 300.0,
+            "root = viewport"
+        );
+        assert_eq!(view.document_height, 3000.0);
+    }
+
+    #[test]
+    fn document_height_of_a_short_page_is_its_root_margin_box() {
+        // Not the viewport and not the canvas fill: a short page reports its
+        // own height (body margins included), with or without a background.
+        for css in ["", "body { background-color: #102030; }"] {
+            let view = page_view(SHORT_PAGE, css);
+            let root = &view.layout_root.dimensions;
+            let bottom = root.content.y
+                + root.content.height
+                + root.padding.bottom
+                + root.border.bottom
+                + root.margin.bottom;
+            assert_eq!(view.document_height, bottom, "{css:?}");
+            assert!(
+                view.document_height < 100.0,
+                "{css:?}: {}",
+                view.document_height
+            );
+        }
+    }
 
     #[test]
     fn body_background_propagates_to_the_whole_canvas() {

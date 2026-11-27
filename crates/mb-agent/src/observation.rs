@@ -23,6 +23,9 @@ pub struct ObserveInput<'a> {
     pub layout_root: &'a LayoutBox,
     pub url: Option<&'a Url>,
     pub scroll_y: f32,
+    /// The scrollable height — `DocumentView::document_height`, the same
+    /// value the scroll limit uses (step 1q).
+    pub document_height: f32,
     pub viewport_width: f32,
     pub viewport_height: f32,
     /// Filled in by the settle loop. `None` = unknown, not printed.
@@ -318,7 +321,7 @@ pub fn observe(input: &ObserveInput<'_>, options: &ObserveOptions) -> Observatio
         origin: input.url.map(origin_of),
         settled: input.settled,
         scroll_y: input.scroll_y,
-        document_height: margin_box_bottom(input.layout_root),
+        document_height: input.document_height,
         viewport_width: input.viewport_width,
         viewport_height: input.viewport_height,
         scope: options.scope,
@@ -548,11 +551,6 @@ fn page_title(index: &DomIndex<'_>) -> Option<String> {
         .find(|&id| index.tag(id) == Some("title"))?;
     let text = index.text_content(title, &|_| false);
     (!text.is_empty()).then_some(truncate_chars(&text, 200))
-}
-
-fn margin_box_bottom(layout_box: &LayoutBox) -> f32 {
-    let d = &layout_box.dimensions;
-    d.content.y + d.content.height + d.padding.bottom + d.border.bottom + d.margin.bottom
 }
 
 // ---------------------------------------------------------------------------

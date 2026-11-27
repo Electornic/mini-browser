@@ -714,7 +714,7 @@ fn parse_declaration_value<'i>(
         return parse_grid_template_shorthand(input);
     }
 
-    let value = parse_value(input)?;
+    let value = unitless_zero_as_length(name, parse_value(input)?);
     // Flexbox: negative flex factors are invalid (the declaration drops, as
     // in Chrome). A negative shrink weight would grow overflowing items.
     if matches!(name, "flex-grow" | "flex-shrink") && matches!(value, Value::Number(n) if n < 0.0) {
@@ -728,6 +728,28 @@ fn parse_declaration_value<'i>(
         value,
         important: false,
     }])
+}
+
+/// A bare `0` is a valid `<length>` (CSS Values 4 §6.1); for a length-valued
+/// property store it as `0px` — layout and the taffy bridge read `Length`
+/// only, so `top: 0` as `Number(0)` was silently ignored (step 1q).
+/// `line-height` is length-kinded in the table but a unitless number there
+/// is a multiplier; number-valued properties (`opacity`, `z-index`,
+/// `flex-grow`…) aren't length-kinded and keep `Number`.
+pub(crate) fn unitless_zero_as_length(name: &str, value: Value) -> Value {
+    match value {
+        Value::Number(n)
+            if n == 0.0
+                && name != "line-height"
+                && matches!(
+                    properties::lookup(name),
+                    Some(properties::ValueKind::Length(_))
+                ) =>
+        {
+            Value::Length(0.0, Unit::Px)
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -832,6 +854,35 @@ mod tests {
             .map(|d| (d.name.as_str(), d.important))
             .collect();
         assert_eq!(flags, [("color", true), ("width", false)]);
+    }
+
+    #[test]
+    fn unitless_zero_is_a_px_length_for_length_properties() {
+        // CSS allows a bare `0` wherever a length goes; layout and taffy only
+        // read `Length`, so `top: 0` as `Number(0)` was ignored (step 1q).
+        let decls = flagged(
+            ".a{top:0;left:0;width:0;min-height:0;gap:0;text-indent:0;margin-top:0;flex-basis:0;\
+             line-height:0;z-index:0;opacity:0;flex-grow:0}",
+        );
+        let value = |name: &str| decls.iter().find(|d| d.0 == name).unwrap().1.clone();
+        for name in [
+            "top",
+            "left",
+            "width",
+            "min-height",
+            "gap",
+            "text-indent",
+            "margin-top",
+            "flex-basis",
+        ] {
+            assert_eq!(value(name), Value::Length(0.0, Unit::Px), "{name}");
+        }
+        // Number-valued (and line-height, where a number is a multiplier).
+        for name in ["line-height", "z-index", "opacity", "flex-grow"] {
+            assert_eq!(value(name), Value::Number(0.0), "{name}");
+        }
+        // Only zero: a unitless non-zero length stays invalid-ish as before.
+        assert_eq!(flagged(".a{top:5}")[0].1, Value::Number(5.0));
     }
 
     #[test]

@@ -47,6 +47,7 @@ fn observe_source(name: &str, source: &str, scroll_y: f32, options: ObserveOptio
             layout_root: &view.layout_root,
             url: Some(&url),
             scroll_y,
+            document_height: view.document_height,
             viewport_width: VIEWPORT_W,
             viewport_height: VIEWPORT_H,
             settled: None,
@@ -178,6 +179,18 @@ fn long_page_full_scope_paginates() {
     );
     assert_eq!(last.elements.len(), 10);
     assert_eq!(last.next_cursor, None);
+}
+
+#[test]
+fn page_height_counts_content_overflowing_a_viewport_tall_root() {
+    // `html, body {height: 100%}` makes the root box the viewport (step 1p);
+    // `page_height` is the scrollable height, as the scroll limit uses
+    // (step 1q) — not 600.
+    let source = "<!DOCTYPE html><html><head><style>html, body { height: 100%; margin: 0; } \
+                  .tall { height: 3000px; }</style></head><body><div class=\"tall\">x</div></body></html>";
+    let observation = observe_source("tall", source, 0.0, ObserveOptions::default());
+    assert_eq!(observation.document_height, 3000.0);
+    assert!(observation.to_text().contains("page_height: 3000"));
 }
 
 #[test]

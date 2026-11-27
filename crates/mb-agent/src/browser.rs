@@ -298,6 +298,7 @@ impl AgentBrowser {
                 layout_root: &view.layout_root,
                 url: self.state.current_url.as_ref(),
                 scroll_y: self.state.scroll_offset,
+                document_height: view.document_height,
                 viewport_width: self.config.viewport_width as f32,
                 viewport_height: self.config.viewport_height as f32,
                 settled: self.last_settled,

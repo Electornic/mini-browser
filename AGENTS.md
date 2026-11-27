@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 955 (workspace 합계, 2026-11-28 호환성 3차 1p 퍼센트 높이 +12; 1a `!important` 는 943, 1r `<html>` 문서 요소는 932). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 961 (workspace 합계, 2026-11-28 호환성 3차 1q scrollHeight·단위 없는 0 +6; 1p 퍼센트 높이는 955, 1a `!important` 는 943). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -153,7 +153,8 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 ### 퍼센트 높이는 확정 포함 블록 높이 기준 (호환성 3차 1p)
 - 레이아웃 코드에서 `height`/`min-height`/`max-height` 를 `length_value(node, "height", <폭>)` 로 읽지 말 것 — `definite_height(node)`/`height_value`/`clamp_height`(`layout/properties.rs`)를 쓴다. 포함 블록 높이는 패스 범위 상태(`containing_block_height()`)로 내려온다: 상자가 자식을 배치하기 **전에** 자기 확정 높이를 `with_containing_block_height` 로 깔고, 그 안에서 컨테이너 알고리즘은 이 값을 "내 확정 높이"로 읽는다. 자식을 배치하는 새 경로를 만들면 같은 범위를 깔 것(안 깔면 % 가 바깥 상자 기준으로 풀린다). 루트의 기준은 뷰포트 높이(`layout_tree_with_viewport`), absolute 의 % 는 2패스(`reposition_absolutes`)가 포함 블록 패딩 상자로 다시 푼다. out-of-flow 자식은 `layout_out_of_flow`(블록화·shrink-to-fit)로 놓는다 — 인라인 상자로 놓지 말 것.
 - 레이아웃이 뷰포트 높이를 읽는 건 루트에 % 높이가 있을 때뿐이고, 그때만 뷰 캐시가 높이를 비교한다(`DocumentView::reads_viewport_height`). 다른 경로로 높이를 읽게 되면 이 플래그를 같이 고칠 것.
-- 단위 없는 `0`(`top: 0`)은 `Value::Number(0.0)` 이라 `length_value` 가 무시한다 — 알려진 갭(1p 메모), 테스트에선 `0px` 를 쓸 것.
+- 단위 없는 `0` 은 길이 속성에서 파싱 때 `Length(0, Px)` 가 된다(1q, `css::unitless_zero_as_length` — `var()` 치환 뒤에도). 레이아웃·taffy 브릿지는 `Number` 를 길이로 읽지 않으니, 새 길이 속성을 전용 파서로 읽게 되면 같은 승격을 거칠 것(`line-height` 처럼 숫자가 뜻을 갖는 속성은 제외).
+- 페이지 높이는 `DocumentView::document_height` 하나다(1q — 넘친 내용 포함, 캔버스 제외). 스크롤 상한·관찰 `page_height` 가 이것을 쓴다; 루트 상자 높이(`layout_root`)나 `view::document_height(commands)` 를 따로 쓰지 말 것.
 
 ### `element.rs` 에 NUL 바이트
 - `crates/mb-runtime/src/js/element.rs` 주석에 `"\0STALE"` 이 리터럴 NUL 로 들어 있어(첫 8KB), 에디터·도구에 따라 바이너리로 취급된다 (Claude Code 의 Edit 이 거부, 일부 grep 은 조용히 건너뜀). 수정은 인코딩을 보존하는 스크립트로, 검색은 `grep -a`.

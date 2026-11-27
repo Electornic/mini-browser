@@ -3799,6 +3799,26 @@ mod tests {
     }
 
     #[test]
+    fn unitless_zero_offsets_pin_an_absolute_box_to_the_corner() {
+        let layout = page(
+            r#"<div class="gap"></div><div class="rel"><p>text</p><div class="abs">x</div></div>"#,
+            concat!(
+                ".gap { height: 50px; } ",
+                ".rel { position: relative; margin-left: 30px; padding: 10px; } ",
+                ".abs { position: absolute; top: 0; left: 0; width: 20px; }"
+            ),
+            (800.0, 600.0),
+        );
+        let rel = by_class(&layout, "rel").dimensions;
+        let abs = by_class(&layout, "abs").dimensions;
+        let padding_box = (
+            rel.content.x - rel.padding.left,
+            rel.content.y - rel.padding.top,
+        );
+        assert_eq!((abs.content.x, abs.content.y), padding_box);
+    }
+
+    #[test]
     fn min_and_max_height_percentages_need_a_definite_containing_block() {
         for extra in ["", LEGACY] {
             let layout = page(

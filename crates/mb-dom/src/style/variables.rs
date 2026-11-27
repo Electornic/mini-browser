@@ -68,7 +68,9 @@ pub(super) fn resolve_var_references(
 ) {
     for (name, value) in values.iter_mut() {
         let Some(report) = report else {
-            resolve_var_value(value, scope);
+            if resolve_var_value(value, scope) {
+                promote_unitless_zero(name, value);
+            }
             continue;
         };
         if !matches!(value, Value::Var { .. }) {
@@ -76,6 +78,9 @@ pub(super) fn resolve_var_references(
         }
         let declared = value.clone();
         let resolved = resolve_var_value(value, scope);
+        if resolved {
+            promote_unitless_zero(name, value);
+        }
         let mut report = report.borrow_mut();
         if !resolved {
             report.iacvt.insert(declaration_key(name, &declared));
@@ -87,6 +92,14 @@ pub(super) fn resolve_var_references(
                 .var_keyword_fallback
                 .insert(declaration_key(name, &declared));
         }
+    }
+}
+
+/// A substituted bare `0` in a length property is `0px`, as at parse time
+/// (`css::unitless_zero_as_length`, step 1q).
+fn promote_unitless_zero(name: &str, value: &mut Value) {
+    if matches!(value, Value::Number(n) if *n == 0.0) {
+        *value = crate::css::unitless_zero_as_length(name, value.clone());
     }
 }
 

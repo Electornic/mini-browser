@@ -50,7 +50,7 @@ use crate::{
     net, profile, render, resource, style,
     view::{
         DocumentView, build_document_view, caret_commands_for_focused_input, compute_hovered_hit,
-        document_height, link_decoration_commands,
+        link_decoration_commands,
     },
 };
 
@@ -589,7 +589,7 @@ impl BrowserState {
             }
         }
 
-        self.clamp_scroll(viewport_height, document_height(&document_view.commands));
+        self.clamp_scroll(viewport_height, document_view.document_height);
         // The next frame's style pass picks up `hovered_dom_path` — a
         // deliberate one-frame lag that keeps style and layout strictly
         // forward, no double-pass per frame required.
@@ -1125,6 +1125,7 @@ impl BrowserState {
                         children: Vec::new(),
                     },
                     reads_viewport_height: false,
+                    document_height: 0.0,
                 })
             }
         }
