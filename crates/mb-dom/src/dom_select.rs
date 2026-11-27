@@ -306,7 +306,9 @@ impl<'a> selectors::Element for MatchingElement<'a> {
 
     fn is_root(&self) -> bool {
         // The arena exposes a roots list; a node is the document root when
-        // it has no parent and is the very first root entry.
+        // it has no parent and is the very first root entry — the `<html>`
+        // element of a parsed page (its single root), or a fragment's first
+        // top-level node.
         self.doc.get(self.id).is_some_and(|n| n.parent.is_none())
             && self.doc.roots().first() == Some(&self.id)
     }

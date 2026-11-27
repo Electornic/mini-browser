@@ -520,6 +520,21 @@ pub(super) fn layout_via_taffy(node: &StyledNode, viewport_width: f32) -> Option
     MEASURE_NANOS.with(|n| n.set(0));
     let root_id =
         mb_dom::profile::time_block("taffy::build_tree", || build_taffy_node(&mut tree, node))?;
+    // The document element establishes the initial block formatting
+    // context: its margins never collapse with its children's (CSS 2.1
+    // 8.3.1), so `<body>`'s margin stays inside `<html>` and the page height
+    // includes it, as in Chrome. Taffy only stops the collapse at a scroll
+    // container; the flag is layout-only (paint reads the CSS `overflow`).
+    if matches!(&node.node_type, NodeType::Element(e) if e.tag_name.eq_ignore_ascii_case("html"))
+        && let Ok(style) = tree.style(root_id)
+    {
+        let mut style = style.clone();
+        style.overflow = Point {
+            x: Overflow::Hidden,
+            y: Overflow::Hidden,
+        };
+        let _ = tree.set_style(root_id, style);
+    }
     // Wrapper for root `margin: auto` resolution against the viewport (taffy
     // does not auto-center the topmost node it lays out).
     let wrapper_style = Style {

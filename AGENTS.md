@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 919 (workspace 합계, 2026-11-27 호환성 3차 1단계 P probe +4; 2.1a 위키 그리드는 915, 2.1 `@media` 평가는 902). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 932 (workspace 합계, 2026-11-27 호환성 3차 1r `<html>` 문서 요소 +13; 1단계 P probe 는 919, 2.1a 위키 그리드는 915). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -148,7 +148,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
 ### 테스트 HTML 과 루트
 - `html::parse` 는 `<html>`/`<body>` 가 없으면 fragment 로 파싱해서 **최상위 형제가 각각 루트**가 되고, 화면에 그리는 건 `roots().last()` 뿐이다. `<input>…<script>` 처럼 최상위에 여러 개를 두면 마지막(`<script>`)만 레이아웃 루트가 되어 클릭·getElementById 가 다 빗나간다 → 테스트 HTML 은 `<div>` 하나로 감싸거나 완전한 문서로 쓸 것.
-- 완전한 문서여도 **`<html>` 요소는 arena 에 없다** — `<head>`·`<body>` 가 따로 루트. `:root` 는 `roots().first()`(대개 `<head>`)에 맞아서 실사이트의 `:root{--…}` 토큰·`html{…}` 규칙이 `<body>` 에 닿지 않는다(호환성 3차 1단계 P 에서 발견, [compat-round3.md 1단계 구현 메모](docs/compat-round3.md#1단계-구현-메모-2026-11-27)). fragment 픽스처(`:root{…} p{…}` 를 `<div>` 안에)로 쓴 테스트는 이 차이를 못 잡는다.
+- 완전한 문서(원문에 `<html`)의 루트는 **`<html>` 하나**다 — `<head>`·`<body>` 는 그 자식(호환성 3차 1r 에서 고침; 전엔 `<html>` 을 버려 `:root` 가 `<head>` 에만 맞았다). `<body>`/`<head>` 는 인덱스가 아니라 `Document::body()`/`head()`/`document_element()` 로 찾을 것. `<html` 없이 `<head>`/`<body>` 만 쓴 원문은 옛 동작(쓴 래퍼가 루트, 문서 요소 없음) — 픽스처에서 `:root`·`html{}`·rem 을 시험하려면 `<html>` 을 쓸 것. 커스텀 속성(`--*`)은 `StyledNode` 의 맵에 없다(`style/variables.rs::CustomScope` 사슬로만 상속).
 
 ### `element.rs` 에 NUL 바이트
 - `crates/mb-runtime/src/js/element.rs` 주석에 `"\0STALE"` 이 리터럴 NUL 로 들어 있어(첫 8KB), 에디터·도구에 따라 바이너리로 취급된다 (Claude Code 의 Edit 이 거부, 일부 grep 은 조용히 건너뜀). 수정은 인코딩을 보존하는 스크립트로, 검색은 `grep -a`.

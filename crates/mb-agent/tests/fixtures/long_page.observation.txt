@@ -1,35 +1,35 @@
 # browser (trusted)
-url: http://localhost:8000/long_page   scroll_y: 0   page_height: 1880   viewport: 800x600
+url: http://localhost:8000/long_page   scroll_y: 0   page_height: 1884   viewport: 800x600
 elements: 26 shown / 26 in viewport / 60 total   next_cursor: -
 
 # page content (untrusted, origin=http://localhost:8000)
 title: "Long list"
-[e6] link      name="Item 1" → /item/1
-[e11] link      name="Item 2" → /item/2
-[e16] link      name="Item 3" → /item/3
-[e21] link      name="Item 4" → /item/4
-[e26] link      name="Item 5" → /item/5
-[e31] link      name="Item 6" → /item/6
-[e36] link      name="Item 7" → /item/7
-[e41] link      name="Item 8" → /item/8
-[e46] link      name="Item 9" → /item/9
-[e51] link      name="Item 10" → /item/10
-[e56] link      name="Item 11" → /item/11
-[e61] link      name="Item 12" → /item/12
-[e66] link      name="Item 13" → /item/13
-[e71] link      name="Item 14" → /item/14
-[e76] link      name="Item 15" → /item/15
-[e81] link      name="Item 16" → /item/16
-[e86] link      name="Item 17" → /item/17
-[e91] link      name="Item 18" → /item/18
-[e96] link      name="Item 19" → /item/19
-[e101] link      name="Item 20" → /item/20
-[e106] link      name="Item 21" → /item/21
-[e111] link      name="Item 22" → /item/22
-[e116] link      name="Item 23" → /item/23
-[e121] link      name="Item 24" → /item/24
-[e126] link      name="Item 25" → /item/25
-[e131] link      name="Item 26" → /item/26
+[e8] link      name="Item 1" → /item/1
+[e13] link      name="Item 2" → /item/2
+[e18] link      name="Item 3" → /item/3
+[e23] link      name="Item 4" → /item/4
+[e28] link      name="Item 5" → /item/5
+[e33] link      name="Item 6" → /item/6
+[e38] link      name="Item 7" → /item/7
+[e43] link      name="Item 8" → /item/8
+[e48] link      name="Item 9" → /item/9
+[e53] link      name="Item 10" → /item/10
+[e58] link      name="Item 11" → /item/11
+[e63] link      name="Item 12" → /item/12
+[e68] link      name="Item 13" → /item/13
+[e73] link      name="Item 14" → /item/14
+[e78] link      name="Item 15" → /item/15
+[e83] link      name="Item 16" → /item/16
+[e88] link      name="Item 17" → /item/17
+[e93] link      name="Item 18" → /item/18
+[e98] link      name="Item 19" → /item/19
+[e103] link      name="Item 20" → /item/20
+[e108] link      name="Item 21" → /item/21
+[e113] link      name="Item 22" → /item/22
+[e118] link      name="Item 23" → /item/23
+[e123] link      name="Item 24" → /item/24
+[e128] link      name="Item 25" → /item/25
+[e133] link      name="Item 26" → /item/26
 text:
   "Item 1 description for item 1."
   "Item 2 description for item 2."

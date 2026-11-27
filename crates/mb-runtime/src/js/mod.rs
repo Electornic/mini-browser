@@ -1203,6 +1203,18 @@ mod tests {
             rt_with_html(r#"<html><head><title>t</title></head><body><p>b</p></body></html>"#);
         assert_eq!(rt.execute("document.body.tagName").unwrap(), "\"BODY\"");
         assert_eq!(rt.execute("document.head.tagName").unwrap(), "\"HEAD\"");
+        assert_eq!(
+            rt.execute("document.documentElement.tagName").unwrap(),
+            "\"HTML\""
+        );
+        assert_eq!(
+            rt.execute("document.body.parentNode.tagName").unwrap(),
+            "\"HTML\""
+        );
+        assert_eq!(
+            rt.execute("document.documentElement.parentNode").unwrap(),
+            "null"
+        );
     }
 
     // -------- Tier 0 SPA: querySelectorAll + element.style --------

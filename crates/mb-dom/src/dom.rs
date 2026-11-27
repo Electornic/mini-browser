@@ -103,7 +103,9 @@ impl std::fmt::Display for TreeError {
 // `roots` mirrors the original `Vec<Node>` shape returned by the parser — the
 // document is free to expose multiple top-level siblings (some test inputs
 // have two), and consumers that only care about the first element walk
-// `roots()[0]`.
+// `roots()[0]`. A parsed page (source spelt `<html`) has exactly one root,
+// the `<html>` element ([`Document::document_element`]); find `<body>` /
+// `<head>` with [`Document::body`] / [`Document::head`], not by index.
 //
 // `revision` is a monotonically increasing counter bumped by every mutation
 // that affects style/layout output (structural edits, text/attribute writes).
@@ -127,6 +129,44 @@ impl Document {
 
     pub fn roots(&self) -> &[NodeId] {
         &self.roots
+    }
+
+    /// The `<html>` element when it is a root — every parsed source that
+    /// spelt `<html` (real pages; compat round 3 step 1r). `None` for
+    /// fragment-style documents (test fixtures, canned error pages), whose
+    /// top-level siblings are the roots.
+    pub fn document_element(&self) -> Option<NodeId> {
+        self.roots
+            .iter()
+            .copied()
+            .find(|&id| self.is_element_named(id, "html"))
+    }
+
+    /// `document.body`: the document element's first `<body>` child, or —
+    /// without a document element — a `<body>` root.
+    pub fn body(&self) -> Option<NodeId> {
+        self.wrapper_child("body")
+    }
+
+    /// `document.head`, the same way as [`Document::body`].
+    pub fn head(&self) -> Option<NodeId> {
+        self.wrapper_child("head")
+    }
+
+    fn wrapper_child(&self, tag: &str) -> Option<NodeId> {
+        let candidates: &[NodeId] = match self.document_element() {
+            Some(html) => &self.get(html)?.children,
+            None => &self.roots,
+        };
+        candidates
+            .iter()
+            .copied()
+            .find(|&id| self.is_element_named(id, tag))
+    }
+
+    fn is_element_named(&self, id: NodeId, tag: &str) -> bool {
+        self.element_data(id)
+            .is_some_and(|element| element.tag_name.eq_ignore_ascii_case(tag))
     }
 
     /// Monotonic mutation counter. The view cache compares this against the

@@ -115,7 +115,7 @@ pub(super) fn register_document(ctx: &Ctx<'_>, dom: Rc<RefCell<Document>>) -> Re
         "__mb_doc_body",
         Func::from(move || -> Option<u32> {
             let document = dom_g.borrow();
-            find_first_tag(&document, "body").map(|n| n.raw())
+            document.body().map(|n| n.raw())
         }),
     )?;
 
@@ -124,7 +124,18 @@ pub(super) fn register_document(ctx: &Ctx<'_>, dom: Rc<RefCell<Document>>) -> Re
         "__mb_doc_head",
         Func::from(move || -> Option<u32> {
             let document = dom_g.borrow();
-            find_first_tag(&document, "head").map(|n| n.raw())
+            document.head().map(|n| n.raw())
+        }),
+    )?;
+
+    // `document.documentElement` — the `<html>` root of a parsed page
+    // (compat round 3 step 1r); `null` for a fragment-style document.
+    let dom_g = dom.clone();
+    globals.set(
+        "__mb_doc_document_element",
+        Func::from(move || -> Option<u32> {
+            let document = dom_g.borrow();
+            document.document_element().map(|n| n.raw())
         }),
     )?;
 
@@ -195,6 +206,14 @@ const DOCUMENT_BOOT: &str = r#"
         configurable: true, enumerable: true,
     });
 
+    Object.defineProperty(doc, 'documentElement', {
+        get: function () {
+            var nid = globalThis.__mb_doc_document_element();
+            return nid == null ? null : globalThis.__mb_make_element(nid);
+        },
+        configurable: true, enumerable: true,
+    });
+
     Object.defineProperty(doc, 'head', {
         get: function () {
             var nid = globalThis.__mb_doc_head();
@@ -252,30 +271,6 @@ fn walk_for_id(document: &Document, node_id: NodeId, id: &str) -> Option<NodeId>
     }
     for child in &node.children {
         if let Some(found) = walk_for_id(document, *child, id) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn find_first_tag(document: &Document, tag: &str) -> Option<NodeId> {
-    for &root in document.roots() {
-        if let Some(found) = walk_for_tag(document, root, tag) {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn walk_for_tag(document: &Document, node_id: NodeId, tag: &str) -> Option<NodeId> {
-    let node = document.get(node_id)?;
-    if let NodeType::Element(elem) = &node.node_type
-        && elem.tag_name == tag
-    {
-        return Some(node_id);
-    }
-    for child in &node.children {
-        if let Some(found) = walk_for_tag(document, *child, tag) {
             return Some(found);
         }
     }

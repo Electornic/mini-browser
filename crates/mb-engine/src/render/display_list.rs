@@ -975,7 +975,7 @@ pub(crate) fn font_weight_value(node: &crate::style::StyledNode) -> u16 {
 }
 
 impl LayoutBox {
-    fn styled_node(&self) -> Option<&crate::style::StyledNode> {
+    pub(crate) fn styled_node(&self) -> Option<&crate::style::StyledNode> {
         match &self.box_type {
             crate::layout::BoxType::BlockNode(node)
             | crate::layout::BoxType::FlexNode(node)

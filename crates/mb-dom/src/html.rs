@@ -6,7 +6,9 @@
 // explicitly wrote:
 //   * If the source contains `<html>`, `<head>`, or `<body>` openers, we use
 //     `parse_document` so those wrappers survive intact (tests style the
-//     real `<body>` and read `document.body` / `document.head`).
+//     real `<body>` and read `document.body` / `document.head`). With
+//     `<html` (every real page) the `<html>` element is the single root,
+//     as in the spec tree; with only `<head>`/`<body>` those are the roots.
 //   * Otherwise we use `parse_fragment` with a `<body>` context. The tree
 //     builder is already in "in body" insertion mode, so siblings written
 //     at the top of the source — including `<script>` and `<style>` — stay
@@ -52,12 +54,25 @@ pub fn parse(source: &str) -> Result<Document, ParseError> {
     if saw_html || saw_head || saw_body {
         let dom = h5e_document(RcDom::default(), parser_opts()).one(source);
         // `parse_document` always builds  #Document → <html> → [<head>, <body>],
-        // synthesising any wrapper the user didn't write. We expose only the
-        // wrappers the source actually contained — that keeps `roots()[0]` ==
-        // `<body>` for the common `<body>...</body>` test fixture, while still
-        // letting `document.body` / `document.head` resolve to the real
-        // elements when the source spelt them out.
-        if let Some(html_handle) = first_element_named(&dom.document.children.borrow(), "html") {
+        // synthesising any wrapper the source didn't write.
+        let document_kids = dom.document.children.borrow();
+        let html_handle = first_element_named(&document_kids, "html");
+        if saw_html {
+            // A real page: the `<html>` element (attributes kept, for
+            // `html[data-theme]` / `html.dark`) is the single root with the
+            // head and body html5ever built under it — the spec tree, so
+            // `:root`, inheritance from `<html>` and rem work (compat round
+            // 3 step 1r).
+            if let Some(html_handle) = html_handle
+                && let Some(id) = build_into_arena(&mut document, html_handle)
+            {
+                document.append_root(id);
+            }
+        } else if let Some(html_handle) = html_handle {
+            // Only `<head>`/`<body>` were spelt out (test fixtures): expose
+            // just those wrappers as roots — `roots()[0]` == `<body>` for the
+            // common `<body>...</body>` fixture, and `document.body` /
+            // `document.head` still resolve to the real elements.
             for child in html_handle.children.borrow().iter() {
                 if let NodeData::Element { name, .. } = &child.data {
                     let include = match name.local.as_ref() {
@@ -285,6 +300,99 @@ mod tests {
             }
         }
         (deepest, elements, text)
+    }
+
+    fn tag(document: &Document, id: NodeId) -> String {
+        match &document.get(id).unwrap().node_type {
+            NodeType::Element(e) => e.tag_name.clone(),
+            NodeType::Text(t) => format!("#text {t:?}"),
+        }
+    }
+
+    #[test]
+    fn document_with_html_tag_has_the_html_element_as_its_single_root() {
+        // Compat round 3 step 1r: `:root`, `html[data-*]` and rem need the
+        // real document element (Chrome: #document → <html> → head, body).
+        let document = parse(
+            r#"<!DOCTYPE html><html lang="ko" data-theme="dark" class="js"><head><title>t</title></head><body><p>x</p></body></html>"#,
+        )
+        .unwrap();
+        assert_eq!(document.roots().len(), 1);
+        let html = document.document_element().expect("document element");
+        assert_eq!(html, document.roots()[0]);
+        assert_eq!(tag(&document, html), "html");
+        let attrs = &document.element_data(html).unwrap().attributes;
+        assert_eq!(attrs.get("data-theme").map(String::as_str), Some("dark"));
+        assert_eq!(attrs.get("lang").map(String::as_str), Some("ko"));
+        let kids: Vec<String> = document
+            .get(html)
+            .unwrap()
+            .children
+            .iter()
+            .map(|&c| tag(&document, c))
+            .collect();
+        assert_eq!(kids, ["head", "body"]);
+        assert_eq!(
+            document.head().map(|h| tag(&document, h)).as_deref(),
+            Some("head")
+        );
+        assert_eq!(
+            document.body().map(|b| tag(&document, b)).as_deref(),
+            Some("body")
+        );
+    }
+
+    #[test]
+    fn html_tag_without_head_or_body_gets_the_synthesised_ones() {
+        let document = parse("<html><title>t</title><p>x</p></html>").unwrap();
+        assert_eq!(document.roots().len(), 1);
+        let html = document.document_element().unwrap();
+        let kids: Vec<String> = document
+            .get(html)
+            .unwrap()
+            .children
+            .iter()
+            .map(|&c| tag(&document, c))
+            .collect();
+        assert_eq!(kids, ["head", "body"]);
+        let body = document.body().unwrap();
+        let body_kids: Vec<String> = document
+            .get(body)
+            .unwrap()
+            .children
+            .iter()
+            .map(|&c| tag(&document, c))
+            .collect();
+        assert_eq!(body_kids, ["p"]);
+    }
+
+    #[test]
+    fn fragment_and_body_only_sources_keep_their_roots() {
+        // No `<html`: unchanged — top-level siblings / the `<body>` are roots,
+        // and there is no document element.
+        let fragment = parse("<div>a</div>").unwrap();
+        assert_eq!(fragment.roots().len(), 1);
+        assert_eq!(tag(&fragment, fragment.roots()[0]), "div");
+        assert_eq!(fragment.document_element(), None);
+        let body_only = parse("<body><p>x</p></body>").unwrap();
+        assert_eq!(tag(&body_only, body_only.roots()[0]), "body");
+        assert_eq!(body_only.body(), Some(body_only.roots()[0]));
+        assert_eq!(body_only.document_element(), None);
+    }
+
+    #[test]
+    fn html_root_counts_as_depth_one_for_the_cap() {
+        // <html> is depth 1, <body> 2: the cap still bounds the whole tree.
+        let depth = MAX_DOM_DEPTH + 10;
+        let source = format!(
+            "<html><body>{}x{}</body></html>",
+            "<div>".repeat(depth),
+            "</div>".repeat(depth)
+        );
+        let document = parse(&source).unwrap();
+        let (deepest, elements, _) = shape(&document, document.roots()[0]);
+        assert_eq!(deepest, MAX_DOM_DEPTH);
+        assert_eq!(elements, depth + 3, "html, head, body and every div");
     }
 
     #[test]

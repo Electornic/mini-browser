@@ -1,28 +1,28 @@
 # browser (trusted)
-url: http://localhost:8000/long_page   scroll_y: 1500   page_height: 1880   viewport: 800x600
+url: http://localhost:8000/long_page   scroll_y: 1500   page_height: 1884   viewport: 800x600
 elements: 19 shown / 19 in viewport / 60 total   next_cursor: -
 
 # page content (untrusted, origin=http://localhost:8000)
 title: "Long list"
-[e211] link      name="Item 42" → /item/42
-[e216] link      name="Item 43" → /item/43
-[e221] link      name="Item 44" → /item/44
-[e226] link      name="Item 45" → /item/45
-[e231] link      name="Item 46" → /item/46
-[e236] link      name="Item 47" → /item/47
-[e241] link      name="Item 48" → /item/48
-[e246] link      name="Item 49" → /item/49
-[e251] link      name="Item 50" → /item/50
-[e256] link      name="Item 51" → /item/51
-[e261] link      name="Item 52" → /item/52
-[e266] link      name="Item 53" → /item/53
-[e271] link      name="Item 54" → /item/54
-[e276] link      name="Item 55" → /item/55
-[e281] link      name="Item 56" → /item/56
-[e286] link      name="Item 57" → /item/57
-[e291] link      name="Item 58" → /item/58
-[e296] link      name="Item 59" → /item/59
-[e301] link      name="Item 60" → /item/60
+[e213] link      name="Item 42" → /item/42
+[e218] link      name="Item 43" → /item/43
+[e223] link      name="Item 44" → /item/44
+[e228] link      name="Item 45" → /item/45
+[e233] link      name="Item 46" → /item/46
+[e238] link      name="Item 47" → /item/47
+[e243] link      name="Item 48" → /item/48
+[e248] link      name="Item 49" → /item/49
+[e253] link      name="Item 50" → /item/50
+[e258] link      name="Item 51" → /item/51
+[e263] link      name="Item 52" → /item/52
+[e268] link      name="Item 53" → /item/53
+[e273] link      name="Item 54" → /item/54
+[e278] link      name="Item 55" → /item/55
+[e283] link      name="Item 56" → /item/56
+[e288] link      name="Item 57" → /item/57
+[e293] link      name="Item 58" → /item/58
+[e298] link      name="Item 59" → /item/59
+[e303] link      name="Item 60" → /item/60
 text:
   "Item 42 description for item 42."
   "Item 43 description for item 43."

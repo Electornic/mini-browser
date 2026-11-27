@@ -4,14 +4,14 @@ elements: 8 shown / 8 in viewport / 8 total   next_cursor: -
 
 # page content (untrusted, origin=http://localhost:8000)
 title: "Acme Tools"
-[e11] link      name="Skip to content" → /compat3#main
-[e17] link      name="Features" → /compat3#features
-[e20] link      name="Pricing" → /compat3#pricing
-[e27] textbox   name="Search docs" value=""
-[e29] button    name="Search"  submits GET /compat3#search
-[e34] checkbox  name="Menu" checked=false
-[e65] link      name="safe deploys" → /compat3#safe
-[e69] link      name="happy teams" → /compat3#teams
+[e13] link      name="Skip to content" → /compat3#main
+[e19] link      name="Features" → /compat3#features
+[e22] link      name="Pricing" → /compat3#pricing
+[e29] textbox   name="Search docs" value=""
+[e31] button    name="Search"  submits GET /compat3#search
+[e36] checkbox  name="Menu" checked=false
+[e67] link      name="safe deploys" → /compat3#safe
+[e71] link      name="happy teams" → /compat3#teams
 text:
   "Skip to content"
   "Features Pricing"

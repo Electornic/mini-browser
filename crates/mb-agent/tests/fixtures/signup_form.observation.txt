@@ -1,21 +1,21 @@
 # browser (trusted)
-url: http://localhost:8000/signup_form   scroll_y: 0   page_height: 261   viewport: 800x600
+url: http://localhost:8000/signup_form   scroll_y: 0   page_height: 265   viewport: 800x600
 elements: 12 shown / 12 in viewport / 12 total   next_cursor: -
 
 # page content (untrusted, origin=http://localhost:8000)
 title: "Create account"
-[e24] textbox   name="Email" value="dev@example.test"
-[e29] textbox   name="Password" value=(hidden, 8 chars)  ⚠ password
-[e34] checkbox  name="I agree to the terms" checked=false
-[e38] radio     name="Free plan" checked=true
-[e41] combobox  name="" field="country" value="Japan"
-[e47] textbox   name="" field="bio" value="Hello there"
-[e50] button    name="Sign up"  ⚠ submits POST /signup
-[e53] button    name="Help"  (disabled)
-[e58] textbox   name="Search" value=""
-[e59] button    name="Go"  submits GET /search
-[e63] link      name="Log in" → /login
-[e66] link      name="external terms" → https://other.example/terms  ⚠ other origin
+[e26] textbox   name="Email" value="dev@example.test"
+[e31] textbox   name="Password" value=(hidden, 8 chars)  ⚠ password
+[e36] checkbox  name="I agree to the terms" checked=false
+[e40] radio     name="Free plan" checked=true
+[e43] combobox  name="" field="country" value="Japan"
+[e49] textbox   name="" field="bio" value="Hello there"
+[e52] button    name="Sign up"  ⚠ submits POST /signup
+[e55] button    name="Help"  (disabled)
+[e60] textbox   name="Search" value=""
+[e61] button    name="Go"  submits GET /search
+[e65] link      name="Log in" → /login
+[e68] link      name="external terms" → https://other.example/terms  ⚠ other origin
 text:
   "Create your account"
   "Welcome. Fill in the form below to get started."

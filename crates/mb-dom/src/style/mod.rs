@@ -4,11 +4,12 @@ mod presentational;
 mod variables;
 
 use cascade::specified_values;
-use variables::resolve_var_references;
+use variables::{CustomScope, resolve_var_references};
 
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
+    rc::Rc,
 };
 
 use crate::{
@@ -204,6 +205,7 @@ fn style_pass(
         root,
         &cascade,
         None,
+        &Rc::new(CustomScope::default()),
         root_font_size,
         &matching_state,
     )
@@ -237,10 +239,18 @@ fn style_tree_inner(
     node_id: NodeId,
     cascade: &Cascade<'_>,
     parent_values: Option<&PropertyMap>,
+    parent_custom: &Rc<CustomScope>,
     root_font_size: f32,
     state: &MatchingState,
 ) -> StyledNode {
-    let mut specified_values = specified_values(document, node_id, cascade, state);
+    // Custom properties (`--*`) leave the property map: nothing downstream
+    // reads them, they only feed `var()`. They inherit through a shared
+    // scope chain instead of being copied into every node.
+    let (own_custom, mut specified_values): (PropertyMap, PropertyMap) =
+        specified_values(document, node_id, cascade, state)
+            .into_iter()
+            .partition(|(name, _)| name.starts_with("--"));
+    let custom = CustomScope::child(parent_custom, own_custom);
 
     // Real browsers inherit many properties. Here we only inherit a few text-related ones
     // because they make documents readable without making the style system much more complex.
@@ -274,24 +284,12 @@ fn style_tree_inner(
         }
     }
 
-    // CSS Custom Properties inherit per the CSS Variables spec. Pull every
-    // `--*` declaration from the parent that isn't shadowed locally so this
-    // node can resolve `var()` references against ancestor values too. The
-    // var-resolve pass below sees the merged map.
-    if let Some(parent) = parent_values {
-        for (name, value) in parent {
-            if name.starts_with("--") && !specified_values.contains_key(name) {
-                specified_values.insert(name.clone(), value.clone());
-            }
-        }
-    }
-
     // Resolve `var()` references against the `--*` declarations now in scope.
     // Done before the em/rem rewrite below so a custom property that holds
     // a length (e.g. `--gap: 1em`) goes through the same em/rem conversion
     // as if it had been written inline. Cycle-protected; unresolved
     // references with no fallback degrade to `Keyword("initial")`.
-    resolve_var_references(&mut specified_values, cascade.report);
+    resolve_var_references(&mut specified_values, &custom, cascade.report);
 
     // Font-size is resolved first because every other em-based length on this node depends
     // on it. Parent font-size has already been resolved to Px during the parent's pass, so
@@ -383,6 +381,7 @@ fn style_tree_inner(
                 *child_id,
                 cascade,
                 Some(&specified_values),
+                &custom,
                 root_font_size,
                 state,
             )
@@ -2250,6 +2249,100 @@ mod tests {
             &crate::css::media::MediaContext::default(),
         );
         assert_eq!(plain, reported);
+    }
+
+    /// A whole page (`<html>` root, step 1r) styled like the view does.
+    fn style_page(html_source: &str, css_source: &str) -> style::StyledNode {
+        let document = html::parse(html_source).unwrap();
+        let root = *document.roots().last().unwrap();
+        style::style_tree(&document, root, &[parse_css(css_source)])
+    }
+
+    const PAGE: &str = r#"<!DOCTYPE html><html data-theme="dark"><head><title>t</title></head><body><div><p>x</p></div></body></html>"#;
+
+    #[test]
+    fn root_custom_property_reaches_body_descendants() {
+        let styled = style_page(PAGE, ":root { --x: 5px; } p { margin-left: var(--x); }");
+        let p = find_tag(&styled, "p").unwrap();
+        assert_eq!(p.value("margin-left"), Some(&Value::Length(5.0, Unit::Px)));
+    }
+
+    #[test]
+    fn html_attribute_selector_matches_the_document_element() {
+        let styled = style_page(
+            PAGE,
+            "html[data-theme=dark] p { width: 7px; } html { height: 9px; }",
+        );
+        assert_eq!(
+            find_tag(&styled, "p").unwrap().value("width"),
+            Some(&Value::Length(7.0, Unit::Px))
+        );
+        assert_eq!(
+            find_tag(&styled, "html").unwrap().value("height"),
+            Some(&Value::Length(9.0, Unit::Px))
+        );
+    }
+
+    #[test]
+    fn rem_resolves_against_the_html_font_size() {
+        let styled = style_page(PAGE, "html { font-size: 10px; } p { width: 2rem; }");
+        assert_eq!(
+            find_tag(&styled, "p").unwrap().value("width"),
+            Some(&Value::Length(20.0, Unit::Px))
+        );
+    }
+
+    #[test]
+    fn root_font_size_does_not_override_a_body_rule() {
+        // `:root` (0,1,0) only matches <html>; `body` (0,0,1) still sets the
+        // body's size, and rem is still the html one — as in Chrome.
+        let styled = style_page(
+            PAGE,
+            ":root { font-size: 10px; } body { font-size: 14px; } p { width: 1rem; }",
+        );
+        let p = find_tag(&styled, "p").unwrap();
+        assert_eq!(p.value("font-size"), Some(&Value::Length(14.0, Unit::Px)));
+        assert_eq!(p.value("width"), Some(&Value::Length(10.0, Unit::Px)));
+        assert_eq!(
+            find_tag(&styled, "body").unwrap().value("font-size"),
+            Some(&Value::Length(14.0, Unit::Px))
+        );
+    }
+
+    #[test]
+    fn custom_properties_inherit_without_being_copied_into_each_node() {
+        // Hundreds of `:root` tokens copied into every node made GitHub's
+        // style pass blow the budget (step 1r); they live in a shared scope.
+        let styled = style_page(
+            PAGE,
+            ":root { --x: 5px; --unused: 1px; } div { --y: 3px; } p { margin-left: var(--x); width: var(--y); }",
+        );
+        let p = find_tag(&styled, "p").unwrap();
+        assert_eq!(p.value("margin-left"), Some(&Value::Length(5.0, Unit::Px)));
+        assert_eq!(p.value("width"), Some(&Value::Length(3.0, Unit::Px)));
+        for node in [&styled, find_tag(&styled, "div").unwrap(), p] {
+            assert!(
+                node.specified_values
+                    .keys()
+                    .all(|name| !name.starts_with("--")),
+                "{:?}",
+                node.specified_values.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn html_color_inherits_into_the_body() {
+        let styled = style_page(PAGE, "html { color: #00ff00; }");
+        assert_eq!(
+            find_tag(&styled, "p").unwrap().value("color"),
+            Some(&Value::Color(Color {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255
+            }))
+        );
     }
 
     fn find_tag<'a>(node: &'a style::StyledNode, tag: &str) -> Option<&'a style::StyledNode> {

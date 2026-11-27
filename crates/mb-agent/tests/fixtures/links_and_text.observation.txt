@@ -1,16 +1,16 @@
 # browser (trusted)
-url: http://localhost:8000/links_and_text   scroll_y: 0   page_height: 344   viewport: 800x600
+url: http://localhost:8000/links_and_text   scroll_y: 0   page_height: 348   viewport: 800x600
 elements: 7 shown / 7 in viewport / 7 total   next_cursor: -
 
 # page content (untrusted, origin=http://localhost:8000)
 title: "Docs home"
-[e9] link      name="Guide" → /guide
-[e13] link      name="API reference" → /api?v=2#auth
-[e17] link      name="Home" → /
-[e32] button    name="Copy command"
-[e35] button    name="Close banner"
-[e38] clickable name="Show more"
-[e41] link      name="Do nothing" → "javascript:void(0)"
+[e11] link      name="Guide" → /guide
+[e15] link      name="API reference" → /api?v=2#auth
+[e19] link      name="Home" → /
+[e34] button    name="Copy command"
+[e37] button    name="Close banner"
+[e40] clickable name="Show more"
+[e43] link      name="Do nothing" → "javascript:void(0)"
 text:
   "Guide"
   "API reference"

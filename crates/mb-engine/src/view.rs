@@ -83,6 +83,17 @@ pub fn build_document_view(
     profile::time_block("view::collect_image_commands", || {
         commands.extend(collect_image_commands(&layout, current_url, images));
     });
+    if let Some(color) = canvas_background(&layout) {
+        // Cover the viewport and the whole document, under everything.
+        let height = (viewport_height as f32).max(document_height(&commands));
+        let canvas = layout::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: viewport_width as f32,
+            height,
+        };
+        commands.insert(0, render::DisplayCommand::SolidRect(color, canvas));
+    }
     let links = profile::time_block("view::collect_link_targets", || {
         collect_link_targets(&layout, None, false, render::Affine::IDENTITY)
     });
@@ -90,6 +101,28 @@ pub fn build_document_view(
         commands,
         links,
         layout_root: layout,
+    })
+}
+
+/// The canvas colour (CSS Backgrounds 3 §2.11.2): the root `<html>`'s
+/// `background-color`, or — when that is transparent — the `<body>`'s.
+/// Only a colour propagates; a root background *image* still paints in its
+/// own box only (not modelled). The box itself keeps painting its colour on
+/// top — same colour, so only a translucent one shows twice.
+fn canvas_background(layout: &layout::LayoutBox) -> Option<css::Color> {
+    let opaque_color = |node: &style::StyledNode| match node.value("background-color") {
+        Some(css::Value::Color(color)) if color.a > 0 => Some(*color),
+        _ => None,
+    };
+    let html = layout.styled_node()?;
+    if !matches!(&html.node_type, NodeType::Element(e) if e.tag_name.eq_ignore_ascii_case("html")) {
+        return None;
+    }
+    opaque_color(html).or_else(|| {
+        let body = html.children.iter().find(
+            |child| matches!(&child.node_type, NodeType::Element(e) if e.tag_name.eq_ignore_ascii_case("body")),
+        )?;
+        opaque_color(body)
     })
 }
 
@@ -601,6 +634,58 @@ mod tests {
             }
         }
         None
+    }
+
+    fn page_view(html_source: &str, css_source: &str) -> DocumentView {
+        let document = html::parse(html_source).unwrap();
+        let sheet = css::parse(css_source).unwrap();
+        build_document_view(
+            &document,
+            std::slice::from_ref(&sheet),
+            400,
+            300,
+            None,
+            &HashMap::new(),
+            style::InteractionState::default(),
+        )
+        .unwrap()
+    }
+
+    fn canvas_rect(view: &DocumentView) -> Option<(css::Color, layout::Rect)> {
+        match view.commands.first() {
+            Some(DisplayCommand::SolidRect(color, rect)) if rect.x == 0.0 && rect.y == 0.0 => {
+                Some((*color, *rect))
+            }
+            _ => None,
+        }
+    }
+
+    const SHORT_PAGE: &str = "<html><body><p>x</p></body></html>";
+
+    #[test]
+    fn body_background_propagates_to_the_whole_canvas() {
+        // CSS Backgrounds 3 §2.11.2: html transparent → body's background
+        // paints the canvas (whole viewport, not just the body box).
+        let view = page_view(SHORT_PAGE, "body { background-color: #102030; }");
+        let (color, rect) = canvas_rect(&view).expect("canvas fill first");
+        assert_eq!((color.r, color.g, color.b), (0x10, 0x20, 0x30));
+        assert_eq!((rect.width, rect.height), (400.0, 300.0));
+    }
+
+    #[test]
+    fn html_background_wins_over_body_for_the_canvas() {
+        let view = page_view(
+            SHORT_PAGE,
+            "html { background-color: #ff0000; } body { background-color: #00ff00; }",
+        );
+        let (color, _) = canvas_rect(&view).expect("canvas fill first");
+        assert_eq!((color.r, color.g, color.b), (255, 0, 0));
+    }
+
+    #[test]
+    fn no_canvas_fill_without_a_root_background() {
+        let view = page_view(SHORT_PAGE, "p { background-color: #00ff00; }");
+        assert!(canvas_rect(&view).is_none(), "{:?}", view.commands.first());
     }
 
     #[test]

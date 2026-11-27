@@ -5,18 +5,51 @@
 // only top-level Var values get substituted, which is what real pages
 // reach for (`color: var(--accent)`).
 
-use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-};
+use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
 use crate::css::{Value, properties};
 
 use super::{PropertyMap, StyleReport, declaration_key};
 
-/// Substitute every `Value::Var` in `values` with the looked-up `--*` value
-/// in the same map. Custom properties inherit, so by the time this runs the
-/// parent's declarations have already been folded in by the cascade caller.
+/// The custom properties (`--*`) in scope at a node: its own declarations
+/// on top of the parent's scope. Custom properties inherit, so a node that
+/// declares none shares its parent's scope (one `Rc` clone) — pages put
+/// hundreds of design tokens on `:root`, and copying them into every node
+/// made style time grow with nodes × tokens (compat round 3 step 1r).
+/// Lookups walk up the chain; it only grows at nodes that declare `--*`
+/// and is bounded by the DOM depth cap.
+#[derive(Debug, Default)]
+pub(super) struct CustomScope {
+    vars: PropertyMap,
+    parent: Option<Rc<CustomScope>>,
+}
+
+impl CustomScope {
+    /// The scope of a node declaring `own` under `parent`.
+    pub(super) fn child(parent: &Rc<CustomScope>, own: PropertyMap) -> Rc<CustomScope> {
+        if own.is_empty() {
+            Rc::clone(parent)
+        } else {
+            Rc::new(CustomScope {
+                vars: own,
+                parent: Some(Rc::clone(parent)),
+            })
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&Value> {
+        let mut scope = self;
+        loop {
+            if let Some(value) = scope.vars.get(name) {
+                return Some(value);
+            }
+            scope = scope.parent.as_deref()?;
+        }
+    }
+}
+
+/// Substitute every `Value::Var` in `values` (a node's non-custom
+/// properties) with the looked-up `--*` value in `scope`.
 ///
 /// Resolution is iterative: a variable that resolves to another variable is
 /// chased again, with a `seen` set guarding against cycles. The fallback
@@ -30,30 +63,19 @@ use super::{PropertyMap, StyleReport, declaration_key};
 /// substitution failed or left a keyword the property rejects.
 pub(super) fn resolve_var_references(
     values: &mut PropertyMap,
+    scope: &CustomScope,
     report: Option<&RefCell<StyleReport>>,
 ) {
-    let custom_props: HashMap<String, Value> = values
-        .iter()
-        .filter(|(name, _)| name.starts_with("--"))
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect();
-
     for (name, value) in values.iter_mut() {
-        if name.starts_with("--") {
-            // Custom-property *definitions* are kept as-is so descendants
-            // that inherit them still see the original (possibly Var)
-            // value. Each descendant runs its own resolve pass.
-            continue;
-        }
         let Some(report) = report else {
-            resolve_var_value(value, &custom_props);
+            resolve_var_value(value, scope);
             continue;
         };
         if !matches!(value, Value::Var { .. }) {
             continue;
         }
         let declared = value.clone();
-        let resolved = resolve_var_value(value, &custom_props);
+        let resolved = resolve_var_value(value, scope);
         let mut report = report.borrow_mut();
         if !resolved {
             report.iacvt.insert(declaration_key(name, &declared));
@@ -70,7 +92,7 @@ pub(super) fn resolve_var_references(
 
 /// Substitute in place. False = invalid at computed-value time (a cycle,
 /// or an undefined name with no fallback): the value became `initial`.
-fn resolve_var_value(value: &mut Value, custom_props: &HashMap<String, Value>) -> bool {
+fn resolve_var_value(value: &mut Value, scope: &CustomScope) -> bool {
     let mut seen: HashSet<String> = HashSet::new();
     while let Value::Var { name, fallback } = value {
         if !seen.insert(name.clone()) {
@@ -78,7 +100,7 @@ fn resolve_var_value(value: &mut Value, custom_props: &HashMap<String, Value>) -
             *value = Value::Keyword("initial".into());
             return false;
         }
-        match custom_props.get(name) {
+        match scope.get(name) {
             Some(resolved) => {
                 *value = resolved.clone();
             }
