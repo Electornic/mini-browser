@@ -1,11 +1,12 @@
 # browser (trusted)
-url: http://localhost:8000/compat3   scroll_y: 0   page_height: 322   viewport: 800x600
-elements: 7 shown / 7 in viewport / 7 total   next_cursor: -
+url: http://localhost:8000/compat3   scroll_y: 0   page_height: 318   viewport: 800x600
+elements: 8 shown / 8 in viewport / 8 total   next_cursor: -
 
 # page content (untrusted, origin=http://localhost:8000)
 title: "Acme Tools"
 [e11] link      name="Skip to content" → /compat3#main
-[e23] button    name="Open navigation"
+[e17] link      name="Features" → /compat3#features
+[e20] link      name="Pricing" → /compat3#pricing
 [e27] textbox   name="Search docs" value=""
 [e29] button    name="Search"  submits GET /compat3#search
 [e34] checkbox  name="Menu" checked=false
@@ -13,6 +14,7 @@ title: "Acme Tools"
 [e69] link      name="happy teams" → /compat3#teams
 text:
   "Skip to content"
+  "Features Pricing"
   "Acme Tools"
   "Build, ship and watch your services from one place."
   "Slide one: fast builds"

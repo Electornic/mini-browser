@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
+    css,
     dom::{Document, NodeId, NodeType},
     net::{self, Url},
 };
@@ -17,10 +18,15 @@ pub use mb_dom::resource::{LoadedImage, ResourceError, decode_image};
 // navigation (AGENTS.md "Robustness Rules" 1). Keep it that way — a `?`
 // here would bring back the blank-page bug.
 pub fn load_stylesheets(document: &Document, base_url: &Url) -> Vec<String> {
-    let stylesheet_urls = stylesheet_urls(document, base_url);
+    let links = stylesheet_links(document, base_url);
     // Fetch all stylesheets in parallel; per-resource failures are silently
-    // dropped so one broken link does not kill the whole page.
-    parallel_fetch(&stylesheet_urls, |url| net::load_css(url).ok())
+    // dropped so one broken link does not kill the whole page. A `media`
+    // attribute wraps the body in `@media` here, because the sheets are
+    // joined into one string downstream (compat round 3 2.1).
+    parallel_fetch(&links, |(url, media)| {
+        let css = net::load_css(url).ok()?;
+        Some(css::media::scope_sheet(&css, media.as_deref()).into_owned())
+    })
 }
 
 // Fetches every `<script src="…">` body referenced by `document` in parallel
@@ -114,19 +120,20 @@ fn stylesheet_image_urls(stylesheets: &[String], base_url: &Url) -> Vec<Url> {
 // borrow whatever the caller already had on the stack. There is no thread
 // pool: one thread per URL is fine because the bottleneck is network I/O,
 // not CPU, and pages rarely reference more than a handful of resources.
-fn parallel_fetch<T, F>(urls: &[Url], fetch: F) -> Vec<T>
+fn parallel_fetch<I, T, F>(items: &[I], fetch: F) -> Vec<T>
 where
+    I: Sync,
     T: Send,
-    F: Fn(&Url) -> Option<T> + Send + Sync,
+    F: Fn(&I) -> Option<T> + Send + Sync,
 {
-    if urls.is_empty() {
+    if items.is_empty() {
         return Vec::new();
     }
     std::thread::scope(|scope| {
         let fetch = &fetch;
-        let handles: Vec<_> = urls
+        let handles: Vec<_> = items
             .iter()
-            .map(|url| scope.spawn(move || fetch(url)))
+            .map(|item| scope.spawn(move || fetch(item)))
             .collect();
         handles
             .into_iter()
@@ -189,12 +196,13 @@ fn first_favicon_link(document: &Document, id: NodeId, base_url: &Url) -> Option
     None
 }
 
-fn stylesheet_urls(document: &Document, base_url: &Url) -> Vec<Url> {
-    let mut urls = Vec::new();
+/// Every `<link rel=stylesheet>` with a usable href, with its `media`.
+fn stylesheet_links(document: &Document, base_url: &Url) -> Vec<(Url, Option<String>)> {
+    let mut links = Vec::new();
     for &root in document.roots() {
-        collect_stylesheet_urls(document, root, base_url, &mut urls);
+        collect_stylesheet_links(document, root, base_url, &mut links);
     }
-    urls
+    links
 }
 
 fn image_urls(document: &Document, base_url: &Url) -> Vec<Url> {
@@ -205,7 +213,12 @@ fn image_urls(document: &Document, base_url: &Url) -> Vec<Url> {
     urls
 }
 
-fn collect_stylesheet_urls(document: &Document, id: NodeId, base_url: &Url, urls: &mut Vec<Url>) {
+fn collect_stylesheet_links(
+    document: &Document,
+    id: NodeId,
+    base_url: &Url,
+    links: &mut Vec<(Url, Option<String>)>,
+) {
     let Some(node) = document.get(id) else {
         return;
     };
@@ -220,13 +233,13 @@ fn collect_stylesheet_urls(document: &Document, id: NodeId, base_url: &Url, urls
             // A link without a usable href loads nothing, like in browsers —
             // it must not fail the page.
             if let Some(url) = resolve_attr(element.attributes.get("href"), base_url) {
-                urls.push(url);
+                links.push((url, element.attributes.get("media").cloned()));
             }
         }
     }
 
     for &child in &node.children {
-        collect_stylesheet_urls(document, child, base_url, urls);
+        collect_stylesheet_links(document, child, base_url, links);
     }
 }
 
@@ -408,7 +421,7 @@ mod tests {
 
     use super::{
         extract_font_urls, favicon_url, image_urls, load_images, load_scripts, load_stylesheets,
-        stylesheet_urls,
+        stylesheet_links,
     };
 
     #[test]
@@ -440,7 +453,10 @@ mod tests {
         )
         .unwrap();
         let base = Url::parse("https://example.com/").unwrap();
-        let sheets = stylesheet_urls(&document, &base);
+        let sheets: Vec<_> = stylesheet_links(&document, &base)
+            .into_iter()
+            .map(|(url, _)| url)
+            .collect();
         let images = image_urls(&document, &base);
         assert_eq!(
             sheets.iter().map(|u| u.to_string()).collect::<Vec<_>>(),
@@ -486,6 +502,81 @@ mod tests {
             html::parse(r#"<head><link rel="stylesheet" href="/base.css"/></head>"#).unwrap();
         let base = Url::parse("https://example.com/").unwrap();
         assert!(favicon_url(&document, &base).is_none());
+    }
+
+    #[test]
+    fn link_media_attribute_is_evaluated() {
+        // `<link media=print>` used to apply everywhere (the attribute was
+        // ignored). The body now joins the other sheets as an `@media`
+        // block, so the cascade evaluates it like any other.
+        let document = html::parse(
+            r#"<html><head>
+                <link rel="stylesheet" href="/print.css" media="print">
+                <link rel="stylesheet" href="/narrow.css" media="(max-width: 600px)">
+              </head><body><p class="t">x</p></body></html>"#,
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                let bytes_read = stream.read(&mut request).unwrap();
+                let request_text = String::from_utf8_lossy(&request[..bytes_read]);
+                let body = if request_text.starts_with("GET /print.css ") {
+                    ".t { color: #000001; }"
+                } else {
+                    ".t { color: #000002; }"
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/css\r\nConnection: close\r\n\r\n{body}"
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let base_url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        let stylesheets = load_stylesheets(&document, &base_url);
+        server.join().unwrap();
+        assert!(
+            stylesheets[0].starts_with("@media print {"),
+            "{stylesheets:?}"
+        );
+
+        // Joined the way navigation joins them.
+        let sheet = crate::css::parse(&stylesheets.join("\n")).unwrap();
+        let color = |width: f32| {
+            let body = *document.roots().last().unwrap();
+            let styled = crate::style::style_tree_with_state(
+                &document,
+                body,
+                std::slice::from_ref(&sheet),
+                crate::style::InteractionState::default(),
+                &crate::css::media::MediaContext::new(width, 800.0),
+            );
+            fn find(node: &crate::style::StyledNode) -> Option<crate::css::Value> {
+                if matches!(&node.node_type, crate::dom::NodeType::Element(e) if e.tag_name == "p")
+                {
+                    return node.value("color").cloned();
+                }
+                node.children.iter().find_map(find)
+            }
+            find(&styled)
+        };
+        let rgb = |b| {
+            Some(crate::css::Value::Color(crate::css::Color {
+                r: 0,
+                g: 0,
+                b,
+                a: 255,
+            }))
+        };
+        assert_eq!(
+            color(1280.0),
+            None,
+            "neither sheet applies on a wide screen"
+        );
+        assert_eq!(color(500.0), rgb(2), "narrow applies, print never");
     }
 
     #[test]

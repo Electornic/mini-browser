@@ -10,17 +10,17 @@ use selectors::context::{
 };
 
 use crate::{
-    css::{Declaration, MiniBrowserSelectorImpl, Selector, Stylesheet, Value},
+    css::{Declaration, MiniBrowserSelectorImpl, Selector, Value},
     dom::{Document, NodeId, NodeType},
     dom_select::{MatchingElement, MatchingState},
 };
 
-use super::{PropertyMap, defaults::default_values, presentational::presentational_hints};
+use super::{Cascade, PropertyMap, defaults::default_values, presentational::presentational_hints};
 
 pub(super) fn specified_values(
     document: &Document,
     node_id: NodeId,
-    stylesheets: &[Stylesheet],
+    cascade: &Cascade<'_>,
     state: &MatchingState,
 ) -> PropertyMap {
     let mut matched = Vec::new();
@@ -43,10 +43,20 @@ pub(super) fn specified_values(
 
     // First collect every rule that matches this node together with its
     // specificity and source order.
-    for (rule_order, rule) in stylesheets
+    // A rule in a `@media` block that doesn't match is skipped; its slot
+    // in `rule_order` stays, so source order is unchanged for the rest.
+    for (rule_order, rule) in cascade
+        .stylesheets
         .iter()
-        .flat_map(|sheet| sheet.rules.iter())
+        .zip(cascade.media)
+        .flat_map(|(sheet, media)| sheet.rules.iter().map(move |rule| (rule, media)))
         .enumerate()
+        .filter(|(_, (rule, media))| {
+            rule.media
+                .as_ref()
+                .is_none_or(|block| media.get(block.index).copied().unwrap_or(false))
+        })
+        .map(|(order, (rule, _))| (order, rule))
     {
         if let Some(specificity) = matching_specificity(&element, &mut ctx, &rule.selectors) {
             matched.push((specificity, rule_order, &rule.declarations));

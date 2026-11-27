@@ -46,6 +46,7 @@ pub fn build_document_view(
     parsed_document: &dom::Document,
     stylesheets: &[css::Stylesheet],
     viewport_width: usize,
+    viewport_height: usize,
     current_url: Option<&url::Url>,
     images: &HashMap<String, resource::LoadedImage>,
     interaction: style::InteractionState<'_>,
@@ -64,8 +65,10 @@ pub fn build_document_view(
         .last()
         .copied()
         .ok_or_else(|| "document did not produce a root node".to_string())?;
+    // `@media` sees the page viewport (CSS px, chrome excluded).
+    let media = css::media::MediaContext::new(viewport_width as f32, viewport_height as f32);
     let styled = profile::time_block("view::style_tree", || {
-        style::style_tree_with_state(parsed_document, root, stylesheets, interaction)
+        style::style_tree_with_state(parsed_document, root, stylesheets, interaction, &media)
     });
     let layout = profile::time_block("view::layout_tree", || {
         layout::layout_tree(&styled, viewport_width as f32)

@@ -858,6 +858,7 @@ fn run_pipeline(html_src: &str, css_src: &str) -> view::DocumentView {
         &document,
         &[stylesheet],
         800,
+        600,
         None,
         &HashMap::new(),
         style::InteractionState::default(),
@@ -1551,6 +1552,76 @@ const CSS_DEDICATED: &[&str] = &[
     "gap",
 ];
 
+/// Pieces of `@media` preludes: real features, values, range operators,
+/// `calc`, logic words, and the token soup's breakage.
+const MEDIA_TOKENS: &[&str] = &[
+    "screen",
+    "print",
+    "all",
+    "not",
+    "only",
+    "and",
+    "or",
+    ",",
+    "(",
+    ")",
+    "(min-width: 768px)",
+    "(max-width:1e39px)",
+    "(width >= 1px)",
+    "(1px < width <= 2e9px)",
+    "(width<calc(48rem - .02px))",
+    "(width < calc(1px + ))",
+    "calc(",
+    "(prefers-color-scheme: dark)",
+    "(hover)",
+    "(orientation: portrait)",
+    "(aspect-ratio: 0/0)",
+    "(min-aspect-ratio: 16/9)",
+    "(-webkit-min-device-pixel-ratio: 2)",
+    "(min-resolution: 1e39dpi)",
+    "(color)",
+    "(frobnicate)",
+    "(--custom)",
+    "(min-width: -1px)",
+    "(height: 0)",
+    "(width: 50vmin)",
+    "<",
+    "<=",
+    ">",
+    "=",
+    "1px",
+    "1e39px",
+    "NaN",
+    "width",
+    ":",
+    "{",
+    "}",
+    ";",
+    "\"",
+    "/*",
+    "\\",
+    "안녕",
+];
+
+/// An `@media` prelude: a few media tokens, sometimes very deep `(((…`.
+fn media_prelude(rng: &mut Rng) -> String {
+    let mut out = String::new();
+    if rng.chance(5) {
+        let depth = rng.range(30, 400);
+        out.push_str(&"(".repeat(depth));
+        out.push_str("min-width: 1px");
+        out.push_str(&")".repeat(rng.range(0, depth + 1)));
+        return out;
+    }
+    for _ in 0..rng.range(0, 7) {
+        out.push_str(rng.pick_str(MEDIA_TOKENS));
+        if rng.chance(70) {
+            out.push(' ');
+        }
+    }
+    out
+}
+
 fn token_soup(rng: &mut Rng, len: usize) -> String {
     let mut out = String::new();
     for _ in 0..len {
@@ -1577,6 +1648,18 @@ fn css_input(rng: &mut Rng) -> (String, String) {
     ];
     let mut sheet = String::new();
     let mut bodies = String::new();
+    // `@media` blocks around the rules: usually 1–3 deep, sometimes past
+    // the parser's nesting cap; not always closed.
+    let media_depth = match rng.below(10) {
+        0..=5 => 0,
+        6..=8 => rng.range(1, 4),
+        _ => rng.range(30, 200),
+    };
+    for _ in 0..media_depth {
+        sheet.push_str("@media ");
+        sheet.push_str(&media_prelude(rng));
+        sheet.push('{');
+    }
     for _ in 0..rng.range(1, 5) {
         if rng.chance(25) {
             let selector_len = rng.range(1, 4);
@@ -1597,6 +1680,11 @@ fn css_input(rng: &mut Rng) -> (String, String) {
         }
         sheet.push_str(&body);
         bodies.push_str(&body);
+        if rng.chance(90) {
+            sheet.push('}');
+        }
+    }
+    for _ in 0..media_depth {
         if rng.chance(90) {
             sheet.push('}');
         }
@@ -1698,7 +1786,16 @@ fn css_soup_case(seed: u64) -> Result<usize, Failure> {
     let mut rng = Rng::new(seed ^ 0xC55_F022);
     let (source, bodies) = css_input(&mut rng);
     let short_len = rng.range(0, 12);
+    let prelude = media_prelude(&mut rng);
     let outcome = quietly(|| {
+        // `@media` on its own: a soup query list at odd viewports, and a
+        // soup `media` attribute wrapping the soup sheet.
+        let list = css::media::MediaQueryList::parse(&prelude);
+        for (w, h) in [(0.0, 0.0), (800.0, 600.0), (f32::MAX, 1.0), (1.0, f32::MAX)] {
+            let _ = css::media::evaluate(&list, &css::media::MediaContext::new(w, h));
+        }
+        let scoped = css::media::scope_sheet(&source, Some(&prelude));
+        let _ = css::parse(&scoped).expect("css::parse recovers");
         let sheet = css::parse(&source).expect("css::parse recovers");
         let _ = css::parse_with_report(&source);
         let inline = css::parse_inline_style(&bodies);
@@ -1719,6 +1816,7 @@ fn css_soup_case(seed: u64) -> Result<usize, Failure> {
                 &document,
                 &[sheet],
                 800,
+                600,
                 None,
                 &HashMap::new(),
                 style::InteractionState::default(),
@@ -2185,6 +2283,41 @@ fn run_deep_case() {
     }
 }
 
+/// Media evaluation is bounded (docs/compat-round3.md 2.1): 10 000 nested
+/// `@media` blocks, 10 000 nested parentheses and a 50 000-query list go
+/// through parse + cascade + layout on [`SOUP_PAGE`] without blowing the
+/// stack (it would abort the binary) or the time. The time bound is loose
+/// (debug build): it catches exponential, not slow.
+#[test]
+fn media_extremes_stay_bounded() {
+    let depth = 10_000;
+    let nested = format!(
+        "{}.a{{color:red}}{}",
+        "@media screen and (min-width: 1px){".repeat(depth),
+        "}".repeat(depth)
+    );
+    let parens = format!(
+        "@media {}(min-width: 1px){} {{ p {{ color: blue }} }}",
+        "(".repeat(depth),
+        ")".repeat(depth)
+    );
+    let list = format!(
+        "@media {}, screen {{ div {{ padding: 1px }} }}",
+        vec!["(max-width: 1px)"; 50_000].join(", ")
+    );
+    for css_src in [nested, parens, list] {
+        let started = Instant::now();
+        let view = run_pipeline(SOUP_PAGE, &css_src);
+        check_commands(&view.commands).expect("finite paint commands");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "took {:?} on a {}-byte sheet",
+            started.elapsed(),
+            css_src.len()
+        );
+    }
+}
+
 // ------------------------------------------------- generator sanity ----
 
 /// The generator must actually reach its advertised shape — deep trees,
@@ -2222,6 +2355,25 @@ fn fuzz_generator_covers_its_spec() {
         "{with_areas}/200 cases with grid-template-areas"
     );
     assert!(korean >= 20, "{korean}/200 cases with Korean text");
+    // The CSS soup wraps rules in `@media`, sometimes past the nesting cap.
+    let mut media = 0;
+    let mut past_cap = 0;
+    for seed in 1..=500 {
+        let mut rng = Rng::new(seed ^ 0xC55_F022);
+        let (source, _) = css_input(&mut rng);
+        let blocks = source.matches("@media").count();
+        if blocks > 0 {
+            media += 1;
+        }
+        if blocks > css::media::MAX_MEDIA_NESTING {
+            past_cap += 1;
+        }
+    }
+    assert!(media >= 100, "{media}/500 CSS inputs with @media");
+    assert!(
+        past_cap >= 10,
+        "{past_cap}/500 CSS inputs nested past the cap"
+    );
     // Determinism: the same seed builds the same case.
     assert_eq!(Gen::case(42).html(), Gen::case(42).html());
     assert_eq!(Gen::case(42).css(), Gen::case(42).css());

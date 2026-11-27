@@ -257,6 +257,15 @@ enum PendingKind {
 struct CachedView {
     revision: u64,
     viewport_width: usize,
+    // The viewport height reaches the view only through `@media` (and, from
+    // compat round 3 step 5, `vh`): the key holds what it decided — every
+    // block's result — not the height itself, so a height-only resize
+    // (dragging the watching window taller) restyles only when it crosses
+    // a query boundary (docs/compat-round3.md 2.1).
+    media_results: Vec<u64>,
+    // The viewport height when the style pass resolved a `vh`/`vmin`/`vmax`
+    // length, else 0. Always 0 until step 5 resolves viewport units.
+    vh_height: usize,
     hover_path: Option<Vec<usize>>,
     focus_path: Option<Vec<usize>>,
     active: bool,
@@ -510,7 +519,7 @@ impl BrowserState {
         // mouse-still page hits the view cache every frame, while a
         // press/release cycle naturally produces two cache misses.
         let active = input.left_mouse_held && self.hovered_dom_path.is_some();
-        let document_view = self.build_or_reuse_view(viewport_width, active);
+        let document_view = self.build_or_reuse_view(viewport_width, viewport_height, active);
 
         // Compute the deepest layout-box hit once: `path` feeds the next
         // frame's :hover/:focus styling, `node_id` feeds the click dispatch
@@ -984,9 +993,10 @@ impl BrowserState {
     //   - `Document::revision()` covers every DOM mutation that flows
     //     through the arena's mutating methods or through the JS bridge's
     //     attribute setters (which now call `document.touch()` themselves).
-    //   - `viewport_width` is the only viewport input that build_document_view
-    //     pays attention to; height affects scroll clamping but not the
-    //     painted commands.
+    //   - `viewport_width` drives layout. The page height (window minus
+    //     chrome) reaches style only through `@media`, so the key holds the
+    //     block results (`media_results`) and `vh_height` instead of the
+    //     height — see `CachedView`.
     //   - `hover_path` / `focus_path` / `active` snapshot the interaction
     //     state that style_tree_with_state cascades into the styled tree;
     //     a hover transition or a press flips one of them and forces a
@@ -1002,14 +1012,27 @@ impl BrowserState {
     //
     // Render failures don't get cached — we want the next frame to retry
     // a fresh build (the failure may have been transient).
-    fn build_or_reuse_view(&mut self, viewport_width: usize, active: bool) -> Rc<DocumentView> {
+    fn build_or_reuse_view(
+        &mut self,
+        viewport_width: usize,
+        viewport_height: usize,
+        active: bool,
+    ) -> Rc<DocumentView> {
         let revision = self.parsed_document.borrow().revision();
+        let page_height = (viewport_height as f32 - CHROME_HEIGHT).max(0.0) as usize;
+        let media = css::media::MediaContext::new(viewport_width as f32, page_height as f32);
+        // No viewport unit reaches the style pass before step 5.
+        let vh_height = 0;
         if let Some(cached) = self.cached_view.as_ref()
             && cached.revision == revision
             && cached.viewport_width == viewport_width
             && cached.active == active
             && cached.hover_path == self.hovered_dom_path
             && cached.focus_path == self.focused_dom_path
+            && cached.vh_height == vh_height
+            // Last: the only part that costs something (one comparison per
+            // `@media` block), and only worth it when the rest matched.
+            && cached.media_results == media_bitset(&self.parsed_stylesheets, &media)
         {
             return Rc::clone(&cached.view);
         }
@@ -1017,6 +1040,7 @@ impl BrowserState {
         // moved. Re-collect inline `<style>` CSS if the DOM changed since we
         // last did (no-op on a hover/focus-only miss — revision unchanged).
         self.refresh_inline_stylesheet(revision);
+        let media_results = media_bitset(&self.parsed_stylesheets, &media);
         let interaction = style::InteractionState {
             hover: self.hovered_dom_path.as_deref(),
             focus: self.focused_dom_path.as_deref(),
@@ -1041,6 +1065,7 @@ impl BrowserState {
                 &document,
                 &self.parsed_stylesheets,
                 viewport_width,
+                page_height,
                 self.current_url.as_ref(),
                 &self.images,
                 interaction,
@@ -1069,6 +1094,8 @@ impl BrowserState {
                 self.cached_view = Some(CachedView {
                     revision,
                     viewport_width,
+                    media_results,
+                    vh_height,
                     hover_path: self.hovered_dom_path.clone(),
                     focus_path: self.focused_dom_path.clone(),
                     active,
@@ -1252,6 +1279,11 @@ fn collect_script_sources(
 // land CSS in the arena). Blocks are newline-separated so a missing trailing
 // `;`/`}` in one doesn't fuse into the next. Used by
 // `refresh_inline_stylesheet` to feed `parsed_stylesheets[1]`.
+/// The document's `@media` block results, packed (the view cache key).
+fn media_bitset(sheets: &[css::Stylesheet], media: &css::media::MediaContext) -> Vec<u64> {
+    css::media::media_bitset(sheets.iter().map(|sheet| sheet.media.as_slice()), media)
+}
+
 fn collect_inline_style_css(document: &dom::Document) -> String {
     let mut buf = String::new();
     for &root in document.roots() {
@@ -1267,11 +1299,18 @@ fn collect_style_text(document: &dom::Document, node_id: NodeId, buf: &mut Strin
     if let NodeType::Element(elem) = &node.node_type
         && elem.tag_name.eq_ignore_ascii_case("style")
     {
+        let mut text = String::new();
         for child_id in &node.children {
-            if let Some(NodeType::Text(text)) = document.get(*child_id).map(|n| &n.node_type) {
-                buf.push_str(text);
+            if let Some(NodeType::Text(chunk)) = document.get(*child_id).map(|n| &n.node_type) {
+                text.push_str(chunk);
             }
         }
+        // `<style media=…>`: the sheets are joined into one, so the
+        // attribute travels as an `@media` block (compat round 3 2.1).
+        buf.push_str(&css::media::scope_sheet(
+            &text,
+            elem.attributes.get("media").map(String::as_str),
+        ));
         buf.push('\n');
         // A `<style>`'s only meaningful content is its text; don't descend.
         return;
@@ -2226,6 +2265,58 @@ mod tests {
         // The collected inline sheet occupies slot [1] alongside the
         // (empty) external sheet at [0].
         assert_eq!(state.parsed_stylesheets.len(), 2);
+    }
+
+    #[test]
+    fn style_media_attribute_wraps_sheet() {
+        // `<style media=print>` used to apply everywhere.
+        let mut state = make_state(
+            "<div><style media=\"print\">#t { background-color: #010203; }</style>\
+             <style media=\"screen and (min-width: 1px)\">#u { background-color: #070809; }</style>\
+             <div id=\"t\">x</div><div id=\"u\">y</div></div>",
+        );
+        let cmds = state.display_list(800, 600, &input::WindowInput::default());
+        assert!(!has_solid_rect_rgb(&cmds, 1, 2, 3), "print sheet applied");
+        assert!(has_solid_rect_rgb(&cmds, 7, 8, 9), "screen sheet lost");
+    }
+
+    #[test]
+    fn resize_restyles_media_rules() {
+        let mut state = make_state(
+            "<div><style>@media (max-width: 600px) { #t { background-color: #0a0b0c; } }</style>\
+             <div id=\"t\">x</div></div>",
+        );
+        let input = input::WindowInput::default();
+        let wide = state.display_list(800, 600, &input);
+        assert!(!has_solid_rect_rgb(&wide, 10, 11, 12));
+        let narrow = state.display_list(500, 600, &input);
+        assert!(has_solid_rect_rgb(&narrow, 10, 11, 12));
+    }
+
+    #[test]
+    fn height_only_resize_restyles_only_across_a_query_boundary() {
+        // The page height (window minus chrome) reaches style only through
+        // `@media`: the cache key holds the block results, not the height.
+        let mut state = make_state(
+            "<div><style>@media (min-height: 500px) { #t { background-color: #0d0e0f; } }</style>\
+             <div id=\"t\">x</div></div>",
+        );
+        let input = input::WindowInput::default();
+        let chrome = CHROME_HEIGHT as usize;
+        let tall = state.display_list(800, 700 + chrome, &input);
+        assert!(has_solid_rect_rgb(&tall, 13, 14, 15));
+        let first = Rc::clone(&state.cached_view.as_ref().unwrap().view);
+        let _ = state.display_list(800, 650 + chrome, &input);
+        let second = Rc::clone(&state.cached_view.as_ref().unwrap().view);
+        assert!(
+            Rc::ptr_eq(&first, &second),
+            "no query flipped: reuse the view"
+        );
+        let short = state.display_list(800, 400 + chrome, &input);
+        assert!(
+            !has_solid_rect_rgb(&short, 13, 14, 15),
+            "min-height flipped"
+        );
     }
 
     #[test]

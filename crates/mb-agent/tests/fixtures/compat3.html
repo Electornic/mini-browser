@@ -16,10 +16,11 @@
   2. Search form (.hide-sm) — visible at 800px: its `display:none
      !important` sits in a max-width:600px @media. Today it shows only by
      accident (!important declarations are dropped); once step 1 keeps
-     !important it must stay visible, which needs step 2.1 (@media
-     evaluation) first.
+     !important it must stay visible — step 2.1 (@media evaluation, done)
+     keeps that block off at 800px.
   3. Mobile @media — desktop nav (Features, Pricing) visible, "Open
-     navigation" hidden. Today every @media applies: inverted (step 2.1).
+     navigation" hidden. Matches Chrome since step 2.1 (@media evaluated);
+     before it every @media applied and the two were inverted.
   4. Checkbox-hack menu — "Menu" label toggles the hidden checkbox and
      `:checked ~ .menu` opens the list (Docs, Contact). Today the
      `:checked` rule is dropped whole, so the menu never opens (step 4).

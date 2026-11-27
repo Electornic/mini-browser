@@ -18,6 +18,7 @@ use std::cell::RefCell;
 use cssparser::Parser as CssParser;
 
 use super::Stylesheet;
+use super::media;
 use super::properties::{self, ValueKind};
 
 /// Longest source excerpt kept per dropped item.
@@ -135,8 +136,8 @@ pub struct AtRuleSeen {
     pub name: String,
     /// The text between the name and the block (`(min-width: 768px)`).
     pub prelude: String,
-    /// Whether the body's rules were kept (`@media`, always treated as
-    /// matching) or the whole rule skipped.
+    /// Whether the body's rules were kept (`@media` — evaluated per style
+    /// pass, see [`media_verdict`]) or the whole rule skipped.
     pub kept: bool,
     /// Size of a skipped body in source bytes (0 when kept or block-less).
     pub skipped_bytes: usize,
@@ -159,15 +160,16 @@ pub struct MediaVerdict {
 }
 
 /// How the engine treats a `@media` block with this prelude at a
-/// `viewport_width` × `viewport_height` CSS px viewport (light theme).
-///
-/// The engine doesn't evaluate media queries yet: every block applies and
-/// no prelude is parsed (docs/compat-round3.md 2.1 replaces this).
+/// `viewport_width` × `viewport_height` CSS px viewport (light theme) —
+/// the same parse and [`media::evaluate`] the cascade uses.
 pub fn media_verdict(prelude: &str, viewport_width: f32, viewport_height: f32) -> MediaVerdict {
-    let _ = (prelude, viewport_width, viewport_height);
+    let list = media::MediaQueryList::parse(prelude);
     MediaVerdict {
-        applies: true,
-        invalid_queries: 0,
+        applies: media::evaluate(
+            &list,
+            &media::MediaContext::new(viewport_width, viewport_height),
+        ),
+        invalid_queries: list.invalid_queries(),
     }
 }
 

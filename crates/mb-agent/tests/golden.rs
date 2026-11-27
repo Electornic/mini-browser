@@ -34,6 +34,7 @@ fn observe_source(name: &str, source: &str, scroll_y: f32, options: ObserveOptio
         &document,
         std::slice::from_ref(&stylesheet),
         VIEWPORT_W as usize,
+        VIEWPORT_H as usize,
         None,
         &HashMap::new(),
         style::InteractionState::default(),

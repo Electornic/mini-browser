@@ -9,7 +9,10 @@ use variables::resolve_var_references;
 use std::collections::BTreeMap;
 
 use crate::{
-    css::{Stylesheet, TrackSize, Unit, Value},
+    css::{
+        Stylesheet, TrackSize, Unit, Value,
+        media::{self, MediaContext},
+    },
     dom::{Document, NodeId, NodeType},
     dom_select::MatchingState,
 };
@@ -60,8 +63,15 @@ pub struct InteractionState<'a> {
 }
 
 pub fn style_tree(document: &Document, root: NodeId, stylesheets: &[Stylesheet]) -> StyledNode {
-    // Most callers do not care about interaction state — they get a "nothing engaged" tree.
-    style_tree_with_state(document, root, stylesheets, InteractionState::default())
+    // Most callers do not care about interaction state — they get a "nothing engaged" tree,
+    // with `@media` evaluated for the agent's default 1280×800 viewport.
+    style_tree_with_state(
+        document,
+        root,
+        stylesheets,
+        InteractionState::default(),
+        &MediaContext::default(),
+    )
 }
 
 /// Backward-compatible convenience: same as `style_tree_with_state` with only the
@@ -80,6 +90,7 @@ pub fn style_tree_with_hover(
             hover: hovered_path,
             ..Default::default()
         },
+        &MediaContext::default(),
     )
 }
 
@@ -87,12 +98,24 @@ pub fn style_tree_with_hover(
 /// identifies the node under that interaction; matching uses CSS-spec semantics —
 /// :hover and :active propagate to ancestors of the deepest engaged node, while :focus
 /// only matches the focused node itself.
+///
+/// `media` is the viewport `@media` blocks are evaluated against — once,
+/// here, for the whole pass (docs/compat-round3.md 2.1), never per node.
 pub fn style_tree_with_state(
     document: &Document,
     root: NodeId,
     stylesheets: &[Stylesheet],
     state: InteractionState<'_>,
+    media: &MediaContext,
 ) -> StyledNode {
+    let media_results: Vec<Vec<bool>> = stylesheets
+        .iter()
+        .map(|sheet| media::evaluate_blocks(&sheet.media, media))
+        .collect();
+    let cascade = Cascade {
+        stylesheets,
+        media: &media_results,
+    };
     // Resolve the user-supplied paths into NodeIds once. The matching layer
     // walks parent links from these NodeIds to compute :hover / :focus /
     // :active per element, which is cheaper than re-comparing path slices
@@ -116,7 +139,7 @@ pub fn style_tree_with_state(
     };
     // The root font-size feeds rem resolution for every descendant. Compute it up front
     // by treating the root as if it lived inside the user-agent default font-size.
-    let raw_root = specified_values(document, root, stylesheets, &matching_state);
+    let raw_root = specified_values(document, root, &cascade, &matching_state);
     let root_font_size = resolve_font_size(
         raw_root.get("font-size"),
         DEFAULT_FONT_SIZE,
@@ -125,11 +148,18 @@ pub fn style_tree_with_state(
     style_tree_inner(
         document,
         root,
-        stylesheets,
+        &cascade,
         None,
         root_font_size,
         &matching_state,
     )
+}
+
+/// The author sheets of one style pass plus which of their `@media` blocks
+/// match (`media[sheet][block.index]`).
+pub(super) struct Cascade<'a> {
+    pub stylesheets: &'a [Stylesheet],
+    pub media: &'a [Vec<bool>],
 }
 
 /// Walk a `Vec<usize>` child-index path starting from `root` (rather than
@@ -149,12 +179,12 @@ fn resolve_relative_path(document: &Document, root: NodeId, path: &[usize]) -> O
 fn style_tree_inner(
     document: &Document,
     node_id: NodeId,
-    stylesheets: &[Stylesheet],
+    cascade: &Cascade<'_>,
     parent_values: Option<&PropertyMap>,
     root_font_size: f32,
     state: &MatchingState,
 ) -> StyledNode {
-    let mut specified_values = specified_values(document, node_id, stylesheets, state);
+    let mut specified_values = specified_values(document, node_id, cascade, state);
 
     // Real browsers inherit many properties. Here we only inherit a few text-related ones
     // because they make documents readable without making the style system much more complex.
@@ -286,7 +316,7 @@ fn style_tree_inner(
             style_tree_inner(
                 document,
                 *child_id,
-                stylesheets,
+                cascade,
                 Some(&specified_values),
                 root_font_size,
                 state,
@@ -380,6 +410,50 @@ mod tests {
 
     fn parse_css(source: &str) -> crate::css::Stylesheet {
         crate::css::parse(source).unwrap()
+    }
+
+    fn color_at(source_css: &str, width: f32) -> Option<Value> {
+        let (document, root) = parse_html(r#"<div><p class="t">x</p></div>"#);
+        let sheet = parse_css(source_css);
+        let styled = style::style_tree_with_state(
+            &document,
+            root,
+            &[sheet],
+            style::InteractionState::default(),
+            &crate::css::media::MediaContext::new(width, 800.0),
+        );
+        styled.children[0].value("color").cloned()
+    }
+
+    fn rgb(r: u8, g: u8, b: u8) -> Option<Value> {
+        Some(Value::Color(Color { r, g, b, a: 255 }))
+    }
+
+    #[test]
+    fn media_rule_applies_only_when_matching() {
+        let css = ".t { color: #000001 }
+                   @media (max-width: 600px) { .t { color: #000002 } }
+                   @media print { .t { color: #000003 } }";
+        assert_eq!(color_at(css, 1280.0), rgb(0, 0, 1));
+        assert_eq!(color_at(css, 500.0), rgb(0, 0, 2));
+    }
+
+    #[test]
+    fn nested_media_is_and() {
+        let css = "@media screen { @media (max-width: 600px) { .t { color: #000002 } } }
+                   @media print { @media (min-width: 1px) { .t { color: #000003 } } }";
+        assert_eq!(color_at(css, 1280.0), None);
+        assert_eq!(color_at(css, 500.0), rgb(0, 0, 2));
+    }
+
+    #[test]
+    fn media_does_not_change_rule_order() {
+        // A skipped block must not shift the source order the cascade
+        // sorts by: the later matching rule still wins.
+        let css = "@media (min-width: 1px) { .t { color: #000001 } }
+                   @media (max-width: 1px) { .t { color: #000009 } }
+                   .t { color: #000002 }";
+        assert_eq!(color_at(css, 1280.0), rgb(0, 0, 2));
     }
 
     #[test]
@@ -835,6 +909,7 @@ mod tests {
                 focus: Some(&[0]),
                 ..Default::default()
             },
+            &crate::css::media::MediaContext::default(),
         );
         let link = &styled.children[0];
 
@@ -871,6 +946,7 @@ mod tests {
                 focus: Some(&[0, 0]),
                 ..Default::default()
             },
+            &crate::css::media::MediaContext::default(),
         );
 
         // .outer keeps the green non-focus color even though the focused node is its
@@ -907,6 +983,7 @@ mod tests {
                 active: Some(&[0, 0]),
                 ..Default::default()
             },
+            &crate::css::media::MediaContext::default(),
         );
 
         assert_eq!(

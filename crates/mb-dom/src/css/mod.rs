@@ -8,6 +8,7 @@ mod color;
 mod error;
 mod gradient;
 mod grid;
+pub mod media;
 mod parse;
 pub mod properties;
 mod report;
@@ -31,6 +32,10 @@ use shorthand::{
 };
 use transform::parse_transform_value;
 
+use std::rc::Rc;
+
+use media::{MAX_MEDIA_NESTING, MediaBlock, MediaQueryList};
+
 use cssparser::{
     AtRuleParser as CssAtRuleParser, CowRcStr, ParseError as CssParseError, Parser as CssParser,
     ParserState, QualifiedRuleParser as CssQualifiedRuleParser, StyleSheetParser,
@@ -40,6 +45,9 @@ use selectors::parser::{ParseRelative, SelectorList as SelectorsSelectorList};
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    /// Every `@media` block, in source order (an enclosing block before
+    /// the ones nested in it); `MediaBlock::index` is the position here.
+    pub media: Vec<Rc<MediaBlock>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +57,10 @@ pub struct Rule {
     /// public surface and so we can derive `PartialEq` for snapshot tests.
     pub selectors: Selector,
     pub declarations: Vec<Declaration>,
+    /// The innermost `@media` block the rule sits in, shared by every rule
+    /// of that block (`None` = applies everywhere). The cascade skips the
+    /// rule when the block's chain doesn't match.
+    pub media: Option<Rc<MediaBlock>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -276,16 +288,23 @@ impl ParseError {
 
 pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
     let mut parser = CssParser::new(source);
-    let mut handler = StylesheetHandler;
-    let iter = StyleSheetParser::new(&mut parser, &mut handler);
+    let mut media = Vec::new();
     let mut rules = Vec::new();
-    // Tolerant recovery: `StyleSheetParser` itself walks past a broken rule's
-    // block before yielding the next item, so we just keep the successes and
-    // discard the errors — same semantic as the previous `skip_to_end_of_block`.
-    // Each yielded item is a Vec<Rule>: top-level qualified rules contribute
-    // a single entry, `@media` blocks contribute N (Phase 6.F).
-    collect_rules(iter, &mut rules);
-    Ok(Stylesheet { rules })
+    {
+        let mut handler = StylesheetHandler {
+            media: None,
+            depth: 0,
+            blocks: &mut media,
+        };
+        let iter = StyleSheetParser::new(&mut parser, &mut handler);
+        // Tolerant recovery: `StyleSheetParser` itself walks past a broken rule's
+        // block before yielding the next item, so we just keep the successes and
+        // discard the errors — same semantic as the previous `skip_to_end_of_block`.
+        // Each yielded item is a Vec<Rule>: top-level qualified rules contribute
+        // a single entry, `@media` blocks contribute N (Phase 6.F).
+        collect_rules(iter, &mut rules);
+    }
+    Ok(Stylesheet { rules, media })
 }
 
 /// Parse the contents of a `style="..."` attribute as a flat declaration
@@ -332,7 +351,14 @@ fn convert_selector_error(
 // cssparser glue: rule iteration via StyleSheetParser
 // =============================================================================
 
-struct StylesheetHandler;
+struct StylesheetHandler<'a> {
+    /// The `@media` block being parsed (`None` at the top level).
+    media: Option<Rc<MediaBlock>>,
+    /// How many `@media` blocks enclose this one.
+    depth: usize,
+    /// The sheet's block list, shared by nested handlers.
+    blocks: &'a mut Vec<Rc<MediaBlock>>,
+}
 
 /// Keep every parsed rule; note the selector of each one dropped (an
 /// at-rule that failed is already in the report under its name).
@@ -361,7 +387,7 @@ struct RulePrelude(Selector);
 /// back into the legacy `ParseError` shape on the way out.
 type CssError = ParseError;
 
-impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler {
+impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler<'_> {
     type Prelude = RulePrelude;
     // Vec<Rule> instead of a single `Rule` so the parse() iterator can fold
     // both qualified rules and at-rule expansions through the same channel.
@@ -397,6 +423,7 @@ impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler {
         Ok(vec![Rule {
             selectors: prelude.0,
             declarations,
+            media: self.media.clone(),
         }])
     }
 }
@@ -406,12 +433,13 @@ impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler {
 /// `Reject` arm so `parse_block` can return an empty Vec without invoking
 /// any parsing.
 enum AtRulePrelude {
-    /// Carries the block's index in the parse report (when one is active).
-    Media(Option<usize>),
+    /// The parsed query list, and the block's index in the parse report
+    /// (when one is active).
+    Media(MediaQueryList, Option<usize>),
     Reject,
 }
 
-impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
+impl<'i> CssAtRuleParser<'i> for StylesheetHandler<'_> {
     type Prelude = AtRulePrelude;
     // Vec<Rule>: `@media` unfolds into N qualified rules (Phase 6.F),
     // every other at-rule yields an empty vec.
@@ -423,20 +451,20 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
         name: cssparser::CowRcStr<'i>,
         input: &mut CssParser<'i>,
     ) -> Result<Self::Prelude, CssParseError<Self::Error>> {
-        // `@media` rules: drop the condition (we always match) and let
-        // `parse_block` recurse into the body. Real evaluation of
-        // `(min-width: 768px)` etc. against the viewport is a follow-up;
-        // pretending every condition matches is the right default for a
-        // desktop-window toy browser, where most pages are mobile-first
-        // and the desktop overrides are the ones that should win.
+        // `@media`: parse the query list (evaluated per style pass, see
+        // `media::evaluate_blocks`) and let `parse_block` recurse into the
+        // body. Every other at-rule's prelude is consumed and dropped.
         let is_media = name.eq_ignore_ascii_case("media");
         let start = input.position();
-        // Consume the prelude (for `@media`, the condition list) so cssparser
-        // moves on to the block. The condition is a no-op match today.
-        while input.next().is_ok() {}
+        let queries = if is_media {
+            MediaQueryList::parse_from(input)
+        } else {
+            while input.next().is_ok() {}
+            MediaQueryList::default()
+        };
         let seen = report::record_at_rule(&name, input.slice_from(start), is_media);
         if is_media {
-            return Ok(AtRulePrelude::Media(seen));
+            return Ok(AtRulePrelude::Media(queries, seen));
         }
         // Other at-rules (@charset, @keyframes, @font-face, …) keep the
         // pre-6.F behaviour: skip the prelude + body. parse_block returns
@@ -451,14 +479,27 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
         input: &mut CssParser<'i>,
     ) -> Result<Self::AtRule, CssParseError<Self::Error>> {
         match prelude {
-            AtRulePrelude::Media(seen) => {
-                // Recurse into the @media body using the same handler.
-                // The inner StyleSheetParser walks qualified rules just
-                // like the outer pass, so nested `@media` blocks would
-                // also flatten — which matches what real browsers do
-                // for chained media conditions when both happen to match.
+            AtRulePrelude::Media(queries, seen) => {
+                // Recursion is bounded: past the cap the block's rules are
+                // dropped (cssparser skips the rest of the body).
+                if self.depth >= MAX_MEDIA_NESTING {
+                    return Ok(Vec::new());
+                }
+                // Recurse into the @media body with a handler that tags
+                // every rule with this block; a nested `@media` chains onto
+                // it through `parent` (nested conditions AND together).
+                let block = Rc::new(MediaBlock {
+                    queries,
+                    parent: self.media.clone(),
+                    index: self.blocks.len(),
+                });
+                self.blocks.push(Rc::clone(&block));
                 report::enter_media(seen);
-                let mut handler = StylesheetHandler;
+                let mut handler = StylesheetHandler {
+                    media: Some(block),
+                    depth: self.depth + 1,
+                    blocks: &mut *self.blocks,
+                };
                 let iter = StyleSheetParser::new(input, &mut handler);
                 let mut rules = Vec::new();
                 collect_rules(iter, &mut rules);
@@ -1689,13 +1730,51 @@ mod tests {
     }
 
     #[test]
+    fn media_block_is_shared_by_its_rules_and_nested_blocks_chain() {
+        let sheet =
+            parse(".top{} @media screen { .a{} .b{} @media (min-width: 1px) { .c{} } .d{} } .e{}")
+                .unwrap();
+        let media: Vec<_> = sheet
+            .rules
+            .iter()
+            .map(|rule| rule.media.as_ref().map(|block| block.index))
+            .collect();
+        assert_eq!(media, [None, Some(0), Some(0), Some(1), Some(0), None]);
+        assert!(std::rc::Rc::ptr_eq(
+            sheet.rules[1].media.as_ref().unwrap(),
+            sheet.rules[2].media.as_ref().unwrap()
+        ));
+        assert_eq!(sheet.media.len(), 2);
+        let parent = sheet.media[1].parent.as_ref().expect("nested block");
+        assert!(std::rc::Rc::ptr_eq(parent, &sheet.media[0]));
+    }
+
+    #[test]
+    fn deeply_nested_media_blocks_are_bounded() {
+        // 10,000 nested blocks must neither overflow the stack nor keep
+        // rules past the cap; what follows the nest still parses.
+        let depth = 10_000;
+        let css = format!(
+            "{}.deep{{color:red}}{} .after{{color:blue}}",
+            "@media screen{".repeat(depth),
+            "}".repeat(depth)
+        );
+        let sheet = parse(&css).unwrap();
+        assert_eq!(sheet.media.len(), super::media::MAX_MEDIA_NESTING);
+        assert_eq!(
+            sheet.rules.len(),
+            1,
+            "only .after survives: {:?}",
+            sheet.rules.len()
+        );
+        assert!(sheet.rules[0].media.is_none());
+    }
+
+    #[test]
     fn media_rule_unfolds_inner_rules_into_top_level_stylesheet() {
-        // Phase 6.F: `@media (min-width: 768px) { ... }` is the desktop
-        // override mobile-first sites layer on top of their default
-        // (mobile) rules. mb opens at desktop width, so the simplest
-        // useful behaviour is to always match — unfolding the inner
-        // rules into the top-level stylesheet so the cascade applies
-        // them like any other declaration.
+        // Phase 6.F: `@media` blocks unfold into the top-level rule list;
+        // since compat round 3 2.1 each rule also carries its block, which
+        // the cascade evaluates against the viewport.
         let stylesheet = parse(
             r#"
                 .foo { color: blue; }

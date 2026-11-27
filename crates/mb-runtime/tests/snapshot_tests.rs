@@ -53,6 +53,7 @@ fn render_fixture(fixture_name: &str) -> Vec<u32> {
         &document,
         std::slice::from_ref(&stylesheet),
         VIEWPORT_W,
+        VIEWPORT_H,
         None,
         &images,
         interaction,

@@ -122,6 +122,7 @@ fn run_child() -> String {
         &document,
         &[css::parse("div { padding-left: 1px }").unwrap()],
         800,
+        600,
         None,
         &HashMap::new(),
         style::InteractionState::default(),
