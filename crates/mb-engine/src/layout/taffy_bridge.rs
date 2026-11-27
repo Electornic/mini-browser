@@ -51,7 +51,7 @@ use super::table::is_table_container;
 use super::{
     BoxType, Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, has_float,
     intrinsic_height, intrinsic_width, is_display_none, is_layout_whitespace_text, is_out_of_flow,
-    outer_rect, shift_layout_subtree,
+    length_value, outer_rect, shift_layout_subtree,
 };
 
 use std::cell::RefCell;
@@ -428,6 +428,19 @@ impl NodeBoundary {
         }
     }
 
+    /// The boundary's own left + right margin as the legacy layout will
+    /// resolve it (`auto` → 0: an auto margin only absorbs leftover space,
+    /// which taffy already gave away). An anonymous inline run has none.
+    fn horizontal_margins(&self, percent_base: f32) -> f32 {
+        match &self.content {
+            BoundaryContent::Node(node) => {
+                length_value(node, "margin-left", percent_base).unwrap_or(0.0)
+                    + length_value(node, "margin-right", percent_base).unwrap_or(0.0)
+            }
+            BoundaryContent::InlineRun { .. } => 0.0,
+        }
+    }
+
     fn layout(&self, parent_width: f32) -> LayoutBox {
         match &self.content {
             BoundaryContent::Node(node) => {
@@ -496,7 +509,7 @@ pub(super) fn layout_via_taffy(node: &StyledNode, viewport_width: f32) -> Option
                     inputs,
                     style,
                     |_, _| 0.0,
-                    |_known, avail| measure_boundary(avail, ctx),
+                    |_known, avail| measure_boundary(avail, inputs.parent_size.width, ctx),
                 )
             },
         )
@@ -525,13 +538,27 @@ std::thread_local! {
     static MEASURE_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-fn measure_boundary(avail: Size<AvailableSpace>, ctx: Option<&mut NodeBoundary>) -> Size<f32> {
+/// `containing_width` is taffy's parent size (the base for percentage
+/// margins), when it knows it.
+fn measure_boundary(
+    avail: Size<AvailableSpace>,
+    containing_width: Option<f32>,
+    ctx: Option<&mut NodeBoundary>,
+) -> Size<f32> {
     let Some(boundary) = ctx else {
         return Size::ZERO;
     };
     let _measure_start = std::time::Instant::now();
     let parent_width = match avail.width {
-        AvailableSpace::Definite(w) => w,
+        // taffy gives a leaf the space for its BORDER box — the leaf's own
+        // margins (set in `boundary_taffy_style`) are already subtracted.
+        // The legacy layout below resolves and subtracts those margins
+        // itself, so hand it the margin-box width; otherwise every boundary
+        // leaf with side margins lost them twice (a `<body>` of inline
+        // content was 768px in an 800px viewport; compat round 3 R2).
+        AvailableSpace::Definite(w) => {
+            w + boundary.horizontal_margins(containing_width.unwrap_or(w))
+        }
         // Boundary leaves only see MaxContent / MinContent inside flex / grid
         // intrinsic-size probes, which the boundary path does not yet drive
         // (containers themselves still become boundaries in 4.3.1). Pick a
@@ -669,6 +696,17 @@ fn boundary_taffy_style(node: &StyledNode) -> Style {
         width: lpa_or_auto(node.value("max-width")),
         height: LengthPercentageAuto::auto(),
     };
+    // Item-level properties a flex / grid parent reads. They were missing,
+    // so a boundary item (anything holding inline content) never grew and
+    // ignored its grid placement — hidden until 0c F11 because its
+    // max-content basis used to be the 1e6 probe width (compat round 3 R2).
+    // A block-flow parent ignores them.
+    style.flex_grow = number_value(node.value("flex-grow")).unwrap_or(0.0);
+    style.flex_shrink = number_value(node.value("flex-shrink")).unwrap_or(1.0);
+    style.flex_basis = dimension(node.value("flex-basis"));
+    style.align_self = align_self_value(node);
+    style.grid_column = grid_line_pair(node.value("grid-column"));
+    style.grid_row = grid_line_pair(node.value("grid-row"));
     style
 }
 
@@ -822,16 +860,25 @@ fn boundary_box(
     let ctx = tree
         .get_node_context(id)
         .expect("boundary leaves carry a NodeBoundary context");
-    // Defensive: if the measure callback never fired (taffy may skip when
-    // known dimensions are already definite), lay out here at taffy's
-    // resolved leaf width.
-    let mut cached = ctx
-        .cached
-        .borrow_mut()
-        .take()
-        .unwrap_or_else(|| ctx.layout(layout.size.width));
+    // The cache holds the legacy layout from the *last* measure call, which
+    // is not necessarily at taffy's final size: taffy may finish from its
+    // own cache after an intrinsic-size probe (a flex item that grew from
+    // its max-content basis kept its text width — compat round 3 R2). Lay
+    // out again at the final border-box width (+ the leaf's own margins,
+    // as in `measure_boundary`) when the cache is missing or doesn't match.
+    let final_width = layout.size.width;
+    let cached = ctx.cached.borrow_mut().take();
+    let mut cached = match cached {
+        Some(lb) if (border_box_width(&lb) - final_width).abs() < 0.01 => lb,
+        _ => ctx.layout(final_width + ctx.horizontal_margins(final_width)),
+    };
     shift_layout_subtree(&mut cached, abs_outer_x, abs_outer_y);
     cached
+}
+
+fn border_box_width(lb: &LayoutBox) -> f32 {
+    let d = &lb.dimensions;
+    d.content.width + d.padding.left + d.padding.right + d.border.left + d.border.right
 }
 
 fn edge_from_taffy(rect: &TaffyRect<f32>) -> EdgeSizes {

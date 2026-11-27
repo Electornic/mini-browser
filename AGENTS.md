@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 869 (workspace 합계, 2026-11-27 호환성 3차 R3 스크립트 DOM 깊이·고리 +7; 0c 는 862). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 872 (workspace 합계, 2026-11-27 호환성 3차 R2 경계 잎 여백·flex/grid 항목 속성 +3; R3 는 869). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -153,6 +153,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
 ### 인라인 런은 펼쳐진다
 - 블록 흐름 부모의 연속된 인라인 수준 자식(텍스트·`span`·`label`·`input`·`button`…)은 `inline::group_block_children` 가 런으로 묶어 줄 상자로 배치한다. 레이아웃 트리에 익명 래퍼는 없다 — 런의 박스들이 부모 children 에 바로 들어간다. taffy 브릿지에선 런 하나가 boundary leaf 하나(`BoundaryContent::InlineRun`)이고 `walk` 가 펼친다. `build_taffy_node` 와 `walk` 는 같은 `native_child_slots` 로 짝지어야 한다.
+- 경계 잎(legacy 가 배치하는 서브트리)은 taffy 에게 `boundary_taffy_style` 로만 보인다 — flex/grid 부모가 읽는 항목 속성(`flex-grow/shrink/basis`·`align-self`·`grid-row/column`)을 거기 넘겨야 하고, taffy 가 measure 에 주는 확정 폭은 **테두리 상자**용(자기 여백을 이미 뺌)이라 legacy 에는 여백을 더해 넘긴다(`measure_boundary`, 호환성 3차 R2). 크기 탐색(MaxContent/MinContent)은 1e6/0 대리 폭으로 배치한 뒤 줄 폭으로 다시 잰다(`probe_sizes_to_lines`).
 
 ### JS 래퍼는 노드마다 하나
 - `__mb_make_element(id)` 는 같은 id 에 항상 같은 객체를 돌려준다 (Preact 가 노드 expando 를 씀). 래퍼에 상태를 달아도 되지만, 문서가 바뀌면 런타임째 버려진다.

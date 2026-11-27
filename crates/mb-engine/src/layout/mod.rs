@@ -3349,4 +3349,69 @@ mod tests {
         }
         check(&layout);
     }
+
+    #[test]
+    fn boundary_leaf_margins_are_subtracted_once() {
+        // taffy hands a leaf's measure callback the space for its *border
+        // box* — margins already taken off. The legacy layout behind a
+        // boundary leaf took them off again: a `<body>` holding only inline
+        // content was 768px wide in an 800px viewport instead of 784.
+        let styled = styled_root(r#"<body><span>x</span></body>"#, "");
+        let layout = layout_tree(&styled, 800.0);
+        assert_eq!(layout.dimensions.content.width, 784.0);
+        assert_eq!(layout.dimensions.content.x, 8.0);
+
+        // Any boundary leaf (inline content) with side margins, in block flow…
+        let styled = styled_root(
+            r#"<body><div><blockquote class="q">quoted text</blockquote></div></body>"#,
+            ".q { margin: 0 40px; padding: 0 5px; border-left: 2px; border-right: 2px; }",
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let quote = &layout.children[0].children[0];
+        assert_eq!(quote.dimensions.content.x, 8.0 + 40.0 + 2.0 + 5.0);
+        assert_eq!(quote.dimensions.content.width, 784.0 - 80.0 - 4.0 - 10.0);
+
+        // …and as a flex item.
+        let styled = styled_root(
+            r#"<body><div class="row"><div class="item">a</div></div></body>"#,
+            ".row { display: flex; } .item { flex-grow: 1; margin: 0 10px; }",
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let item = &layout.children[0].children[0];
+        assert_eq!(item.dimensions.content.x, 18.0);
+        assert_eq!(item.dimensions.content.width, 784.0 - 20.0);
+    }
+
+    #[test]
+    fn flex_grow_item_with_inline_content_fills_the_row() {
+        // An item with inline content is a legacy boundary leaf, and its
+        // taffy style carried only margin / size — not flex-grow. Before 0c
+        // F11 its max-content basis was the 1e6 probe width, so shrinking
+        // to the row hid that it never grew; now it kept its text width.
+        let styled = styled_root(
+            r#"<body><div class="row"><div class="a">a</div><div class="b">bb</div></div></body>"#,
+            ".row { display: flex; } .a { flex-grow: 1; } .b { flex-grow: 3; }",
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let row = &layout.children[0];
+        let (a, b) = (&row.children[0], &row.children[1]);
+        let free = 784.0 - 12.0 - 24.0;
+        assert_eq!(a.dimensions.content.width, 12.0 + free / 4.0);
+        assert_eq!(b.dimensions.content.width, 24.0 + free * 3.0 / 4.0);
+        assert_eq!(b.dimensions.content.x, 8.0 + a.dimensions.content.width);
+    }
+
+    #[test]
+    fn grid_placement_of_an_item_with_inline_content_is_honoured() {
+        // Same gap as flex-grow: `grid-column` wasn't forwarded for
+        // boundary leaves, so text items were auto-placed in order.
+        let styled = styled_root(
+            r#"<body><div class="g"><div class="a">a</div><div class="b">b</div></div></body>"#,
+            ".g { display: grid; grid-template-columns: 100px 100px 100px; } .a { grid-column: 3; } .b { grid-column: 1; }",
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let grid = &layout.children[0];
+        assert_eq!(grid.children[0].dimensions.content.x, 208.0);
+        assert_eq!(grid.children[1].dimensions.content.x, 8.0);
+    }
 }

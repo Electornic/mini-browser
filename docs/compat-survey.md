@@ -301,6 +301,8 @@ MB_NET_CACHE_OFFLINE=1 ./target/debug/mb-mcp --start-url https://news.ycombinato
 
 **0c 재측정** (2026-11-27, 라벨 `0c`, 같은 동결 캐시·release — 0c 엔진 수정 뒤, [compat-round3.md 부록 C](compat-round3.md#부록-c--0c-퍼저에서-찾은-것)): 결과 분포·버린 선언·버린 규칙·요소 수·기대 컨트롤은 25곳 모두 위 표와 **같다**, `scripts/compat-corpus.sh diff baseline-k4 0c` 의 요소 목록 차이 **없음**(에이전트가 보는 역할·이름 목록 동일). 바뀐 것은 기하뿐: 슬리버 **297 → 275**(korea-kr 36→25, github 17→10, enwiki 69→66, rustlang 9→7, apple 17→18; 2차 5곳 17→10), 문서 높이 hani 27,637→27,183 · google 901→753 · rustlang 10,199→9,825 — flex 안 인라인 내용 항목이 내용 폭으로(F11)·인라인 상자 안 % 기준(F3) 때문으로 보이나 사이트별 원인과 Chrome 대조는 안 했다. timeout·panic 0, `[mb-budget]` 0.
 
+**R2 재측정** (2026-11-27, 라벨 `r2`, `r3` 대비 — 경계 잎 여백 이중 차감·flex/grid 항목 속성 수정, [compat-round3.md 부록 C R2](compat-round3.md#부록-c--0c-퍼저에서-찾은-것)): 결과·버림·요소 수·요소 목록 25곳 동일, 관찰이 바뀐 곳은 github `page_height` 8,229 → 8,277 하나. 위 표의 수치는 그대로 유효.
+
 - `ms` = `navigate`(settle 포함) 벽시계, 이 맥에서. 두 실행 사이 차이는 대부분 ±10% 안, 가장 큰 것은 kowiki 256 → 197(−23%)·github 1,829 → 1,562(−15%) — 시간은 비교용이 아니라 timeout 판정용.
 - 기대 컨트롤 **누락 사이트 8곳**(naver·daum·hani·korea-kr·velog·d2·google·enwiki; 0b 때는 측정된 17곳 중 6곳). 원인 분류는 각 단계에서 — 지금 표는 기준선. naver 검색창은 ARIA `combobox` 다(역할 오기를 녹화 후 tsv 에서 고침).
 - **콘솔 에러**(`prompts.rs` "제3자 스크립트 콘솔 에러" 결정용 입력): 측정된 20곳 중 **16곳이 1건 이상**, 합 104건 중 98건이 `Uncaught in script`. 많은 곳 korea-kr 33·bbc 15·yna 13·daum 9·google 6·kakaocorp 6. 대부분 빠진 API(`getElementsByTagName` 류, [JS API 표면 프로브](#js-api-표면-프로브)). naver 광고 2건은 이번 스냅샷에서 `near "document.getElementsByTagName"` / `near "Na"`(gfp-core 의 축약 별칭 — 2차의 `console.debug` 가 이번 빌드에선 지역 변수로 줄여져 있음)로 읽힌다. 0a 권고(지금은 `prompts.rs` 를 안 바꿈)를 바꿀 근거는 아직 없다 — 다음은 제3자 에러가 있는 손으로 쓴 eval 페이지로 확인.
