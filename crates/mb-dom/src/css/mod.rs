@@ -8,6 +8,7 @@ mod color;
 mod error;
 mod gradient;
 mod grid;
+pub mod layer;
 pub mod media;
 mod parse;
 pub mod properties;
@@ -52,6 +53,11 @@ pub struct Stylesheet {
     /// Every `@media` block, in source order (an enclosing block before
     /// the ones nested in it); `MediaBlock::index` is the position here.
     pub media: Vec<Rc<MediaBlock>>,
+    /// The sheet's `@layer` tree, one entry per name segment in first-
+    /// appearance order (a parent before its children);
+    /// [`Rule::layer`] indexes it. Ranked per style pass across all sheets
+    /// by [`layer::document_layer_ranks`].
+    pub layers: Vec<layer::Layer>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +71,9 @@ pub struct Rule {
     /// of that block (`None` = applies everywhere). The cascade skips the
     /// rule when the block's chain doesn't match.
     pub media: Option<Rc<MediaBlock>>,
+    /// The innermost `@layer` the rule sits in, as an index into
+    /// [`Stylesheet::layers`] (`None` = unlayered).
+    pub layer: Option<u32>,
     /// Some declaration is `!important` — the cascade's second (important)
     /// pass skips rules without one.
     pub has_important: bool,
@@ -373,13 +382,14 @@ impl ParseError {
 
 pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
     let mut parser = CssParser::new(source);
-    let mut media = Vec::new();
+    let mut build = SheetBuild::default();
     let mut rules = Vec::new();
     {
         let mut handler = StylesheetHandler {
             media: None,
+            layer: None,
             depth: 0,
-            blocks: &mut media,
+            sheet: &mut build,
         };
         let iter = StyleSheetParser::new(&mut parser, &mut handler);
         // Tolerant recovery: `StyleSheetParser` itself walks past a broken rule's
@@ -389,7 +399,11 @@ pub fn parse(source: &str) -> Result<Stylesheet, ParseError> {
         // a single entry, `@media` blocks contribute N (Phase 6.F).
         collect_rules(iter, &mut rules);
     }
-    Ok(Stylesheet { rules, media })
+    Ok(Stylesheet {
+        rules,
+        media: build.media,
+        layers: build.layers.layers,
+    })
 }
 
 /// Parse the contents of a `style="..."` attribute as a flat declaration
@@ -439,10 +453,57 @@ fn convert_selector_error(
 struct StylesheetHandler<'a> {
     /// The `@media` block being parsed (`None` at the top level).
     media: Option<Rc<MediaBlock>>,
-    /// How many `@media` blocks enclose this one.
+    /// The `@layer` being parsed, an index into the sheet's layers.
+    layer: Option<u32>,
+    /// How many grouping blocks (`@media`, `@layer`) enclose this one —
+    /// one cap, `MAX_MEDIA_NESTING`, for all of them.
     depth: usize,
-    /// The sheet's block list, shared by nested handlers.
-    blocks: &'a mut Vec<Rc<MediaBlock>>,
+    /// Sheet-wide state, shared by nested handlers.
+    sheet: &'a mut SheetBuild,
+}
+
+/// What a sheet's parse collects besides rules.
+#[derive(Default)]
+struct SheetBuild {
+    media: Vec<Rc<MediaBlock>>,
+    layers: layer::LayerRegistry,
+}
+
+impl StylesheetHandler<'_> {
+    /// Parse a grouping block's body with `media`/`layer` as the context
+    /// of every rule in it.
+    fn nested(
+        &mut self,
+        input: &mut CssParser<'_>,
+        media: Option<Rc<MediaBlock>>,
+        layer: Option<u32>,
+        seen: Option<usize>,
+    ) -> Vec<Rule> {
+        report::enter_block(seen);
+        let mut handler = StylesheetHandler {
+            media,
+            layer,
+            depth: self.depth + 1,
+            sheet: &mut *self.sheet,
+        };
+        let iter = StyleSheetParser::new(input, &mut handler);
+        let mut rules = Vec::new();
+        collect_rules(iter, &mut rules);
+        report::leave_block(seen, rules.len());
+        rules
+    }
+}
+
+/// Consume a block that is not kept; with a report active, note its size
+/// (and that it was skipped) on at-rule `seen` (the last one if `None`).
+fn skip_block(input: &mut CssParser<'_>, seen: Option<usize>) {
+    if !report::is_active() {
+        return;
+    }
+    let start = input.position();
+    while input.next().is_ok() {}
+    let bytes = input.slice_from(start).len();
+    report::skip_body(seen, bytes);
 }
 
 /// Keep every parsed rule; note the selector of each one dropped (an
@@ -510,6 +571,7 @@ impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler<'_> {
             has_important: declarations.iter().any(|d| d.important),
             declarations,
             media: self.media.clone(),
+            layer: self.layer,
         }])
     }
 }
@@ -522,6 +584,8 @@ enum AtRulePrelude {
     /// The parsed query list, and the block's index in the parse report
     /// (when one is active).
     Media(MediaQueryList, Option<usize>),
+    /// `@layer`: the names (none = anonymous block), and the report index.
+    Layer(Vec<layer::LayerName>, Option<usize>),
     Reject,
 }
 
@@ -540,18 +604,23 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler<'_> {
         // `@media`: parse the query list (evaluated per style pass, see
         // `media::evaluate_blocks`) and let `parse_block` recurse into the
         // body. Every other at-rule's prelude is consumed and dropped.
-        let is_media = name.eq_ignore_ascii_case("media");
         let start = input.position();
-        let queries = if is_media {
-            MediaQueryList::parse_from(input)
-        } else {
-            while input.next().is_ok() {}
-            MediaQueryList::default()
-        };
-        let seen = report::record_at_rule(&name, input.slice_from(start), is_media);
-        if is_media {
+        if name.eq_ignore_ascii_case("media") {
+            let queries = MediaQueryList::parse_from(input);
+            let seen = report::record_at_rule(&name, input.slice_from(start), true);
             return Ok(AtRulePrelude::Media(queries, seen));
         }
+        if name.eq_ignore_ascii_case("layer") {
+            let names = layer::parse_prelude(input);
+            while input.next().is_ok() {}
+            let seen = report::record_at_rule(&name, input.slice_from(start), names.is_ok());
+            return Ok(match names {
+                Ok(names) => AtRulePrelude::Layer(names, seen),
+                Err(()) => AtRulePrelude::Reject,
+            });
+        }
+        while input.next().is_ok() {}
+        report::record_at_rule(&name, input.slice_from(start), false);
         // Other at-rules (@charset, @keyframes, @font-face, …) keep the
         // pre-6.F behaviour: skip the prelude + body. parse_block returns
         // an empty Vec and the iter::flatten in `parse()` quietly drops it.
@@ -577,32 +646,31 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler<'_> {
                 let block = Rc::new(MediaBlock {
                     queries,
                     parent: self.media.clone(),
-                    index: self.blocks.len(),
+                    index: self.sheet.media.len(),
                 });
-                self.blocks.push(Rc::clone(&block));
-                report::enter_block(seen);
-                let mut handler = StylesheetHandler {
-                    media: Some(block),
-                    depth: self.depth + 1,
-                    blocks: &mut *self.blocks,
+                self.sheet.media.push(Rc::clone(&block));
+                Ok(self.nested(input, Some(block), self.layer, seen))
+            }
+            AtRulePrelude::Layer(names, seen) => {
+                // Same cap as `@media` (one depth for all grouping blocks).
+                if self.depth >= MAX_MEDIA_NESTING {
+                    return Ok(Vec::new());
+                }
+                // A block takes one name or none (anonymous); a list is
+                // only valid as a statement.
+                let layer = match names.as_slice() {
+                    [] => self.sheet.layers.anonymous(self.layer),
+                    [name] => self.sheet.layers.named(self.layer, name),
+                    _ => None,
                 };
-                let iter = StyleSheetParser::new(input, &mut handler);
-                let mut rules = Vec::new();
-                collect_rules(iter, &mut rules);
-                report::leave_block(seen, rules.len());
-                Ok(rules)
+                let Some(layer) = layer else {
+                    skip_block(input, seen);
+                    return Ok(Vec::new());
+                };
+                Ok(self.nested(input, self.media.clone(), Some(layer), seen))
             }
             AtRulePrelude::Reject => {
-                if report::is_active() {
-                    let start = input.position();
-                    while input.next().is_ok() {}
-                    let bytes = input.slice_from(start).len();
-                    report::record(|r| {
-                        if let Some(seen) = r.at_rules.last_mut() {
-                            seen.skipped_bytes = bytes;
-                        }
-                    });
-                }
+                skip_block(input, None);
                 Ok(Vec::new())
             }
         }
@@ -610,11 +678,21 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler<'_> {
 
     fn rule_without_block(
         &mut self,
-        _prelude: Self::Prelude,
+        prelude: Self::Prelude,
         _start: &ParserState,
     ) -> Result<Self::AtRule, ()> {
-        // Block-less forms (`@charset "utf-8";`) — drop quietly.
         report::mark_block_less();
+        // `@layer a, b;` fixes the order of layers not seen yet (under the
+        // enclosing layer); `@layer;` is invalid.
+        if let AtRulePrelude::Layer(names, seen) = prelude {
+            if names.is_empty() {
+                report::skip_body(seen, 0);
+            }
+            for name in &names {
+                self.sheet.layers.named(self.layer, name);
+            }
+        }
+        // Other block-less forms (`@charset "utf-8";`) — drop quietly.
         Ok(Vec::new())
     }
 }
@@ -2731,6 +2809,90 @@ mod tests {
             sheet.rules.len()
         );
         assert!(sheet.rules[0].media.is_none());
+    }
+
+    #[test]
+    fn layer_blocks_unfold_and_record_the_layer_tree() {
+        let sheet = parse(
+            "@layer reset, base.x;
+             @layer base { .a{} @layer x { .b{} } @media screen { .c{} } }
+             @layer { .d{} }
+             .e{}",
+        )
+        .unwrap();
+        let layers: Vec<_> = sheet
+            .layers
+            .iter()
+            .map(|l| (l.name.as_deref(), l.parent))
+            .collect();
+        assert_eq!(
+            layers,
+            [
+                (Some("reset"), None),
+                (Some("base"), None),
+                (Some("x"), Some(1)),
+                (None, None)
+            ]
+        );
+        let rule_layers: Vec<_> = sheet.rules.iter().map(|r| r.layer).collect();
+        assert_eq!(rule_layers, [Some(1), Some(2), Some(1), Some(3), None]);
+        assert!(sheet.rules[2].media.is_some(), "@media inside a layer");
+    }
+
+    #[test]
+    fn layer_ranks_are_post_order() {
+        // docs/compat-round3.md 2.2: a.b=0, a (direct rules)=1, c=2.
+        let sheet = parse("@layer a { @layer b { .x{} } .y{} } @layer c { .z{} }").unwrap();
+        let ranks = super::layer::document_layer_ranks(std::slice::from_ref(&sheet));
+        let rule_ranks: Vec<_> = sheet
+            .rules
+            .iter()
+            .map(|r| r.layer.map(|l| ranks[0][l as usize]))
+            .collect();
+        assert_eq!(rule_ranks, [Some(0), Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn deeply_nested_layer_blocks_are_bounded() {
+        // Nested `@layer`/`@media` blocks share one depth cap; past it the
+        // block's rules are dropped and what follows still parses.
+        let depth = 10_000;
+        for open in ["@layer{", "@layer a{", "@media screen{@layer{"] {
+            let css = format!(
+                "{}.deep{{color:red}}{} .after{{color:blue}}",
+                open.repeat(depth),
+                "}".repeat(depth * open.matches('{').count())
+            );
+            let sheet = parse(&css).unwrap();
+            assert_eq!(sheet.rules.len(), 1, "only .after survives ({open})");
+            assert!(sheet.rules[0].layer.is_none());
+            assert!(sheet.layers.len() <= super::media::MAX_MEDIA_NESTING);
+            let ranks = super::layer::document_layer_ranks(&[sheet]);
+            assert!(ranks[0].len() <= super::media::MAX_MEDIA_NESTING);
+        }
+    }
+
+    #[test]
+    fn long_layer_names_and_many_layers_stay_bounded() {
+        // A dotted name deeper than the nesting cap is invalid (block
+        // dropped); 50,000 anonymous layers rank in linear time.
+        let long = vec!["a"; 10_000].join(".");
+        let sheet = parse(&format!("@layer {long} {{ .x{{}} }} @layer {long}; .y{{}}")).unwrap();
+        assert_eq!(sheet.rules.len(), 1);
+        assert!(sheet.layers.is_empty());
+        let many = "@layer { .x{} }".repeat(50_000);
+        let sheet = parse(&many).unwrap();
+        let ranks = super::layer::document_layer_ranks(std::slice::from_ref(&sheet));
+        assert_eq!(ranks[0].len(), 50_000);
+        assert_eq!(ranks[0][49_999], 49_999);
+        // Deeply nested names in one chain rank without recursion.
+        let chain: String = (0..super::media::MAX_MEDIA_NESTING)
+            .map(|i| format!("@layer l{i};@layer l{i}{{"))
+            .collect::<String>()
+            + &"}".repeat(super::media::MAX_MEDIA_NESTING);
+        let sheet = parse(&chain).unwrap();
+        let ranks = super::layer::document_layer_ranks(std::slice::from_ref(&sheet));
+        assert_eq!(ranks[0].first(), Some(&(ranks[0].len() as u32 - 1)));
     }
 
     #[test]

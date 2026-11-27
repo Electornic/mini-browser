@@ -4,13 +4,15 @@
 // emit the resulting `PropertyMap`. The `<center>` quirks-mode auto-margin
 // shim folds in last because real browsers run it regardless of author CSS.
 
+use std::cmp::Reverse;
+
 use selectors::context::{
     MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, QuirksMode,
     SelectorCaches,
 };
 
 use crate::{
-    css::{Declaration, MiniBrowserSelectorImpl, Selector, Value},
+    css::{Declaration, MiniBrowserSelectorImpl, Rule, Selector, Value, layer::UNLAYERED},
     dom::{Document, NodeId, NodeType},
     dom_select::{MatchingElement, MatchingState},
 };
@@ -42,29 +44,50 @@ pub(super) fn specified_values(
     );
 
     // First collect every rule that matches this node together with its
-    // specificity and source order.
+    // layer rank, specificity and source order.
     // A rule in a `@media` block that doesn't match is skipped; its slot
     // in `rule_order` stays, so source order is unchanged for the rest.
-    for (rule_order, rule) in cascade
+    let no_ranks = Vec::new();
+    for (rule_order, (rule, ranks)) in cascade
         .stylesheets
         .iter()
         .zip(cascade.media)
-        .flat_map(|(sheet, media)| sheet.rules.iter().map(move |rule| (rule, media)))
         .enumerate()
-        .filter(|(_, (rule, media))| {
+        .flat_map(|(index, (sheet, media))| {
+            let ranks = cascade.layer_ranks.get(index).unwrap_or(&no_ranks);
+            sheet.rules.iter().map(move |rule| (rule, media, ranks))
+        })
+        .enumerate()
+        .filter(|(_, (rule, media, _))| {
             rule.media
                 .as_ref()
                 .is_none_or(|block| media.get(block.index).copied().unwrap_or(false))
         })
-        .map(|(order, (rule, _))| (order, rule))
+        .map(|(order, (rule, _, ranks))| (order, (rule, ranks)))
     {
         if let Some(specificity) = matching_specificity(&element, &mut ctx, &rule.selectors) {
-            matched.push((specificity, rule_order, rule));
+            let rank = rule
+                .layer
+                .and_then(|layer| ranks.get(layer as usize).copied())
+                .unwrap_or(UNLAYERED);
+            matched.push(Matched {
+                rank,
+                specificity,
+                rule_order,
+                rule,
+            });
         }
     }
 
-    // Lower-priority rules are applied first so later, more specific matches overwrite them.
-    matched.sort_by_key(|(specificity, rule_order, _)| (*specificity, *rule_order));
+    // Lower-priority rules are applied first so later, more specific
+    // matches overwrite them. Normal declarations: an earlier layer loses
+    // to a later one and every layer loses to unlayered rules (step 2.2).
+    matched.sort_by_key(|m| (m.rank, m.specificity, m.rule_order));
+    // `!important` reverses the layer order (CSS Cascade 5 §6.4): unlayered
+    // important loses to every layer's, an earlier layer's beats a later's.
+    let mut important: Vec<&Matched<'_>> =
+        matched.iter().filter(|m| m.rule.has_important).collect();
+    important.sort_by_key(|m| (Reverse(m.rank), m.specificity, m.rule_order));
 
     let mut values = default_values(document, node_id);
     // Presentational hints fold in between UA defaults and any author rules —
@@ -93,14 +116,16 @@ pub(super) fn specified_values(
     // Two passes in the spec's origin order (CSS Cascade 4 §6.1; no UA
     // `!important` or user sheets here): author normal < inline normal <
     // author important < inline important. Within a pass, the
-    // (specificity, source order) sort decides. Rules without an
-    // `!important` declaration skip the second pass (`Rule::has_important`).
-    for (_, _, rule) in &matched {
-        apply_declarations(&mut values, &rule.declarations, false);
+    // (layer, specificity, source order) sort decides — the style
+    // attribute is compared before layers, so it beats every layer in its
+    // pass. Rules without an `!important` declaration skip the second
+    // pass (`Rule::has_important`).
+    for m in &matched {
+        apply_declarations(&mut values, &m.rule.declarations, false);
     }
     apply_declarations(&mut values, &inline_decls, false);
-    for (_, _, rule) in matched.iter().filter(|(_, _, rule)| rule.has_important) {
-        apply_declarations(&mut values, &rule.declarations, true);
+    for m in important {
+        apply_declarations(&mut values, &m.rule.declarations, true);
     }
     apply_declarations(&mut values, &inline_decls, true);
 
@@ -120,6 +145,15 @@ pub(super) fn specified_values(
     }
 
     values
+}
+
+/// A rule matching the node, with what the cascade sorts it by.
+struct Matched<'a> {
+    /// Document-wide layer rank ([`UNLAYERED`] outside every layer).
+    rank: u32,
+    specificity: u32,
+    rule_order: usize,
+    rule: &'a Rule,
 }
 
 fn parent_is_center(document: &Document, node_id: NodeId) -> bool {

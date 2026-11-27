@@ -2,7 +2,7 @@
 //!
 //! The parser is tolerant: a rule whose selector it can't read, a
 //! declaration whose value it can't read and every at-rule except `@media`
-//! are dropped silently (that's the CSS error-recovery contract). On a real
+//! and `@layer` are dropped silently (that's the CSS error-recovery contract). On a real
 //! site those silent drops are most of what goes wrong, so
 //! [`parse_with_report`] runs the same parse and also hands back the dropped
 //! pieces, each with a [`DropReason`]. Normal parsing never records (or
@@ -68,7 +68,8 @@ pub enum DropReason {
     /// A selector with another engine's prefix (`::-moz-selection`,
     /// `:-ms-input-placeholder`) — Chrome drops the whole rule too.
     ForeignSelector,
-    /// An at-rule whose body is skipped (`@supports`, `@layer`, `@font-face`…).
+    /// An at-rule whose body is skipped (`@supports`, `@font-face`, an
+    /// invalid `@layer`…).
     SkippedAtRule,
     /// An at-rule with another engine's prefix (`@-moz-document`).
     ForeignAtRule,
@@ -139,14 +140,15 @@ pub struct AtRuleSeen {
     /// The text between the name and the block (`(min-width: 768px)`).
     pub prelude: String,
     /// Whether the body's rules were kept (`@media` — evaluated per style
-    /// pass, see [`media_verdict`]) or the whole rule skipped.
+    /// pass, see [`media_verdict`]; `@layer`, statement form included) or
+    /// the whole rule skipped.
     pub kept: bool,
     /// Size of a skipped body in source bytes (0 when kept or block-less).
     pub skipped_bytes: usize,
     /// Rules kept from a kept body, nested blocks' rules included.
     pub rules: usize,
-    /// Index in [`ParseReport::at_rules`] of the kept block (`@media`)
-    /// this one sits in (`None` at the top level).
+    /// Index in [`ParseReport::at_rules`] of the kept block (`@media`,
+    /// `@layer`) this one sits in (`None` at the top level).
     pub parent: Option<usize>,
     /// `false` for the statement form (`@layer a, b;`, `@import …;`).
     pub has_block: bool,
@@ -257,6 +259,22 @@ pub(super) fn mark_block_less() {
     record(|r| {
         if let Some(seen) = r.at_rules.last_mut() {
             seen.has_block = false;
+        }
+    });
+}
+
+/// An at-rule whose body is not kept after all (an invalid
+/// `@layer a, b { }`), or a skipped one's body size: `seen` (or, without
+/// an index, the last at-rule recorded) is not kept and lost `bytes`.
+pub(super) fn skip_body(seen: Option<usize>, bytes: usize) {
+    record(|r| {
+        let at_rule = match seen {
+            Some(index) => r.at_rules.get_mut(index),
+            None => r.at_rules.last_mut(),
+        };
+        if let Some(at_rule) = at_rule {
+            at_rule.kept = false;
+            at_rule.skipped_bytes = bytes;
         }
     });
 }
@@ -512,6 +530,38 @@ mod tests {
                 ("layer", "base", true),
                 ("layer", "", true),
                 ("supports", long.as_str(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn layer_blocks_are_kept_and_enclose_their_at_rules() {
+        let (_, report) = parse_with_report(
+            "@layer a, b; @layer a { .x{} @media screen { .y{} } @layer c { .z{} } }
+             @layer a b { .bad{} } @layer;",
+        );
+        let seen: Vec<_> = report
+            .at_rules
+            .iter()
+            .map(|a| {
+                (
+                    a.prelude.as_str(),
+                    a.kept,
+                    a.rules,
+                    a.parent,
+                    a.drop_reason(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("a, b", true, 0, None, None),
+                ("a", true, 3, None, None),
+                ("screen", true, 1, Some(1), None),
+                ("c", true, 1, Some(1), None),
+                ("a b", false, 0, None, Some(DropReason::SkippedAtRule)),
+                ("", false, 0, None, Some(DropReason::SkippedAtRule)),
             ]
         );
     }

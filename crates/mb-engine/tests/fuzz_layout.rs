@@ -1713,6 +1713,47 @@ fn media_prelude(rng: &mut Rng) -> String {
     out
 }
 
+/// `@layer` preludes: names, dotted names, lists, anonymous, and the
+/// invalid forms (space-separated, dangling dots, digits, CSS-wide words).
+const LAYER_PRELUDES: &[&str] = &[
+    "",
+    "a",
+    "b",
+    "base",
+    "a.b",
+    "a.b.c",
+    "a, b",
+    "reset, base, a.b",
+    "b, a",
+    "a b",
+    "a.",
+    ".a",
+    "a..b",
+    "1x",
+    "inherit",
+    "a,",
+    "(a)",
+    "안녕",
+    "{",
+];
+
+/// A layer prelude; now and then a dotted name past the nesting cap.
+fn layer_prelude(rng: &mut Rng) -> String {
+    if rng.chance(3) {
+        return vec!["a"; rng.range(30, 200)].join(".");
+    }
+    rng.pick_str(LAYER_PRELUDES).to_string()
+}
+
+/// The opening of one grouping block: mostly `@media`, else `@layer`.
+fn group_open(rng: &mut Rng) -> String {
+    if rng.chance(60) {
+        format!("@media {}{{", media_prelude(rng))
+    } else {
+        format!("@layer {}{{", layer_prelude(rng))
+    }
+}
+
 fn token_soup(rng: &mut Rng, len: usize) -> String {
     let mut out = String::new();
     for _ in 0..len {
@@ -1739,17 +1780,22 @@ fn css_input(rng: &mut Rng) -> (String, String) {
     ];
     let mut sheet = String::new();
     let mut bodies = String::new();
-    // `@media` blocks around the rules: usually 1–3 deep, sometimes past
-    // the parser's nesting cap; not always closed.
+    // `@media`/`@layer` blocks around the rules: usually 1–3 deep,
+    // sometimes past the parser's nesting cap; not always closed. Layer
+    // statements (`@layer a, b;`) now and then, inside or outside.
     let media_depth = match rng.below(10) {
         0..=5 => 0,
         6..=8 => rng.range(1, 4),
         _ => rng.range(30, 200),
     };
+    if rng.chance(10) {
+        sheet.push_str(&format!("@layer {};", layer_prelude(rng)));
+    }
     for _ in 0..media_depth {
-        sheet.push_str("@media ");
-        sheet.push_str(&media_prelude(rng));
-        sheet.push('{');
+        sheet.push_str(&group_open(rng));
+    }
+    if rng.chance(10) {
+        sheet.push_str(&format!("@layer {};", layer_prelude(rng)));
     }
     for _ in 0..rng.range(1, 5) {
         if rng.chance(25) {
@@ -2474,7 +2520,8 @@ fn run_deep_case() {
 }
 
 /// Media evaluation is bounded (docs/compat-round3.md 2.1): 10 000 nested
-/// `@media` blocks, 10 000 nested parentheses and a 50 000-query list go
+/// `@media` blocks, 10 000 nested parentheses and a 50 000-query list (and
+/// the `@layer` shapes of 2.2) go
 /// through parse + cascade + layout on [`SOUP_PAGE`] without blowing the
 /// stack (it would abort the binary) or the time. The time bound is loose
 /// (debug build): it catches exponential, not slow.
@@ -2495,7 +2542,27 @@ fn media_extremes_stay_bounded() {
         "@media {}, screen {{ div {{ padding: 1px }} }}",
         vec!["(max-width: 1px)"; 50_000].join(", ")
     );
-    for css_src in [nested, parens, list] {
+    // `@layer` (2.2): nested blocks under the same cap, a name with
+    // 10 000 segments, 50 000 anonymous layers + a statement naming
+    // 50 000 layers (the document-wide ranking runs every style pass).
+    let layers_nested = format!(
+        "{}.a{{color:red}}{}",
+        "@layer a{@media screen{".repeat(depth / 2),
+        "}".repeat(depth)
+    );
+    let long_name = format!(
+        "@layer {} {{ p {{ color: blue }} }}",
+        vec!["a"; depth].join(".")
+    );
+    let many_layers = format!(
+        "@layer {}; {}",
+        (0..50_000)
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        "@layer { div { padding: 1px } }".repeat(50_000)
+    );
+    for css_src in [nested, parens, list, layers_nested, long_name, many_layers] {
         let started = Instant::now();
         let view = run_pipeline(SOUP_PAGE, &css_src);
         check_commands(&view.commands).expect("finite paint commands");
@@ -2587,21 +2654,28 @@ fn fuzz_generator_covers_its_spec() {
         "{root_rules}/200 cases with an `html, body` rule"
     );
     assert!(var_uses >= 20, "{var_uses}/200 cases using var(--g)");
-    // The CSS soup wraps rules in `@media`, sometimes past the nesting cap.
+    // The CSS soup wraps rules in `@media`/`@layer`, sometimes past the
+    // nesting cap (one cap for both).
     let mut media = 0;
+    let mut layers = 0;
     let mut past_cap = 0;
     for seed in 1..=500 {
         let mut rng = Rng::new(seed ^ 0xC55_F022);
         let (source, _) = css_input(&mut rng);
-        let blocks = source.matches("@media").count();
-        if blocks > 0 {
+        let media_blocks = source.matches("@media").count();
+        let layer_blocks = source.matches("@layer").count();
+        if media_blocks > 0 {
             media += 1;
         }
-        if blocks > css::media::MAX_MEDIA_NESTING {
+        if layer_blocks > 0 {
+            layers += 1;
+        }
+        if media_blocks + layer_blocks > css::media::MAX_MEDIA_NESTING {
             past_cap += 1;
         }
     }
-    assert!(media >= 100, "{media}/500 CSS inputs with @media");
+    assert!(media >= 70, "{media}/500 CSS inputs with @media");
+    assert!(layers >= 70, "{layers}/500 CSS inputs with @layer");
     assert!(
         past_cap >= 10,
         "{past_cap}/500 CSS inputs nested past the cap"

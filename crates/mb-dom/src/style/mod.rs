@@ -178,10 +178,14 @@ fn style_pass(
         .iter()
         .map(|sheet| media::evaluate_blocks(&sheet.media, media))
         .collect();
+    // One document-wide layer order across the sheets (step 2.2), once per
+    // pass like the media results.
+    let layer_ranks = crate::css::layer::document_layer_ranks(stylesheets);
     let var_memo = RefCell::new(VarMemo::new());
     let cascade = Cascade {
         stylesheets,
         media: &media_results,
+        layer_ranks: &layer_ranks,
         report,
         var_memo: &var_memo,
     };
@@ -226,10 +230,12 @@ fn style_pass(
 }
 
 /// The author sheets of one style pass plus which of their `@media` blocks
-/// match (`media[sheet][block.index]`).
+/// match (`media[sheet][block.index]`) and their layers' document-wide
+/// ranks (`layer_ranks[sheet][layer]`).
 pub(super) struct Cascade<'a> {
     pub stylesheets: &'a [Stylesheet],
     pub media: &'a [Vec<bool>],
+    pub layer_ranks: &'a [Vec<u32>],
     /// Only the probe's pass collects one (`style_tree_with_report`).
     pub report: Option<&'a RefCell<StyleReport>>,
     /// `var()` re-parse results for this pass (step 1c).
@@ -615,6 +621,126 @@ mod tests {
                    @media print { @media (min-width: 1px) { .t { color: #000003 } } }";
         assert_eq!(color_at(css, 1280.0), None);
         assert_eq!(color_at(css, 500.0), rgb(0, 0, 2));
+    }
+
+    fn color_with_sheets(sheets: &[&str], html: &str) -> Option<Value> {
+        let (document, root) = parse_html(html);
+        let sheets: Vec<_> = sheets.iter().map(|css| parse_css(css)).collect();
+        let styled = style::style_tree(&document, root, &sheets);
+        styled.children[0].value("color").cloned()
+    }
+
+    fn layered_color(css: &str) -> Option<Value> {
+        color_with_sheets(&[css], r#"<div><p class="t">x</p></div>"#)
+    }
+
+    #[test]
+    fn layer_rules_lose_to_unlayered() {
+        // Higher specificity inside a layer still loses to an unlayered rule.
+        let css = "@layer a { .t.t.t { color: #000002 } } .t { color: #000001 }
+                   @layer { div .t.t { color: #000003 } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 1));
+    }
+
+    #[test]
+    fn later_layer_beats_earlier() {
+        let css = "@layer a { .t.t { color: #000001 } } @layer b { .t { color: #000002 } }
+                   @layer a { div .t.t { color: #000003 } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 2));
+        // Anonymous layers are each a new layer, in order.
+        let css = "@layer { .t.t { color: #000001 } } @layer { .t { color: #000002 } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 2));
+    }
+
+    #[test]
+    fn important_in_layer_beats_unlayered_important() {
+        let css =
+            ".t.t { color: #000001 !important } @layer a { .t { color: #000002 !important } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 2));
+        // Among layers the order reverses too: the earlier layer wins.
+        let css = "@layer a { .t { color: #000001 !important } }
+                   @layer b { .t.t { color: #000002 !important } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 1));
+        // A normal unlayered declaration still loses to a layered important one.
+        let css = "@layer a { .t { color: #000001 !important } } .t.t { color: #000002 }";
+        assert_eq!(layered_color(css), rgb(0, 0, 1));
+    }
+
+    #[test]
+    fn inline_style_beats_layered_rules() {
+        let html = r#"<div><p class="t" style="color: #000005">x</p></div>"#;
+        let css = "@layer a { .t { color: #000001 } }";
+        assert_eq!(color_with_sheets(&[css], html), rgb(0, 0, 5));
+        let html = r#"<div><p class="t" style="color: #000005 !important">x</p></div>"#;
+        let css = "@layer a { .t { color: #000001 !important } }";
+        assert_eq!(color_with_sheets(&[css], html), rgb(0, 0, 5));
+    }
+
+    #[test]
+    fn dark_media_inside_layer_stays_off() {
+        let css = "@layer base { .t { color: #000001 }
+                     @media (prefers-color-scheme: dark) { .t { color: #000009 } } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 1));
+    }
+
+    #[test]
+    fn parent_direct_rules_beat_child_layer() {
+        let css = "@layer a { @layer b { .t { color: #ff0000 } } .t { color: #0000ff } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 255));
+        // The same with dotted names, the child declared after the parent.
+        let css = "@layer a { .t { color: #000001 } } @layer a.b { .t.t { color: #000002 } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 1));
+        // `a.b` is the layer `b` nested in `a`: one layer, one rank.
+        let css = "@layer a { @layer b { .t.t { color: #000001 } } }
+                   @layer c { .t { color: #000002 } }
+                   @layer a.b { div .t.t { color: #000003 } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 2));
+    }
+
+    #[test]
+    fn layer_statement_fixes_order() {
+        let css =
+            "@layer b, a; @layer a { .t { color: #000001 } } @layer b { .t.t { color: #000002 } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 1));
+        // A statement inside a layer names its sublayers.
+        let css = "@layer x { @layer late, early; }
+                   @layer x.early { .t { color: #000001 } }
+                   @layer x.late { .t.t { color: #000002 } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 1));
+    }
+
+    #[test]
+    fn same_layer_name_across_sheets_shares_rank() {
+        // The second sheet's `a` is the first sheet's `a` (before `b`),
+        // not a new last layer.
+        let html = r#"<div><p class="t">x</p></div>"#;
+        let first = "@layer a { } @layer b { .t { color: #000002 } }";
+        let second = "@layer a { .t.t { color: #000003 } }";
+        assert_eq!(color_with_sheets(&[first, second], html), rgb(0, 0, 2));
+        // A layer first seen in the second sheet comes after every layer
+        // of the first.
+        let second = "@layer c { .t { color: #000004 } }";
+        assert_eq!(color_with_sheets(&[first, second], html), rgb(0, 0, 4));
+    }
+
+    #[test]
+    fn layer_first_seen_in_false_media_still_takes_its_place() {
+        // Approximation (docs/compat-round3.md 2.2): a layer named in a
+        // block whose condition is false is ordered anyway, by first
+        // appearance — `b` is before `a` here.
+        let css = "@media print { @layer b { } }
+                   @layer a { .t { color: #000001 } } @layer b { .t.t { color: #000002 } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 1));
+    }
+
+    #[test]
+    fn invalid_layer_preludes_drop_the_block() {
+        let css = ".t { color: #000001 }
+                   @layer a b { .t { color: #000009 } }
+                   @layer a, b { .t { color: #000009 } }
+                   @layer a. { .t { color: #000009 } }
+                   @layer 1x { .t { color: #000009 } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 1));
     }
 
     #[test]
