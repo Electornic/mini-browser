@@ -1,6 +1,6 @@
 # 호환성 3차 설계 — 견고성 + CSS 파서·캐스케이드
 
-> 상태: **설계 확정 (2026-11-26, 1차 검토 + 다각도 검토 — 코드 대조·웹 표준·실행/측정 — 반영) · 0a 완료(`d6801bb`, 829) · 0b 완료(`15775d6`, 842) · K4 완료(`0e0ccc9`, 843) · 0c 퍼저 완료(미커밋, 862) → 0단계 완료** (K5 nav-fail 1 은 [부록 B](#부록-b--0b-코퍼스에서-찾은-것-알려진-문제--담당) 대로 4차로 넘김) — **2.1 `@media` 평가 완료(미커밋, 902 — [구현 메모](#21-구현-메모-2026-11-27--설계와-달라진-점-포함))** → 다음 1단계 · 근거 = [compat-survey.md](compat-survey.md) (호환성 2차 실사이트 조사) · 기준선 `4588aba` 804 → 조사 캐시 2차 수정 후 **806** → 0a **829** → 0b **842** → K4 **843** → 0c **862** → R1 **876** → 2.1 **902** · 진행은 [진행 표](#진행-표)
+> 상태: **설계 확정 (2026-11-26, 1차 검토 + 다각도 검토 — 코드 대조·웹 표준·실행/측정 — 반영) · 0a 완료(`d6801bb`, 829) · 0b 완료(`15775d6`, 842) · K4 완료(`0e0ccc9`, 843) · 0c 퍼저 완료(미커밋, 862) → 0단계 완료** (K5 nav-fail 1 은 [부록 B](#부록-b--0b-코퍼스에서-찾은-것-알려진-문제--담당) 대로 4차로 넘김) — **2.1 `@media` 평가 완료(`8904659` probe · `4bd8146` 엔진, 902 — [구현 메모](#21-구현-메모-2026-11-27--설계와-달라진-점-포함)) → 2.1a 위키 그리드 회귀 수정(미커밋, 915 — [메모](#21a-위키-그리드-회귀-수정-2026-11-27))** → 다음 1단계 · 근거 = [compat-survey.md](compat-survey.md) (호환성 2차 실사이트 조사) · 기준선 `4588aba` 804 → 조사 캐시 2차 수정 후 **806** → 0a **829** → 0b **842** → K4 **843** → 0c **862** → R1 **876** → 2.1 **902** → 2.1a **915** · 진행은 [진행 표](#진행-표)
 
 이 문서만 읽고 어느 단계든 이어받을 수 있게 쓴다. 단계마다 **목표 → 세부 항목 → 설계 결정 → 테스트 → 측정·완료 기준 → 위험 → 노력** 순서다. 2차 조사의 수치·용어(슬리버, 버린 선언, `compat_probe`, `MB_NET_CACHE`)는 [compat-survey.md 방법](compat-survey.md#방법) 참고.
 
@@ -381,6 +381,45 @@ grep -naE '\?;|\.unwrap\(\)|\.expect\(|\[[a-z_]+\]|\[[a-z_]+ *[-+] *1\]' \
 - 실패 테스트 먼저: 캐스케이드 테스트(`media_rule_applies_only_when_matching`·`nested_media_is_and`·`media_does_not_change_rule_order`)는 `style_tree_with_state` 새 인자 전에 써서 실패(컴파일) 확인. 상태·리소스 테스트 4개는 구현 직후에 썼지만 각각 옛 동작(속성 무시·모든 `@media` 참·폭만 키)에서 실패하는 단정이다.
 - 골든: `compat3.observation.txt` 만 바뀜 — 머리 주석 3번 그대로(데스크톱 내비 Features·Pricing 보임, "Open navigation" 사라짐, `page_height` 322 → 318). 2번(검색 폼 `.hide-sm`)은 그대로 보임(정상). 다른 골든·스냅샷 변화 없음.
 
+#### 2.1a 위키 그리드 회귀 수정 (2026-11-27)
+
+2.1 뒤 enwiki·kowiki 에서 navbox 링크가 관찰에서 빠지고 슬리버가 폭증한 것(진행 표 2행)을 1단계 전에 고친다. 범위는 코퍼스가 쓰는 만큼 — `grid-template` 단축과 `minmax()` 트랙. 트랙 속 `calc`·`repeat()`·`fit-content()`·줄 이름 `[a]` 는 5단계에 그대로 둔다(지금처럼 선언째 버림).
+
+**원인**(동결 캐시로 진단, 사이트 방문 없음) — 세 겹:
+1. `@media screen and (min-width:1120px)` 의 Vector 2022 데스크톱 격자가 이제 적용되는데, `grid-template` 단축은 전용 파서가 없어 버려지고 `grid-template-columns: minmax(0,1fr)` 류는 `minmax()` 때문에 선언째 버려졌다. 영역(`grid-template-areas`)만 남은 그리드가 열을 `1fr` 로 균등 분할.
+2. 레거시 그리드(`layout/grid.rs`)는 항목을 **컨테이너 전체 폭으로** 먼저 배치하고 열 위치로 옮기기만 했다(줄이지 않음). 그래서 `pageContent` 가 1,192px 폭으로 x=640 에서 시작해 넘쳤다. enwiki 의 그리드는 조상이 boundary(body 에 out-of-flow 자식)라 taffy 가 아니라 이 레거시가 배치한다.
+3. 그 아래 navbox 는 행이 전부 `colspan="2"` 셀인 표다. 레거시 표가 다중 열 셀을 열 크기 계산에서 빼서 열이 0px → 셀 0폭 → 링크 494개가 슬리버. **그리드와 무관한 기존 표 버그**로, 합성 재현은 폭 636·1,192 둘 다 0폭이다. kowiki 의 navbox 는 2.1 전에도 이 버그로 빠져 있었다(이번에 +230 이 처음 보임). enwiki 의 것이 2.1 전엔 왜 0폭이 아니었는지는 확인하지 못했다.
+
+**Chrome 해석**(캐시의 CSS 를 스펙대로 계산):
+- `.mw-page-container-inner` — 1280 에서 내용 폭 1,192(= 1280 − 2×2.75rem). `grid-template: min-content 1fr min-content / 12.25rem minmax(0,1fr)` + `column-gap: 24px` → 열 196 / 간격 24 / 972. 영역: siteNotice(1행 전체), columnStart(2행 1열), pageContent(2행 2열), footer(3행 전체).
+- `.mw-body`(972px) — `min-content min-content min-content 1fr / minmax(0,59.25rem) min-content` → 1열 = min(948, 972 − columnEnd 의 min-content).
+- 우리 결과: 196 / 24 / 972 는 일치. `.mw-body` 는 1열 636 · columnEnd 336 — 우리 자연 폭은 max-content 근사라 Chrome 보다 넓을 수 있다(대조 안 함).
+
+**taffy 0.15.1**: `MinMax` 트랙(최소 length/percent/auto/min-content/max-content, 최대는 여기에 fr·fit-content), `grid_template_areas`, 영역 이름 → `-start`/`-end` 암묵 선 해석(`GridPlacement::NamedLine`)이 모두 있다 → 브릿지는 매핑만 추가. 영역 그리드를 taffy 로 옮기는 일은 이번엔 안 한다 — enwiki 는 어차피 boundary 안이라 효과가 없다.
+
+**변경**:
+- **파서**(`css/grid.rs`):
+  - `TrackSize::{MinContent, MaxContent, MinMax(TrackBreadth, TrackBreadth)}` + `TrackBreadth` — 5단계 설계의 모양 그대로, `Copy` 유지.
+  - `minmax()` 의 최소에 `fr` 이 오면 무효(선언 버림, 브라우저와 같음). 무단위 `0` 은 길이로 받는다. `none` 키워드(`grid-template-areas/-columns/-rows: none`).
+  - `grid-template` 단축 세 형태: `none` / `<rows> / <columns>`(영역은 `none` 으로 리셋) / `[<string> <track-size>?]+ [/ <columns>]?`.
+  - `css/properties.rs` 의 `grid-template` 값 종류 Other → Dedicated — 전용 파서가 생겼으므로 버림 사유가 multi-token → invalid-value 로 바뀐다(0b 분류표의 규칙 그대로).
+- **taffy 매핑**(`taffy_bridge.rs` `track_to_taffy`): 새 변형 세 개.
+- **레거시 그리드**(`layout/grid.rs`) — 5단계 설계의 "레거시는 `minmax(0,Nfr)` 정도로 최소화" 보다 넓다. enwiki 의 그리드가 레거시를 타므로 필요했다:
+  - `column-gap`/`row-gap`/`gap`(단일 길이).
+  - 항목을 **자기 영역 폭으로** 배치: 폭이 없으면 영역을 채운다(`justify-self: stretch`, `inline::layout_grid_item`). 자연 폭 사전 측정은 내용으로 크기가 정해지는 열(`auto`·`min-content`·`max-content`·그런 것이 든 `minmax`)에서 시작하는 항목만 한다. 측정한 상자가 영역에 들어가면 다시 배치하지 않는다 — 항목당 배치 1회, 넘칠 때만 2회.
+  - 트랙 해석 `resolve_tracks`: 고정 → 내용 → `minmax(<min>, <길이>)` 는 바닥에서 시작해 남는 공간으로 상한까지 고르게(fr 보다 먼저 — 스펙의 "maximize tracks") → `fr` 은 스펙의 "find the size of an fr"(바닥이 몫보다 큰 트랙은 빼고 다시 나눔, 가중치 합이 1 미만이면 1). 5단계 설계가 근사로는 틀린다고 짚은 `minmax(300px,1fr) 1fr` @400 = 300/100 을 두 경로 모두 테스트로 고정.
+  - 높이가 정해지지 않은 그리드의 `fr` 행은 내용 크기 — Chrome 과 같다. 전엔 0 으로 접혔다(위키의 `1fr` 본문 행).
+  - `auto` 최소는 0 으로 근사(min-content 를 따로 재지 않음).
+- **레거시 표**(`layout/table.rs`): 다중 열 셀도 측정해, 걸친 열(사이 간격 포함)보다 넓으면 그 열들을 고르게 넓힌다. 셀마다 측정은 한 번.
+- **테스트 +13**: 파서 6 · 레이아웃 5(영역 항목이 트랙 폭으로, 영역 안 표가 0폭 안 됨, minmax 상한 + min-content, taffy 의 minmax, fr 바닥 300/100 두 경로) · 표 2.
+- **퍼저**: 구조 생성기에 `grid-template` 단축 두 형태 + 생성기 검사(단축·`minmax` 각 200 중 ≥10), CSS 토큰 풀에 `grid-template` 와 `minmax`/`min-content` 값. 긴 실행(release) 레이아웃 3만·CSS 10만 무결.
+
+**코퍼스**(라벨 `grid`, `media-after` 대비, 동결 캐시·오프라인·release): 결과·기대 컨트롤·오프라인 미스는 25곳 동일. 수치는 진행 표 2.1a 행.
+
+**남은 것**:
+1. enwiki 슬리버 71 + 2.1 전 대비 링크 11개(Blink·Gecko·WebKit 등 엔진 그룹 이름): navbox 의 `th.navbox-group{width:1%; white-space:nowrap}` 셀이다. 레거시 표가 열을 평평한 비율로 줄이고 min-content 바닥이 없어서, 1% 열이 6px 남짓 → 좌우 패딩 28px 에 밀려 0이 된다. 표 알고리즘 몫이고 그리드가 아니다 — 후속 작업.
+2. mdn 슬리버 0 → 25: 레이아웃 열이 전부 사용자 속성이다(`grid-template-columns: var(--layout-2-sidebars)` — 줄 이름 `[…]`, `minmax(var(--layout-sidebar-min),1fr)`). 그 분기를 고르는 미디어 쿼리 `(width < calc(1rem * 2 + (15rem + 2rem) * 2 + 31rem))` 도 2.1 의 좁은 calc 밖이라 unknown → 거짓이다(Chrome 1280 에선 참). 그래서 영역만 남은 5열 균등(256px)이 된다. 전엔 항목이 열보다 넓게 배치돼 넘쳤을 뿐이고, 지금은 열 폭에 맞춰져 좁아졌다. 요소 목록·컨트롤 변화는 없다. 1단계(여러 토큰 사용자 속성 → `Unparsed`) + 5단계(줄 이름, calc 곱셈) 몫.
+
 ### 2.2 `@layer` 펼치기
 
 **왜 `@media` 뒤인가**: GitHub 의 버려진 `@layer` 블록 안에 `prefers-color-scheme: dark` 블록이 49개 있다. `@media` 평가 없이 `@layer` 만 펼치면 다크 규칙 49개가 **추가로** 적용되어 GitHub 이 더 어두워진다. 평가가 먼저 있으면 펼친 레이어 안의 다크 블록은 거짓으로 빠진다.
@@ -576,14 +615,14 @@ sr-only 텍스트(`.blind`, `.sr-only`, `visuallyHidden`: `position:absolute; wi
 
 ### 목표
 
-GitHub 간격(`margin-top: calc(var(--base-size-8) + var(--Layout-row-gap))` 류 수백), Google·위키의 `calc(100% - 16px)`, 위키 그리드(`15.5rem minmax(0,1fr)` — 2차에서 본문이 밀리고 잘린 원인)를 살린다.
+GitHub 간격(`margin-top: calc(var(--base-size-8) + var(--Layout-row-gap))` 류 수백), Google·위키의 `calc(100% - 16px)` 을 살린다. 위키 그리드(`15.5rem minmax(0,1fr)` — 2차에서 본문이 밀리고 잘린 원인)는 [2.1a](#21a-위키-그리드-회귀-수정-2026-11-27)에서 `minmax()`·`grid-template` 단축으로 먼저 살렸다.
 
 ### 세부 항목
 
 1. `calc()` — `+ - * /`, 괄호, 중첩 `calc()`, 단위 혼합(`px`, `%`, `em`, `rem`, `vw`, `vh`, `ch`, `pt`, 무단위 수).
 2. `min()`, `max()`, `clamp()`.
 3. 값 속 `var()` — 1단계 `Unparsed` 경로가 이미 처리(치환 후 재파싱 시 `calc` 가 여기서 파싱됨). 이 단계에선 `calc(var(--a) * -1)` 같은 조합의 테스트만 추가.
-4. 그리드 트랙: `minmax(a, b)`, `repeat(n, …)`, `repeat(auto-fill|auto-fit, minmax(…))`, `fit-content()`.
+4. 그리드 트랙: `repeat(n, …)`, `repeat(auto-fill|auto-fit, minmax(…))`, `fit-content()`, 트랙 속 `calc()`·`var()`, 줄 이름 `[a]`(mdn 레이아웃). — `minmax(a, b)`·`min-content`/`max-content`·`grid-template` 단축은 **2.1a 완료**.
 5. `vw`/`vh` 단위 전반(지금은 `Keyword("100vw")` 로 떨어짐).
 
 ### 설계 결정
@@ -594,8 +633,8 @@ GitHub 간격(`margin-top: calc(var(--base-size-8) + var(--Layout-row-gap))` 류
 - **taffy 브릿지 — 전제 정정**: taffy 0.15.1 에는 `calc` 가 **있다**(기본 feature: `Dimension::calc(ptr)`, `LayoutPartialTree::resolve_calc_value(ptr, basis)`). 다만 우리가 쓰는 고수준 `TaffyTree` 는 `resolve_calc_value` 가 **0.0 고정**이다(`taffy_tree.rs` ~405행). 그리고 처음 안이었던 "boundary 로 보내 레거시가 계산" 은 불완전하다 — boundary leaf 도 자기 `width`/`min/max-width`/`margin` 은 `boundary_taffy_style`(~624–653행)이 taffy 로 넘기므로 calc margin 은 0, calc max-width 는 auto 가 된다. "기준 폭을 알면 브릿지에서 px 로" 도 `build_taffy_node`(~591행)가 compute 전에 스타일을 만들어 기준을 아는 경우가 거의 없다.
   - **5단계 시작 때 스파이크(0.5일)**: (a) 저수준 trait(`LayoutPartialTree` 등)을 우리 트리에 직접 구현해 `CalcSum` 포인터를 넘기고 taffy 안에서 `basis` 로 풀게 하는 안, (b) `TaffyTree` 를 유지하고 calc 가 있는 상자를 `px`/`%` 중 하나로 근사하는 안 — (a) 가 정답이지만 브릿지 재작성 규모를 재 보고 결정, 결과를 이 절에 기록.
   - 흔한 모양 `width: min(100% - 2rem, 1200px)` 을 가진 flex/grid 컨테이너가 기준 사례.
-- **그리드**: `TrackSize` 는 `Copy` 라(`css/mod.rs` ~130행) `Box` 를 넣지 않는다 — `MinMax(TrackBreadth, TrackBreadth)`(Box 없는 min/max 전용 enum), `FitContent(f32)` 추가. `repeat(n)` 은 파싱 때 펼침, `repeat(auto-fill|auto-fit, …)` 은 `Value::TrackList` 모양을 바꿔(`TrackList{ before, auto: Option<(AutoKind, Vec<TrackSize>)>, after }`) 레이아웃 때 개수 결정 — 개수는 **gap 포함**, max 가 확정이면 max·아니면 min 으로 센다, `auto-fit` 은 빈 트랙을 접는다.
-- **그리드 해석은 가능하면 taffy 로**: taffy 에는 `minmax`·`repeat(auto-fill)`·`fit-content` 와 스펙의 fr 알고리즘("find the size of an fr")이 이미 있다. 레거시 `grid.rs::resolve_grid_columns` 에 처음 안의 근사("min 을 고정 예산에 넣고 남는 공간을 fr 로 분배")를 넣으면 스펙과 다르다 — `minmax(300px,1fr) 1fr` 를 400px 에 두면 스펙 300/100, 근사 350/50. 또 `1fr` 단독은 `minmax(auto,1fr)` 라 긴 내용(pre·표)이 줄지 않는다. **결정**: 새 트랙 함수가 든 그리드는 taffy 경로로 보내고(`taffy_bridge.rs` grid 트랙 변환에 매핑), 레거시 `grid.rs` 확장은 `minmax(0, Nfr)`(위키 모양 — 근사로도 정확) 정도로 최소화.
+- **그리드**: `TrackSize` 는 `Copy` 라(`css/mod.rs` ~130행) `Box` 를 넣지 않는다 — `MinMax(TrackBreadth, TrackBreadth)`(Box 없는 min/max 전용 enum)은 **2.1a 에서 추가됨**, 남은 건 `FitContent(f32)`. `repeat(n)` 은 파싱 때 펼침, `repeat(auto-fill|auto-fit, …)` 은 `Value::TrackList` 모양을 바꿔(`TrackList{ before, auto: Option<(AutoKind, Vec<TrackSize>)>, after }`) 레이아웃 때 개수 결정 — 개수는 **gap 포함**, max 가 확정이면 max·아니면 min 으로 센다, `auto-fit` 은 빈 트랙을 접는다.
+- **그리드 해석은 가능하면 taffy 로**: taffy 에는 `minmax`·`repeat(auto-fill)`·`fit-content` 와 스펙의 fr 알고리즘("find the size of an fr")이 이미 있다. 레거시 `grid.rs::resolve_grid_columns` 에 처음 안의 근사("min 을 고정 예산에 넣고 남는 공간을 fr 로 분배")를 넣으면 스펙과 다르다 — `minmax(300px,1fr) 1fr` 를 400px 에 두면 스펙 300/100, 근사 350/50. 또 `1fr` 단독은 `minmax(auto,1fr)` 라 긴 내용(pre·표)이 줄지 않는다. **결정**: 새 트랙 함수가 든 그리드는 taffy 경로로 보내고(`taffy_bridge.rs` grid 트랙 변환에 매핑), 레거시 `grid.rs` 확장은 `minmax(0, Nfr)`(위키 모양 — 근사로도 정확) 정도로 최소화. **2.1a 에서 바뀜**: 위키 그리드가 boundary 안(레거시)이라, 레거시에 `minmax`(상한 트랙을 fr 보다 먼저 키움)·스펙의 fr 몫 계산(위 300/100 사례 정확)·간격·영역 폭 배치를 넣었다. 영역 그리드를 taffy 로 옮기는 일은 여전히 열려 있다.
 - **퍼센트 기준은 속성마다 다르다** — `CalcSum.percent` 를 아무 데서나 "부모 폭" 으로 풀면 틀린다:
 | 속성 | `%` 기준 | 해석 시점 |
 |---|---|---|
@@ -618,10 +657,10 @@ GitHub 간격(`margin-top: calc(var(--base-size-8) + var(--Layout-row-gap))` 류
 - 스타일: `font_size_calc_percent_uses_parent_font`(부모 20px, `calc(50% + 2px)` → 12px), `line_height_calc_resolves_at_style_time`.
 - 상태: `height_resize_restyles_only_with_vh`(vh 안 쓰는 문서는 높이만 바꿔도 뷰 재사용, `100vh` 쓰면 재계산).
 - 레이아웃: `width_calc_percent_minus_px` (`calc(100% - 16px)` in 200px → 184), `margin_calc_of_vars` (1단계 경로와 결합), `clamp_respects_bounds`.
-- 그리드: `grid_minmax_fr_track`(위키 모양 축소판: `15.5rem minmax(0,1fr)` 두 열 → 248px + 나머지), `grid_minmax_min_not_added_to_fr_share`(`minmax(300px,1fr) 1fr` @400 → 300/100), `grid_repeat_n`, `grid_repeat_auto_fill_count_includes_gap`, `grid_auto_fit_collapses_empty`.
+- 그리드: `grid_repeat_n`, `grid_repeat_auto_fill_count_includes_gap`, `grid_auto_fit_collapses_empty`. (`grid_minmax_min_not_added_to_fr_share` 와 위키 모양 `grid_areas_item_is_laid_out_at_its_track_width` 는 2.1a 에 있음.)
 - 브릿지: `calc_width_on_flex_container_resolves`(스파이크 결과에 맞춰), `explicit_width_check_accepts_calc`(`matches!(Length)` 오판 회귀).
 - `line_height_unitless_calc_inherits_as_factor`, `flex_basis_percent_uses_main_axis`.
-- 퍼저 CSS 풀에 `calc()`/`minmax()` 추가 — 0 나누기·거대값.
+- 퍼저 CSS 풀에 `calc()` 추가 — 0 나누기·거대값(`minmax()`·`grid-template` 은 2.1a 에서 추가됨).
 
 ### 측정·완료 기준 (5단계)
 
@@ -650,6 +689,7 @@ GitHub 간격(`margin-top: calc(var(--base-size-8) + var(--Layout-row-gap))` 류
 | 0 견고성 | ✅ 0a·0b·K4·0c 완료 (K5 → 4차) | `d6801bb`(0a) · `15775d6`(0b) · `0e0ccc9`(K4) · 0c 미커밋 | 806 → 829 (0a) → 842 (0b) → 843 (K4) → 862 (0c) → 869 (R3) → 872 (R2) → 875 (R4) → 876 (R1) | **기준선(25곳, K4 뒤)**: ok 19 + ok* 1 · nav-fail 1(crates.io K5) · panic 0 · **timeout 0**(0b 때 3 — daum·hani·bbc, K4 로 해결) · blocked 2 · robots skip 2 · `[mb-budget]` 0. 목표 0/0/0 중 nav-fail 1 남음 → K5 | 5곳 **ours 7,389 / browser-too 15** (20곳 14,112 / 256; 0b 17곳 13,251 / 236) | 5곳 **ours 1,745 / browser-too 11** (20곳 10,451 / 58; 0b 17곳 10,114 / 53) | 5곳 17 (20곳 297; 0b 17곳 249) → 0c 5곳 **10** (20곳 275) | 8/20: naver·daum·hani·korea-kr·velog·d2·google·enwiki | **0a**: Robustness Rules(AGENTS.md) + `[mb-budget]` 워치독 · 검토 표 [부록 A](#부록-a--04-표적-코드-검토-표-0a)(grep 140곳: 안전 117·수정 10·보류 2·거짓 양성 11 + grep 밖 발견 수정 5 — 패닉 4: 멀티바이트 `#색`·`bgcolor`·`@font-face`, colspan 오버플로 / 할당 폭주 1: 거대 grid 줄) · 리소스 수집 `Result` 제거 · 스크립트 에러 위치(콘솔) · `compat3` 골든 + `compat3-menu` eval(오늘은 실패가 정상). **0b**: 코퍼스 도구(`compat-corpus.sh`·`compat-sites.tsv`·probe `summary.tsv`)·조사 캐시 GET 전용·`css/properties.rs`·버림 사유 코드·[분류표](#0b-분류표-동결--바꾸려면-이-표를-먼저-고친다) 동결 · 녹화 2026-11-26(캐시 동결) · 발견 수정 K1 settle·K2 빈 오류 페이지·K3 `queueMicrotask` · **K4**(`0e0ccc9`): `queueMicrotask` 가 `then` 의 species 를 통해 페이지 폴리필 Promise 를 만들던 것 — daum·hani·bbc timeout → ok(~250ms), 나머지 22곳 수치·요소 목록 변화 없음(`diff`) ([부록 B](#부록-b--0b-코퍼스에서-찾은-것-알려진-문제--담당)) · 사이트별 표 [survey](compat-survey.md#3차-코퍼스-기준선-0b). **0c**: 구조적 퍼저 + 축소기 + CSS 토큰·이미지 바이트 퍼징 + 깊이 10,000 케이스([0.3 구현 메모](#03-퍼징)) · 긴 실행(release) 레이아웃·CSS·이미지 각 15만 무결 · 발견 수정 11건([부록 C](#부록-c--0c-퍼저에서-찾은-것)): 비유한 좌표(길이 포화 ±33,554,431 + 레이아웃 출력 포화), 증폭 4(음수 shrink-to-fit 합, 인라인 상자가 자기 폭을 % 기준으로 넘김, 음수 flex 인수, flex 탐색이 1e6 대리 폭을 max-content 로 보고 — 실사이트 flex 내비 균등 분배의 원인), 깊이 abort(파서 평탄화 256), SVG 4(래스터 4096 상한, tiny-skia 이중 패닉 abort, 필터 층 3GB, 중첩 `<svg>` 스택 넘침), 래스터 거대 글리프 · D1·D2·D3 결정([부록 A](#부록-a--04-표적-코드-검토-표-0a)) · 코퍼스 재측정(`0c`, [survey](compat-survey.md#3차-코퍼스-기준선-0b)): 결과·버림 수·요소 목록 25곳 동일, 슬리버 297 → 275, 문서 높이 3곳 변화, timeout·panic·`[mb-budget]` 0. 남음: K5(4차), R5–R7(부록 C; R1–R4 는 후속으로 수정) |
 | 1 값 파서 | ⏳ | | | 0/0/0 | 목표 ours −80% (2차 환산 ≤1,500) | — | — | | 2.1 뒤에 실행 |
 | 2 @media/@layer/@supports | 🔶 2.1 완료(미커밋) · 2.2·2.3 ⏳ | 2.1 미커밋(probe·엔진 두 커밋) | 876 → 878 (2.1 probe) → 902 (2.1) | 25곳 그대로: ok 19 + ok* 1 · nav-fail 1(K5) · panic 0 · timeout 0 · `[mb-budget]` 0 | 5곳 ours 7,389 / browser-too 15 (변화 없음 — 2.1 은 버림을 안 바꿈) | 5곳 ours 1,745 / browser-too 11 (변화 없음) | 5곳 10 → **218**(kowiki 0→203), 20곳 275 → **984**(enwiki 66→552) — 아래 메모 | 8/20 그대로(naver·daum·hani·korea-kr·velog·d2·google·enwiki) | **2.1**: 코퍼스 `media-before`(probe 만 바꾼 옛 엔진) → `media-after`. 20곳 `@media` 블록 3,786 → 3,789(`<link media>` 3개가 이제 블록) · 블록 안 규칙 15,417 → 16,220 · 적용 15,417 → **5,754** · "wrong at 1280x800" 범주 규칙 적용 9,223 → **1**(GitHub `print,screen and (width<=1349px) and (width>=768px)` — probe 휴리스틱 오분류, 1280 에서 참이 맞음) · 무효 쿼리 0. 결과·버림·오프라인 미스·기대 컨트롤은 25곳 동일. **요소 목록 diff 10곳** — 모바일 전용이 사라짐(정상): yna −186(메뉴 열기/닫기 ×29 + 모바일 서랍 메뉴 링크·APP설치·광고삭제·뉴스레터), apple −11(모바일 푸터 아코디언 버튼), d2 −2(모바일 검색·메뉴 링크), docsrs −1(모바일 "Crate tokio"), github −1("View all files"). 데스크톱 전용이 나타남(정상): bbc +69(섹션 내비·월드 서비스 언어), yna +20(캐러셀 버튼), github +18(파일 목록·Go to file·Branches/Tags), apple +17(글로벌 내비·검색·장바구니), microsoft +10(상단 내비), hani +6(섹션 링크), d2 +4(검색창·D2 News·Hello world), kowiki +14(전거 통제·바닥글 링크). **버그 → 5단계 몫**: enwiki −494 +240 — Vector 2022 데스크톱 격자(`@media screen and (min-width:1120px)` 의 `.mw-body{display:grid; grid-template: … / minmax(0,59.25rem) min-content; grid-template-areas: …}`)가 이제 적용되는데 `grid-template` 단축·`minmax()` 를 못 읽어 본문 열이 0폭 → navbox 링크 494개가 0폭(관찰에서 빠짐), 슬리버 enwiki 66→552·kowiki 0→203(같은 원인, kowiki 는 링크가 남음). 나타난 240 은 참고문헌 역링크·"145 languages" 버튼(Chrome 데스크톱에도 있음). 기대 컨트롤 enwiki 2/3 그대로. 미리보기 `compat-cache/previews/2.1/`(후만 — 전은 옛 빌드가 필요해 생략): HN 데스크톱 표(문서 높이 1,377 → 1,020, 모바일 규칙 빠짐), GitHub 위쪽 어두운 띠 = 로그아웃 헤더 `div[data-color-mode=dark]`(Chrome 에서도 어두움)가 레이아웃 갭으로 늘어난 것 — `@media` 와 무관, "GitHub 라이트" 판정은 2.2 때. **비트셋 비용**: GitHub `@media` 517블록(쿼리 534) **3.6µs/프레임**, 코퍼스 최대 yna 1,571블록 17µs(release) — 매 프레임 키 확인에 그대로 씀. 퍼저 CSS 긴 실행 10만 무결. 남음: 2.2 `@layer`(GitHub 의 레이어 안 다크 블록 49개는 2.1 평가가 있어 펼쳐도 꺼짐)·2.3 `@supports` — 1단계 뒤 |
+| 2.1a 위키 그리드 | 🔶 완료(미커밋) | 미커밋 | 902 → **915** | 25곳 그대로(ok 19 + ok* 1 · nav-fail 1 · panic 0 · timeout 0 · `[mb-budget]` 0) | 5곳 ours 7,389 → **7,371** / 15 (20곳 14,112 → 14,078 — `grid-template`·`minmax` 가 이제 읽힘: github 17·enwiki 6·mdn 6·docsrs 2·bbc 2·google 1) | 그대로 | 5곳 218 → **15**, 20곳 984 → **325**(enwiki 552→71 · kowiki 203→0 · **mdn 0→25**) | 8/20 그대로 | [2.1a 메모](#21a-위키-그리드-회귀-수정-2026-11-27). 요소 diff(`media-after` → `grid`) 2곳뿐: enwiki **+484**·kowiki **+230** = navbox 링크(요소 678→1,162 · 767→997). 2.1 전(`media-before`) 대비로는 enwiki +241 −11(+240 은 2.1 의 참고문헌 역링크·언어 버튼), kowiki +244(2.1 의 +14 + navbox 230 — kowiki navbox 는 **2.1 전에도** colspan 표 버그로 빠져 있었고 이번에 처음 보임). 2.1 전 대비 enwiki −11 은 navbox 그룹 셀(`width:1%`) — 표 min-content 바닥 없음, 후속. mdn 슬리버는 사용자 속성 트랙·calc 곱셈 미디어 쿼리(1·5단계 몫), 요소 변화 없음. 문서 높이: enwiki 35,445→16,790 · kowiki 16,345→11,983 · hani 11,898→10,426 · mdn 5,791→6,755 · bbc 25,226→26,042 · docsrs 5,947→6,029 · apple 26,569→26,617(간격·영역 폭 배치·내용 크기 `fr` 행; 요소 목록 동일) |
 | 3 클리핑 | ⏳ | | | 0/0/0 | — | — | 목표 0 | | |
 | 4 셀렉터 | ⏳ | | | 0/0/0 | — | 목표: 대상 범주 0 | — | | |
 | 5 calc/트랙 | ⏳ | | | 0/0/0 | 목표 ours −95% (2차 환산 ≤380) | — | — | | 위키 레이아웃, taffy 스파이크 결과 |

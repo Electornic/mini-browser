@@ -593,12 +593,44 @@ pub(super) fn layout_inline_block_node(
     y: f32,
     available_width: f32,
 ) -> LayoutBox {
+    layout_inline_block_node_as(node, x, y, available_width, false)
+}
+
+/// A grid item in its area: like an inline-block, except that with no
+/// width of its own it stretches to fill `area_width` (`justify-self:
+/// stretch`, the default) instead of shrinking to fit — so its content is
+/// laid out at the column's width, not the container's.
+pub(super) fn layout_grid_item(node: &StyledNode, x: f32, y: f32, area_width: f32) -> LayoutBox {
+    layout_inline_block_node_as(node, x, y, area_width, true)
+}
+
+fn layout_inline_block_node_as(
+    node: &StyledNode,
+    x: f32,
+    y: f32,
+    available_width: f32,
+    stretch: bool,
+) -> LayoutBox {
     // Inline-block ignores `margin: auto` (auto only collapses for in-flow
     // blocks), so we just take the raw declared margins here.
     let margin = edge_sizes(node, "margin", available_width);
     let padding = edge_sizes(node, "padding", available_width);
     let border = edge_sizes(node, "border", available_width);
-    let content_width = inline_block_resolved_width(node, available_width);
+    let stretched = (stretch
+        && length_value(node, "width", available_width).is_none()
+        && intrinsic_width(node).is_none())
+    .then(|| {
+        (available_width
+            - margin.left
+            - margin.right
+            - border.left
+            - border.right
+            - padding.left
+            - padding.right)
+            .max(0.0)
+    });
+    let content_width =
+        stretched.unwrap_or_else(|| inline_block_resolved_width(node, available_width));
 
     let content_x = x + margin.left + border.left + padding.left;
     let content_y = y + margin.top + border.top + padding.top;

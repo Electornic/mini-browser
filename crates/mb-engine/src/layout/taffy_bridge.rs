@@ -38,7 +38,7 @@ use taffy::style::{
     TrackSizingFunction,
 };
 
-use crate::css::{GridLine, TrackSize, Unit, Value};
+use crate::css::{GridLine, TrackBreadth, TrackSize, Unit, Value};
 use crate::dom::NodeType;
 use crate::style::StyledNode;
 
@@ -352,6 +352,18 @@ fn grid_template(value: Option<&Value>) -> Vec<GridTemplateComponent<String>> {
 
 fn track_to_taffy(track: &TrackSize) -> TrackSizingFunction {
     match track {
+        TrackSize::MinContent => MinMax {
+            min: MinTrackSizingFunction::min_content(),
+            max: MaxTrackSizingFunction::min_content(),
+        },
+        TrackSize::MaxContent => MinMax {
+            min: MinTrackSizingFunction::max_content(),
+            max: MaxTrackSizingFunction::max_content(),
+        },
+        TrackSize::MinMax(min, max) => MinMax {
+            min: min_breadth_to_taffy(min),
+            max: max_breadth_to_taffy(max),
+        },
         TrackSize::Length(v, Unit::Px) => MinMax {
             min: MinTrackSizingFunction::length(*v),
             max: MaxTrackSizingFunction::length(*v),
@@ -372,6 +384,28 @@ fn track_to_taffy(track: &TrackSize) -> TrackSizingFunction {
             min: MinTrackSizingFunction::auto(),
             max: MaxTrackSizingFunction::auto(),
         },
+    }
+}
+
+fn min_breadth_to_taffy(breadth: &TrackBreadth) -> MinTrackSizingFunction {
+    match breadth {
+        TrackBreadth::Length(v, Unit::Percent) => MinTrackSizingFunction::percent(*v / 100.0),
+        TrackBreadth::Length(v, _) => MinTrackSizingFunction::length(*v),
+        TrackBreadth::MinContent => MinTrackSizingFunction::min_content(),
+        TrackBreadth::MaxContent => MinTrackSizingFunction::max_content(),
+        // `fr` never parses as a minimum; `auto` either way.
+        TrackBreadth::Auto | TrackBreadth::Fraction(_) => MinTrackSizingFunction::auto(),
+    }
+}
+
+fn max_breadth_to_taffy(breadth: &TrackBreadth) -> MaxTrackSizingFunction {
+    match breadth {
+        TrackBreadth::Length(v, Unit::Percent) => MaxTrackSizingFunction::percent(*v / 100.0),
+        TrackBreadth::Length(v, _) => MaxTrackSizingFunction::length(*v),
+        TrackBreadth::Fraction(weight) => MaxTrackSizingFunction::fr(*weight),
+        TrackBreadth::MinContent => MaxTrackSizingFunction::min_content(),
+        TrackBreadth::MaxContent => MaxTrackSizingFunction::max_content(),
+        TrackBreadth::Auto => MaxTrackSizingFunction::auto(),
     }
 }
 

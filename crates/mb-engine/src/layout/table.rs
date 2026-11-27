@@ -116,12 +116,10 @@ pub(super) fn layout_table_children(
     // the largest answer per column. Explicit `width` on a cell flows
     // through layout_inline_block_node automatically (its first sizing
     // branch reads the declared width). Multi-column (colspan > 1) cells
-    // are skipped here — they want a width spanning several columns, but
-    // the proper distribution algorithm is intricate; the toy lets the
-    // single-column cells drive sizing and lets the spanned cell take
-    // whatever total the columns add up to. That undersizes a few cases
-    // (a colspan cell wider than the columns combined) but matches the
-    // common HN layout where multi-column cells are spacers/empty.
+    // come second: single-column cells drive sizing, then a spanning cell
+    // wider than its columns widens them evenly (the spec's distribution
+    // is intricate; even split is the toy's). HN's empty spacer colspans
+    // measure 0 and change nothing.
     let _pass_c = std::time::Instant::now();
     let mut col_widths = vec![0.0_f32; column_count];
     // `available_for_cells` is computed after Pass D's border-spacing math
@@ -153,6 +151,31 @@ pub(super) fn layout_table_children(
                     let measured = measure_cell_max_width(cell);
                     if measured > col_widths[col_idx] {
                         col_widths[col_idx] = measured;
+                    }
+                }
+                col_idx += span.max(1);
+            }
+        }
+        // Spanning cells, once the single-column ones set their columns:
+        // a cell wider than the columns it spans (plus the spacing between
+        // them) widens them, split evenly. Without this a table whose rows
+        // only hold `colspan` cells (Wikipedia's navbox) kept every column
+        // at 0px. Each cell is still measured once.
+        for cells in &row_cells {
+            let mut col_idx = 0usize;
+            for cell in cells {
+                let span = cell_colspan(cell).min(column_count.saturating_sub(col_idx));
+                if span > 1 {
+                    let columns = col_idx..col_idx + span;
+                    let inner_spacing = (span - 1) as f32 * _bs_for_shortcut;
+                    let current: f32 =
+                        col_widths[columns.clone()].iter().sum::<f32>() + inner_spacing;
+                    let measured = measure_cell_max_width(cell);
+                    if measured > current {
+                        let extra = (measured - current) / span as f32;
+                        for w in &mut col_widths[columns] {
+                            *w += extra;
+                        }
                     }
                 }
                 col_idx += span.max(1);
@@ -611,6 +634,44 @@ mod tests {
             span_cell.dimensions.content.x,
             row0_col0.dimensions.content.x
         );
+    }
+
+    #[test]
+    fn colspan_only_rows_still_size_their_columns() {
+        // Wikipedia's navbox: the outer table's rows hold only
+        // `colspan="2"` cells. Columns were sized from single-column cells
+        // alone, so every column — and every cell — came out 0px wide.
+        let styled = styled_root(
+            r#"<div><table>
+                <tr><th colspan="2">Web browsers</th></tr>
+                <tr><td colspan="2"><img width="120" height="20"></td></tr>
+            </table></div>"#,
+            r#"div { width: 600px; } table { width: 100%; border-spacing: 0; } td, th { padding: 0; }"#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let table = &layout.children[0];
+        assert_eq!(table.children.len(), 2);
+        for cell in &table.children {
+            assert_eq!(cell.dimensions.content.width, 600.0, "{cell:?}");
+        }
+    }
+
+    #[test]
+    fn a_wide_colspan_cell_widens_the_columns_it_spans() {
+        // An auto-width table: the spanning cell (200px) is wider than the
+        // two columns it spans (60 + 40), so they grow by the difference,
+        // split evenly.
+        let styled = styled_root(
+            r#"<table>
+                <tr><td><img width="60" height="20"></td><td><img width="40" height="20"></td></tr>
+                <tr><td colspan="2"><img width="200" height="20"></td></tr>
+            </table>"#,
+            r#"table { border-spacing: 0; } td { padding: 0; }"#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        assert_eq!(layout.children[0].dimensions.content.width, 110.0);
+        assert_eq!(layout.children[1].dimensions.content.width, 90.0);
+        assert_eq!(layout.children[2].dimensions.content.width, 200.0);
     }
 
     #[test]

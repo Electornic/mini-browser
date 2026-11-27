@@ -725,7 +725,35 @@ impl Gen {
                     value,
                 )
             }
-            23 => ("grid-template-areas", self.areas()),
+            23 if self.rng.chance(50) => ("grid-template-areas", self.areas()),
+            // The `grid-template` shorthand: `<rows> / <columns>` or the
+            // areas form with optional row sizes.
+            23 => {
+                let value = if self.rng.chance(50) {
+                    let rows: Vec<String> =
+                        (0..self.rng.range(1, 4)).map(|_| self.track()).collect();
+                    let cols: Vec<String> =
+                        (0..self.rng.range(1, 4)).map(|_| self.track()).collect();
+                    format!("{} / {}", rows.join(" "), cols.join(" "))
+                } else {
+                    let mut value = String::new();
+                    for _ in 0..self.rng.range(1, 4) {
+                        let cols = self.rng.range(0, 4);
+                        let names: Vec<&str> =
+                            (0..cols).map(|_| *self.rng.pick(AREA_NAMES)).collect();
+                        let _ = write!(value, "\"{}\" ", names.join(" "));
+                        if self.rng.chance(50) {
+                            value.push_str(&self.track());
+                            value.push(' ');
+                        }
+                    }
+                    if self.rng.chance(50) {
+                        let _ = write!(value, "/ {} {}", self.track(), self.track());
+                    }
+                    value.trim_end().to_string()
+                };
+                ("grid-template", value)
+            }
             24 => (
                 *self.rng.pick(&["grid-column", "grid-row"]),
                 self.grid_line(),
@@ -1540,6 +1568,7 @@ const CSS_DEDICATED: &[&str] = &[
     "grid-template-columns",
     "grid-template-rows",
     "grid-template-areas",
+    "grid-template",
     "grid-column",
     "grid-row",
     "font-size",
@@ -1722,6 +1751,15 @@ fn soup_value(rng: &mut Rng, property: &str) -> String {
             "repeat(3, 1px) minmax(1px, 1fr)",
             "1px auto 1%",
             "repeat(2, 1fr 1px)",
+            "minmax(0,1fr) min-content",
+            "minmax(1px,59.25rem) max-content minmax(min-content, auto)",
+        ]),
+        "grid-template" => *rng.pick(&[
+            "min-content 1fr min-content / 12.25rem minmax(0,1fr)",
+            "auto / 1px minmax(0,1fr)",
+            "\"a b\" 1px 'c d' / 1fr 1fr",
+            "none",
+            "1fr / ",
         ]),
         "grid-template-areas" => *rng.pick(&["\"a b\" \"c d\"", "\"a\" \"a b\"", "\". .\""]),
         "grid-column" | "grid-row" => *rng.pick(&["1 / span 2", "-1 / 1", "a / b", "span 1"]),
@@ -2327,6 +2365,8 @@ fn fuzz_generator_covers_its_spec() {
     let mut deepest = 0;
     let mut unbounded = 0;
     let mut with_areas = 0;
+    let mut with_shorthand = 0;
+    let mut with_minmax = 0;
     let mut korean = 0;
     for seed in 1..=200 {
         let case = Gen::case(seed);
@@ -2336,6 +2376,12 @@ fn fuzz_generator_covers_its_spec() {
         }
         if case.css().contains("grid-template-areas") {
             with_areas += 1;
+        }
+        if case.css().contains("grid-template:") {
+            with_shorthand += 1;
+        }
+        if case.css().contains("minmax(") {
+            with_minmax += 1;
         }
         if case.html().contains('한') || case.html().contains('안') || case.html().contains('가')
         {
@@ -2355,6 +2401,11 @@ fn fuzz_generator_covers_its_spec() {
         "{with_areas}/200 cases with grid-template-areas"
     );
     assert!(korean >= 20, "{korean}/200 cases with Korean text");
+    assert!(
+        with_shorthand >= 10,
+        "{with_shorthand}/200 cases with the grid-template shorthand"
+    );
+    assert!(with_minmax >= 10, "{with_minmax}/200 cases with minmax()");
     // The CSS soup wraps rules in `@media`, sometimes past the nesting cap.
     let mut media = 0;
     let mut past_cap = 0;

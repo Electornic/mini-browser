@@ -7,11 +7,32 @@
 use cssparser::{Parser as CssParser, Token};
 
 use super::error::{convert_basic_error_at, token_error};
-use super::{GridLine, GridPlacement, ParseError, TrackSize, Unit, Value};
+use super::{
+    Declaration, GridLine, GridPlacement, ParseError, TrackBreadth, TrackSize, Unit, Value,
+};
 
 pub(super) fn parse_grid_template_areas<'i>(
     input: &mut CssParser<'i>,
 ) -> Result<Value, ParseError> {
+    if input.try_parse(|i| i.expect_ident_matching("none")).is_ok() {
+        return Ok(Value::Keyword("none".into()));
+    }
+    let rows = parse_area_rows(input, |_| Ok(()))?;
+    if rows.is_empty() {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            "grid-template-areas requires at least one row string",
+        ));
+    }
+    Ok(Value::TemplateAreas(rows))
+}
+
+/// Row strings of a template, each optionally followed by whatever
+/// `after_row` reads (the `grid-template` shorthand's row size).
+fn parse_area_rows<'i>(
+    input: &mut CssParser<'i>,
+    mut after_row: impl FnMut(&mut CssParser<'i>) -> Result<(), ParseError>,
+) -> Result<Vec<Vec<Option<String>>>, ParseError> {
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
     loop {
         input.skip_whitespace();
@@ -36,14 +57,115 @@ pub(super) fn parse_grid_template_areas<'i>(
         if !cells.is_empty() {
             rows.push(cells);
         }
+        after_row(input)?;
     }
-    if rows.is_empty() {
-        return Err(ParseError::new(
-            input.position().byte_index(),
-            "grid-template-areas requires at least one row string",
+    Ok(rows)
+}
+
+/// `grid-template` → `grid-template-rows` / `-columns` / `-areas`
+/// (css-grid-1 §7.4). Three forms: `none`; `<rows> / <columns>` (areas
+/// reset to `none`); and `[ <string> <track-size>? ]+ [ / <columns> ]?`.
+/// Line names (`[a]`) and `repeat()` are not read — the declaration is
+/// dropped, as before.
+pub(super) fn parse_grid_template_shorthand<'i>(
+    input: &mut CssParser<'i>,
+) -> Result<Vec<Declaration>, ParseError> {
+    let none = || Value::Keyword("none".into());
+    let declarations = |rows: Value, columns: Value, areas: Value| {
+        vec![
+            Declaration {
+                name: "grid-template-rows".into(),
+                value: rows,
+            },
+            Declaration {
+                name: "grid-template-columns".into(),
+                value: columns,
+            },
+            Declaration {
+                name: "grid-template-areas".into(),
+                value: areas,
+            },
+        ]
+    };
+    if input
+        .try_parse(|i| {
+            i.expect_ident_matching("none")?;
+            i.expect_exhausted()
+        })
+        .is_ok()
+    {
+        return Ok(declarations(none(), none(), none()));
+    }
+    input.skip_whitespace();
+    let starts_with_string = {
+        let probe = input.state();
+        let is_string = matches!(input.next(), Ok(Token::QuotedString(_)));
+        input.reset(&probe);
+        is_string
+    };
+    if starts_with_string {
+        let mut row_sizes = Vec::new();
+        let areas = parse_area_rows(input, |input| {
+            input.skip_whitespace();
+            let probe = input.state();
+            let size = match input.next() {
+                Ok(Token::QuotedString(_)) | Ok(Token::Delim('/')) | Err(_) => None,
+                Ok(_) => {
+                    input.reset(&probe);
+                    Some(parse_grid_track_size(input)?)
+                }
+            };
+            if size.is_none() {
+                input.reset(&probe);
+            }
+            row_sizes.push(size.unwrap_or(TrackSize::Auto));
+            Ok(())
+        })?;
+        let columns = if input.try_parse(|i| i.expect_delim('/')).is_ok() {
+            let columns = parse_track_sizes(input)?;
+            if columns.is_empty() {
+                return Err(ParseError::new(
+                    input.position().byte_index(),
+                    "grid-template needs columns after '/'",
+                ));
+            }
+            Value::TrackList(columns)
+        } else {
+            none()
+        };
+        input
+            .expect_exhausted()
+            .map_err(|err| convert_basic_error_at(input.position().byte_index(), err))?;
+        return Ok(declarations(
+            Value::TrackList(row_sizes),
+            columns,
+            Value::TemplateAreas(areas),
         ));
     }
-    Ok(Value::TemplateAreas(rows))
+    let rows = parse_track_list_or_none(input)?;
+    input
+        .expect_delim('/')
+        .map_err(|err| convert_basic_error_at(input.position().byte_index(), err))?;
+    let columns = parse_track_list_or_none(input)?;
+    input
+        .expect_exhausted()
+        .map_err(|err| convert_basic_error_at(input.position().byte_index(), err))?;
+    Ok(declarations(rows, columns, none()))
+}
+
+/// One side of `<rows> / <columns>`: `none` or at least one track size.
+fn parse_track_list_or_none<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
+    if input.try_parse(|i| i.expect_ident_matching("none")).is_ok() {
+        return Ok(Value::Keyword("none".into()));
+    }
+    let tracks = parse_track_sizes(input)?;
+    if tracks.is_empty() {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            "grid track list requires at least one track size",
+        ));
+    }
+    Ok(Value::TrackList(tracks))
 }
 
 pub(super) fn parse_grid_placement<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
@@ -118,57 +240,114 @@ fn parse_grid_line_integer<'i>(input: &mut CssParser<'i>) -> Result<u32, ParseEr
 }
 
 pub(super) fn parse_grid_track_list<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
+    let value = parse_track_list_or_none(input)?;
+    input
+        .expect_exhausted()
+        .map_err(|err| convert_basic_error_at(input.position().byte_index(), err))?;
+    Ok(value)
+}
+
+/// Track sizes up to the end of the input or a `/` (left unread).
+fn parse_track_sizes<'i>(input: &mut CssParser<'i>) -> Result<Vec<TrackSize>, ParseError> {
     let mut tracks = Vec::new();
     loop {
         input.skip_whitespace();
-        if input.is_exhausted() {
-            break;
+        let probe = input.state();
+        match input.next() {
+            Err(_) => break,
+            Ok(Token::Delim('/')) => {
+                input.reset(&probe);
+                break;
+            }
+            Ok(_) => input.reset(&probe),
         }
-        let track = parse_grid_track_size(input)?;
-        tracks.push(track);
+        tracks.push(parse_grid_track_size(input)?);
     }
-    if tracks.is_empty() {
-        return Err(ParseError::new(
-            input.position().byte_index(),
-            "grid track list requires at least one track size",
-        ));
-    }
-    Ok(Value::TrackList(tracks))
+    Ok(tracks)
 }
 
+/// `<track-size>`: a breadth (not `fr`-only rules: `1fr` is a track size
+/// on its own) or `minmax(<min>, <max>)`. `fit-content()`, `repeat()`
+/// and `calc()` stay unsupported (step 5 owns calc in tracks).
 fn parse_grid_track_size<'i>(input: &mut CssParser<'i>) -> Result<TrackSize, ParseError> {
     let pos = input.position().byte_index();
     let token = input
         .next()
         .map_err(|err| convert_basic_error_at(pos, err))?
         .clone();
+    if let Token::Function(name) = &token {
+        if !name.eq_ignore_ascii_case("minmax") {
+            return Err(ParseError::new(
+                pos,
+                format!("unsupported grid track function '{name}'"),
+            ));
+        }
+        return input
+            .parse_nested_block(|input| {
+                let min = parse_track_breadth(input)?;
+                input.expect_comma()?;
+                let max = parse_track_breadth(input)?;
+                input.expect_exhausted()?;
+                if matches!(min, TrackBreadth::Fraction(_)) {
+                    return Err(cssparser::ParseError::custom(ParseError::new(
+                        pos,
+                        "minmax() minimum cannot be flexible",
+                    )));
+                }
+                Ok(TrackSize::MinMax(min, max))
+            })
+            .map_err(|_| ParseError::new(pos, "invalid minmax()"));
+    }
+    Ok(match breadth_from_token(&token, pos)? {
+        TrackBreadth::Length(value, unit) => TrackSize::Length(value, unit),
+        TrackBreadth::Fraction(weight) => TrackSize::Fraction(weight),
+        TrackBreadth::Auto => TrackSize::Auto,
+        TrackBreadth::MinContent => TrackSize::MinContent,
+        TrackBreadth::MaxContent => TrackSize::MaxContent,
+    })
+}
+
+fn parse_track_breadth<'i>(
+    input: &mut CssParser<'i>,
+) -> Result<TrackBreadth, cssparser::ParseError<ParseError>> {
+    let pos = input.position().byte_index();
+    let token = input.next()?.clone();
+    breadth_from_token(&token, pos).map_err(cssparser::ParseError::custom)
+}
+
+fn breadth_from_token(token: &Token<'_>, pos: usize) -> Result<TrackBreadth, ParseError> {
     match token {
-        Token::Ident(name) => match name.as_ref() {
-            "auto" => Ok(TrackSize::Auto),
+        Token::Ident(name) => match name.to_ascii_lowercase().as_str() {
+            "auto" => Ok(TrackBreadth::Auto),
+            "min-content" => Ok(TrackBreadth::MinContent),
+            "max-content" => Ok(TrackBreadth::MaxContent),
             other => Err(ParseError::new(
                 pos,
                 format!("unsupported grid track keyword '{other}'"),
             )),
         },
         Token::Percentage { unit_value, .. } => {
-            Ok(TrackSize::Length(unit_value * 100.0, Unit::Percent))
+            Ok(TrackBreadth::Length(unit_value * 100.0, Unit::Percent))
         }
-        Token::Dimension { value, unit, .. } => match unit.as_ref() {
-            "fr" => Ok(TrackSize::Fraction(value)),
-            "px" => Ok(TrackSize::Length(value, Unit::Px)),
-            "em" => Ok(TrackSize::Length(value, Unit::Em)),
-            "rem" => Ok(TrackSize::Length(value, Unit::Rem)),
-            "ch" => Ok(TrackSize::Length(value, Unit::Ch)),
-            "pt" => Ok(TrackSize::Length(value, Unit::Pt)),
+        Token::Dimension { value, unit, .. } => match unit.to_ascii_lowercase().as_str() {
+            "fr" if *value >= 0.0 => Ok(TrackBreadth::Fraction(*value)),
+            "px" => Ok(TrackBreadth::Length(*value, Unit::Px)),
+            "em" => Ok(TrackBreadth::Length(*value, Unit::Em)),
+            "rem" => Ok(TrackBreadth::Length(*value, Unit::Rem)),
+            "ch" => Ok(TrackBreadth::Length(*value, Unit::Ch)),
+            "pt" => Ok(TrackBreadth::Length(*value, Unit::Pt)),
             other => Err(ParseError::new(
                 pos,
                 format!("unsupported grid track unit '{other}'"),
             )),
         },
+        // A unitless zero is a length (`minmax(0, 1fr)`); any other bare
+        // number is not.
+        Token::Number { value, .. } if *value == 0.0 => Ok(TrackBreadth::Length(0.0, Unit::Px)),
         Token::Number { .. } => Err(ParseError::new(
             pos,
             "grid track size requires a unit (px/em/rem/% or fr)",
         )),
-        other => Err(token_error(input, &other, "invalid grid track size")),
+        _ => Err(ParseError::new(pos, "invalid grid track size")),
     }
 }

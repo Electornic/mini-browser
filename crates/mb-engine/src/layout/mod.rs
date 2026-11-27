@@ -3055,6 +3055,141 @@ mod tests {
         );
     }
 
+    // Vector 2022 (Wikipedia) desktop shape, synthetic: an areas grid (the
+    // legacy path) with `grid-template: <rows> / <columns>`, `minmax()` and
+    // a column gap. Chrome: side 200, gap 20, main = 1000 - 220 = 780.
+    const VECTOR_LIKE_CSS: &str = r#"
+        #g {
+            display: grid;
+            width: 1000px;
+            column-gap: 20px;
+            grid-template: min-content 1fr min-content / 200px minmax(0,1fr);
+            grid-template-areas: 'note note' 'side main' 'foot foot';
+        }
+        .note { grid-area: note; height: 10px; }
+        .side { grid-area: side; }
+        .main { grid-area: main; }
+        .foot { grid-area: foot; height: 10px; }
+    "#;
+
+    fn vector_like_html(main: &str) -> String {
+        format!(
+            r#"<div id="g"><div class="note"></div><div class="side">menu</div><div class="main">{main}</div><div class="foot"></div></div>"#
+        )
+    }
+
+    #[test]
+    fn grid_areas_item_is_laid_out_at_its_track_width() {
+        // A long paragraph in the `minmax(0,1fr)` column used to be laid
+        // out at the container's full width and then shifted right, so it
+        // overflowed by the side column's width.
+        let long = "word ".repeat(400);
+        let styled = styled_root(
+            &vector_like_html(&format!("<p>{long}</p>")),
+            VECTOR_LIKE_CSS,
+        );
+        let layout = layout_tree(&styled, 1200.0);
+        let side = &layout.children[1];
+        let main = &layout.children[2];
+        assert_eq!(side.dimensions.content.x, 0.0);
+        assert_eq!(side.dimensions.content.width, 200.0);
+        assert_eq!(main.dimensions.content.x, 220.0, "after the 20px gap");
+        assert_eq!(main.dimensions.content.width, 780.0);
+        let paragraph = &main.children[0];
+        assert!(
+            paragraph.dimensions.content.width <= 780.0,
+            "content fits its column: {}",
+            paragraph.dimensions.content.width
+        );
+    }
+
+    #[test]
+    fn grid_areas_table_in_a_minmax_column_keeps_a_width() {
+        // The enwiki symptom: a navbox table under the main column ended
+        // up 0px wide, so every link in it was a sliver.
+        let styled = styled_root(
+            &vector_like_html(
+                r##"<table style="width:100%"><tr><th>Web browsers</th></tr><tr><td><a href="#b">Bookmarks</a></td></tr></table>"##,
+            ),
+            VECTOR_LIKE_CSS,
+        );
+        let layout = layout_tree(&styled, 1200.0);
+        let main = &layout.children[2];
+        let table = &main.children[0];
+        assert_eq!(table.dimensions.content.x, 220.0);
+        assert_eq!(table.dimensions.content.width, 780.0);
+        fn min_cell_width(b: &super::LayoutBox) -> f32 {
+            b.children
+                .iter()
+                .map(min_cell_width)
+                .fold(b.dimensions.content.width, f32::min)
+        }
+        assert!(min_cell_width(table) > 100.0, "no collapsed cell");
+    }
+
+    #[test]
+    fn grid_areas_minmax_capped_column_and_min_content_column() {
+        // `.mw-body`: `minmax(0, 59.25rem) min-content` — the first column
+        // stops at its max (948px), the second fits its content.
+        let styled = styled_root(
+            r#"<div id="g"><div class="c">content</div><div class="e"><div style="width:120px">x</div></div></div>"#,
+            r#"
+                #g {
+                    display: grid;
+                    width: 1200px;
+                    grid-template: min-content / minmax(0,59.25rem) min-content;
+                    grid-template-areas: 'c e';
+                }
+                .c { grid-area: c; }
+                .e { grid-area: e; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 1300.0);
+        let content = &layout.children[0];
+        let end = &layout.children[1];
+        assert_eq!(content.dimensions.content.width, 948.0);
+        assert_eq!(end.dimensions.content.x, 948.0);
+        assert_eq!(end.dimensions.content.width, 120.0);
+    }
+
+    #[test]
+    fn grid_minmax_min_not_added_to_fr_share() {
+        // css-grid-1 "find the size of an fr": `minmax(300px,1fr) 1fr` in
+        // 400px is 300 / 100 — a track whose floor beats its fr share is
+        // taken out and the rest re-split. Both layout paths.
+        for areas in ["grid-template-areas: 'a b';", ""] {
+            let styled = styled_root(
+                r#"<div id="g"><div class="a">a</div><div class="b">b</div></div>"#,
+                &format!(
+                    "#g {{ display: grid; width: 400px; grid-template-columns: minmax(300px,1fr) 1fr; {areas} }}
+                     .a {{ grid-area: a; }} .b {{ grid-area: b; }}"
+                ),
+            );
+            let layout = layout_tree(&styled, 800.0);
+            let (a, b) = (&layout.children[0], &layout.children[1]);
+            assert_eq!(a.dimensions.content.width, 300.0, "{areas}");
+            assert_eq!(b.dimensions.content.x, 300.0, "{areas}");
+            assert_eq!(b.dimensions.content.width, 100.0, "{areas}");
+        }
+    }
+
+    #[test]
+    fn grid_minmax_tracks_reach_taffy() {
+        // A grid without areas is laid out natively by taffy; `minmax()`
+        // used to drop the whole `grid-template-columns` declaration.
+        let styled = styled_root(
+            r#"<div id="g"><div class="a">a</div><div class="b">b</div></div>"#,
+            r#"
+                #g { display: grid; width: 600px; column-gap: 10px;
+                     grid-template-columns: 100px minmax(0,1fr); }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let b = &layout.children[1];
+        assert_eq!(b.dimensions.content.x, 110.0);
+        assert_eq!(b.dimensions.content.width, 490.0);
+    }
+
     #[test]
     fn grid_template_areas_wider_than_column_tracks_does_not_panic() {
         // Wikipedia's Vector skin: `grid-template-areas` names two columns

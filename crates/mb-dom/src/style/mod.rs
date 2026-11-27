@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     css::{
-        Stylesheet, TrackSize, Unit, Value,
+        Stylesheet, TrackBreadth, TrackSize, Unit, Value,
         media::{self, MediaContext},
     },
     dom::{Document, NodeId, NodeType},
@@ -277,19 +277,28 @@ fn style_tree_inner(
             // with fr tracks; resolve em/rem/ch/pt inside Length tracks the same
             // way we resolve top-level lengths so layout only ever sees Px / %.
             Value::TrackList(tracks) => {
+                let to_px = |v: f32, unit: Unit| match unit {
+                    Unit::Em => (v * own_font_size, Unit::Px),
+                    Unit::Rem => (v * root_font_size, Unit::Px),
+                    Unit::Ch => (v * ch_unit, Unit::Px),
+                    Unit::Pt => (v * PT_TO_PX, Unit::Px),
+                    other => (v, other),
+                };
+                let breadth_to_px = |breadth: &mut TrackBreadth| {
+                    if let TrackBreadth::Length(v, unit) = *breadth {
+                        let (v, unit) = to_px(v, unit);
+                        *breadth = TrackBreadth::Length(v, unit);
+                    }
+                };
                 for track in tracks.iter_mut() {
                     match track {
-                        TrackSize::Length(v, Unit::Em) => {
-                            *track = TrackSize::Length(*v * own_font_size, Unit::Px);
+                        TrackSize::Length(v, unit) => {
+                            let (v, unit) = to_px(*v, *unit);
+                            *track = TrackSize::Length(v, unit);
                         }
-                        TrackSize::Length(v, Unit::Rem) => {
-                            *track = TrackSize::Length(*v * root_font_size, Unit::Px);
-                        }
-                        TrackSize::Length(v, Unit::Ch) => {
-                            *track = TrackSize::Length(*v * ch_unit, Unit::Px);
-                        }
-                        TrackSize::Length(v, Unit::Pt) => {
-                            *track = TrackSize::Length(*v * PT_TO_PX, Unit::Px);
+                        TrackSize::MinMax(min, max) => {
+                            breadth_to_px(min);
+                            breadth_to_px(max);
                         }
                         _ => {}
                     }
@@ -353,7 +362,15 @@ fn saturate_value(value: &mut Value) {
             for track in tracks.iter_mut() {
                 match track {
                     TrackSize::Length(v, _) | TrackSize::Fraction(v) => *v = saturate(*v),
-                    TrackSize::Auto => {}
+                    TrackSize::MinMax(min, max) => {
+                        for breadth in [min, max] {
+                            if let TrackBreadth::Length(v, _) | TrackBreadth::Fraction(v) = breadth
+                            {
+                                *v = saturate(*v);
+                            }
+                        }
+                    }
+                    TrackSize::Auto | TrackSize::MinContent | TrackSize::MaxContent => {}
                 }
             }
         }

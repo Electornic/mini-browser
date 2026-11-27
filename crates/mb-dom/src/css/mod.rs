@@ -17,7 +17,10 @@ mod shadow;
 mod shorthand;
 mod transform;
 
-use grid::{parse_grid_placement, parse_grid_template_areas, parse_grid_track_list};
+use grid::{
+    parse_grid_placement, parse_grid_template_areas, parse_grid_template_shorthand,
+    parse_grid_track_list,
+};
 use parse::parse_value;
 pub use report::{
     AtRuleSeen, DropReason, DroppedDeclaration, DroppedRule, MediaVerdict, Origin, ParseReport,
@@ -156,6 +159,24 @@ pub enum TrackSize {
     /// natural width). Resolution requires a pre-pass to lay each item out
     /// without a track constraint and read its natural outer width.
     Auto,
+    /// `min-content` / `max-content` tracks. The legacy grid measures one
+    /// natural width per item, so both size to it there; taffy tells them
+    /// apart.
+    MinContent,
+    MaxContent,
+    /// `minmax(min, max)`. `min` is never `Fraction` (the parser rejects a
+    /// flexible minimum, as browsers do).
+    MinMax(TrackBreadth, TrackBreadth),
+}
+
+/// One side of `minmax()`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrackBreadth {
+    Length(f32, Unit),
+    Fraction(f32),
+    Auto,
+    MinContent,
+    MaxContent,
 }
 
 /// Single function in a `transform: ...` list. Stored in source order so the
@@ -666,6 +687,9 @@ fn parse_declaration_value<'i>(
             value,
         }]);
     }
+    if name == "grid-template" {
+        return parse_grid_template_shorthand(input);
+    }
 
     let value = parse_value(input)?;
     // Flexbox: negative flex factors are invalid (the declaration drops, as
@@ -685,8 +709,8 @@ fn parse_declaration_value<'i>(
 #[cfg(test)]
 mod tests {
     use super::{
-        BoxShadow, Color, GradientDirection, GradientKind, GridLine, TextShadow, TrackSize,
-        TransformOp, Unit, Value, parse,
+        BoxShadow, Color, GradientDirection, GradientKind, GridLine, Stylesheet, TextShadow,
+        TrackSize, TransformOp, Unit, Value, parse,
     };
 
     #[test]
@@ -1515,6 +1539,142 @@ mod tests {
         assert_eq!(tracks[1], TrackSize::Fraction(1.0));
         assert_eq!(tracks[2], TrackSize::Fraction(2.0));
         assert_eq!(tracks[3], TrackSize::Length(50.0, Unit::Px));
+    }
+
+    fn decl<'a>(sheet: &'a Stylesheet, name: &str) -> Option<&'a Value> {
+        sheet.rules[0]
+            .declarations
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| &d.value)
+    }
+
+    #[test]
+    fn grid_track_list_parses_minmax_and_content_keywords() {
+        use super::TrackBreadth as B;
+        let sheet = parse(
+            ".g { grid-template-columns: minmax(0,1fr) min-content max-content minmax(100px, 59.25rem) minmax(min-content, auto); }",
+        )
+        .unwrap();
+        assert_eq!(
+            decl(&sheet, "grid-template-columns"),
+            Some(&Value::TrackList(vec![
+                TrackSize::MinMax(B::Length(0.0, Unit::Px), B::Fraction(1.0)),
+                TrackSize::MinContent,
+                TrackSize::MaxContent,
+                TrackSize::MinMax(B::Length(100.0, Unit::Px), B::Length(59.25, Unit::Rem)),
+                TrackSize::MinMax(B::MinContent, B::Auto),
+            ]))
+        );
+    }
+
+    #[test]
+    fn grid_minmax_rejects_a_flexible_minimum_and_bad_arity() {
+        // `fr` is not a valid minimum (css-grid-1 §7.2.3); the whole
+        // declaration is invalid, like in a browser.
+        for bad in [
+            "minmax(1fr, 10px)",
+            "minmax(10px)",
+            "minmax(1px, 2px, 3px)",
+            "minmax(5, 1fr)",
+        ] {
+            let sheet = parse(&format!(".g {{ grid-template-columns: {bad}; }}")).unwrap();
+            assert_eq!(decl(&sheet, "grid-template-columns"), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn grid_template_none_keywords_parse() {
+        let sheet =
+            parse(".g { grid-template-areas: none; grid-template-columns: none; }").unwrap();
+        assert_eq!(
+            decl(&sheet, "grid-template-areas"),
+            Some(&Value::Keyword("none".into()))
+        );
+        assert_eq!(
+            decl(&sheet, "grid-template-columns"),
+            Some(&Value::Keyword("none".into()))
+        );
+    }
+
+    #[test]
+    fn grid_template_shorthand_rows_slash_columns() {
+        // Vector 2022 (Wikipedia): `grid-template: <rows> / <columns>`.
+        // The shorthand also resets `grid-template-areas` to `none`.
+        let sheet =
+            parse(".g { grid-template: min-content 1fr min-content / 12.25rem minmax(0,1fr); }")
+                .unwrap();
+        assert_eq!(
+            decl(&sheet, "grid-template-rows"),
+            Some(&Value::TrackList(vec![
+                TrackSize::MinContent,
+                TrackSize::Fraction(1.0),
+                TrackSize::MinContent
+            ]))
+        );
+        assert_eq!(
+            decl(&sheet, "grid-template-columns"),
+            Some(&Value::TrackList(vec![
+                TrackSize::Length(12.25, Unit::Rem),
+                TrackSize::MinMax(
+                    super::TrackBreadth::Length(0.0, Unit::Px),
+                    super::TrackBreadth::Fraction(1.0)
+                ),
+            ]))
+        );
+        assert_eq!(
+            decl(&sheet, "grid-template-areas"),
+            Some(&Value::Keyword("none".into()))
+        );
+    }
+
+    #[test]
+    fn grid_template_shorthand_areas_form() {
+        // `[ <string> <track-size>? ]+ [ / <track-list> ]?`
+        let sheet = parse(r#".g { grid-template: "a b" 40px 'c d' / 1fr 2fr; }"#).unwrap();
+        assert_eq!(
+            decl(&sheet, "grid-template-areas"),
+            Some(&Value::TemplateAreas(vec![
+                vec![Some("a".into()), Some("b".into())],
+                vec![Some("c".into()), Some("d".into())],
+            ]))
+        );
+        assert_eq!(
+            decl(&sheet, "grid-template-rows"),
+            Some(&Value::TrackList(vec![
+                TrackSize::Length(40.0, Unit::Px),
+                TrackSize::Auto
+            ]))
+        );
+        assert_eq!(
+            decl(&sheet, "grid-template-columns"),
+            Some(&Value::TrackList(vec![
+                TrackSize::Fraction(1.0),
+                TrackSize::Fraction(2.0)
+            ]))
+        );
+        // Without columns: rows only, columns reset to none.
+        let sheet = parse(r#".g { grid-template: "a" "b"; }"#).unwrap();
+        assert_eq!(
+            decl(&sheet, "grid-template-columns"),
+            Some(&Value::Keyword("none".into()))
+        );
+    }
+
+    #[test]
+    fn grid_template_shorthand_rejects_garbage_whole() {
+        for bad in [
+            "/ 1fr",
+            "1fr /",
+            "1fr / 1fr / 1fr",
+            "\"a\" 1fr 2fr",
+            "1fr \"a\"",
+        ] {
+            let sheet = parse(&format!(".g {{ grid-template: {bad}; }}")).unwrap();
+            assert!(sheet.rules[0].declarations.is_empty(), "{bad}");
+        }
+        let sheet = parse(".g { grid-template: none; }").unwrap();
+        assert_eq!(sheet.rules[0].declarations.len(), 3);
     }
 
     #[test]

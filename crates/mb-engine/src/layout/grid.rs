@@ -2,11 +2,11 @@
 // occupancy-based auto-flow.
 
 use crate::{
-    css::{GridLine, TrackSize, Unit, Value},
+    css::{GridLine, TrackBreadth, TrackSize, Unit, Value},
     style::StyledNode,
 };
 
-use super::inline::{layout_inline_block_node, layout_inline_or_inline_block};
+use super::inline::{layout_grid_item, layout_inline_block_node, layout_inline_or_inline_block};
 use super::{
     LayoutBox, is_display_none, is_layout_whitespace_text, is_out_of_flow, length_value,
     outer_rect, shift_layout_subtree,
@@ -42,31 +42,31 @@ pub(super) fn layout_grid_children<'a>(
     content_y: f32,
     content_width: f32,
 ) -> (Vec<LayoutBox>, f32) {
-    // Four-pass placement.
-    //   Pass 0: assign each in-flow item a GridArea via grid-column/grid-row
-    //           (when explicit) plus row-major auto-flow filling around the
-    //           explicit cells. Items spanning multiple cells claim a
-    //           rectangular block. Then lay each item out at the container
-    //           origin to measure natural outer widths.
-    //   Pass 1: resolve column tracks. Auto tracks pick the per-column max
-    //           natural width (spanned items contribute to col_start only —
-    //           a known toy simplification of spec's "distribute across
-    //           spanned tracks" rule).
-    //   Pass 2: shift each item to its column-start track and grow its
-    //           content to fill the spanned columns when no explicit width
-    //           was declared.
-    //   Pass 3: resolve row heights via grid-template-rows + natural per-row
-    //           max. Shift each item down by its row-start offset and grow
-    //           content height to fill spanned rows when no explicit height.
+    // Passes:
+    //   0: give each in-flow item a GridArea — a `grid-area` name from the
+    //      template, explicit `grid-column`/`grid-row`, or row-major
+    //      auto-flow around the cells already claimed.
+    //   1: measure natural outer widths, only for items starting in a column
+    //      whose size depends on its content (`auto`, `min-content`,
+    //      `max-content`, `minmax()` with one of those). Spanning items
+    //      contribute to their start column only (toy simplification).
+    //   2: resolve the column tracks against the width left after the
+    //      column gaps (`resolve_tracks`).
+    //   3: lay every item out across its spanned columns — stretched to the
+    //      span unless it has its own width (grid items stretch); a measured
+    //      item that already fits is reused instead of laid out again.
+    //   4: rows — natural heights per row, `grid-template-rows`, row gaps;
+    //      shift items down and grow them to cover their rows.
     //
     // Out-of-flow children skip the grid entirely — they sit at the container
-    // origin during pass 0 and the absolute reposition pass at the tree root
-    // moves them to their containing block.
+    // origin and the absolute reposition pass at the tree root moves them to
+    // their containing block.
     let column_tracks = effective_column_tracks(container);
-    let track_decls = (!column_tracks.is_empty()).then_some(column_tracks.as_slice());
     let n_cols = column_tracks.len().max(1);
+    let column_gap = gap_value(container, "column-gap", content_width);
+    let row_gap = gap_value(container, "row-gap", 0.0);
 
-    let mut boxes: Vec<LayoutBox> = Vec::with_capacity(children.len());
+    let mut boxes: Vec<Option<LayoutBox>> = Vec::with_capacity(children.len());
     // For each in-flow item: its area + boxes index + source styled node.
     let mut cell_assignments: Vec<(GridArea, usize, &'a StyledNode)> = Vec::new();
     let mut occupancy = Occupancy::new(n_cols);
@@ -86,7 +86,7 @@ pub(super) fn layout_grid_children<'a>(
         }
         if is_out_of_flow(child) {
             let abs_box = layout_inline_or_inline_block(child, content_x, content_y, content_width);
-            boxes.push(abs_box);
+            boxes.push(Some(abs_box));
             continue;
         }
         let col_hint = axis_hint_from(child.value("grid-column"));
@@ -105,64 +105,78 @@ pub(super) fn layout_grid_children<'a>(
         } else {
             place_grid_item(&mut occupancy, &mut cursor, n_cols, col_hint, row_hint)
         };
-        let box_idx = boxes.len();
-        cell_assignments.push((area, box_idx, child));
-        // Pre-pass: lay out at the container origin so we can read the
-        // item's natural outer width before knowing its track width.
-        boxes.push(layout_inline_block_node(
-            child,
-            content_x,
-            content_y,
-            content_width,
-        ));
+        cell_assignments.push((area, boxes.len(), child));
+        boxes.push(None);
     }
 
-    // Per-column natural max outer width — feeds auto track sizing. Spanned
-    // items contribute to col_start only (toy simplification).
-    //
-    // Indexing below is in bounds by construction: `box_idx` was pushed
-    // with its assignment; every `col_start < n_cols == columns.len()`
-    // (place_grid_item clamps starts to `n_cols - span`, template areas
-    // widen the tracks in effective_column_tracks); `row_start < row_end
-    // <= n_rows` and resolve_grid_rows returns `n_rows` heights.
+    // Pass 1. Indexing below is in bounds by construction: `box_idx` was
+    // pushed with its assignment; every `col_start < n_cols ==
+    // columns.len()` (place_grid_item clamps starts to `n_cols - span`,
+    // template areas widen the tracks in effective_column_tracks);
+    // `row_start < row_end <= n_rows` and resolve_tracks returns one size
+    // per requested track.
     let mut natural_max_per_col = vec![0.0_f32; n_cols];
-    for &(area, box_idx, _) in &cell_assignments {
-        let w = outer_rect(&boxes[box_idx]).width;
-        if w > natural_max_per_col[area.col_start] {
-            natural_max_per_col[area.col_start] = w;
-        }
-    }
-
-    let columns = resolve_grid_columns(track_decls, content_width, &natural_max_per_col);
-    let mut col_offsets: Vec<f32> = Vec::with_capacity(columns.len());
-    let mut acc = 0.0;
-    for w in &columns {
-        col_offsets.push(acc);
-        acc += w;
-    }
-
-    // Pass 2: shift each item to its track-start x and grow content to fill
-    // the spanned columns (sum of widths from col_start..col_end).
-    for &(area, box_idx, child) in &cell_assignments {
-        let target_outer_x = content_x + col_offsets[area.col_start];
-        let current_outer_x = outer_rect(&boxes[box_idx]).x;
-        let dx = target_outer_x - current_outer_x;
-        if dx != 0.0 {
-            shift_layout_subtree(&mut boxes[box_idx], dx, 0.0);
-        }
-        if !matches!(child.value("width"), Some(Value::Length(_, _))) {
-            let span_width: f32 = columns[area.col_start..area.col_end.min(columns.len())]
-                .iter()
-                .sum();
-            let edges = outer_rect(&boxes[box_idx]).width - boxes[box_idx].dimensions.content.width;
-            let target = (span_width - edges).max(0.0);
-            if boxes[box_idx].dimensions.content.width < target {
-                boxes[box_idx].dimensions.content.width = target;
+    if !column_tracks.is_empty() {
+        for &(area, box_idx, child) in &cell_assignments {
+            if !column_tracks
+                .get(area.col_start)
+                .is_some_and(sizes_to_content)
+            {
+                continue;
             }
+            let measured = layout_inline_block_node(child, content_x, content_y, content_width);
+            let w = outer_rect(&measured).width;
+            if w > natural_max_per_col[area.col_start] {
+                natural_max_per_col[area.col_start] = w;
+            }
+            boxes[box_idx] = Some(measured);
         }
     }
 
-    // Pass 3: natural row heights = max(item outer height) per row, with
+    // Pass 2. With no declaration a bare `display: grid` is one full-width
+    // track.
+    let columns = if column_tracks.is_empty() {
+        vec![content_width]
+    } else {
+        let gaps = column_gap * (n_cols - 1) as f32;
+        resolve_tracks(
+            &column_tracks,
+            n_cols,
+            &natural_max_per_col,
+            Some((content_width - gaps).max(0.0)),
+            Some(content_width),
+        )
+    };
+    let col_offsets = track_offsets(&columns, column_gap);
+
+    // Pass 3.
+    for &(area, box_idx, child) in &cell_assignments {
+        let span_width = span_size(&columns, column_gap, area.col_start, area.col_end);
+        let target_outer_x = content_x + col_offsets[area.col_start];
+        let measured = boxes[box_idx]
+            .take()
+            .filter(|measured| outer_rect(measured).width <= span_width + 0.5);
+        let item = match measured {
+            Some(mut item) => {
+                let dx = target_outer_x - outer_rect(&item).x;
+                if dx != 0.0 {
+                    shift_layout_subtree(&mut item, dx, 0.0);
+                }
+                if !matches!(child.value("width"), Some(Value::Length(_, _))) {
+                    let edges = outer_rect(&item).width - item.dimensions.content.width;
+                    let target = (span_width - edges).max(0.0);
+                    if item.dimensions.content.width < target {
+                        item.dimensions.content.width = target;
+                    }
+                }
+                item
+            }
+            None => layout_grid_item(child, target_outer_x, content_y, span_width),
+        };
+        boxes[box_idx] = Some(item);
+    }
+
+    // Pass 4: natural row heights = max(item outer height) per row, with
     // spanned items contributing to row_start only.
     let n_rows = cell_assignments
         .iter()
@@ -171,33 +185,35 @@ pub(super) fn layout_grid_children<'a>(
         .unwrap_or(0);
     let mut natural_row_heights = vec![0.0_f32; n_rows];
     for &(area, box_idx, _) in &cell_assignments {
-        let h = outer_rect(&boxes[box_idx]).height;
+        let h = boxes[box_idx]
+            .as_ref()
+            .map_or(0.0, |b| outer_rect(b).height);
         if h > natural_row_heights[area.row_start] {
             natural_row_heights[area.row_start] = h;
         }
     }
 
-    let row_track_decls = match container.value("grid-template-rows") {
-        Some(Value::TrackList(tracks)) if !tracks.is_empty() => Some(tracks.as_slice()),
-        _ => None,
+    let row_template = match container.value("grid-template-rows") {
+        Some(Value::TrackList(tracks)) => tracks.as_slice(),
+        _ => &[],
     };
     let container_explicit_height = length_value(container, "height", content_width);
-    let row_heights = resolve_grid_rows(
-        row_track_decls,
-        container_explicit_height,
+    let row_gaps = row_gap * n_rows.saturating_sub(1) as f32;
+    let row_heights = resolve_tracks(
+        row_template,
+        n_rows,
         &natural_row_heights,
+        container_explicit_height.map(|h| (h - row_gaps).max(0.0)),
+        container_explicit_height,
     );
-
-    let mut row_offsets: Vec<f32> = Vec::with_capacity(n_rows);
-    let mut acc = 0.0;
-    for h in &row_heights {
-        row_offsets.push(acc);
-        acc += h;
-    }
+    let row_offsets = track_offsets(&row_heights, row_gap);
     for &(area, box_idx, child) in &cell_assignments {
+        let Some(item) = boxes[box_idx].as_mut() else {
+            continue;
+        };
         let dy = row_offsets[area.row_start];
         if dy != 0.0 {
-            shift_layout_subtree(&mut boxes[box_idx], 0.0, dy);
+            shift_layout_subtree(item, 0.0, dy);
         }
         // Fill content to span the row range when no explicit height. This
         // covers single-row and multi-row spans uniformly: an item without
@@ -206,20 +222,44 @@ pub(super) fn layout_grid_children<'a>(
         // size — this matches the column-track post-hoc fill on the main
         // axis.
         if !matches!(child.value("height"), Some(Value::Length(_, _))) {
-            let span_height: f32 = row_heights[area.row_start..area.row_end.min(row_heights.len())]
-                .iter()
-                .sum();
-            let edges =
-                outer_rect(&boxes[box_idx]).height - boxes[box_idx].dimensions.content.height;
+            let span_height = span_size(&row_heights, row_gap, area.row_start, area.row_end);
+            let edges = outer_rect(item).height - item.dimensions.content.height;
             let target = (span_height - edges).max(0.0);
-            if boxes[box_idx].dimensions.content.height < target {
-                boxes[box_idx].dimensions.content.height = target;
+            if item.dimensions.content.height < target {
+                item.dimensions.content.height = target;
             }
         }
     }
 
-    let auto_content_height: f32 = row_heights.iter().sum();
-    (boxes, auto_content_height)
+    let auto_content_height: f32 = row_heights.iter().sum::<f32>() + row_gaps;
+    (boxes.into_iter().flatten().collect(), auto_content_height)
+}
+
+/// `column-gap` / `row-gap`, falling back to the `gap` value (one length);
+/// a percentage resolves against `base`.
+fn gap_value(container: &StyledNode, name: &str, base: f32) -> f32 {
+    length_value(container, name, base)
+        .or_else(|| length_value(container, "gap", base))
+        .unwrap_or(0.0)
+        .max(0.0)
+}
+
+/// Start offset of each track, gaps included.
+fn track_offsets(sizes: &[f32], gap: f32) -> Vec<f32> {
+    let mut offsets = Vec::with_capacity(sizes.len());
+    let mut acc = 0.0;
+    for size in sizes {
+        offsets.push(acc);
+        acc += size + gap;
+    }
+    offsets
+}
+
+/// Size of tracks `start..end` plus the gaps between them.
+fn span_size(sizes: &[f32], gap: f32, start: usize, end: usize) -> f32 {
+    let end = end.min(sizes.len());
+    let tracks = sizes.get(start..end).unwrap_or(&[]);
+    tracks.iter().sum::<f32>() + gap * tracks.len().saturating_sub(1) as f32
 }
 
 /// `grid-template-columns`, widened to the column count
@@ -452,117 +492,190 @@ fn place_grid_item(
     }
 }
 
-fn resolve_grid_rows(
-    tracks: Option<&[TrackSize]>,
-    container_height: Option<f32>,
-    natural_row_heights: &[f32],
-) -> Vec<f32> {
-    // Rows differ from columns in two ways:
-    //   - Container main-axis size (height) is often `auto`. fr rows can only
-    //     distribute leftover when the container has an explicit height; under
-    //     auto height they collapse to zero (matching the flex-column rule).
-    //   - The template can be shorter than the implicit row count (more
-    //     items than declared rows). Trailing rows beyond the template fall
-    //     back to natural max — the same auto-fallback that took row sizing
-    //     before this commit.
-    let template = tracks.unwrap_or(&[]);
-    let n_rows = natural_row_heights.len();
-    if n_rows == 0 {
-        return Vec::new();
-    }
-
-    let mut sizes = vec![0.0_f32; n_rows];
-    let mut total_fr = 0.0_f32;
-    let mut fixed_total = 0.0_f32;
-    for (i, &natural_h) in natural_row_heights.iter().enumerate() {
-        if let Some(track) = template.get(i) {
-            match track {
-                TrackSize::Length(value, Unit::Px) => {
-                    sizes[i] = *value;
-                    fixed_total += *value;
-                }
-                TrackSize::Length(value, Unit::Percent) => {
-                    let resolved = *value / 100.0 * container_height.unwrap_or(0.0);
-                    sizes[i] = resolved;
-                    fixed_total += resolved;
-                }
-                TrackSize::Length(value, _) => {
-                    sizes[i] = *value;
-                    fixed_total += *value;
-                }
-                TrackSize::Auto => {
-                    sizes[i] = natural_h;
-                    fixed_total += natural_h;
-                }
-                TrackSize::Fraction(weight) => {
-                    total_fr += *weight;
-                    // Filled in below if container_height is known.
-                }
-            }
-        } else {
-            sizes[i] = natural_h;
-            fixed_total += natural_h;
+/// Whether a track's size depends on the natural width of its items (the
+/// pre-pass measures only items starting in such a column).
+fn sizes_to_content(track: &TrackSize) -> bool {
+    match track {
+        TrackSize::Auto | TrackSize::MinContent | TrackSize::MaxContent => true,
+        TrackSize::MinMax(min, max) => {
+            matches!(min, TrackBreadth::MinContent | TrackBreadth::MaxContent)
+                || matches!(
+                    max,
+                    TrackBreadth::Auto | TrackBreadth::MinContent | TrackBreadth::MaxContent
+                )
         }
+        TrackSize::Length(_, _) | TrackSize::Fraction(_) => false,
     }
-
-    if total_fr > 0.0
-        && let Some(container_h) = container_height
-    {
-        let free = (container_h - fixed_total).max(0.0);
-        for (i, track) in template.iter().enumerate().take(n_rows) {
-            if let TrackSize::Fraction(weight) = track {
-                sizes[i] = free * *weight / total_fr;
-            }
-        }
-    }
-
-    sizes
 }
 
-fn resolve_grid_columns(
-    tracks: Option<&[TrackSize]>,
-    content_width: f32,
-    natural_max_per_col: &[f32],
-) -> Vec<f32> {
-    // Resolves `grid-template-columns` to a Vec of pixel widths. Length and
-    // Auto tracks contribute fixed budget; Fraction tracks split the leftover
-    // proportionally to their weight, like flex-grow. With no declaration,
-    // behave like a single full-width track so a bare `display: grid` still
-    // produces sensible single-column output.
-    let tracks = match tracks {
-        Some(t) if !t.is_empty() => t,
-        _ => return vec![content_width],
-    };
+/// How one track takes space.
+#[derive(Debug, Clone, Copy)]
+enum Plan {
+    Fixed(f32),
+    /// `minmax(<min>, <length>)`: starts at `floor`, grows to `cap` from
+    /// free space before any `fr` track gets some.
+    Capped {
+        floor: f32,
+        cap: f32,
+    },
+    /// `fr` (and `minmax(<min>, <n>fr)`): a share of what is left.
+    Flex {
+        weight: f32,
+        floor: f32,
+    },
+}
 
-    let mut fixed_total = 0.0_f32;
-    let mut total_fr = 0.0_f32;
-    for (i, track) in tracks.iter().enumerate() {
-        match track {
-            TrackSize::Length(value, Unit::Px) => fixed_total += *value,
-            TrackSize::Length(value, Unit::Percent) => {
-                fixed_total += *value / 100.0 * content_width;
-            }
-            // em/rem are resolved to Px during style; this fallback only
-            // matters if a future code path bypasses style-time resolution.
-            TrackSize::Length(value, _) => fixed_total += *value,
-            TrackSize::Auto => fixed_total += natural_max_per_col.get(i).copied().unwrap_or(0.0),
-            TrackSize::Fraction(weight) => total_fr += *weight,
+/// A breadth in px: a percentage needs a definite `base` (`None` = behaves
+/// as `auto`); the content keywords are the measured `natural` size.
+fn breadth_px(breadth: TrackBreadth, natural: f32, base: Option<f32>) -> Option<f32> {
+    match breadth {
+        TrackBreadth::Length(v, Unit::Percent) => base.map(|b| v / 100.0 * b),
+        // em/rem/ch/pt are resolved to px at style time.
+        TrackBreadth::Length(v, _) => Some(v),
+        TrackBreadth::MinContent | TrackBreadth::MaxContent => Some(natural),
+        TrackBreadth::Auto | TrackBreadth::Fraction(_) => None,
+    }
+}
+
+fn plan(track: TrackSize, natural: f32, base: Option<f32>) -> Plan {
+    let as_breadth = |track| match track {
+        TrackSize::Length(v, unit) => TrackBreadth::Length(v, unit),
+        TrackSize::Fraction(w) => TrackBreadth::Fraction(w),
+        TrackSize::MinContent => TrackBreadth::MinContent,
+        TrackSize::MaxContent => TrackBreadth::MaxContent,
+        TrackSize::Auto | TrackSize::MinMax(..) => TrackBreadth::Auto,
+    };
+    let (min, max) = match track {
+        TrackSize::MinMax(min, max) => (min, max),
+        // A plain `fr` keeps the toy's 0 floor (spec: `minmax(auto, 1fr)`).
+        TrackSize::Fraction(w) => (
+            TrackBreadth::Length(0.0, Unit::Px),
+            TrackBreadth::Fraction(w),
+        ),
+        other => (as_breadth(other), as_breadth(other)),
+    };
+    // An `auto` minimum is 0 here — the toy has no separate min-content
+    // measurement (the natural size is max-content-like).
+    let floor = breadth_px(min, natural, base).unwrap_or(0.0).max(0.0);
+    match max {
+        TrackBreadth::Fraction(weight) => Plan::Flex {
+            weight: weight.max(0.0),
+            floor,
+        },
+        TrackBreadth::Length(..) => match breadth_px(max, natural, base) {
+            // A max below the min is the min (css-grid-1 §7.2.3).
+            Some(cap) if matches!(track, TrackSize::MinMax(..)) => Plan::Capped {
+                floor,
+                cap: cap.max(floor),
+            },
+            Some(size) => Plan::Fixed(size.max(0.0)),
+            // A percentage without a definite base behaves as `auto`.
+            None => Plan::Fixed(natural.max(floor)),
+        },
+        TrackBreadth::Auto | TrackBreadth::MinContent | TrackBreadth::MaxContent => {
+            Plan::Fixed(natural.max(floor))
         }
     }
-    let free = (content_width - fixed_total).max(0.0);
+}
 
-    tracks
-        .iter()
-        .enumerate()
-        .map(|(i, track)| match track {
-            TrackSize::Length(value, Unit::Px) => *value,
-            TrackSize::Length(value, Unit::Percent) => *value / 100.0 * content_width,
-            TrackSize::Length(value, _) => *value,
-            TrackSize::Auto => natural_max_per_col.get(i).copied().unwrap_or(0.0),
-            TrackSize::Fraction(weight) if total_fr > 0.0 => free * *weight / total_fr,
-            TrackSize::Fraction(_) => 0.0,
+/// Resolve `count` tracks (template first, `auto` past its end) to sizes.
+/// `available` is the space for the tracks (gaps already taken out), `None`
+/// when indefinite (auto-height rows): flexible and capped tracks then size
+/// to their content, as Chrome does for `fr` rows in an auto-height grid.
+/// `base` is what percentages resolve against.
+fn resolve_tracks(
+    template: &[TrackSize],
+    count: usize,
+    natural: &[f32],
+    available: Option<f32>,
+    base: Option<f32>,
+) -> Vec<f32> {
+    let plans: Vec<Plan> = (0..count)
+        .map(|i| {
+            let track = template.get(i).copied().unwrap_or(TrackSize::Auto);
+            plan(track, natural.get(i).copied().unwrap_or(0.0), base)
         })
-        .collect()
+        .collect();
+    let Some(available) = available else {
+        return plans
+            .iter()
+            .zip(natural.iter().chain(std::iter::repeat(&0.0)))
+            .map(|(plan, &natural)| match *plan {
+                Plan::Fixed(size) => size,
+                Plan::Capped { floor, cap } => natural.clamp(floor, cap),
+                Plan::Flex { floor, .. } => natural.max(floor),
+            })
+            .collect();
+    };
+    let mut sizes: Vec<f32> = plans
+        .iter()
+        .map(|plan| match *plan {
+            Plan::Fixed(size) => size,
+            Plan::Capped { floor, .. } | Plan::Flex { floor, .. } => floor,
+        })
+        .collect();
+    let mut free = available - sizes.iter().sum::<f32>();
+    // Capped tracks grow first, evenly, each up to its cap. Every round
+    // either uses up the free space or caps at least one track, so this
+    // runs at most `count` times.
+    for _ in 0..plans.len() {
+        let growable: Vec<usize> = (0..plans.len())
+            .filter(|&i| matches!(plans[i], Plan::Capped { cap, .. } if sizes[i] < cap))
+            .collect();
+        if free <= 0.0 || growable.is_empty() {
+            break;
+        }
+        let share = free / growable.len() as f32;
+        for i in growable {
+            if let Plan::Capped { cap, .. } = plans[i] {
+                let add = share.min(cap - sizes[i]);
+                sizes[i] += add;
+                free -= add;
+            }
+        }
+    }
+    // Then `fr` tracks split what is left, by css-grid-1 "find the size of
+    // an fr": a track whose floor beats its share keeps its floor and
+    // leaves the split, which is redone without it (`minmax(300px,1fr)
+    // 1fr` in 400px is 300 / 100, not 300 / 200). A weight sum below 1
+    // counts as 1, so `0.5fr` alone takes half. Each round fixes at least
+    // one track, so this runs at most `count` times.
+    let mut flexible: Vec<usize> = (0..plans.len())
+        .filter(|&i| matches!(plans[i], Plan::Flex { .. }))
+        .collect();
+    if !flexible.is_empty() {
+        let mut space = free.max(0.0) + flexible.iter().map(|&i| sizes[i]).sum::<f32>();
+        loop {
+            let weights: f32 = flexible
+                .iter()
+                .map(|&i| match plans[i] {
+                    Plan::Flex { weight, .. } => weight,
+                    _ => 0.0,
+                })
+                .sum();
+            let fr = space / weights.max(1.0);
+            let (stuck, rest): (Vec<usize>, Vec<usize>) =
+                flexible.iter().partition(|&&i| match plans[i] {
+                    Plan::Flex { weight, floor } => floor > fr * weight,
+                    _ => false,
+                });
+            if stuck.is_empty() {
+                for &i in &flexible {
+                    if let Plan::Flex { weight, .. } = plans[i] {
+                        sizes[i] = fr * weight;
+                    }
+                }
+                break;
+            }
+            // `sizes` already holds the floors of the stuck tracks.
+            space -= stuck.iter().map(|&i| sizes[i]).sum::<f32>();
+            flexible = rest;
+            if flexible.is_empty() {
+                break;
+            }
+        }
+    }
+    sizes
 }
 
 #[cfg(test)]

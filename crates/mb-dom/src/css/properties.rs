@@ -479,7 +479,7 @@ const PROPERTIES: &[(&str, ValueKind)] = &[
     ("grid-row-end", ValueKind::Other),
     ("grid-row-gap", ValueKind::Length(NORMAL)),
     ("grid-row-start", ValueKind::Other),
-    ("grid-template", ValueKind::Other),
+    ("grid-template", ValueKind::Dedicated),
     ("grid-template-areas", ValueKind::Dedicated),
     ("grid-template-columns", ValueKind::Dedicated),
     ("grid-template-rows", ValueKind::Dedicated),
