@@ -39,7 +39,7 @@ use mb_agent::{AgentBrowser, AgentConfig, ClockMode, Observation};
 use mb_runtime::{
     css::{self, DropReason, Origin, Value, properties},
     dom::{Document, NodeId, NodeType},
-    layout::{BoxType, LayoutBox},
+    layout::{self, BoxType, ClipTable, LayoutBox, Rect},
     net, style,
 };
 
@@ -131,12 +131,11 @@ fn main() {
 
     let view = state.current_view().expect("a laid-out view");
     let mut anomalies = Anomalies::default();
-    walk_layout(
-        &view.layout_root,
-        &document,
-        state.parsed_stylesheets.len(),
-        &mut anomalies,
-    );
+    // The same per-box clip table paint, hit testing and the agent's click
+    // target read (step 3) — computed here from the frame's layout.
+    let clips = layout::compute_clips(&view.layout_root);
+    anomalies.clip_boxes = clips.len();
+    walk_layout(&view.layout_root, &document, &clips, &mut anomalies);
     let page_width = browser.config().viewport_width as f32;
     write(&out, "layout.txt", &anomalies.render(page_width));
 
@@ -245,6 +244,7 @@ fn main() {
         viewport: &viewport,
         css: &css_report.counts,
         slivers: anomalies.slivers.len(),
+        clip: anomalies.clip_counts(),
         script_errors,
         console_errors,
         cache: &cache,
@@ -271,6 +271,7 @@ struct Columns<'a> {
     viewport: &'a Observation,
     css: &'a CssCounts,
     slivers: usize,
+    clip: ClipCounts,
     script_errors: usize,
     console_errors: usize,
     cache: &'a net::SurveyCacheStats,
@@ -318,6 +319,20 @@ fn push_columns(row: &mut Row, columns: Option<&Columns>) {
         c.css.var_keyword_fallback.to_string()
     });
     col("decl_drop_total", &|c| c.css.drop_total().to_string());
+    // Step 3 (overflow clipping): see `ClipCounts`.
+    col("clip_boxes", &|c| c.clip.clip_boxes.to_string());
+    col("slivers_in_clip", &|c| c.clip.slivers_in_clip.to_string());
+    col("slivers_in_sr", &|c| c.clip.slivers_in_sr.to_string());
+    col("slivers_painted", &|c| c.clip.slivers_painted.to_string());
+    col("slivers_sr_painted", &|c| {
+        c.clip.slivers_sr_painted.to_string()
+    });
+    col("text_hidden", &|c| c.clip.text_hidden.to_string());
+    col("text_hidden_sr", &|c| c.clip.text_hidden_sr.to_string());
+    col("text_hidden_other", &|c| {
+        c.clip.text_hidden_other.to_string()
+    });
+    col("text_cut", &|c| c.clip.text_cut.to_string());
     col("at_skipped_ours", &|c| c.css.at_ours.to_string());
     col("at_skipped_browser", &|c| c.css.at_browser.to_string());
     col("at_skipped_bytes", &|c| c.css.at_skipped_bytes.to_string());
@@ -1217,9 +1232,70 @@ struct Anomalies {
     /// `<style>`/`<script>`/`<template>` elements that got a layout box
     /// (their source text would paint as page text).
     unrendered: Vec<String>,
+    // --- step 3 (overflow clipping) ---
+    /// Nodes the engine's `ClipTable` clips.
+    clip_boxes: usize,
+    /// Slivers under an ancestor that clips by style (`ClipStyle`, any kind).
+    slivers_in_clip: usize,
+    /// Slivers under an sr-only-like ancestor (`ClipStyle::sr`).
+    slivers_in_sr: usize,
+    /// Slivers the engine still paints (non-empty after the `ClipTable`).
+    slivers_painted: usize,
+    /// … of which under an sr-only-like ancestor — step 3's target is 0.
+    slivers_sr_painted: usize,
+    /// Text boxes with area that the `ClipTable` hides completely.
+    text_hidden_sr: usize,
+    /// The same outside any sr-only-like ancestor: text a real-sized clip
+    /// (carousel, collapsed list) hides — each must be explained, since
+    /// a wrong clip rule hides what should show (step 3's worst failure).
+    text_hidden_other: Vec<String>,
+    /// Text boxes the `ClipTable` cuts but doesn't hide.
+    text_cut: usize,
+}
+
+/// The step 3 columns of `summary.tsv`.
+#[derive(Default)]
+struct ClipCounts {
+    clip_boxes: usize,
+    slivers_in_clip: usize,
+    slivers_in_sr: usize,
+    slivers_painted: usize,
+    slivers_sr_painted: usize,
+    text_hidden: usize,
+    text_hidden_sr: usize,
+    text_hidden_other: usize,
+    text_cut: usize,
 }
 
 impl Anomalies {
+    fn clip_counts(&self) -> ClipCounts {
+        ClipCounts {
+            clip_boxes: self.clip_boxes,
+            slivers_in_clip: self.slivers_in_clip,
+            slivers_in_sr: self.slivers_in_sr,
+            slivers_painted: self.slivers_painted,
+            slivers_sr_painted: self.slivers_sr_painted,
+            text_hidden: self.text_hidden_sr + self.text_hidden_other.len(),
+            text_hidden_sr: self.text_hidden_sr,
+            text_hidden_other: self.text_hidden_other.len(),
+            text_cut: self.text_cut,
+        }
+    }
+
+    fn clip_headline(&self) -> String {
+        format!(
+            "clipping: {} clipped boxes; slivers {} in a clip by style ({} sr-only-like), {} still painted ({} sr-only-like); text boxes hidden by a clip {} sr-only-like + {} other, {} cut",
+            self.clip_boxes,
+            self.slivers_in_clip,
+            self.slivers_in_sr,
+            self.slivers_painted,
+            self.slivers_sr_painted,
+            self.text_hidden_sr,
+            self.text_hidden_other.len(),
+            self.text_cut
+        )
+    }
+
     fn headline(&self) -> String {
         format!(
             "{} boxes, {} with text, {} text slivers (<3px per char), {} boxes off the left/top edge, {} style/script boxes, widest box {:.0}px",
@@ -1233,9 +1309,23 @@ impl Anomalies {
     }
 
     fn render(&self, page_width: f32) -> String {
-        let mut text = format!("{}\npage width {page_width}\n", self.headline());
-        let _ = writeln!(text, "\n## text slivers (first 60)");
+        let mut text = format!(
+            "{}\n{}\npage width {page_width}\n",
+            self.headline(),
+            self.clip_headline()
+        );
+        let _ = writeln!(
+            text,
+            "\n## text slivers (first 60; clip = nearest ancestor that clips by style, sr: = sr-only-like; painted = what the clip table leaves)"
+        );
         for line in self.slivers.iter().take(60) {
+            let _ = writeln!(text, "{line}");
+        }
+        let _ = writeln!(
+            text,
+            "\n## text hidden by a clip outside sr-only-like boxes (first 60) — each needs a reason"
+        );
+        for line in self.text_hidden_other.iter().take(60) {
             let _ = writeln!(text, "{line}");
         }
         let _ = writeln!(
@@ -1253,8 +1343,112 @@ impl Anomalies {
     }
 }
 
-fn walk_layout(layout: &LayoutBox, document: &Document, _sheets: usize, out: &mut Anomalies) {
-    walk_layout_in(layout, document, out, &mut Vec::new());
+fn walk_layout(layout: &LayoutBox, document: &Document, clips: &ClipTable, out: &mut Anomalies) {
+    let mut walk = Walk {
+        document,
+        clips,
+        out,
+        path: Vec::new(),
+    };
+    walk.visit(layout, &ClipContext::default());
+}
+
+struct Walk<'a> {
+    document: &'a Document,
+    clips: &'a ClipTable,
+    out: &'a mut Anomalies,
+    path: Vec<String>,
+}
+
+/// The clipping ancestors of a box by style alone — a classification for
+/// the probe, deliberately independent of the engine's containing-block
+/// rules (those live in `layout::clip`, which this probe also reads).
+#[derive(Clone, Default)]
+struct ClipContext {
+    /// The nearest ancestor that clips its content by style.
+    nearest: Option<String>,
+    /// The nearest sr-only-like ancestor (`ClipStyle::sr`).
+    sr: Option<String>,
+}
+
+/// How an element clips its content by style: `overflow` other than
+/// `visible` on either axis, `clip: rect()` on an absolute/fixed box, or
+/// `clip-path: inset()`. The root `<html>` and `<body>` (their overflow goes
+/// to the viewport) and `display: inline` boxes (overflow doesn't apply)
+/// don't count. `sr` = the sr-only / visually-hidden shape: a `clip` or
+/// `clip-path`, or overflow on a box at most 2px wide or tall.
+struct ClipStyle {
+    sr: bool,
+    label: String,
+}
+
+fn clip_style(layout: &LayoutBox, node: &style::StyledNode) -> Option<ClipStyle> {
+    let NodeType::Element(element) = &node.node_type else {
+        return None;
+    };
+    let tag = element.tag_name.to_ascii_lowercase();
+    if tag == "html" || tag == "body" {
+        return None;
+    }
+    let keyword = |name: &str| match node.value(name) {
+        Some(Value::Keyword(k)) => Some(k.as_str()),
+        _ => None,
+    };
+    if keyword("display") == Some("inline") {
+        return None;
+    }
+    let clips_axis = |name: &str| {
+        keyword(name)
+            .or_else(|| keyword("overflow"))
+            .is_some_and(|k| k != "visible")
+    };
+    let overflow = clips_axis("overflow-x") || clips_axis("overflow-y");
+    let positioned = matches!(keyword("position"), Some("absolute" | "fixed"));
+    let clip_rect = positioned
+        && matches!(node.value("clip"), Some(Value::ClipBox(b)) if b.function == css::ClipFunction::Rect);
+    let clip_path = matches!(
+        node.value("clip-path"),
+        Some(Value::ClipBox(b)) if b.function == css::ClipFunction::Inset
+    );
+    if !(overflow || clip_rect || clip_path) {
+        return None;
+    }
+    let d = &layout.dimensions;
+    let width = d.content.width + d.padding.left + d.padding.right + d.border.left + d.border.right;
+    let height =
+        d.content.height + d.padding.top + d.padding.bottom + d.border.top + d.border.bottom;
+    let tiny = width <= 2.0 || height <= 2.0;
+    let mut why = Vec::new();
+    if overflow {
+        why.push(format!("overflow {width:.0}x{height:.0}"));
+    }
+    if clip_rect {
+        why.push("clip:rect".into());
+    }
+    if clip_path {
+        why.push("clip-path:inset".into());
+    }
+    Some(ClipStyle {
+        sr: clip_rect || clip_path || (overflow && tiny),
+        label: format!("{}[{}]", tag_label(element), why.join(" ")),
+    })
+}
+
+fn tag_label(element: &mb_runtime::dom::ElementData) -> String {
+    let mut label = element.tag_name.clone();
+    if let Some(id_attr) = element.attributes.get("id") {
+        let _ = write!(label, "#{id_attr}");
+    }
+    if let Some(class) = element.attributes.get("class") {
+        for c in class.split_whitespace().take(2) {
+            let _ = write!(label, ".{c}");
+        }
+    }
+    label
+}
+
+fn area(rect: Rect) -> f32 {
+    rect.width.max(0.0) * rect.height.max(0.0)
 }
 
 /// Each layout ancestor as `tag[display/position/float]`, for tracing
@@ -1291,73 +1485,126 @@ fn box_label(layout: &LayoutBox) -> String {
     )
 }
 
-fn walk_layout_in(
-    layout: &LayoutBox,
-    document: &Document,
-    out: &mut Anomalies,
-    path: &mut Vec<String>,
-) {
-    let _ = &path;
-    out.boxes += 1;
-    let rect = layout.dimensions.content;
-    out.widest = out.widest.max(rect.width);
-    let styled = match &layout.box_type {
-        BoxType::BlockNode(n)
-        | BoxType::FlexNode(n)
-        | BoxType::GridNode(n)
-        | BoxType::TableNode(n) => Some(n),
-        BoxType::AnonymousBlock => None,
-    };
-    if let Some(node) = styled {
-        if let NodeType::Text(text) = &node.node_type {
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                out.text_boxes += 1;
-                if trimmed.chars().count() > 2
-                    && rect.width / (trimmed.chars().count() as f32) < 3.0
-                {
-                    out.slivers.push(format!(
-                        "{:7.1}x{:<7.1} at ({:.0},{:.0})  {:?}  in {}",
-                        rect.width,
-                        rect.height,
-                        rect.x,
-                        rect.y,
-                        clip(trimmed, 24),
-                        ancestry(document, node.node_id, 3)
-                    ));
+impl Walk<'_> {
+    fn visit(&mut self, layout: &LayoutBox, ctx: &ClipContext) {
+        let out = &mut *self.out;
+        out.boxes += 1;
+        let rect = layout.dimensions.content;
+        out.widest = out.widest.max(rect.width);
+        let styled = match &layout.box_type {
+            BoxType::BlockNode(n)
+            | BoxType::FlexNode(n)
+            | BoxType::GridNode(n)
+            | BoxType::TableNode(n) => Some(n),
+            BoxType::AnonymousBlock => None,
+        };
+        if let Some(node) = styled {
+            if let NodeType::Text(text) = &node.node_type {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    self.text_box(node.node_id, rect, trimmed, ctx);
                 }
+            } else if let NodeType::Element(element) = &node.node_type
+                && matches!(element.tag_name.as_str(), "style" | "script" | "template")
+            {
+                out.unrendered.push(format!(
+                    "{} display={:?}  in {}\n    layout path: {}",
+                    element.tag_name,
+                    node.value("display"),
+                    ancestry(self.document, node.node_id, 3),
+                    self.path
+                        .iter()
+                        .rev()
+                        .take(6)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" < ")
+                ));
+            } else if rect.x + rect.width < -1.0 || rect.y + rect.height < -1.0 {
+                out.offscreen.push(format!(
+                    "{:.0}x{:.0} at ({:.0},{:.0})  {}",
+                    rect.width,
+                    rect.height,
+                    rect.x,
+                    rect.y,
+                    ancestry(self.document, node.node_id, 2)
+                ));
             }
-        } else if let NodeType::Element(element) = &node.node_type
-            && matches!(element.tag_name.as_str(), "style" | "script" | "template")
-        {
-            out.unrendered.push(format!(
-                "{} display={:?}  in {}\n    layout path: {}",
-                element.tag_name,
-                node.value("display"),
-                ancestry(document, node.node_id, 3),
-                path.iter()
-                    .rev()
-                    .take(6)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(" < ")
-            ));
-        } else if rect.x + rect.width < -1.0 || rect.y + rect.height < -1.0 {
-            out.offscreen.push(format!(
-                "{:.0}x{:.0} at ({:.0},{:.0})  {}",
+        }
+        // What this box's own clip style means for its descendants.
+        let inner = match styled.and_then(|node| clip_style(layout, node)) {
+            Some(style) => ClipContext {
+                sr: if style.sr {
+                    Some(style.label.clone())
+                } else {
+                    ctx.sr.clone()
+                },
+                nearest: Some(style.label),
+            },
+            None => ctx.clone(),
+        };
+        self.path.push(box_label(layout));
+        for child in &layout.children {
+            self.visit(child, &inner);
+        }
+        self.path.pop();
+    }
+
+    fn text_box(&mut self, node: NodeId, rect: Rect, text: &str, ctx: &ClipContext) {
+        let out = &mut *self.out;
+        out.text_boxes += 1;
+        let visible = self.clips.visible_rect(node, rect);
+        let sliver = text.chars().count() > 2 && rect.width / (text.chars().count() as f32) < 3.0;
+        if sliver {
+            out.slivers_in_clip += usize::from(ctx.nearest.is_some());
+            out.slivers_in_sr += usize::from(ctx.sr.is_some());
+            if visible.is_some() {
+                out.slivers_painted += 1;
+                out.slivers_sr_painted += usize::from(ctx.sr.is_some());
+            }
+            out.slivers.push(format!(
+                "{:7.1}x{:<7.1} at ({:.0},{:.0})  {:?}  in {}  clip={}  painted={}",
                 rect.width,
                 rect.height,
                 rect.x,
                 rect.y,
-                ancestry(document, node.node_id, 2)
+                clip(text, 24),
+                ancestry(self.document, node, 3),
+                match (&ctx.sr, &ctx.nearest) {
+                    (Some(sr), _) => format!("sr:{sr}"),
+                    (None, Some(nearest)) => nearest.clone(),
+                    (None, None) => "-".into(),
+                },
+                visible
+                    .map(|v| format!("{:.0}x{:.0}", v.width, v.height))
+                    .unwrap_or_else(|| "none".into())
             ));
         }
+        if area(rect) <= 0.0 {
+            return;
+        }
+        match visible {
+            None if ctx.sr.is_some() => out.text_hidden_sr += 1,
+            None => out.text_hidden_other.push(format!(
+                "{:.0}x{:.0} at ({:.0},{:.0})  {:?}  in {}  clip={}  clip rect={}",
+                rect.width,
+                rect.height,
+                rect.x,
+                rect.y,
+                clip(text, 40),
+                ancestry(self.document, node, 3),
+                ctx.nearest
+                    .as_deref()
+                    .unwrap_or("- (positioned ancestor rule)"),
+                self.clips
+                    .clip_of(node)
+                    .map(|c| format!("{:.0}x{:.0} at ({:.0},{:.0})", c.width, c.height, c.x, c.y))
+                    .unwrap_or_default()
+            )),
+            Some(v) if area(v) < area(rect) => out.text_cut += 1,
+            Some(_) => {}
+        }
     }
-    path.push(box_label(layout));
-    for child in &layout.children {
-        walk_layout_in(child, document, out, path);
-    }
-    path.pop();
 }
 
 /// `div.cls#id < span.x < …` for the node and a few ancestors.

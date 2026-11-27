@@ -10,6 +10,7 @@ use crate::{css::Value, dom::NodeType, style::StyledNode};
 
 mod absolute;
 mod block;
+pub mod clip;
 mod flex;
 mod grid;
 mod inline;
@@ -28,6 +29,8 @@ pub(super) use properties::{
     shift_layout_subtree, with_containing_block_height, with_intrinsic_probe,
 };
 use table::is_table_container;
+
+pub use clip::{ClipTable, compute_clips};
 
 pub(crate) use properties::font_family_name;
 

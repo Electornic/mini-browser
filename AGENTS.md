@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1049 (workspace 합계, 2026-11-28 호환성 3차 후속 F3b 둥근 테두리 작업량 상한 +1; F4 셀렉터 규칙 색인은 1048, F3 은 1045). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1050 (workspace 합계, 2026-11-28 호환성 3차 3단계 P 클립 표 API +1; F3b 둥근 테두리 작업량 상한은 1049, F4 셀렉터 규칙 색인은 1048). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
