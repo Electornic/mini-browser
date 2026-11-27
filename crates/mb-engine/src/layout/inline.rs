@@ -14,8 +14,8 @@ use super::grid::{is_grid_container, layout_grid_children};
 use super::{
     BoxType, Dimensions, LayoutBox, Rect, apply_relative_offset, child_height, clamp_height,
     collapsed_text, container_box_type, containing_block_height, definite_height, edge_sizes,
-    has_float, intrinsic_height, intrinsic_width, is_display_none, is_float_right, is_out_of_flow,
-    length_value, outer_rect, with_containing_block_height,
+    has_float, in_intrinsic_probe, intrinsic_height, intrinsic_width, is_display_none,
+    is_float_right, is_out_of_flow, length_value, outer_rect, with_containing_block_height,
 };
 
 pub(super) fn layout_inline_children(
@@ -455,7 +455,9 @@ fn is_inline_block(node: &StyledNode) -> bool {
     matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "inline-block")
 }
 
-type InlineSizeMemo = std::collections::HashMap<(crate::dom::NodeId, u32, u32), Rect>;
+/// Keyed by node, available width, containing-block height and whether an
+/// intrinsic-size probe is running (`%` padding differs there — F1b).
+type InlineSizeMemo = std::collections::HashMap<(crate::dom::NodeId, u32, u32, bool), Rect>;
 
 thread_local! {
     /// Inline outer sizes already computed in the current layout pass, by
@@ -496,7 +498,12 @@ fn inline_total_size(node: &StyledNode, parent_width: f32) -> Rect {
     // Percent heights make the size depend on the containing block's
     // height too (step 1p).
     let cb_height = containing_block_height().map_or(u32::MAX, f32::to_bits);
-    let key = (node.node_id, parent_width.to_bits(), cb_height);
+    let key = (
+        node.node_id,
+        parent_width.to_bits(),
+        cb_height,
+        in_intrinsic_probe(),
+    );
     let hit =
         INLINE_SIZE_MEMO.with(|memo| memo.borrow().as_ref().and_then(|m| m.get(&key).copied()));
     if let Some(size) = hit {

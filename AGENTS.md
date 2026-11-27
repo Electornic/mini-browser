@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1034 (workspace 합계, 2026-11-28 호환성 3차 후속 F1 SVG 크기·논리 속성 +6; 2.3 `@supports` 는 1028, 2.2 `@layer` 는 1012). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1035 (workspace 합계, 2026-11-28 호환성 3차 후속 F1b 크기 탐색 중 `%` 패딩 +1; F1 SVG 크기·논리 속성은 1034, 2.3 `@supports` 는 1028). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -153,6 +153,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 ### 퍼센트 높이는 확정 포함 블록 높이 기준 (호환성 3차 1p)
 - 레이아웃 코드에서 `height`/`min-height`/`max-height` 를 `length_value(node, "height", <폭>)` 로 읽지 말 것 — `definite_height(node)`/`height_value`/`clamp_height`(`layout/properties.rs`)를 쓴다. 포함 블록 높이는 패스 범위 상태(`containing_block_height()`)로 내려온다: 상자가 자식을 배치하기 **전에** 자기 확정 높이를 `with_containing_block_height` 로 깔고, 그 안에서 컨테이너 알고리즘은 이 값을 "내 확정 높이"로 읽는다. 자식을 배치하는 새 경로를 만들면 같은 범위를 깔 것(안 깔면 % 가 바깥 상자 기준으로 풀린다). 루트의 기준은 뷰포트 높이(`layout_tree_with_viewport`), absolute 의 % 는 2패스(`reposition_absolutes`)가 포함 블록 패딩 상자로 다시 푼다. out-of-flow 자식은 `layout_out_of_flow`(블록화·shrink-to-fit)로 놓는다 — 인라인 상자로 놓지 말 것.
 - 레이아웃이 뷰포트 높이를 읽는 건 루트에 % 높이가 있을 때뿐이고, 그때만 뷰 캐시가 높이를 비교한다(`DocumentView::reads_viewport_height`). 다른 경로로 높이를 읽게 되면 이 플래그를 같이 고칠 것.
+- taffy 의 크기 탐색(MaxContent/MinContent)은 legacy 경계 잎을 대리 폭(1e6/0)으로 배치한다 — 그동안은 `with_intrinsic_probe` 범위라 `edge_sizes` 의 `%` 패딩·여백이 0 이다(순환 퍼센트, 후속 F1b; 대리 폭의 82% 가 열 폭이 되던 증폭). 탐색 중에 `%` 를 대리 폭에 대해 푸는 새 경로를 만들지 말 것 — `in_intrinsic_probe()` 를 볼 것. 인라인 크기 메모 키에 탐색 여부가 들어 있다.
 - 단위 없는 `0` 은 길이 속성에서 파싱 때 `Length(0, Px)` 가 된다(1q, `css::unitless_zero_as_length` — `var()` 치환 뒤에도). 레이아웃·taffy 브릿지는 `Number` 를 길이로 읽지 않으니, 새 길이 속성을 전용 파서로 읽게 되면 같은 승격을 거칠 것(`line-height` 처럼 숫자가 뜻을 갖는 속성은 제외).
 - 페이지 높이는 `DocumentView::document_height` 하나다(1q — 넘친 내용 포함, 캔버스 제외). 스크롤 상한·관찰 `page_height` 가 이것을 쓴다; 루트 상자 높이(`layout_root`)나 `view::document_height(commands)` 를 따로 쓰지 말 것.
 

@@ -22,12 +22,56 @@ use crate::style::MAX_CSS_LENGTH;
 pub(crate) fn edge_sizes(node: &StyledNode, prefix: &str, base: f32) -> EdgeSizes {
     // CSS resolves percent margin/padding against the containing block's *width*, even
     // for the top and bottom sides — a common gotcha worth keeping in mind here.
+    // Inside an intrinsic-size probe the width is a proxy, and a percentage
+    // of it is cyclic: it contributes 0 (see [`with_intrinsic_probe`]).
+    let side = |side: &str| {
+        let name = format!("{prefix}-{side}");
+        if in_intrinsic_probe()
+            && matches!(node.value(&name), Some(Value::Length(_, Unit::Percent)))
+        {
+            return 0.0;
+        }
+        length_value(node, &name, base).unwrap_or(0.0)
+    };
     EdgeSizes {
-        left: length_value(node, &format!("{prefix}-left"), base).unwrap_or(0.0),
-        right: length_value(node, &format!("{prefix}-right"), base).unwrap_or(0.0),
-        top: length_value(node, &format!("{prefix}-top"), base).unwrap_or(0.0),
-        bottom: length_value(node, &format!("{prefix}-bottom"), base).unwrap_or(0.0),
+        left: side("left"),
+        right: side("right"),
+        top: side("top"),
+        bottom: side("bottom"),
     }
+}
+
+// ---- Intrinsic-size probes (compat round 3 follow-up F1b) --------------
+//
+// taffy asks a legacy boundary leaf for its min-/max-content size by laying
+// it out against a proxy width (0 / 1e6, `taffy_bridge::measure_boundary`).
+// A `%` padding or margin resolved against that proxy is a cyclic
+// percentage (CSS Sizing 3 §5.2.1): it contributes 0 to the intrinsic size
+// and resolves against the real width in the final layout. Resolving it
+// against 1e6 made a `max-content` grid column ~820,000px wide, compounding
+// through nested inline boxes (layout fuzzer, past the 1e7 invariant).
+// Pass-scoped like the containing-block height above.
+
+thread_local! {
+    static INTRINSIC_PROBE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the layout running now is an intrinsic-size probe.
+pub(crate) fn in_intrinsic_probe() -> bool {
+    INTRINSIC_PROBE.with(std::cell::Cell::get)
+}
+
+/// Run `layout` as an intrinsic-size probe (`true`) or a real layout; the
+/// previous state comes back afterwards, also on a panic.
+pub(crate) fn with_intrinsic_probe<R>(probe: bool, layout: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            INTRINSIC_PROBE.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(INTRINSIC_PROBE.with(|cell| cell.replace(probe)));
+    layout()
 }
 
 pub(crate) fn length_value(node: &StyledNode, name: &str, base: f32) -> Option<f32> {

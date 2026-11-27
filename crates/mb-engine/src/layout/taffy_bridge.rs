@@ -52,6 +52,7 @@ use super::{
     BoxType, Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, has_float,
     intrinsic_height, intrinsic_width, is_display_none, is_layout_whitespace_text, is_out_of_flow,
     length_value, outer_rect, shift_layout_subtree, with_containing_block_height,
+    with_intrinsic_probe,
 };
 
 use std::cell::RefCell;
@@ -631,7 +632,10 @@ fn measure_boundary(
         AvailableSpace::MaxContent => 1.0e6,
         AvailableSpace::MinContent => 0.0,
     };
-    let mut lb = with_containing_block_height(containing.height, || boundary.layout(parent_width));
+    let probe = !matches!(avail.width, AvailableSpace::Definite(_));
+    let mut lb = with_intrinsic_probe(probe, || {
+        with_containing_block_height(containing.height, || boundary.layout(parent_width))
+    });
     if !matches!(avail.width, AvailableSpace::Definite(_))
         && probe_sizes_to_lines(&boundary.content)
     {

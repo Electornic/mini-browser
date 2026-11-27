@@ -23,9 +23,9 @@ use flex::is_flex_container;
 use grid::is_grid_container;
 pub(super) use properties::{
     apply_relative_offset, attribute_length, clamp_height, containing_block_height,
-    definite_height, edge_sizes, has_float, is_auto, is_display_none, is_float_left,
-    is_float_right, is_layout_whitespace_text, is_out_of_flow, length_value, shift_layout_subtree,
-    with_containing_block_height,
+    definite_height, edge_sizes, has_float, in_intrinsic_probe, is_auto, is_display_none,
+    is_float_left, is_float_right, is_layout_whitespace_text, is_out_of_flow, length_value,
+    shift_layout_subtree, with_containing_block_height, with_intrinsic_probe,
 };
 use table::is_table_container;
 
@@ -3638,6 +3638,60 @@ mod tests {
             b.children.iter().find_map(|c| find(c, class))
         }
         find(layout, class).unwrap_or_else(|| panic!("no box with class {class}"))
+    }
+
+    /// The widest border box in the tree.
+    fn widest_box(layout: &LayoutBox) -> f32 {
+        let d = &layout.dimensions;
+        let own =
+            d.content.width + d.padding.left + d.padding.right + d.border.left + d.border.right;
+        layout.children.iter().map(widest_box).fold(own, f32::max)
+    }
+
+    /// A `%` padding or margin is cyclic in an intrinsic-size probe (CSS
+    /// Sizing 3 §5.2.1): it contributes 0 there and resolves against the
+    /// real track / line afterwards. It used to resolve against the 1e6
+    /// max-content proxy, so a `max-content` grid column (or a flex item's
+    /// max-content basis) became ~820,000px wide — and each nested inline
+    /// box with `%` padding compounded it (layout fuzzer, past 1e7).
+    #[test]
+    fn percent_padding_does_not_inflate_intrinsic_track_sizes() {
+        let cases = [
+            // max-content grid column around a `%`-padded item.
+            (
+                r#"<div style="display:grid; grid-template-columns:max-content"><div class="i" style="padding-right:82%"><img></div></div>"#,
+                "",
+            ),
+            // Nested inline boxes with `%` padding inside the item.
+            (
+                r#"<div style="display:grid; grid-template-columns:max-content"><div class="i"><span><span><span><img></span></span></span></div></div>"#,
+                "div, span { padding-right: 82%; }",
+            ),
+            // `%` margins too.
+            (
+                r#"<div style="display:grid; grid-template-columns:max-content"><div class="i" style="margin-left:50%"><img></div></div>"#,
+                "",
+            ),
+            // A flex item's max-content basis.
+            (
+                r#"<div style="display:flex"><div class="i" style="padding-right:82%; flex-shrink:0"><img></div></div>"#,
+                "",
+            ),
+        ];
+        for (html, css) in cases {
+            let layout = page(html, css, (800.0, 600.0));
+            let widest = widest_box(&layout);
+            assert!(widest < 5_000.0, "widest box {widest}px for {html} {css}");
+        }
+        // The column is the image's 200px; the padding then resolves
+        // against it (82% of 200 = 164) and overflows, as in Chrome.
+        let layout = page(
+            r#"<div style="display:grid; grid-template-columns:max-content"><div class="i" style="padding-right:82%"><img></div></div>"#,
+            "",
+            (800.0, 600.0),
+        );
+        let item = by_class(&layout, "i");
+        assert_eq!(item.dimensions.padding.right, 164.0);
     }
 
     fn size_of(layout: &LayoutBox, class: &str) -> (f32, f32) {

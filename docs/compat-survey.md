@@ -329,6 +329,8 @@ MB_NET_CACHE_OFFLINE=1 ./target/debug/mb-mcp --start-url https://news.ycombinato
 
 **F1 재측정** (2026-11-28, 라벨 `f1`, `supports` 대비 — 인라인 SVG 고유 크기·논리 속성, [compat-round3.md F1](compat-round3.md#f1--인라인-svg-고유-크기--논리-속성-2026-11-28)): 결과·기대 컨트롤·오프라인 미스·슬리버 그대로, `[mb-budget]` 0. 요소 목록 diff: github +1 "Appearance settings" · bbc +1 "Open menu" · mdn +1 "MDN logo" · velog +2(이름 없는 홈 로고 링크 — Chrome 도 이름 없음) — 전부 전엔 0 크기 SVG 만 담아 빠져 있던 것. 6곳 SVG 189개 중 179 가 CSS·속성 크기, 10 이 300×150 기본(크기 없는 `viewBox` SVG — Chrome 은 컨테이너 폭). 파싱만 12,649 → 10,181(논리 속성이 물리 속성으로), 문서 높이 mdn·github·bbc 조금 늚.
 
+**F1b 재측정** (2026-11-28, 라벨 `f1b`, `f1` 대비 — 크기 탐색 중 `%` 패딩·여백 = 0, [compat-round3.md F1b](compat-round3.md#f1b--크기-탐색-중--패딩-증폭-2026-11-28)): `load_ms` 외 25곳 모든 열 동일, 요소 목록 diff 없음.
+
 - `ms` = `navigate`(settle 포함) 벽시계, 이 맥에서. 두 실행 사이 차이는 대부분 ±10% 안, 가장 큰 것은 kowiki 256 → 197(−23%)·github 1,829 → 1,562(−15%) — 시간은 비교용이 아니라 timeout 판정용.
 - 기대 컨트롤 **누락 사이트 8곳**(naver·daum·hani·korea-kr·velog·d2·google·enwiki; 0b 때는 측정된 17곳 중 6곳). 원인 분류는 각 단계에서 — 지금 표는 기준선. naver 검색창은 ARIA `combobox` 다(역할 오기를 녹화 후 tsv 에서 고침).
 - **콘솔 에러**(`prompts.rs` "제3자 스크립트 콘솔 에러" 결정용 입력): 측정된 20곳 중 **16곳이 1건 이상**, 합 104건 중 98건이 `Uncaught in script`. 많은 곳 korea-kr 33·bbc 15·yna 13·daum 9·google 6·kakaocorp 6. 대부분 빠진 API(`getElementsByTagName` 류, [JS API 표면 프로브](#js-api-표면-프로브)). naver 광고 2건은 이번 스냅샷에서 `near "document.getElementsByTagName"` / `near "Na"`(gfp-core 의 축약 별칭 — 2차의 `console.debug` 가 이번 빌드에선 지역 변수로 줄여져 있음)로 읽힌다. 0a 권고(지금은 `prompts.rs` 를 안 바꿈)를 바꿀 근거는 아직 없다 — 다음은 제3자 에러가 있는 손으로 쓴 eval 페이지로 확인.
