@@ -435,7 +435,70 @@ fn is_inline_block(node: &StyledNode) -> bool {
     matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "inline-block")
 }
 
+type InlineSizeMemo = std::collections::HashMap<(crate::dom::NodeId, u32), Rect>;
+
+thread_local! {
+    /// Inline outer sizes already computed in the current layout pass, by
+    /// (DOM node, available width bits). `None` outside a pass.
+    static INLINE_SIZE_MEMO: std::cell::RefCell<Option<InlineSizeMemo>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run one layout pass with inline sizes memoised (compat round 3 R1).
+///
+/// Every inline box re-summed its whole subtree to find its own size, and
+/// each descendant box did it again — O(n × inline depth); 10 000 nested
+/// `<span>`s (flattened to depth 256) took 7.8 s in release.
+/// `inline_total_size` is a pure function of the styled node and the
+/// available width, so one pass can reuse each answer.
+///
+/// Keyed by the DOM `NodeId`, not the `StyledNode`'s address: layout boxes
+/// and taffy boundary leaves hold *clones* of styled subtrees (same id,
+/// same values — layout never edits styles), and the boundary clones are
+/// freed mid-pass, so an address could be reused by a different node. A
+/// nested pass (another tree, same ids) gets its own memo; the outer one is
+/// restored afterwards, also on a panic. Lookup only — the map's order
+/// never leaks (determinism).
+pub(super) fn with_inline_size_memo<R>(pass: impl FnOnce() -> R) -> R {
+    struct Restore(Option<InlineSizeMemo>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let outer = self.0.take();
+            INLINE_SIZE_MEMO.with(|memo| *memo.borrow_mut() = outer);
+        }
+    }
+    let outer = INLINE_SIZE_MEMO.with(|memo| memo.borrow_mut().replace(InlineSizeMemo::new()));
+    let _restore = Restore(outer);
+    pass()
+}
+
 fn inline_total_size(node: &StyledNode, parent_width: f32) -> Rect {
+    let key = (node.node_id, parent_width.to_bits());
+    let hit =
+        INLINE_SIZE_MEMO.with(|memo| memo.borrow().as_ref().and_then(|m| m.get(&key).copied()));
+    if let Some(size) = hit {
+        return size;
+    }
+    let size = compute_inline_total_size(node, parent_width);
+    INLINE_SIZE_MEMO.with(|memo| {
+        if let Some(m) = memo.borrow_mut().as_mut() {
+            m.insert(key, size);
+        }
+    });
+    size
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times an inline outer size was actually computed (not
+    /// served from the per-pass memo) — for the R1 complexity test.
+    pub(super) static INLINE_SIZE_COMPUTATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+fn compute_inline_total_size(node: &StyledNode, parent_width: f32) -> Rect {
+    #[cfg(test)]
+    INLINE_SIZE_COMPUTATIONS.with(|c| c.set(c.get() + 1));
     if is_inline_block(node) {
         return inline_block_outer_size(node, parent_width);
     }

@@ -92,6 +92,10 @@ pub enum BoxType {
 pub const MAX_LAYOUT_COORDINATE: f32 = mb_dom::style::MAX_CSS_LENGTH;
 
 pub fn layout_tree(root: &StyledNode, viewport_width: f32) -> LayoutBox {
+    inline::with_inline_size_memo(|| layout_tree_pass(root, viewport_width))
+}
+
+fn layout_tree_pass(root: &StyledNode, viewport_width: f32) -> LayoutBox {
     // Element roots route through taffy (the bridge's measure-callback
     // boundary handles every shape taffy itself doesn't understand). Only
     // a non-element root (e.g. a stand-alone text node — never produced by
@@ -3413,5 +3417,29 @@ mod tests {
         let grid = &layout.children[0];
         assert_eq!(grid.children[0].dimensions.content.x, 208.0);
         assert_eq!(grid.children[1].dimensions.content.x, 8.0);
+    }
+
+    #[test]
+    fn nested_inline_boxes_are_sized_once_per_layout_not_once_per_ancestor() {
+        // Every inline box re-summed its whole subtree to find its own
+        // size, and each descendant box did it again: O(n × inline depth) —
+        // 7.8 s in release for 10 000 nested `<span>`s (flattened to depth
+        // 256). Sizes are now memoised for one layout pass.
+        let depth = 200;
+        let html = format!(
+            "<body>{}x{}</body>",
+            "<span>a ".repeat(depth),
+            "</span>".repeat(depth)
+        );
+        let styled = styled_root(&html, "");
+        let nodes = 2 * depth + 1; // a span and a text node per level, + "x"
+        super::inline::INLINE_SIZE_COMPUTATIONS.with(|c| c.set(0));
+        let layout = layout_tree(&styled, 800.0);
+        let computed = super::inline::INLINE_SIZE_COMPUTATIONS.with(|c| c.get());
+        assert!(
+            computed <= 4 * nodes,
+            "{computed} inline size computations for {nodes} nodes"
+        );
+        assert!(layout.dimensions.content.width > 0.0);
     }
 }
