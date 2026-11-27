@@ -266,6 +266,10 @@ struct CachedView {
     // The viewport height when the style pass resolved a `vh`/`vmin`/`vmax`
     // length, else 0. Always 0 until step 5 resolves viewport units.
     vh_height: usize,
+    // The page height the view was laid out at — compared only when the
+    // layout read it (`DocumentView::reads_viewport_height`: a percentage
+    // height on the root, step 1p).
+    page_height: usize,
     hover_path: Option<Vec<usize>>,
     focus_path: Option<Vec<usize>>,
     active: bool,
@@ -1030,6 +1034,7 @@ impl BrowserState {
             && cached.hover_path == self.hovered_dom_path
             && cached.focus_path == self.focused_dom_path
             && cached.vh_height == vh_height
+            && (!cached.view.reads_viewport_height || cached.page_height == page_height)
             // Last: the only part that costs something (one comparison per
             // `@media` block), and only worth it when the rest matched.
             && cached.media_results == media_bitset(&self.parsed_stylesheets, &media)
@@ -1096,6 +1101,7 @@ impl BrowserState {
                     viewport_width,
                     media_results,
                     vh_height,
+                    page_height,
                     hover_path: self.hovered_dom_path.clone(),
                     focus_path: self.focused_dom_path.clone(),
                     active,
@@ -1118,6 +1124,7 @@ impl BrowserState {
                         dimensions: layout::Dimensions::default(),
                         children: Vec::new(),
                     },
+                    reads_viewport_height: false,
                 })
             }
         }
@@ -2316,6 +2323,53 @@ mod tests {
         assert!(
             !has_solid_rect_rgb(&short, 13, 14, 15),
             "min-height flipped"
+        );
+    }
+
+    #[test]
+    fn height_only_resize_relayouts_a_percent_height_root() {
+        // `html, body {height: 100%}` resolves against the viewport height
+        // (step 1p): a height-only resize must not reuse the old layout —
+        // but a page whose root has no percentage height still does.
+        let chrome = CHROME_HEIGHT as usize;
+        let input = input::WindowInput::default();
+        let mut state = make_state(
+            "<!DOCTYPE html><html><body><style>html, body { height: 100%; margin: 0; }</style>\
+             <div>x</div></body></html>",
+        );
+        let _ = state.display_list(800, 700 + chrome, &input);
+        let tall = state
+            .cached_view
+            .as_ref()
+            .unwrap()
+            .view
+            .layout_root
+            .dimensions
+            .content
+            .height;
+        assert_eq!(tall, 700.0);
+        let _ = state.display_list(800, 400 + chrome, &input);
+        let short = state
+            .cached_view
+            .as_ref()
+            .unwrap()
+            .view
+            .layout_root
+            .dimensions
+            .content
+            .height;
+        assert_eq!(short, 400.0, "relaid out at the new viewport height");
+
+        let mut plain = make_state(
+            "<!DOCTYPE html><html><body><style>body { margin: 0; }</style><div>x</div></body></html>",
+        );
+        let _ = plain.display_list(800, 700 + chrome, &input);
+        let first = Rc::clone(&plain.cached_view.as_ref().unwrap().view);
+        let _ = plain.display_list(800, 400 + chrome, &input);
+        let second = Rc::clone(&plain.cached_view.as_ref().unwrap().view);
+        assert!(
+            Rc::ptr_eq(&first, &second),
+            "no percentage root height: reuse"
         );
     }
 

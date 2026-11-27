@@ -51,7 +51,7 @@ use super::table::is_table_container;
 use super::{
     BoxType, Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, has_float,
     intrinsic_height, intrinsic_width, is_display_none, is_layout_whitespace_text, is_out_of_flow,
-    length_value, outer_rect, shift_layout_subtree,
+    length_value, outer_rect, shift_layout_subtree, with_containing_block_height,
 };
 
 use std::cell::RefCell;
@@ -501,7 +501,14 @@ impl NodeBoundary {
     }
 }
 
-pub(super) fn layout_via_taffy(node: &StyledNode, viewport_width: f32) -> Option<LayoutBox> {
+/// `viewport_height` is the initial containing block's height — what the
+/// root's `height: N%` resolves against (`html, body {height: 100%}`).
+/// `None` leaves it indefinite (callers without a viewport height).
+pub(super) fn layout_via_taffy(
+    node: &StyledNode,
+    viewport_width: f32,
+    viewport_height: Option<f32>,
+) -> Option<LayoutBox> {
     if !matches!(node.node_type, NodeType::Element(_)) {
         return None;
     }
@@ -537,11 +544,15 @@ pub(super) fn layout_via_taffy(node: &StyledNode, viewport_width: f32) -> Option
     }
     // Wrapper for root `margin: auto` resolution against the viewport (taffy
     // does not auto-center the topmost node it lays out).
+    // Its definite height is the initial containing block's (step 1p): the
+    // root's percentage height resolves against it, and taffy hands it on to
+    // boundary leaves as `parent_size.height`. The root's own box is still
+    // its content height — the wrapper is never part of the layout tree.
     let wrapper_style = Style {
         display: Display::Block,
         size: Size {
             width: Dimension::length(viewport_width),
-            height: Dimension::auto(),
+            height: viewport_height.map_or(Dimension::auto(), Dimension::length),
         },
         ..Style::DEFAULT
     };
@@ -558,7 +569,7 @@ pub(super) fn layout_via_taffy(node: &StyledNode, viewport_width: f32) -> Option
                     inputs,
                     style,
                     |_, _| 0.0,
-                    |_known, avail| measure_boundary(avail, inputs.parent_size.width, ctx),
+                    |_known, avail| measure_boundary(avail, inputs.parent_size, ctx),
                 )
             },
         )
@@ -589,11 +600,15 @@ std::thread_local! {
 
 /// `containing_width` is taffy's parent size (the base for percentage
 /// margins), when it knows it.
+/// `containing` is the leaf's containing block as taffy knows it: the
+/// width for margins, and the height — `Some` only when definite — that the
+/// legacy layout resolves percentage heights against (step 1p).
 fn measure_boundary(
     avail: Size<AvailableSpace>,
-    containing_width: Option<f32>,
+    containing: Size<Option<f32>>,
     ctx: Option<&mut NodeBoundary>,
 ) -> Size<f32> {
+    let containing_width = containing.width;
     let Some(boundary) = ctx else {
         return Size::ZERO;
     };
@@ -616,7 +631,7 @@ fn measure_boundary(
         AvailableSpace::MaxContent => 1.0e6,
         AvailableSpace::MinContent => 0.0,
     };
-    let mut lb = boundary.layout(parent_width);
+    let mut lb = with_containing_block_height(containing.height, || boundary.layout(parent_width));
     if !matches!(avail.width, AvailableSpace::Definite(_))
         && probe_sizes_to_lines(&boundary.content)
     {
@@ -971,7 +986,7 @@ mod tests {
 
         let legacy = layout_tree(&styled, 800.0);
         let bridged =
-            layout_via_taffy(&styled, 800.0).expect("leaf block must be supported in 4.3b");
+            layout_via_taffy(&styled, 800.0, None).expect("leaf block must be supported in 4.3b");
 
         assert_eq!(legacy.dimensions.content, bridged.dimensions.content);
         assert_eq!(legacy.dimensions.padding, bridged.dimensions.padding);
@@ -989,7 +1004,7 @@ mod tests {
             r#"#root { width: 300px; } p { font-size: 16px; }"#,
         );
         let legacy = layout_tree(&styled, 800.0);
-        let bridged = layout_via_taffy(&styled, 800.0)
+        let bridged = layout_via_taffy(&styled, 800.0, None)
             .expect("element root always routes through taffy after 4.3.1");
         assert_eq!(legacy.dimensions.content, bridged.dimensions.content);
         assert_eq!(legacy.children.len(), bridged.children.len());
@@ -1016,8 +1031,8 @@ mod tests {
             "#,
         );
         let legacy = layout_tree(&styled, 800.0);
-        let bridged =
-            layout_via_taffy(&styled, 800.0).expect("element root always routes through taffy");
+        let bridged = layout_via_taffy(&styled, 800.0, None)
+            .expect("element root always routes through taffy");
         assert_eq!(legacy.dimensions.content, bridged.dimensions.content);
         assert_eq!(legacy.children.len(), bridged.children.len());
     }
@@ -1035,7 +1050,7 @@ mod tests {
             "#,
         );
         let legacy = layout_tree(&styled, 800.0);
-        let bridged = layout_via_taffy(&styled, 800.0)
+        let bridged = layout_via_taffy(&styled, 800.0, None)
             .expect("relative + px inset must be supported in 4.3e");
         assert_eq!(
             legacy.children[0].dimensions.content,
@@ -1055,7 +1070,7 @@ mod tests {
             "#,
         );
         let legacy = layout_tree(&styled, 800.0);
-        let bridged = layout_via_taffy(&styled, 800.0)
+        let bridged = layout_via_taffy(&styled, 800.0, None)
             .expect("nested block subtree must be supported in 4.3d");
 
         assert_eq!(legacy.dimensions.content, bridged.dimensions.content);

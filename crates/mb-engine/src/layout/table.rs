@@ -21,8 +21,9 @@ use crate::{css::Value, dom::NodeType, style::StyledNode};
 use super::block::layout_node;
 use super::inline::layout_inline_block_node;
 use super::{
-    Dimensions, LayoutBox, Rect, container_box_type, edge_sizes, intrinsic_height, is_display_none,
-    is_layout_whitespace_text, length_value, outer_rect,
+    Dimensions, LayoutBox, Rect, clamp_height, container_box_type, definite_height, edge_sizes,
+    intrinsic_height, is_display_none, is_layout_whitespace_text, length_value, outer_rect,
+    with_containing_block_height,
 };
 
 // Per-table call counters/accumulators. thread_local because layout is
@@ -376,30 +377,33 @@ fn layout_table_cell(cell: &StyledNode, x: f32, y: f32, cell_outer_width: f32) -
     // Honour display:none on the cell's children before recursing — block
     // flow does the same filter, so cells stay in step with the rest of
     // the layout pipeline.
-    let mut child_cursor_y = content_y;
-    let mut children: Vec<LayoutBox> = Vec::new();
-    for child in &cell.children {
-        if is_display_none(child) {
-            continue;
+    let own_height = definite_height(cell);
+    let (children, auto_content_height) = with_containing_block_height(own_height, || {
+        let mut child_cursor_y = content_y;
+        let mut children: Vec<LayoutBox> = Vec::new();
+        for child in &cell.children {
+            if is_display_none(child) {
+                continue;
+            }
+            // Inter-element whitespace text (preserved by the parser to keep
+            // inline runs spaced) would otherwise lay out as a font-size-tall
+            // full-width row inside the cell — a phantom block strip stacked
+            // above / below the real cell content. Block flow drops the same
+            // pattern for the same reason.
+            if is_layout_whitespace_text(child) {
+                continue;
+            }
+            children.push(layout_node(
+                child,
+                content_x,
+                &mut child_cursor_y,
+                content_width,
+            ));
         }
-        // Inter-element whitespace text (preserved by the parser to keep
-        // inline runs spaced) would otherwise lay out as a font-size-tall
-        // full-width row inside the cell — a phantom block strip stacked
-        // above / below the real cell content. Block flow drops the same
-        // pattern for the same reason.
-        if is_layout_whitespace_text(child) {
-            continue;
-        }
-        children.push(layout_node(
-            child,
-            content_x,
-            &mut child_cursor_y,
-            content_width,
-        ));
-    }
-    let auto_content_height = (child_cursor_y - content_y).max(0.0);
-    let content_height = length_value(cell, "height", cell_outer_width)
-        .unwrap_or_else(|| auto_content_height.max(intrinsic_height(cell)));
+        (children, (child_cursor_y - content_y).max(0.0))
+    });
+    let content_height = own_height
+        .unwrap_or_else(|| clamp_height(cell, auto_content_height.max(intrinsic_height(cell))));
 
     let result = LayoutBox {
         box_type: container_box_type(cell),

@@ -12,9 +12,10 @@ use super::block::layout_node;
 use super::flex::{is_flex_container, layout_flex_children};
 use super::grid::{is_grid_container, layout_grid_children};
 use super::{
-    BoxType, Dimensions, LayoutBox, Rect, apply_relative_offset, child_height, collapsed_text,
-    container_box_type, edge_sizes, has_float, intrinsic_height, intrinsic_width, is_display_none,
-    is_float_right, is_out_of_flow, length_value, outer_rect,
+    BoxType, Dimensions, LayoutBox, Rect, apply_relative_offset, child_height, clamp_height,
+    collapsed_text, container_box_type, containing_block_height, definite_height, edge_sizes,
+    has_float, intrinsic_height, intrinsic_width, is_display_none, is_float_right, is_out_of_flow,
+    length_value, outer_rect, with_containing_block_height,
 };
 
 pub(super) fn layout_inline_children(
@@ -115,7 +116,7 @@ pub(super) fn layout_inline_children(
         .iter()
         .filter(|child| is_out_of_flow(child) && !is_display_none(child))
     {
-        let abs_box = layout_inline_or_inline_block(child, content_x, content_y, content_width);
+        let abs_box = layout_out_of_flow(child, content_x, content_y, content_width);
         boxes.push(abs_box);
     }
 
@@ -153,6 +154,24 @@ pub(super) fn layout_inline_children(
     // visually spill below the paragraph background.
     let height = (max_bottom - content_y).max(max_float_bottom - content_y);
     (boxes, height)
+}
+
+/// An absolutely positioned / fixed child at its static position (pass 2
+/// moves it). Such boxes are blockified and sized shrink-to-fit (CSS 2.1
+/// §9.7, §10.3.7) — the inline-block path — whatever their `display`, so
+/// their children resolve percentages against the box itself (step 1p).
+/// Laying a `display: block` one out as an inline box gave its children the
+/// container's width and no definite height.
+pub(super) fn layout_out_of_flow(
+    node: &StyledNode,
+    x: f32,
+    y: f32,
+    available_width: f32,
+) -> LayoutBox {
+    if matches!(node.node_type, NodeType::Text(_)) {
+        return layout_inline_or_inline_block(node, x, y, available_width);
+    }
+    layout_inline_block_node(node, x, y, available_width)
 }
 
 pub(super) fn layout_inline_or_inline_block(
@@ -268,7 +287,7 @@ fn layout_inline_sequence_no_wrap(
         if is_out_of_flow(child) {
             // Static position approximation: at the parent's content origin.
             // Pass 2 will move it once the containing block is known.
-            let abs_box = layout_inline_or_inline_block(child, content_x, y, containing_width);
+            let abs_box = layout_out_of_flow(child, content_x, y, containing_width);
             boxes.push(abs_box);
             continue;
         }
@@ -435,7 +454,7 @@ fn is_inline_block(node: &StyledNode) -> bool {
     matches!(node.value("display"), Some(Value::Keyword(keyword)) if keyword == "inline-block")
 }
 
-type InlineSizeMemo = std::collections::HashMap<(crate::dom::NodeId, u32), Rect>;
+type InlineSizeMemo = std::collections::HashMap<(crate::dom::NodeId, u32, u32), Rect>;
 
 thread_local! {
     /// Inline outer sizes already computed in the current layout pass, by
@@ -473,7 +492,10 @@ pub(super) fn with_inline_size_memo<R>(pass: impl FnOnce() -> R) -> R {
 }
 
 fn inline_total_size(node: &StyledNode, parent_width: f32) -> Rect {
-    let key = (node.node_id, parent_width.to_bits());
+    // Percent heights make the size depend on the containing block's
+    // height too (step 1p).
+    let cb_height = containing_block_height().map_or(u32::MAX, f32::to_bits);
+    let key = (node.node_id, parent_width.to_bits(), cb_height);
     let hit =
         INLINE_SIZE_MEMO.with(|memo| memo.borrow().as_ref().and_then(|m| m.get(&key).copied()));
     if let Some(size) = hit {
@@ -530,14 +552,19 @@ fn compute_inline_total_size(node: &StyledNode, parent_width: f32) -> Rect {
 }
 
 fn inline_block_outer_size(node: &StyledNode, available_width: f32) -> Rect {
-    // For line packing we only need an accurate width — height ends up being
-    // re-read from the laid-out box, so we approximate it from explicit
-    // height plus surrounding box edges.
+    // Line packing only reads the width; the height feeds an enclosing
+    // inline box's content height (`inline_content_size`). A definite
+    // `height` wins; otherwise the box's own inline content height — through
+    // the same memoised measurement, so still one visit per (node, width).
+    // It used to be 0, which an inline box sized only by inline-block
+    // children (GitHub's breadcrumb `a > span`) came out 0 tall from — hidden
+    // until step 1p stopped resolving its `height: 100%` against the width.
     let margin = edge_sizes(node, "margin", available_width);
     let padding = edge_sizes(node, "padding", available_width);
     let border = edge_sizes(node, "border", available_width);
     let content_width = inline_block_resolved_width(node, available_width);
-    let content_height = length_value(node, "height", available_width).unwrap_or(0.0);
+    let content_height = definite_height(node)
+        .unwrap_or_else(|| clamp_height(node, inline_content_size(node, content_width).1));
     Rect {
         x: 0.0,
         y: 0.0,
@@ -639,26 +666,29 @@ fn layout_inline_block_node_as(
     // and grid containers: dispatch to their respective placement algorithms
     // first; else if every child is inline, run inline flow; otherwise stack
     // block children top-to-bottom inside our content box.
-    let (children, auto_content_height) = if is_flex_container(node) {
-        layout_flex_children(node, &node.children, content_x, content_y, content_width)
-    } else if is_grid_container(node) {
-        layout_grid_children(node, &node.children, content_x, content_y, content_width)
-    } else if uses_inline_flow(node) {
-        let align = inline_align_for(node);
-        layout_inline_children(&node.children, content_x, content_y, content_width, align)
-    } else {
-        let mut child_cursor_y = content_y;
-        let children = node
-            .children
-            .iter()
-            .filter(|child| !is_display_none(child))
-            .map(|child| layout_node(child, content_x, &mut child_cursor_y, content_width))
-            .collect::<Vec<_>>();
-        (children, child_height(node, content_y, child_cursor_y))
-    };
+    let own_height = definite_height(node);
+    let (children, auto_content_height) = with_containing_block_height(own_height, || {
+        if is_flex_container(node) {
+            layout_flex_children(node, &node.children, content_x, content_y, content_width)
+        } else if is_grid_container(node) {
+            layout_grid_children(node, &node.children, content_x, content_y, content_width)
+        } else if uses_inline_flow(node) {
+            let align = inline_align_for(node);
+            layout_inline_children(&node.children, content_x, content_y, content_width, align)
+        } else {
+            let mut child_cursor_y = content_y;
+            let children = node
+                .children
+                .iter()
+                .filter(|child| !is_display_none(child))
+                .map(|child| layout_node(child, content_x, &mut child_cursor_y, content_width))
+                .collect::<Vec<_>>();
+            (children, child_height(node, content_y, child_cursor_y))
+        }
+    });
 
-    let content_height = length_value(node, "height", available_width)
-        .unwrap_or_else(|| auto_content_height.max(intrinsic_height(node)));
+    let content_height = own_height
+        .unwrap_or_else(|| clamp_height(node, auto_content_height.max(intrinsic_height(node))));
 
     let mut layout_box = LayoutBox {
         box_type: container_box_type(node),
@@ -694,7 +724,7 @@ fn layout_inline_block_node_as(
 fn inline_content_size(node: &StyledNode, parent_width: f32) -> (f32, f32) {
     let declared_width =
         length_value(node, "width", parent_width).or_else(|| intrinsic_width(node));
-    let declared_height = length_value(node, "height", parent_width);
+    let declared_height = definite_height(node);
     if let (Some(width), Some(height)) = (declared_width, declared_height) {
         return (width, height);
     }

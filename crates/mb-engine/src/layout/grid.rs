@@ -6,10 +6,10 @@ use crate::{
     style::StyledNode,
 };
 
-use super::inline::{layout_grid_item, layout_inline_block_node, layout_inline_or_inline_block};
+use super::inline::{layout_grid_item, layout_inline_block_node, layout_out_of_flow};
 use super::{
-    LayoutBox, is_display_none, is_layout_whitespace_text, is_out_of_flow, length_value,
-    outer_rect, shift_layout_subtree,
+    LayoutBox, containing_block_height, is_display_none, is_layout_whitespace_text, is_out_of_flow,
+    length_value, outer_rect, shift_layout_subtree,
 };
 
 pub(super) fn is_grid_container(node: &StyledNode) -> bool {
@@ -85,7 +85,7 @@ pub(super) fn layout_grid_children<'a>(
             continue;
         }
         if is_out_of_flow(child) {
-            let abs_box = layout_inline_or_inline_block(child, content_x, content_y, content_width);
+            let abs_box = layout_out_of_flow(child, content_x, content_y, content_width);
             boxes.push(Some(abs_box));
             continue;
         }
@@ -197,7 +197,9 @@ pub(super) fn layout_grid_children<'a>(
         Some(Value::TrackList(tracks)) => tracks.as_slice(),
         _ => &[],
     };
-    let container_explicit_height = length_value(container, "height", content_width);
+    // The container's own definite height (installed for its child layout,
+    // step 1p) — `None` when auto.
+    let container_explicit_height = containing_block_height();
     let row_gaps = row_gap * n_rows.saturating_sub(1) as f32;
     let row_heights = resolve_tracks(
         row_template,

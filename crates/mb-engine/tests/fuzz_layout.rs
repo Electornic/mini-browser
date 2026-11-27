@@ -437,7 +437,13 @@ impl Gen {
     }
 
     fn rule(&mut self) -> Rule {
-        let selector = self.selector();
+        // Sometimes the root chain (step 1p): `html, body {height: N%}`
+        // resolves against the viewport height.
+        let selector = if self.rng.chance(8) {
+            "html, body".to_string()
+        } else {
+            self.selector()
+        };
         let n = self.rng.range(1, 8);
         let decls = (0..n).map(|_| self.flagged_declaration()).collect();
         Rule { selector, decls }
@@ -2380,6 +2386,7 @@ fn fuzz_generator_covers_its_spec() {
     let mut with_minmax = 0;
     let mut important_rules = 0;
     let mut important_inline = 0;
+    let mut root_rules = 0;
     let mut korean = 0;
     for seed in 1..=200 {
         let case = Gen::case(seed);
@@ -2398,6 +2405,9 @@ fn fuzz_generator_covers_its_spec() {
         }
         if case.css().contains("!important") {
             important_rules += 1;
+        }
+        if case.css().contains("html, body {") {
+            root_rules += 1;
         }
         if case.html().contains("!important") {
             important_inline += 1;
@@ -2432,6 +2442,10 @@ fn fuzz_generator_covers_its_spec() {
     assert!(
         important_inline >= 10,
         "{important_inline}/200 cases with an inline !important"
+    );
+    assert!(
+        root_rules >= 20,
+        "{root_rules}/200 cases with an `html, body` rule"
     );
     // The CSS soup wraps rules in `@media`, sometimes past the nesting cap.
     let mut media = 0;

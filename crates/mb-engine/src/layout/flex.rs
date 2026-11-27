@@ -5,9 +5,9 @@ use crate::{
     style::StyledNode,
 };
 
-use super::inline::{layout_inline_block_node, layout_inline_or_inline_block};
+use super::inline::{layout_inline_block_node, layout_out_of_flow};
 use super::{
-    LayoutBox, is_display_none, is_layout_whitespace_text, is_out_of_flow, length_value,
+    LayoutBox, containing_block_height, is_display_none, is_layout_whitespace_text, is_out_of_flow,
     outer_rect, shift_layout_subtree,
 };
 
@@ -76,7 +76,7 @@ pub(super) fn layout_flex_children(
             // Static-position approximation, same trick as inline flow: drop
             // the absolute child at the container's content origin and let
             // the absolute reposition pass at the tree root move it.
-            let abs_box = layout_inline_or_inline_block(child, content_x, content_y, content_width);
+            let abs_box = layout_out_of_flow(child, content_x, content_y, content_width);
             boxes.push(abs_box);
             continue;
         }
@@ -106,9 +106,9 @@ pub(super) fn layout_flex_children(
     // height: auto falls back to total_basis so free space is zero.
     let container_main_size = match direction {
         FlexDirection::Row => content_width,
-        FlexDirection::Column => {
-            length_value(container, "height", content_width).unwrap_or(total_basis)
-        }
+        // Inside our child layout the installed containing-block height
+        // is this container's own definite height (step 1p).
+        FlexDirection::Column => containing_block_height().unwrap_or(total_basis),
     };
 
     // Distribute free space along the main axis. Positive free space goes to
@@ -177,9 +177,7 @@ pub(super) fn layout_flex_children(
         .map(|&(i, _)| cross_axis_outer(&boxes[i], direction))
         .fold(0.0, f32::max);
     let container_cross_size = match direction {
-        FlexDirection::Row => {
-            length_value(container, "height", content_width).unwrap_or(max_cross_natural)
-        }
+        FlexDirection::Row => containing_block_height().unwrap_or(max_cross_natural),
         FlexDirection::Column => content_width,
     };
 

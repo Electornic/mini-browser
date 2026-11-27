@@ -11,10 +11,10 @@ use super::inline::{
 };
 use super::table::{is_table_container, layout_table_children};
 use super::{
-    Dimensions, EdgeSizes, LayoutBox, Rect, apply_relative_offset, child_height,
-    container_box_type, edge_sizes, intrinsic_height, intrinsic_width, is_auto, is_display_none,
-    is_float_left, is_float_right, is_layout_whitespace_text, is_out_of_flow, length_value,
-    outer_rect, shift_layout_subtree,
+    Dimensions, EdgeSizes, LayoutBox, Rect, apply_relative_offset, child_height, clamp_height,
+    container_box_type, definite_height, edge_sizes, intrinsic_height, intrinsic_width, is_auto,
+    is_display_none, is_float_left, is_float_right, is_layout_whitespace_text, is_out_of_flow,
+    length_value, outer_rect, shift_layout_subtree, with_containing_block_height,
 };
 
 pub(super) fn layout_node(
@@ -75,142 +75,146 @@ pub(super) fn layout_node(
     // collapse and floats per spec.
     // Otherwise: parents with only inline children lay them out left-to-right;
     // everything else stays block.
-    let (children, auto_content_height) = if is_flex_container(node) {
-        layout_flex_children(node, &node.children, content_x, content_y, content_width)
-    } else if is_grid_container(node) {
-        layout_grid_children(node, &node.children, content_x, content_y, content_width)
-    } else if is_table_container(node) {
-        layout_table_children(node, &node.children, content_x, content_y, content_width)
-    } else if uses_inline_flow(node) {
-        let align = inline_align_for(node);
-        layout_inline_children(&node.children, content_x, content_y, content_width, align)
-    } else {
-        // Block flow: stack children top-to-bottom while collapsing the
-        // previous in-flow child's margin-bottom against the next child's
-        // margin-top. Out-of-flow children skip both the cursor advance and
-        // the collapse chain — they neither push siblings down nor break
-        // adjacency between the in-flow neighbours that surround them.
-        // Floats are also out of flow but they DO take horizontal space at
-        // the current cursor and let `clear` push later siblings past them.
-        let mut child_cursor_y = content_y;
-        let mut prev_margin_bottom: f32 = 0.0;
-        let mut next_left_float_x = content_x;
-        let mut next_right_float_right = content_x + content_width;
-        let mut float_bottom_left: f32 = content_y;
-        let mut float_bottom_right: f32 = content_y;
-        let mut children: Vec<LayoutBox> = Vec::with_capacity(node.children.len());
-        let align = inline_align_for(node);
-        for group in group_block_children(&node.children) {
-            let child = match group {
-                BlockChild::Single(i) => &node.children[i],
-                BlockChild::InlineRun(range) => {
-                    // Anonymous block: no margins of its own, so the previous
-                    // child's margin-bottom (already in the cursor) stands
-                    // and ends the collapse chain.
-                    let (boxes, height) = layout_inline_run(
-                        &node.children[range],
-                        content_x,
-                        child_cursor_y,
-                        content_width,
-                        align,
-                    );
-                    children.extend(boxes);
-                    child_cursor_y += height;
-                    prev_margin_bottom = 0.0;
+    // This box's definite content height (its `height` against our
+    // containing block) is what its children's percentages resolve
+    // against — known before they are laid out, or never (auto).
+    let own_height = definite_height(node);
+    let (children, auto_content_height) = with_containing_block_height(own_height, || {
+        if is_flex_container(node) {
+            layout_flex_children(node, &node.children, content_x, content_y, content_width)
+        } else if is_grid_container(node) {
+            layout_grid_children(node, &node.children, content_x, content_y, content_width)
+        } else if is_table_container(node) {
+            layout_table_children(node, &node.children, content_x, content_y, content_width)
+        } else if uses_inline_flow(node) {
+            let align = inline_align_for(node);
+            layout_inline_children(&node.children, content_x, content_y, content_width, align)
+        } else {
+            // Block flow: stack children top-to-bottom while collapsing the
+            // previous in-flow child's margin-bottom against the next child's
+            // margin-top. Out-of-flow children skip both the cursor advance and
+            // the collapse chain — they neither push siblings down nor break
+            // adjacency between the in-flow neighbours that surround them.
+            // Floats are also out of flow but they DO take horizontal space at
+            // the current cursor and let `clear` push later siblings past them.
+            let mut child_cursor_y = content_y;
+            let mut prev_margin_bottom: f32 = 0.0;
+            let mut next_left_float_x = content_x;
+            let mut next_right_float_right = content_x + content_width;
+            let mut float_bottom_left: f32 = content_y;
+            let mut float_bottom_right: f32 = content_y;
+            let mut children: Vec<LayoutBox> = Vec::with_capacity(node.children.len());
+            let align = inline_align_for(node);
+            for group in group_block_children(&node.children) {
+                let child = match group {
+                    BlockChild::Single(i) => &node.children[i],
+                    BlockChild::InlineRun(range) => {
+                        // Anonymous block: no margins of its own, so the previous
+                        // child's margin-bottom (already in the cursor) stands
+                        // and ends the collapse chain.
+                        let (boxes, height) = layout_inline_run(
+                            &node.children[range],
+                            content_x,
+                            child_cursor_y,
+                            content_width,
+                            align,
+                        );
+                        children.extend(boxes);
+                        child_cursor_y += height;
+                        prev_margin_bottom = 0.0;
+                        continue;
+                    }
+                };
+                if is_display_none(child) {
                     continue;
                 }
-            };
-            if is_display_none(child) {
-                continue;
-            }
-            // Pure-whitespace text children come from the HTML parser's
-            // inter-element whitespace preservation (so inline runs keep
-            // their separating spaces). In block flow that whitespace
-            // would otherwise lay out as a font-size-tall full-width
-            // line — a visible vertical gap between every pair of block
-            // siblings on the page. Real browsers anonymous-inline this
-            // whitespace and then collapse it to nothing in pure-block
-            // context; the toy approximates the same observable result
-            // by dropping the child outright.
-            if is_layout_whitespace_text(child) {
-                continue;
-            }
-            if is_out_of_flow(child) {
-                let mut frozen = child_cursor_y;
-                children.push(layout_node(child, content_x, &mut frozen, content_width));
-                continue;
-            }
-
-            if is_float_left(child) {
-                // Place at the next available x in the left-float column. The
-                // float's outer top sits at the current in-flow cursor, but
-                // we never write back to the cursor — siblings flow past it.
-                let mut throwaway = child_cursor_y;
-                let float_box =
-                    layout_node(child, next_left_float_x, &mut throwaway, content_width);
-                let outer = outer_rect(&float_box);
-                next_left_float_x += outer.width;
-                float_bottom_left = float_bottom_left.max(throwaway);
-                children.push(float_box);
-                continue;
-            }
-            if is_float_right(child) {
-                // Right floats need their outer width before placement, so we
-                // lay out at the left edge first to measure, then shift the
-                // whole subtree to (right_edge - outer_width).
-                let mut throwaway = child_cursor_y;
-                let mut float_box = layout_node(child, content_x, &mut throwaway, content_width);
-                let outer_width = outer_rect(&float_box).width;
-                let dx = (next_right_float_right - outer_width) - content_x;
-                if dx != 0.0 {
-                    shift_layout_subtree(&mut float_box, dx, 0.0);
+                // Pure-whitespace text children come from the HTML parser's
+                // inter-element whitespace preservation (so inline runs keep
+                // their separating spaces). In block flow that whitespace
+                // would otherwise lay out as a font-size-tall full-width
+                // line — a visible vertical gap between every pair of block
+                // siblings on the page. Real browsers anonymous-inline this
+                // whitespace and then collapse it to nothing in pure-block
+                // context; the toy approximates the same observable result
+                // by dropping the child outright.
+                if is_layout_whitespace_text(child) {
+                    continue;
                 }
-                next_right_float_right -= outer_width;
-                float_bottom_right = float_bottom_right.max(throwaway);
-                children.push(float_box);
-                continue;
-            }
-
-            // `clear` jumps the cursor past prior floats on the named side(s)
-            // and resets the float-stack column for that side because no
-            // earlier floats are adjacent at the new cursor anymore.
-            let cleared = clear_target_y(child, float_bottom_left, float_bottom_right);
-            if cleared > child_cursor_y {
-                child_cursor_y = cleared;
-                prev_margin_bottom = 0.0;
-                if cleared >= float_bottom_left {
-                    next_left_float_x = content_x;
+                if is_out_of_flow(child) {
+                    let mut frozen = child_cursor_y;
+                    children.push(layout_node(child, content_x, &mut frozen, content_width));
+                    continue;
                 }
-                if cleared >= float_bottom_right {
-                    next_right_float_right = content_x + content_width;
-                }
-            }
 
-            // The cursor at this point already includes prev_margin_bottom from
-            // the previous in-flow child's tail. Subtracting `(sum - combined)`
-            // collapses it against the next margin-top before the child uses
-            // the cursor as its own starting position.
-            let next_margin_top = length_value(child, "margin-top", content_width).unwrap_or(0.0);
-            let combined = collapse_margins(prev_margin_bottom, next_margin_top);
-            child_cursor_y += combined - (prev_margin_bottom + next_margin_top);
-            let laid_out = layout_node(child, content_x, &mut child_cursor_y, content_width);
-            prev_margin_bottom = laid_out.dimensions.margin.bottom;
-            children.push(laid_out);
+                if is_float_left(child) {
+                    // Place at the next available x in the left-float column. The
+                    // float's outer top sits at the current in-flow cursor, but
+                    // we never write back to the cursor — siblings flow past it.
+                    let mut throwaway = child_cursor_y;
+                    let float_box =
+                        layout_node(child, next_left_float_x, &mut throwaway, content_width);
+                    let outer = outer_rect(&float_box);
+                    next_left_float_x += outer.width;
+                    float_bottom_left = float_bottom_left.max(throwaway);
+                    children.push(float_box);
+                    continue;
+                }
+                if is_float_right(child) {
+                    // Right floats need their outer width before placement, so we
+                    // lay out at the left edge first to measure, then shift the
+                    // whole subtree to (right_edge - outer_width).
+                    let mut throwaway = child_cursor_y;
+                    let mut float_box =
+                        layout_node(child, content_x, &mut throwaway, content_width);
+                    let outer_width = outer_rect(&float_box).width;
+                    let dx = (next_right_float_right - outer_width) - content_x;
+                    if dx != 0.0 {
+                        shift_layout_subtree(&mut float_box, dx, 0.0);
+                    }
+                    next_right_float_right -= outer_width;
+                    float_bottom_right = float_bottom_right.max(throwaway);
+                    children.push(float_box);
+                    continue;
+                }
+
+                // `clear` jumps the cursor past prior floats on the named side(s)
+                // and resets the float-stack column for that side because no
+                // earlier floats are adjacent at the new cursor anymore.
+                let cleared = clear_target_y(child, float_bottom_left, float_bottom_right);
+                if cleared > child_cursor_y {
+                    child_cursor_y = cleared;
+                    prev_margin_bottom = 0.0;
+                    if cleared >= float_bottom_left {
+                        next_left_float_x = content_x;
+                    }
+                    if cleared >= float_bottom_right {
+                        next_right_float_right = content_x + content_width;
+                    }
+                }
+
+                // The cursor at this point already includes prev_margin_bottom from
+                // the previous in-flow child's tail. Subtracting `(sum - combined)`
+                // collapses it against the next margin-top before the child uses
+                // the cursor as its own starting position.
+                let next_margin_top =
+                    length_value(child, "margin-top", content_width).unwrap_or(0.0);
+                let combined = collapse_margins(prev_margin_bottom, next_margin_top);
+                child_cursor_y += combined - (prev_margin_bottom + next_margin_top);
+                let laid_out = layout_node(child, content_x, &mut child_cursor_y, content_width);
+                prev_margin_bottom = laid_out.dimensions.margin.bottom;
+                children.push(laid_out);
+            }
+            // Parent height needs to cover both the in-flow cursor and the
+            // tallest float — without this, floats would spill below the parent's
+            // background.
+            let in_flow_height = child_height(node, content_y, child_cursor_y);
+            let float_height = (float_bottom_left.max(float_bottom_right) - content_y).max(0.0);
+            (children, in_flow_height.max(float_height))
         }
-        // Parent height needs to cover both the in-flow cursor and the
-        // tallest float — without this, floats would spill below the parent's
-        // background.
-        let in_flow_height = child_height(node, content_y, child_cursor_y);
-        let float_height = (float_bottom_left.max(float_bottom_right) - content_y).max(0.0);
-        (children, in_flow_height.max(float_height))
-    };
+    });
 
-    // Percent-on-height technically resolves against the parent's height in CSS, but the
-    // layout walk does not yet track parent height (heights are computed bottom-up). For
-    // now we use parent_width as the base, which is wrong only for explicit `height: x%`
-    // declarations — none of our toy pages exercise that path.
-    let content_height = length_value(node, "height", parent_width)
-        .unwrap_or_else(|| auto_content_height.max(intrinsic_height(node)));
+    let content_height = own_height
+        .unwrap_or_else(|| clamp_height(node, auto_content_height.max(intrinsic_height(node))));
 
     let dimensions = Dimensions {
         content: Rect {

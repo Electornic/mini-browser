@@ -7,9 +7,12 @@
 // `ContainingBlock` lives here because the only callers that build one
 // are the entry shim in mod.rs and this module itself.
 
+use crate::css::{Unit, Value};
+
 use super::{
     LayoutBox, Rect, box_is_absolute, box_is_fixed, box_is_positioned, box_styled_node,
-    length_value, outer_rect, shift_layout_subtree,
+    clamp_height, definite_height, length_value, outer_rect, shift_layout_subtree,
+    with_containing_block_height,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -47,11 +50,32 @@ pub(super) fn reposition_absolutes(
         None
     };
     if let Some(target_cb) = resolution_cb {
+        resolve_percent_height(layout_box, target_cb);
         let (delta_x, delta_y) = absolute_offset_delta(layout_box, target_cb);
         if delta_x != 0.0 || delta_y != 0.0 {
             shift_layout_subtree(layout_box, delta_x, delta_y);
         }
     }
+}
+
+/// An absolutely positioned box's `height` / `min-height` / `max-height`
+/// percentages resolve against its containing block's padding box, which is
+/// always definite here — unlike pass 1, where the box was sized in static
+/// flow against its in-flow parent (CSS 2.1 §10.5, step 1p). Only the box's
+/// own height changes; its children keep their pass-1 layout.
+fn resolve_percent_height(layout_box: &mut LayoutBox, cb: ContainingBlock) {
+    let Some(node) = box_styled_node(layout_box) else {
+        return;
+    };
+    let percent = |name: &str| matches!(node.value(name), Some(Value::Length(_, Unit::Percent)));
+    if !(percent("height") || percent("min-height") || percent("max-height")) {
+        return;
+    }
+    let current = layout_box.dimensions.content.height;
+    let height = with_containing_block_height(Some(cb.height), || {
+        definite_height(node).unwrap_or_else(|| clamp_height(node, current))
+    });
+    layout_box.dimensions.content.height = height;
 }
 
 fn padding_box_as_cb(layout_box: &LayoutBox) -> ContainingBlock {

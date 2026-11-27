@@ -40,6 +40,79 @@ pub(crate) fn length_value(node: &StyledNode, name: &str, base: f32) -> Option<f
     }
 }
 
+// ---- Percentage heights (CSS 2.1 §10.5; compat round 3 step 1p) --------
+//
+// A `height` / `min-height` / `max-height` percentage resolves against the
+// containing block's *height*, and only when that height is definite;
+// otherwise it behaves as `auto` / `0` / `none`. Heights are computed
+// bottom-up, so the definite height is handed *down*: a box resolves its own
+// definite content height before laying out its children and installs it
+// for them ([`with_containing_block_height`]). Inside a container's child
+// layout, [`containing_block_height`] is therefore that container's own
+// definite height — flex/grid/table read it as such. Pass-scoped like the
+// inline-size memo; nothing outside a layout pass sees it.
+
+thread_local! {
+    static CONTAINING_BLOCK_HEIGHT: std::cell::Cell<Option<f32>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The definite content height of the box whose children are being laid
+/// out, or `None` when it is auto (indefinite).
+pub(crate) fn containing_block_height() -> Option<f32> {
+    CONTAINING_BLOCK_HEIGHT.with(std::cell::Cell::get)
+}
+
+/// Run `layout` with `height` as the containing block's definite height
+/// (`None` = indefinite); the previous value comes back afterwards, also on
+/// a panic.
+pub(crate) fn with_containing_block_height<R>(
+    height: Option<f32>,
+    layout: impl FnOnce() -> R,
+) -> R {
+    struct Restore(Option<f32>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CONTAINING_BLOCK_HEIGHT.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(CONTAINING_BLOCK_HEIGHT.with(|cell| cell.replace(height)));
+    layout()
+}
+
+/// A vertical size property (`height`, `min-height`, `max-height`) in px:
+/// a length, or a percentage of the definite containing-block height.
+/// `None` = auto / none / a percentage against an indefinite height.
+pub(crate) fn height_value(node: &StyledNode, name: &str) -> Option<f32> {
+    match node.value(name) {
+        Some(Value::Length(value, Unit::Px)) => Some(*value),
+        Some(Value::Length(value, Unit::Percent)) => {
+            containing_block_height().map(|base| *value / 100.0 * base)
+        }
+        _ => None,
+    }
+}
+
+/// `height` clamped by `max-height` then `min-height` (min wins, CSS 2.1
+/// §10.7). Used for both a definite `height` and the auto content height.
+pub(crate) fn clamp_height(node: &StyledNode, height: f32) -> f32 {
+    let mut height = height;
+    if let Some(max) = height_value(node, "max-height") {
+        height = height.min(max);
+    }
+    if let Some(min) = height_value(node, "min-height") {
+        height = height.max(min);
+    }
+    height.max(0.0)
+}
+
+/// The box's definite content height, if it has one: an explicit or
+/// definitely-resolved `height`, clamped. This is what its children's
+/// percentages resolve against.
+pub(crate) fn definite_height(node: &StyledNode) -> Option<f32> {
+    height_value(node, "height").map(|height| clamp_height(node, height))
+}
+
 pub(crate) fn is_auto(node: &StyledNode, name: &str) -> bool {
     matches!(node.value(name), Some(Value::Keyword(keyword)) if keyword == "auto")
 }

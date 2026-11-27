@@ -22,9 +22,10 @@ use block::layout_node;
 use flex::is_flex_container;
 use grid::is_grid_container;
 pub(super) use properties::{
-    apply_relative_offset, attribute_length, edge_sizes, has_float, is_auto, is_display_none,
-    is_float_left, is_float_right, is_layout_whitespace_text, is_out_of_flow, length_value,
-    shift_layout_subtree,
+    apply_relative_offset, attribute_length, clamp_height, containing_block_height,
+    definite_height, edge_sizes, has_float, is_auto, is_display_none, is_float_left,
+    is_float_right, is_layout_whitespace_text, is_out_of_flow, length_value, shift_layout_subtree,
+    with_containing_block_height,
 };
 use table::is_table_container;
 
@@ -92,16 +93,37 @@ pub enum BoxType {
 pub const MAX_LAYOUT_COORDINATE: f32 = mb_dom::style::MAX_CSS_LENGTH;
 
 pub fn layout_tree(root: &StyledNode, viewport_width: f32) -> LayoutBox {
-    inline::with_inline_size_memo(|| layout_tree_pass(root, viewport_width))
+    layout_tree_with_viewport(root, viewport_width, None)
 }
 
-fn layout_tree_pass(root: &StyledNode, viewport_width: f32) -> LayoutBox {
+/// [`layout_tree`] with the viewport height as the initial containing
+/// block's definite height, so the root's `height: N%` (and a chain of
+/// them, `html, body {height: 100%}`) resolves as in Chrome (standards
+/// mode; the quirks-mode body/html percentage quirk is not modelled).
+/// `layout_tree` leaves it indefinite — the root's percentage is `auto`.
+pub fn layout_tree_with_viewport(
+    root: &StyledNode,
+    viewport_width: f32,
+    viewport_height: Option<f32>,
+) -> LayoutBox {
+    inline::with_inline_size_memo(|| {
+        with_containing_block_height(viewport_height, || {
+            layout_tree_pass(root, viewport_width, viewport_height)
+        })
+    })
+}
+
+fn layout_tree_pass(
+    root: &StyledNode,
+    viewport_width: f32,
+    viewport_height: Option<f32>,
+) -> LayoutBox {
     // Element roots route through taffy (the bridge's measure-callback
     // boundary handles every shape taffy itself doesn't understand). Only
     // a non-element root (e.g. a stand-alone text node — never produced by
     // current callers) falls back to the legacy block path.
     let mut layout_box = mb_dom::profile::time_block("layout::via_taffy_or_legacy", || {
-        match taffy_bridge::layout_via_taffy(root, viewport_width) {
+        match taffy_bridge::layout_via_taffy(root, viewport_width, viewport_height) {
             Some(layout) => layout,
             None => {
                 let mut cursor_y = 0.0;
@@ -111,10 +133,10 @@ fn layout_tree_pass(root: &StyledNode, viewport_width: f32) -> LayoutBox {
     });
     // Pass 2: walk the tree and move every `position: absolute` subtree to
     // its final spot relative to its containing block. The initial
-    // containing block is the viewport; we only know its width, so we use
-    // the laid-out root's own outer height as the height base for the
-    // initial CB — close enough for `bottom`/`%` resolution at the root.
-    let initial_cb_height = outer_rect(&layout_box).height;
+    // containing block is the viewport (CSS 2.1 §10.1) — its height when the
+    // caller knows it (step 1p); otherwise the laid-out root's own outer
+    // height stands in, as before.
+    let initial_cb_height = viewport_height.unwrap_or_else(|| outer_rect(&layout_box).height);
     let initial_cb = ContainingBlock {
         x: 0.0,
         y: 0.0,
@@ -3576,5 +3598,262 @@ mod tests {
             "{computed} inline size computations for {nodes} nodes"
         );
         assert!(layout.dimensions.content.width > 0.0);
+    }
+
+    // ---- 1p: percentage heights (CSS 2.1 §10.5, compat round 3 step 1p) ----
+
+    use super::{LayoutBox, layout_tree_with_viewport};
+
+    /// An absolutely positioned child pushes its parent onto the legacy
+    /// path (taffy_bridge boundary rule); every case runs with and without.
+    const LEGACY: &str = r#"<i style="position:absolute"></i>"#;
+
+    fn page(body: &str, css: &str, viewport: (f32, f32)) -> LayoutBox {
+        let document =
+            html::parse(&format!("<!DOCTYPE html><html><body>{body}</body></html>")).unwrap();
+        let root = *document.roots().last().unwrap();
+        let sheet = css::parse(&format!("body {{ margin: 0; }} {css}")).unwrap();
+        let styled = style::style_tree(&document, root, &[sheet]);
+        layout_tree_with_viewport(&styled, viewport.0, Some(viewport.1))
+    }
+
+    fn by_class<'a>(layout: &'a LayoutBox, class: &str) -> &'a LayoutBox {
+        fn find<'a>(b: &'a LayoutBox, class: &str) -> Option<&'a LayoutBox> {
+            let hit = box_styled_node(b).is_some_and(|n| {
+                matches!(&n.node_type, crate::dom::NodeType::Element(e)
+                    if e.attributes.get("class").is_some_and(|c| c.split_whitespace().any(|w| w == class)))
+            });
+            if hit {
+                return Some(b);
+            }
+            b.children.iter().find_map(|c| find(c, class))
+        }
+        find(layout, class).unwrap_or_else(|| panic!("no box with class {class}"))
+    }
+
+    fn height_of(layout: &LayoutBox, class: &str) -> f32 {
+        by_class(layout, class).dimensions.content.height
+    }
+
+    #[test]
+    fn percent_height_in_an_auto_height_parent_is_auto() {
+        for extra in ["", LEGACY] {
+            let layout = page(
+                &format!(r#"<div class="p">{extra}<div class="c">x</div></div>"#),
+                ".c { height: 50%; }",
+                (800.0, 600.0),
+            );
+            let h = height_of(&layout, "c");
+            assert!(
+                h < 40.0,
+                "{extra:?}: height {h} should be the content height"
+            );
+        }
+    }
+
+    #[test]
+    fn percent_height_in_a_definite_parent_resolves_against_its_height() {
+        for extra in ["", LEGACY] {
+            let layout = page(
+                &format!(r#"<div class="p">{extra}<div class="c">x</div></div>"#),
+                ".p { height: 200px; } .c { height: 50%; }",
+                (800.0, 600.0),
+            );
+            assert_eq!(height_of(&layout, "c"), 100.0, "{extra:?}");
+        }
+    }
+
+    #[test]
+    fn html_body_percent_height_chain_fills_the_viewport() {
+        for extra in ["", LEGACY] {
+            let layout = page(
+                &format!(r#"<div class="c">{extra}x</div>"#),
+                "html, body { height: 100%; } .c { height: 50%; }",
+                (800.0, 600.0),
+            );
+            assert_eq!(layout.dimensions.content.height, 600.0, "{extra:?}: html");
+            assert_eq!(
+                layout.children[0].dimensions.content.height, 600.0,
+                "{extra:?}: body"
+            );
+            assert_eq!(height_of(&layout, "c"), 300.0, "{extra:?}");
+        }
+    }
+
+    #[test]
+    fn percent_height_chain_breaks_at_an_auto_ancestor() {
+        for extra in ["", LEGACY] {
+            let layout = page(
+                &format!(r#"<div class="mid">{extra}<div class="c">x</div></div>"#),
+                "html, body { height: 100%; } .c { height: 50%; }",
+                (800.0, 600.0),
+            );
+            assert!(height_of(&layout, "c") < 40.0, "{extra:?}");
+        }
+    }
+
+    #[test]
+    fn absolute_percent_height_resolves_against_the_containing_block_padding_box() {
+        let layout = page(
+            r#"<div class="rel"><div class="abs">x</div></div>
+               <div class="rel2"><p>one line</p><div class="abs2"></div></div>"#,
+            concat!(
+                ".rel { position: relative; height: 80px; padding: 10px; } ",
+                ".abs { position: absolute; top: 0; height: 50%; } ",
+                ".rel2 { position: relative; } ",
+                ".abs2 { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }"
+            ),
+            (800.0, 600.0),
+        );
+        assert_eq!(
+            height_of(&layout, "abs"),
+            50.0,
+            "50% of the 100px padding box"
+        );
+        let rel2 = by_class(&layout, "rel2").dimensions;
+        let padding_box = rel2.padding.top + rel2.content.height + rel2.padding.bottom;
+        assert_eq!(
+            height_of(&layout, "abs2"),
+            padding_box,
+            "auto-height CB, known after layout"
+        );
+        assert!(padding_box < 60.0, "{padding_box}");
+    }
+
+    #[test]
+    fn fixed_and_unanchored_absolute_percent_heights_use_the_viewport() {
+        // The initial containing block is the viewport, not the root box
+        // (CSS 2.1 §10.1): a tall page must not stretch them.
+        let layout = page(
+            r#"<div class="tall"></div><div class="fixed"></div><div class="abs"></div>"#,
+            concat!(
+                ".tall { height: 3000px; } ",
+                ".fixed { position: fixed; top: 0px; height: 50%; } ",
+                ".abs { position: absolute; bottom: 0px; height: 25%; }"
+            ),
+            (800.0, 600.0),
+        );
+        assert_eq!(height_of(&layout, "fixed"), 300.0);
+        assert_eq!(height_of(&layout, "abs"), 150.0);
+        let abs = by_class(&layout, "abs").dimensions.content;
+        assert_eq!(abs.y + abs.height, 600.0, "bottom: 0 of the viewport");
+    }
+
+    #[test]
+    fn percent_height_inside_an_absolute_box_with_a_definite_height() {
+        // korea.kr's logo: an abs-pos box with a fixed height holds a link
+        // with `height: 100%` whose only child is a visually-hidden span.
+        let layout = page(
+            r#"<header class="hd"><div class="logo"><a class="lnk" href="/"><span class="sr">Name</span></a></div></header>"#,
+            concat!(
+                ".hd { position: relative; height: 80px; } ",
+                ".logo { position: absolute; width: 117px; height: 47px; } ",
+                ".lnk { display: block; width: 100%; height: 100%; } ",
+                ".sr { position: absolute; width: 1px; height: 1px; overflow: hidden; }"
+            ),
+            (1280.0, 800.0),
+        );
+        assert_eq!(height_of(&layout, "lnk"), 47.0);
+    }
+
+    #[test]
+    fn absolute_child_of_a_flex_or_inline_container_sizes_as_a_block() {
+        // Absolutely positioned boxes are blockified (CSS 2.1 §9.7) and sized
+        // shrink-to-fit: their children resolve `width`/`height` % against
+        // the box itself, not the container it sits in. korea.kr's logo link
+        // (`.container{display:flex}` > abs `.logo` > `a{height:100%}`)
+        // came out 1,144 wide and 0 tall, so the agent lost it.
+        for container in ["display: flex;", "display: grid;", ""] {
+            let layout = page(
+                r#"<div class="box">text <div class="logo"><a class="lnk" href="/"><span class="sr">Name</span></a></div></div>"#,
+                &format!(
+                    ".box {{ {container} padding: 19px 60px; }} \
+                     .logo {{ position: absolute; width: 117px; height: 47px; }} \
+                     .lnk {{ display: block; width: 100%; height: 100%; }} \
+                     .sr {{ position: absolute; width: 1px; height: 1px; overflow: hidden; }}"
+                ),
+                (1280.0, 800.0),
+            );
+            let lnk = by_class(&layout, "lnk").dimensions.content;
+            assert_eq!((lnk.width, lnk.height), (117.0, 47.0), "{container:?}");
+        }
+    }
+
+    #[test]
+    fn inline_flex_with_percent_height_in_an_auto_parent_keeps_its_content_height() {
+        // GitHub's breadcrumb: `a { display: inline-flex; height: 100% }`
+        // in an auto-height `li`, holding an inline-block `span`. With the
+        // percentage auto, the box must still be as tall as its content —
+        // legacy lays inline-flex out as an inline box, whose inline-block
+        // children counted 0 tall.
+        let layout = page(
+            r#"<ol class="ol"><li class="li"><a class="crumb" href="/x"><span class="last">tokio</span></a></li></ol>"#,
+            concat!(
+                ".ol { margin: 0; padding-left: 0; } .li { list-style: none; } ",
+                ".crumb { display: inline-flex; align-items: center; height: 100%; padding: 4px 6px; } ",
+                ".last { display: inline-block; line-height: 24px; }"
+            ),
+            (1280.0, 800.0),
+        );
+        assert_eq!(height_of(&layout, "crumb"), 24.0);
+    }
+
+    #[test]
+    fn min_and_max_height_percentages_need_a_definite_containing_block() {
+        for extra in ["", LEGACY] {
+            let layout = page(
+                &format!(
+                    r#"<div class="p">{extra}<div class="min">x</div><div class="max">x</div></div>
+                       <div class="q">{extra}<div class="min2">x</div><div class="max2">x</div></div>"#
+                ),
+                ".p { height: 200px; }                  .min, .min2 { min-height: 50%; }                  .max, .max2 { height: 150px; max-height: 10%; }",
+                (800.0, 600.0),
+            );
+            assert_eq!(
+                height_of(&layout, "min"),
+                100.0,
+                "{extra:?}: min-height 50% of 200"
+            );
+            assert_eq!(
+                height_of(&layout, "max"),
+                20.0,
+                "{extra:?}: max-height 10% of 200"
+            );
+            assert!(
+                height_of(&layout, "min2") < 40.0,
+                "{extra:?}: min-height % → 0"
+            );
+            assert_eq!(
+                height_of(&layout, "max2"),
+                150.0,
+                "{extra:?}: max-height % → none"
+            );
+        }
+    }
+
+    #[test]
+    fn percent_heights_in_an_auto_height_flex_header_stay_small() {
+        // Wikipedia's Vector header: a logo with `height: 100%` and an
+        // invisible full-size checkbox over a dropdown label, in auto-height
+        // flex rows. Resolving % against the width made the header ~1,300px.
+        let layout = page(
+            r#"<header class="h"><div class="start">
+                 <div class="dd"><input type="checkbox" class="cb">
+                   <label class="lbl"><span>i</span><span class="sr">Main menu</span></label></div>
+                 <a class="logo" href="/">Logo</a>
+               </div></header><p>after</p>"#,
+            concat!(
+                ".h, .start { display: flex; } ",
+                ".logo { display: flex; height: 100%; } ",
+                ".dd { position: relative; } ",
+                ".cb { position: absolute; top: 0; left: 0; width: 100%; height: 100%; } ",
+                ".sr { position: absolute; width: 1px; height: 1px; overflow: hidden; }"
+            ),
+            (1280.0, 800.0),
+        );
+        for class in ["h", "logo", "cb"] {
+            let h = height_of(&layout, class);
+            assert!(h < 60.0, "{class}: height {h}");
+        }
     }
 }

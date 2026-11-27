@@ -29,6 +29,10 @@ pub struct DocumentView {
     pub commands: Vec<render::DisplayCommand>,
     pub links: Vec<LinkTarget>,
     pub layout_root: layout::LayoutBox,
+    /// The layout resolved the root's percentage `height`/`min-height`/
+    /// `max-height` against the viewport height (step 1p) — so, unlike the
+    /// rest of the view, it changes with a height-only resize.
+    pub reads_viewport_height: bool,
 }
 
 // The deepest layout box under the mouse. `path` is the DOM-order index
@@ -71,7 +75,11 @@ pub fn build_document_view(
         style::style_tree_with_state(parsed_document, root, stylesheets, interaction, &media)
     });
     let layout = profile::time_block("view::layout_tree", || {
-        layout::layout_tree(&styled, viewport_width as f32)
+        layout::layout_tree_with_viewport(
+            &styled,
+            viewport_width as f32,
+            Some(viewport_height as f32),
+        )
     });
     let paint_ctx = render::PaintContext {
         base_url: current_url,
@@ -97,10 +105,19 @@ pub fn build_document_view(
     let links = profile::time_block("view::collect_link_targets", || {
         collect_link_targets(&layout, None, false, render::Affine::IDENTITY)
     });
+    // Only a percentage on the root can reach the initial containing
+    // block's height; anything below it chains through the root.
+    let reads_viewport_height = ["height", "min-height", "max-height"].iter().any(|name| {
+        matches!(
+            styled.value(name),
+            Some(css::Value::Length(_, css::Unit::Percent))
+        )
+    });
     Ok(DocumentView {
         commands,
         links,
         layout_root: layout,
+        reads_viewport_height,
     })
 }
 
