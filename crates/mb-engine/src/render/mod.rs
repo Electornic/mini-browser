@@ -259,6 +259,10 @@ pub struct ImageCommand {
     // the source clipped to the box rect.
     pub source_x: f32,
     pub source_y: f32,
+    /// Where the whole (scaled) image sits, in the same coordinates as
+    /// `x`/`y` — `background-size` (step 1b). The box rect clips it. When
+    /// set it replaces both legacy shapes above (stretch / sprite offset).
+    pub tile: Option<crate::layout::Rect>,
 }
 
 /// Multiply every coordinate, size and font size in a display list by
@@ -302,6 +306,7 @@ pub fn scale_display_list(commands: &[DisplayCommand], factor: f32) -> Vec<Displ
                 y: image.y * factor,
                 width: image.width * factor,
                 height: image.height * factor,
+                tile: image.tile.as_ref().map(rect),
                 ..image.clone()
             }),
             DisplayCommand::Gradient(gradient) => DisplayCommand::Gradient(GradientCommand {
@@ -622,7 +627,9 @@ mod tests {
         // divider invisible.
         let commands = display_list(
             r#"<div></div>"#,
-            r#"div { color: red; border-top: 2px; height: 10px; }"#,
+            // `border-top: 2px` alone resets the style to none (no border,
+            // as in Chrome — step 1b); the style makes it paint.
+            r#"div { color: red; border-top: 2px solid; height: 10px; }"#,
         );
         let red_top = commands.iter().find(|cmd| {
             matches!(
@@ -636,6 +643,154 @@ mod tests {
             red_top.is_some(),
             "border-top should paint in the element's `color` when border-color is unset",
         );
+    }
+
+    #[test]
+    fn border_side_color_paints() {
+        // Per-side colours (step 1b): `border-left-color` beats the
+        // `border` shorthand's colour on that side only.
+        let commands = display_list(
+            r#"<div>x</div>"#,
+            "div { border: 2px solid #00ff00; border-left-color: #0000ff; height: 10px; }",
+        );
+        let rect_of = |pred: &dyn Fn(&crate::layout::Rect) -> bool| {
+            commands.iter().find_map(|cmd| match cmd {
+                DisplayCommand::SolidRect(color, rect) if pred(rect) => Some(*color),
+                _ => None,
+            })
+        };
+        let top = rect_of(&|r| r.height == 2.0 && r.width > 2.0).expect("top border");
+        let left = rect_of(&|r| r.width == 2.0 && r.height > 2.0).expect("left border");
+        assert_eq!((top.g, top.b), (255, 0));
+        assert_eq!((left.g, left.b), (0, 255));
+    }
+
+    #[test]
+    fn font_family_list_with_monospace_reaches_the_text_command() {
+        let commands = display_list(
+            r#"<p>x</p>"#,
+            "p { font-family: Menlo, Consolas, monospace; }",
+        );
+        let text = commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DisplayCommand::Text(text) if text.text == "x" => Some(text),
+                _ => None,
+            })
+            .expect("text");
+        assert_eq!(text.font_family.as_deref(), Some("monospace"));
+        let commands = display_list(
+            r#"<p>x</p>"#,
+            r#"p { font-family: "Helvetica Neue", Arial; }"#,
+        );
+        assert!(commands.iter().any(|cmd| matches!(cmd, DisplayCommand::Text(t) if t.text == "x" && t.font_family.as_deref() != Some("monospace"))));
+    }
+
+    fn sprite_commands(css: &str) -> Vec<DisplayCommand> {
+        let document = html::parse(r##"<a class="s"></a>"##).unwrap();
+        let root = document.roots()[0];
+        let stylesheet = css::parse(css).unwrap();
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let layout = layout::layout_tree(&styled, 400.0);
+        let base = crate::url::Url::parse("http://example.com/").unwrap();
+        let resolved = base.resolve("/s.png").unwrap();
+        let mut images = std::collections::HashMap::new();
+        // A 4×4 source.
+        images.insert(
+            resolved.to_string(),
+            crate::resource::LoadedImage {
+                url: resolved,
+                width: 4,
+                height: 4,
+                pixels: vec![0; 16],
+            },
+        );
+        render::build_display_list(
+            &layout,
+            &render::PaintContext {
+                base_url: Some(&base),
+                images: &images,
+            },
+        )
+    }
+
+    fn image_of(commands: &[DisplayCommand]) -> &ImageCommand {
+        commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                DisplayCommand::Image(img) => Some(img),
+                _ => None,
+            })
+            .expect("an Image command")
+    }
+
+    #[test]
+    fn background_size_scales_sprite() {
+        // `background-size` places the scaled image (the tile) and the box
+        // clips it; `background-position` offsets the tile (step 1b).
+        let base =
+            ".s { display: inline-block; width: 8px; height: 8px; background-image: url(/s.png); ";
+        let commands = sprite_commands(&format!("{base} background-size: 8px 8px; }}"));
+        let img = image_of(&commands);
+        let tile = img.tile.expect("a sized background places a tile");
+        assert_eq!(
+            (tile.x - img.x, tile.y - img.y, tile.width, tile.height),
+            (0.0, 0.0, 8.0, 8.0)
+        );
+
+        let commands = sprite_commands(&format!(
+            "{base} background-size: 16px auto; background-position: -8px 0; }}"
+        ));
+        let tile = image_of(&commands).tile.unwrap();
+        assert_eq!(
+            (tile.x - image_of(&commands).x, tile.width, tile.height),
+            (-8.0, 16.0, 16.0),
+            "auto keeps the ratio"
+        );
+
+        let commands = sprite_commands(&format!("{base} background-size: contain; }}"));
+        assert_eq!(image_of(&commands).tile.unwrap().width, 8.0);
+        let commands = sprite_commands(&format!("{base} background-size: auto; }}"));
+        assert_eq!(
+            image_of(&commands).tile.unwrap().width,
+            4.0,
+            "auto auto = natural size"
+        );
+
+        // No `background-size`: the existing stretch / sprite paths.
+        let commands = sprite_commands(&format!("{base} }}"));
+        assert!(image_of(&commands).tile.is_none());
+    }
+
+    #[test]
+    fn background_size_tile_rasterises_at_the_given_scale() {
+        // 2×2 source, red top-left pixel, drawn into a 4×4 box at 4×4: the
+        // red pixel covers the top-left 2×2 device pixels.
+        let mut pixels = vec![0xFF_00_00_FF_u32; 4];
+        pixels[0] = 0xFF_FF_00_00;
+        let commands = vec![DisplayCommand::Image(ImageCommand {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+            source_width: 2,
+            source_height: 2,
+            pixels: std::rc::Rc::new(pixels),
+            source_x: 0.0,
+            source_y: 0.0,
+            tile: Some(crate::layout::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 4.0,
+                height: 4.0,
+            }),
+        })];
+        let buffer = render::rasterize(&commands, 4, 4);
+        let red = |x: usize, y: usize| {
+            (buffer[y * 4 + x] >> 16) & 0xFF == 0xFF && buffer[y * 4 + x] & 0xFF == 0
+        };
+        assert!(red(0, 0) && red(1, 1), "scaled red pixel");
+        assert!(!red(2, 2) && !red(3, 0), "the rest is blue");
     }
 
     #[test]
@@ -1092,6 +1247,7 @@ mod tests {
                     pixels: std::rc::Rc::new(vec![0x112233]),
                     source_x: 0.0,
                     source_y: 0.0,
+                    tile: None,
                 }),
             ],
             10.0,
@@ -1135,6 +1291,7 @@ mod tests {
                 pixels: std::rc::Rc::new(vec![0x112233]),
                 source_x: 0.0,
                 source_y: 0.0,
+                tile: None,
             })
         );
     }
@@ -1152,6 +1309,7 @@ mod tests {
                 pixels: std::rc::Rc::new(vec![0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF]),
                 source_x: 0.0,
                 source_y: 0.0,
+                tile: None,
             })],
             2,
             2,
@@ -1168,10 +1326,10 @@ mod tests {
                 .panel {
                     width: 20px;
                     height: 10px;
-                    border-left: 2px;
-                    border-right: 2px;
-                    border-top: 1px;
-                    border-bottom: 3px;
+                    border-left: 2px solid;
+                    border-right: 2px solid;
+                    border-top: 1px solid;
+                    border-bottom: 3px solid;
                     border-color: #112233;
                 }
             "#,

@@ -671,7 +671,24 @@ impl Gen {
                 ]),
                 self.length(),
             ),
-            13 => ("border", format!("{} solid red", self.length())),
+            13 => match self.rng.below(4) {
+                0 => ("border", format!("{} solid red", self.length())),
+                1 => (
+                    *self.rng.pick(&["border-top", "border-left"]),
+                    format!(
+                        "{} {}",
+                        self.length(),
+                        self.rng.pick(&["solid", "none", "dashed"])
+                    ),
+                ),
+                2 => (
+                    "border-style",
+                    self.rng
+                        .pick(&["none", "solid hidden", "hidden"])
+                        .to_string(),
+                ),
+                _ => ("inset", self.length()),
+            },
             14 => (
                 "box-sizing",
                 self.rng.pick(&["border-box", "content-box"]).to_string(),
@@ -682,7 +699,7 @@ impl Gen {
                     1 => format!("{} {} {}", self.number(), self.number(), self.length()),
                     2 => self
                         .rng
-                        .pick(&["none", "auto", "1 1 0%", "0 0 auto"])
+                        .pick(&["none", "auto", "1 1 0%", "0 0 auto", "1 1 0", "1", "auto 2"])
                         .to_string(),
                     _ => format!("{} {}", self.number(), self.length()),
                 };
@@ -1596,6 +1613,19 @@ const CSS_DEDICATED: &[&str] = &[
     "border",
     "font",
     "gap",
+    // Step 1b value parsers.
+    "border-top",
+    "border-width",
+    "border-style",
+    "border-color",
+    "font-family",
+    "background-size",
+    "clip",
+    "clip-path",
+    "inset",
+    "transition",
+    "animation",
+    "all",
 ];
 
 /// Pieces of `@media` preludes: real features, values, range operators,
@@ -1749,20 +1779,26 @@ fn soup_value(rng: &mut Rng, property: &str) -> String {
     let template = match property {
         "background" => *rng.pick(&[
             "red url(a.png) 1px 2px no-repeat",
+            "url(s.png) -1px -1px / 1px 1px no-repeat",
+            "none",
             "linear-gradient(90deg, red 1%, blue)",
             "#fff",
         ]),
         "background-position" => *rng.pick(&["1px 2px", "left 1px top", "center 50%"]),
         "border-radius" => *rng.pick(&["1px", "1px 2px 3px 4px / 5px", "50%"]),
-        "box-shadow" | "text-shadow" => {
-            *rng.pick(&["1px 2px 3px red", "inset 0 0 1px 2px #000", "1px 1px"])
-        }
+        "box-shadow" | "text-shadow" => *rng.pick(&[
+            "1px 2px 3px red",
+            "inset 0 0 1px 2px #000",
+            "1px 1px",
+            "0 1px red, inset 0 1px blue",
+            "red 0 0 1px",
+        ]),
         "transform" => *rng.pick(&[
             "rotate(1deg) translate(1px, 2px)",
             "scale(2) matrix(1,0,0,1,1,1)",
             "translateX(1%)",
         ]),
-        "flex" => *rng.pick(&["1 1 0%", "2 3", "1px", "none"]),
+        "flex" => *rng.pick(&["1 1 0%", "2 3", "1px", "none", "1 1 0", "auto 1", "1"]),
         "grid-template-columns" | "grid-template-rows" => *rng.pick(&[
             "1fr 2fr",
             "repeat(3, 1px) minmax(1px, 1fr)",
@@ -1781,7 +1817,36 @@ fn soup_value(rng: &mut Rng, property: &str) -> String {
         "grid-template-areas" => *rng.pick(&["\"a b\" \"c d\"", "\"a\" \"a b\"", "\". .\""]),
         "grid-column" | "grid-row" => *rng.pick(&["1 / span 2", "-1 / 1", "a / b", "span 1"]),
         "font" => *rng.pick(&["bold 1px/2 serif", "1px a", "italic 1em b"]),
-        "border" => *rng.pick(&["1px solid red", "1px", "thick dashed"]),
+        "border" | "border-top" => *rng.pick(&[
+            "1px solid red",
+            "1px",
+            "thick dashed",
+            "none",
+            "0",
+            "medium currentcolor inset",
+            "red 1px solid",
+            "light-dark(red, blue) 1px solid",
+        ]),
+        "border-width" => *rng.pick(&["1px 2px", "thin medium thick 1px", "0"]),
+        "border-style" => *rng.pick(&["solid none", "hidden", "dotted dashed solid double"]),
+        "border-color" => *rng.pick(&["red blue", "currentcolor", "#123 #456 #789 #abc"]),
+        "font-family" => *rng.pick(&[
+            "\"Helvetica Neue\", Arial, sans-serif",
+            "Menlo, monospace",
+            "a b c",
+        ]),
+        "background-size" => {
+            *rng.pick(&["224px 242px", "cover", "auto 50%", "contain, 1px", "1em"])
+        }
+        "clip" => *rng.pick(&["rect(0 0 0 0)", "rect(1px, auto, 1px, auto)", "auto"]),
+        "clip-path" => *rng.pick(&["inset(50%)", "inset(0 1px round 1px)", "none"]),
+        "inset" => *rng.pick(&["0", "1px auto 1px", "1% 1px 1px 1px"]),
+        "transition" | "animation" => *rng.pick(&[
+            "opacity .2s ease, transform 1s",
+            "spin 1s linear infinite",
+            "none",
+        ]),
+        "all" => *rng.pick(&["unset", "inherit", "initial", "revert"]),
         _ => *rng.pick(&["1px", "1px 2px 3px 4px", "1%", "1em", "1", "red"]),
     };
     const NUMBERS: &[&str] = &[

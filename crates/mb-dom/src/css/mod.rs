@@ -21,7 +21,7 @@ use grid::{
     parse_grid_placement, parse_grid_template_areas, parse_grid_template_shorthand,
     parse_grid_track_list,
 };
-use parse::parse_value;
+use parse::{is_parse_only, parse_clip, parse_font_family, parse_raw, parse_value};
 pub use report::{
     AtRuleSeen, DropReason, DroppedDeclaration, DroppedRule, MediaVerdict, Origin, ParseReport,
     media_verdict, parse_with_report,
@@ -30,8 +30,9 @@ use selector::SelectorParserImpl;
 pub use selector::{CssString, MiniBrowserSelectorImpl, NonTSPseudoClass, PseudoElement, Selector};
 use shadow::{parse_box_shadow_value, parse_text_shadow_value};
 use shorthand::{
-    parse_background_position, parse_background_shorthand, parse_border_radius_shorthand,
-    parse_box_edge_shorthand, parse_flex_shorthand,
+    parse_background_position, parse_background_shorthand, parse_background_size,
+    parse_border_radius_shorthand, parse_border_shorthand, parse_border_side_width,
+    parse_border_sides, parse_box_edge_shorthand, parse_flex_shorthand, parse_inset_shorthand,
 };
 use transform::parse_transform_value;
 
@@ -121,6 +122,14 @@ pub enum Value {
     // against the document's base URL when fetching, and the painter does
     // the same when looking the loaded pixels back up at paint time.
     ImageUrl(String),
+    // `font-family` list, in order, names unquoted (step 1b). Only the
+    // monospace check reads it today; real font selection is out of scope.
+    FontFamilies(Vec<String>),
+    // `background-size` (step 1b) — painted by `background_image_command`.
+    BackgroundSize(BackgroundSize),
+    // `clip: rect(…)` / `clip-path: inset(…)` (step 1b) — kept for the
+    // overflow-clipping step (compat round 3 step 3); nothing reads it yet.
+    ClipBox(ClipBox),
     // `var(--name)` / `var(--name, fallback)` reference. Survives parse time
     // unresolved; the cascade in `style.rs` walks every value at style time
     // and substitutes the looked-up `--*` declaration in scope (custom
@@ -130,6 +139,42 @@ pub enum Value {
         name: String,
         fallback: Option<Box<Value>>,
     },
+}
+
+/// `background-size`: a keyword, or a width and height (`auto` keeps the
+/// image's ratio; both `auto` = natural size).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BackgroundSize {
+    Cover,
+    Contain,
+    Size(SizeAxis, SizeAxis),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SizeAxis {
+    Auto,
+    Length(f32, Unit),
+}
+
+/// `clip: rect(top, right, bottom, left)` (edges from the box's top-left)
+/// or `clip-path: inset(top right bottom left)` (insets from each side).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipBox {
+    pub function: ClipFunction,
+    /// top, right, bottom, left.
+    pub edges: [ClipEdge; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipFunction {
+    Rect,
+    Inset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClipEdge {
+    Auto,
+    Length(f32, Unit),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -647,6 +692,47 @@ fn parse_declaration_value<'i>(
     name: &str,
     input: &mut CssParser<'i>,
 ) -> Result<Vec<Declaration>, ParseError> {
+    // CSS-wide keywords are valid for every property; a shorthand passes
+    // them to each of its longhands (the cascade resolves them, step 1b).
+    if let Ok(keyword) = input.try_parse(parse_css_wide_keyword) {
+        return Ok(longhands_of(name)
+            .into_iter()
+            .map(|longhand| Declaration {
+                name: longhand,
+                value: Value::Keyword(keyword.clone()),
+                important: false,
+            })
+            .collect());
+    }
+    if name == "all" {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            "all: only CSS-wide keywords",
+        ));
+    }
+    let single = |value: Value| {
+        Ok(vec![Declaration {
+            name: name.to_string(),
+            value,
+            important: false,
+        }])
+    };
+    match name {
+        "border" | "border-top" | "border-right" | "border-bottom" | "border-left" => {
+            return parse_border_shorthand(name, input);
+        }
+        "border-width" | "border-style" | "border-color" => return parse_border_sides(name, input),
+        "border-top-width" | "border-right-width" | "border-bottom-width" | "border-left-width" => {
+            let side = &name["border-".len()..name.len() - "-width".len()];
+            return parse_border_side_width(side, input);
+        }
+        "inset" => return parse_inset_shorthand(input),
+        "font-family" => return single(parse_font_family(input)?),
+        "background-size" => return single(parse_background_size(input)?),
+        "clip" | "clip-path" => return single(parse_clip(name, input)?),
+        _ if is_parse_only(name) => return single(parse_raw(input)?),
+        _ => {}
+    }
     if name == "border-radius" {
         return parse_border_radius_shorthand(name, input);
     }
@@ -730,6 +816,83 @@ fn parse_declaration_value<'i>(
     }])
 }
 
+/// `inherit | initial | unset | revert | revert-layer`, alone, lower-cased.
+fn parse_css_wide_keyword<'i>(input: &mut CssParser<'i>) -> Result<String, ()> {
+    let ident = input.expect_ident_cloned().map_err(|_| ())?;
+    let lower = ident.to_ascii_lowercase();
+    if !properties::CSS_WIDE_KEYWORDS.contains(&lower.as_str()) {
+        return Err(());
+    }
+    input.skip_whitespace();
+    input.expect_exhausted().map_err(|_| ())?;
+    Ok(lower)
+}
+
+/// The longhands a shorthand sets, under the engine's keys; any other name
+/// is its own single longhand.
+fn longhands_of(name: &str) -> Vec<String> {
+    const SIDES: [&str; 4] = ["top", "right", "bottom", "left"];
+    let each = |f: &dyn Fn(&str) -> String| SIDES.iter().map(|side| f(side)).collect();
+    match name {
+        "margin" | "padding" => each(&|side| format!("{name}-{side}")),
+        "inset" => each(&|side| side.to_string()),
+        "border" => SIDES
+            .iter()
+            .flat_map(|side| {
+                [
+                    format!("border-{side}"),
+                    format!("border-{side}-style"),
+                    format!("border-{side}-color"),
+                ]
+            })
+            .collect(),
+        "border-top" | "border-right" | "border-bottom" | "border-left" => {
+            vec![
+                name.to_string(),
+                format!("{name}-style"),
+                format!("{name}-color"),
+            ]
+        }
+        "border-width" => each(&|side| format!("border-{side}")),
+        "border-style" => each(&|side| format!("border-{side}-style")),
+        "border-color" => each(&|side| format!("border-{side}-color")),
+        "border-top-width" | "border-right-width" | "border-bottom-width" | "border-left-width" => {
+            vec![name.trim_end_matches("-width").to_string()]
+        }
+        "border-radius" => [
+            "border-top-left-radius",
+            "border-top-right-radius",
+            "border-bottom-right-radius",
+            "border-bottom-left-radius",
+        ]
+        .map(String::from)
+        .to_vec(),
+        "flex" => ["flex-grow", "flex-shrink", "flex-basis"]
+            .map(String::from)
+            .to_vec(),
+        "background" => [
+            "background-color",
+            "background-image",
+            "background-position-x",
+            "background-position-y",
+            "background-size",
+        ]
+        .map(String::from)
+        .to_vec(),
+        "background-position" => ["background-position-x", "background-position-y"]
+            .map(String::from)
+            .to_vec(),
+        "grid-template" => [
+            "grid-template-rows",
+            "grid-template-columns",
+            "grid-template-areas",
+        ]
+        .map(String::from)
+        .to_vec(),
+        other => vec![other.to_string()],
+    }
+}
+
 /// A bare `0` is a valid `<length>` (CSS Values 4 §6.1); for a length-valued
 /// property store it as `0px` — layout and the taffy bridge read `Length`
 /// only, so `top: 0` as `Number(0)` was silently ignored (step 1q).
@@ -755,8 +918,9 @@ pub(crate) fn unitless_zero_as_length(name: &str, value: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoxShadow, Color, GradientDirection, GradientKind, GridLine, Stylesheet, TextShadow,
-        TrackSize, TransformOp, Unit, Value, parse,
+        BackgroundSize, BoxShadow, ClipBox, ClipEdge, ClipFunction, Color, GradientDirection,
+        GradientKind, GridLine, SizeAxis, Stylesheet, TextShadow, TrackSize, TransformOp, Unit,
+        Value, parse,
     };
 
     /// `(name, value, important)` of every declaration in the sheet.
@@ -885,6 +1049,310 @@ mod tests {
         assert_eq!(flagged(".a{top:5}")[0].1, Value::Number(5.0));
     }
 
+    // ---- 1b: value parsers (docs/compat-round3.md 1단계) ----
+
+    /// Every declaration of `.a{…}` as `name → value`, in order (a later
+    /// duplicate wins, like the cascade).
+    fn decls(body: &str) -> std::collections::BTreeMap<String, Value> {
+        flagged(&format!(".a{{{body}}}"))
+            .into_iter()
+            .map(|(name, value, _)| (name, value))
+            .collect()
+    }
+
+    fn px(v: f32) -> Value {
+        Value::Length(v, Unit::Px)
+    }
+
+    fn kw(k: &str) -> Value {
+        Value::Keyword(k.into())
+    }
+
+    fn rgb(r: u8, g: u8, b: u8) -> Value {
+        Value::Color(Color { r, g, b, a: 255 })
+    }
+
+    #[test]
+    fn border_shorthand_expands_to_longhands() {
+        let d = decls("border: 1px solid #ccc");
+        for side in ["top", "right", "bottom", "left"] {
+            assert_eq!(d[&format!("border-{side}")], px(1.0), "{side}");
+            assert_eq!(d[&format!("border-{side}-style")], kw("solid"), "{side}");
+            assert_eq!(
+                d[&format!("border-{side}-color")],
+                rgb(0xcc, 0xcc, 0xcc),
+                "{side}"
+            );
+        }
+        let d = decls("border-top: 2px dashed red");
+        assert_eq!(d["border-top"], px(2.0));
+        assert_eq!(d["border-top-style"], kw("dashed"));
+        assert_eq!(d["border-top-color"], rgb(255, 0, 0));
+        assert!(!d.contains_key("border-left"));
+        // Any order; omitted parts reset to their initial values (medium /
+        // none / currentcolor), as in Chrome.
+        let d = decls("border-bottom: red solid");
+        assert_eq!(d["border-bottom"], px(3.0));
+        assert_eq!(d["border-bottom-style"], kw("solid"));
+        let d = decls("border: 2px solid");
+        assert_eq!(d["border-left-color"], kw("currentcolor"));
+        let d = decls("border: none");
+        assert_eq!(d["border-top-style"], kw("none"));
+        let d = decls("border: 0");
+        assert_eq!(d["border-top"], px(0.0));
+        let d = decls("border-width: 1px 2px");
+        assert_eq!(
+            [
+                &d["border-top"],
+                &d["border-right"],
+                &d["border-bottom"],
+                &d["border-left"]
+            ],
+            [&px(1.0), &px(2.0), &px(1.0), &px(2.0)]
+        );
+        let d = decls("border-width: thin medium thick 0");
+        assert_eq!(
+            [
+                &d["border-top"],
+                &d["border-right"],
+                &d["border-bottom"],
+                &d["border-left"]
+            ],
+            [&px(1.0), &px(3.0), &px(5.0), &px(0.0)]
+        );
+        let d = decls("border-style: solid none");
+        assert_eq!(
+            (&d["border-top-style"], &d["border-left-style"]),
+            (&kw("solid"), &kw("none"))
+        );
+        let d = decls("border-color: red blue");
+        assert_eq!(
+            (&d["border-top-color"], &d["border-right-color"]),
+            (&rgb(255, 0, 0), &rgb(0, 0, 255))
+        );
+        // A real longhand width folds onto the existing key.
+        let d = decls("border-left-width: 4px");
+        assert_eq!(d["border-left"], px(4.0));
+        // Junk drops the whole declaration.
+        assert!(decls("border: 1px solid red blue").is_empty());
+        assert!(decls("border: 1px 2px solid").is_empty());
+    }
+
+    #[test]
+    fn font_family_list_parses() {
+        let d = decls(r#"font-family: "Helvetica Neue", Arial, sans-serif"#);
+        assert_eq!(
+            d["font-family"],
+            Value::FontFamilies(vec![
+                "Helvetica Neue".into(),
+                "Arial".into(),
+                "sans-serif".into()
+            ])
+        );
+        let d = decls("font-family: Apple SD Gothic Neo, monospace");
+        assert_eq!(
+            d["font-family"],
+            Value::FontFamilies(vec!["Apple SD Gothic Neo".into(), "monospace".into()])
+        );
+        assert!(decls("font-family: Arial,, serif").is_empty());
+    }
+
+    #[test]
+    fn box_shadow_list_keeps_first_layer() {
+        let d = decls("box-shadow: 0 1px 2px red, 0 2px 4px rgba(0,0,0,.5)");
+        match &d["box-shadow"] {
+            Value::BoxShadow(BoxShadow {
+                offset_y, color, ..
+            }) => {
+                assert_eq!((*offset_y, color.r), (1.0, 255));
+            }
+            other => panic!("{other:?}"),
+        }
+        // `inset` layers parse but aren't painted: the first outset one is.
+        let d = decls("box-shadow: inset 0 1px red, 0 3px blue");
+        assert!(matches!(&d["box-shadow"], Value::BoxShadow(s) if s.offset_y == 3.0));
+        let d = decls("box-shadow: inset 0 1px red");
+        assert_eq!(d["box-shadow"], kw("none"));
+        assert_eq!(decls("box-shadow: none")["box-shadow"], kw("none"));
+        assert!(decls("box-shadow: 0 1px red,").is_empty());
+    }
+
+    #[test]
+    fn transition_parses_without_drop() {
+        for (name, value) in [
+            (
+                "transition",
+                "opacity .2s ease, transform .3s cubic-bezier(.2,0,0,1)",
+            ),
+            ("animation", "spin 1s linear infinite"),
+            ("transition-property", "opacity, transform"),
+            ("animation-timing-function", "steps(4, end)"),
+        ] {
+            let d = decls(&format!("{name}: {value}"));
+            assert!(d.contains_key(name), "{name}: {d:?}");
+        }
+    }
+
+    #[test]
+    fn clip_rect_and_clip_path_inset_are_kept() {
+        let rect = |top, right, bottom, left| {
+            Value::ClipBox(ClipBox {
+                function: ClipFunction::Rect,
+                edges: [top, right, bottom, left],
+            })
+        };
+        let l = |v| ClipEdge::Length(v, Unit::Px);
+        assert_eq!(
+            decls("clip: rect(0 0 0 0)")["clip"],
+            rect(l(0.0), l(0.0), l(0.0), l(0.0))
+        );
+        assert_eq!(
+            decls("clip: rect(1px, 1px, 1px, 1px)")["clip"],
+            rect(l(1.0), l(1.0), l(1.0), l(1.0))
+        );
+        assert_eq!(
+            decls("clip: rect(0, auto, 10px, auto)")["clip"],
+            rect(l(0.0), ClipEdge::Auto, l(10.0), ClipEdge::Auto)
+        );
+        let inset = |v| ClipEdge::Length(v, Unit::Percent);
+        assert_eq!(
+            decls("clip-path: inset(50%)")["clip-path"],
+            Value::ClipBox(ClipBox {
+                function: ClipFunction::Inset,
+                edges: [inset(50.0); 4]
+            })
+        );
+        assert!(matches!(
+            decls("clip-path: inset(0 0 0 0 round 4px)")["clip-path"],
+            Value::ClipBox(_)
+        ));
+        assert_eq!(decls("clip: auto")["clip"], kw("auto"));
+    }
+
+    #[test]
+    fn light_dark_picks_first() {
+        assert_eq!(
+            decls("color: light-dark(#fff, #000)")["color"],
+            rgb(255, 255, 255)
+        );
+        assert_eq!(
+            decls("background-color: light-dark(red, blue)")["background-color"],
+            rgb(255, 0, 0)
+        );
+        assert!(decls("color: light-dark(#fff)").is_empty());
+    }
+
+    #[test]
+    fn flex_shorthand_three_values_with_auto_basis() {
+        let flex = |body: &str| {
+            let d = decls(body);
+            (
+                d.get("flex-grow").cloned(),
+                d.get("flex-shrink").cloned(),
+                d.get("flex-basis").cloned(),
+            )
+        };
+        let n = |v| Some(Value::Number(v));
+        let pct = |v| Some(Value::Length(v, Unit::Percent));
+        assert_eq!(flex("flex: 1 1 auto"), (n(1.0), n(1.0), Some(kw("auto"))));
+        assert_eq!(flex("flex: 0 0 120px"), (n(0.0), n(0.0), Some(px(120.0))));
+        assert_eq!(flex("flex: 1 1 0"), (n(1.0), n(1.0), Some(px(0.0))));
+        assert_eq!(flex("flex: 1 1 0%"), (n(1.0), n(1.0), pct(0.0)));
+        assert_eq!(
+            flex("flex: 1"),
+            (n(1.0), n(1.0), pct(0.0)),
+            "<number> → basis 0%"
+        );
+        assert_eq!(flex("flex: 2 3"), (n(2.0), n(3.0), pct(0.0)));
+        assert_eq!(flex("flex: 100px"), (n(1.0), n(1.0), Some(px(100.0))));
+        assert_eq!(flex("flex: auto 2"), (n(2.0), n(1.0), Some(kw("auto"))));
+        assert_eq!(flex("flex: none"), (n(0.0), n(0.0), Some(kw("auto"))));
+        assert_eq!(flex("flex: auto"), (n(1.0), n(1.0), Some(kw("auto"))));
+        // `initial` is a CSS-wide keyword: every longhand gets it and the
+        // cascade resolves it to the initial `0 1 auto`.
+        assert_eq!(
+            flex("flex: initial"),
+            (
+                Some(kw("initial")),
+                Some(kw("initial")),
+                Some(kw("initial"))
+            )
+        );
+        assert!(decls("flex: 1 2 3").is_empty());
+    }
+
+    #[test]
+    fn background_size_two_lengths_and_keywords() {
+        let size = |body: &str| decls(body)["background-size"].clone();
+        let l = |v| SizeAxis::Length(v, Unit::Px);
+        assert_eq!(
+            size("background-size: 224px 242px"),
+            Value::BackgroundSize(BackgroundSize::Size(l(224.0), l(242.0)))
+        );
+        assert_eq!(
+            size("background-size: cover"),
+            Value::BackgroundSize(BackgroundSize::Cover)
+        );
+        assert_eq!(
+            size("background-size: contain"),
+            Value::BackgroundSize(BackgroundSize::Contain)
+        );
+        assert_eq!(
+            size("background-size: auto"),
+            Value::BackgroundSize(BackgroundSize::Size(SizeAxis::Auto, SizeAxis::Auto))
+        );
+        assert_eq!(
+            size("background-size: 50%"),
+            Value::BackgroundSize(BackgroundSize::Size(
+                SizeAxis::Length(50.0, Unit::Percent),
+                SizeAxis::Auto
+            ))
+        );
+        assert_eq!(
+            size("background-size: auto 0"),
+            Value::BackgroundSize(BackgroundSize::Size(SizeAxis::Auto, l(0.0)))
+        );
+        // The shorthand's `<position> / <size>` and its position.
+        let d = decls("background: url(s.png) no-repeat -10px -20px / 224px 242px");
+        assert_eq!(
+            d["background-size"],
+            Value::BackgroundSize(BackgroundSize::Size(l(224.0), l(242.0)))
+        );
+        assert_eq!(
+            (&d["background-position-x"], &d["background-position-y"]),
+            (&px(-10.0), &px(-20.0))
+        );
+        assert!(matches!(d["background-image"], Value::ImageUrl(_)));
+        assert!(decls("background-size: 1px 2px 3px").is_empty());
+    }
+
+    #[test]
+    fn inset_shorthand_expands_to_offsets() {
+        let d = decls("inset: 0");
+        for side in ["top", "right", "bottom", "left"] {
+            assert_eq!(d[side], px(0.0), "{side}");
+        }
+        let d = decls("inset: 1px auto");
+        assert_eq!(
+            (&d["top"], &d["right"], &d["bottom"], &d["left"]),
+            (&px(1.0), &kw("auto"), &px(1.0), &kw("auto"))
+        );
+    }
+
+    #[test]
+    fn global_keywords_and_all_are_kept() {
+        for value in ["inherit", "initial", "unset", "revert", "revert-layer"] {
+            assert_eq!(decls(&format!("color: {value}"))["color"], kw(value));
+            assert_eq!(
+                decls(&format!("border: {value}"))["border-top"],
+                kw(value),
+                "shorthands take them too"
+            );
+            assert_eq!(decls(&format!("all: {value}"))["all"], kw(value));
+        }
+        assert!(decls("all: red").is_empty());
+    }
+
     #[test]
     fn negative_flex_factors_are_invalid_and_dropped() {
         // CSS Flexbox: "Negative numbers are invalid" for flex-grow and
@@ -905,7 +1373,11 @@ mod tests {
         let sheet = parse("a{flex-shrink:2; flex-shrink:-1; flex: 0 3}").unwrap();
         let decls = &sheet.rules[0].declarations;
         assert_eq!(decls[0].value, Value::Number(2.0));
-        assert_eq!(decls.len(), 3, "valid declarations stay: {decls:?}");
+        assert_eq!(
+            decls.len(),
+            4,
+            "valid declarations stay (flex: grow, shrink, basis): {decls:?}"
+        );
     }
 
     #[test]
@@ -1689,13 +2161,16 @@ mod tests {
 
     #[test]
     fn flex_shorthand_one_number_emits_grow_with_default_shrink() {
+        // `flex: <number>` = `<number> 1 0%` (step 1b: the basis was left
+        // unset — auto — before).
         let stylesheet = parse(".a { flex: 2; }").unwrap();
         let decls = &stylesheet.rules[0].declarations;
-        assert_eq!(decls.len(), 2);
+        assert_eq!(decls.len(), 3);
         assert_eq!(decls[0].name, "flex-grow");
         assert_eq!(decls[0].value, Value::Number(2.0));
         assert_eq!(decls[1].name, "flex-shrink");
         assert_eq!(decls[1].value, Value::Number(1.0));
+        assert_eq!(decls[2].value, Value::Length(0.0, Unit::Percent));
     }
 
     #[test]
@@ -1944,11 +2419,13 @@ mod tests {
         // panel without an image. The shorthand walker must handle this
         // without insisting on an image too, otherwise legacy pages
         // that wrote bg colors via the shorthand would lose them.
+        // The shorthand also resets the image to `none` (step 1b).
         let stylesheet = parse(r#".panel { background: red; }"#).unwrap();
         let decls = &stylesheet.rules[0].declarations;
-        assert_eq!(decls.len(), 1);
+        assert_eq!(decls.len(), 2);
         assert_eq!(decls[0].name, "background-color");
         assert!(matches!(decls[0].value, Value::Color(_)));
+        assert_eq!(decls[1].value, Value::Keyword("none".into()));
     }
 
     #[test]

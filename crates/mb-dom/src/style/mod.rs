@@ -252,44 +252,46 @@ fn style_tree_inner(
             .partition(|(name, _)| name.starts_with("--"));
     let custom = CustomScope::child(parent_custom, own_custom);
 
-    // Real browsers inherit many properties. Here we only inherit a few text-related ones
-    // because they make documents readable without making the style system much more complex.
-    for property in [
-        "color",
-        "font-size",
-        "text-align",
-        "line-height",
-        "text-shadow",
-        // white-space inherits per CSS spec; the layout/render whitespace
-        // collapse helper consults this on the text node, which is always
-        // a child of an element — without inheritance the text wouldn't
-        // see `<pre>`'s `white-space: pre` declaration.
-        "white-space",
-        // Spec-mandated inheritance — without it, the UA defaults that put
-        // `<pre>` / `<code>` / `<kbd>` / `<samp>` / `<tt>` into a monospace
-        // family would never reach the text child the renderer actually
-        // shapes, so the page would still draw code in the proportional
-        // fallback font.
-        "font-family",
-        // Same reasoning for font-weight: the UA defaults give `<b>`,
-        // `<strong>`, `<th>`, and headings a bold weight, but the renderer
-        // shapes the *text* child. Without inheritance, a `<b>Hi</b>` run
-        // never tells cosmic-text to pick the bold face.
-        "font-weight",
-    ] {
-        if !specified_values.contains_key(property)
-            && let Some(value) = parent_values.and_then(|values| values.get(property))
-        {
-            specified_values.insert(property.to_string(), value.clone());
-        }
-    }
-
     // Resolve `var()` references against the `--*` declarations now in scope.
     // Done before the em/rem rewrite below so a custom property that holds
     // a length (e.g. `--gap: 1em`) goes through the same em/rem conversion
     // as if it had been written inline. Cycle-protected; unresolved
     // references with no fallback degrade to `Keyword("initial")`.
     resolve_var_references(&mut specified_values, &custom, cascade.report);
+
+    // CSS-wide keywords (step 1b): `inherit` takes the parent's computed
+    // value; `initial` drops the value (the consumer's default is the
+    // initial value); `unset` — and `revert`/`revert-layer`, approximated
+    // as `unset` (no UA-sheet rollback) — is `inherit` for an inherited
+    // property and `initial` otherwise. After `var()`, so a substituted
+    // keyword resolves too; before the inheritance copy below, which must
+    // not refill an inherited property explicitly set to `initial`.
+    let forced_initial = resolve_css_wide_keywords(&mut specified_values, parent_values);
+
+    // Real browsers inherit many properties. Here we only inherit a few text-related ones
+    // because they make documents readable without making the style system much more complex
+    // (the list and why each is on it: `INHERITED_PROPERTIES`).
+    for &property in INHERITED_PROPERTIES {
+        if !specified_values.contains_key(property)
+            && !forced_initial.contains(&property)
+            && let Some(value) = parent_values.and_then(|values| values.get(property))
+        {
+            specified_values.insert(property.to_string(), value.clone());
+        }
+    }
+
+    // A side whose border style is `none`/`hidden` has a 0 border width
+    // (CSS 2.1 §8.5.3) — `border: none`, or a `border-{side}` shorthand
+    // that omitted the style (step 1b). Only an explicit style counts: UA
+    // defaults and `border="1"` widths carry no style key and still paint.
+    for side in ["top", "right", "bottom", "left"] {
+        if matches!(
+            specified_values.get(&format!("border-{side}-style")),
+            Some(Value::Keyword(k)) if k == "none" || k == "hidden"
+        ) {
+            specified_values.insert(format!("border-{side}"), Value::Length(0.0, Unit::Px));
+        }
+    }
 
     // Font-size is resolved first because every other em-based length on this node depends
     // on it. Parent font-size has already been resolved to Px during the parent's pass, so
@@ -330,6 +332,23 @@ fn style_tree_inner(
             // Track lists (grid-template-columns/rows) can mix length tracks
             // with fr tracks; resolve em/rem/ch/pt inside Length tracks the same
             // way we resolve top-level lengths so layout only ever sees Px / %.
+            // `background-size` lengths (step 1b): font-relative units to px.
+            Value::BackgroundSize(crate::css::BackgroundSize::Size(width, height)) => {
+                for axis in [width, height] {
+                    if let crate::css::SizeAxis::Length(v, unit) = axis {
+                        let px = match unit {
+                            Unit::Em => Some(*v * own_font_size),
+                            Unit::Rem => Some(*v * root_font_size),
+                            Unit::Ch => Some(*v * ch_unit),
+                            Unit::Pt => Some(*v * PT_TO_PX),
+                            _ => None,
+                        };
+                        if let Some(px) = px {
+                            *axis = crate::css::SizeAxis::Length(saturate(px), Unit::Px);
+                        }
+                    }
+                }
+            }
             Value::TrackList(tracks) => {
                 let to_px = |v: f32, unit: Unit| match unit {
                     Unit::Em => (v * own_font_size, Unit::Px),
@@ -394,6 +413,65 @@ fn style_tree_inner(
         specified_values,
         children,
     }
+}
+
+/// The properties this engine inherits (CSS defines more; these are the
+/// ones layout and paint read from a text leaf or rely on cascading down).
+pub(super) const INHERITED_PROPERTIES: &[&str] = &[
+    "color",
+    "font-size",
+    "text-align",
+    "line-height",
+    "text-shadow",
+    // white-space inherits per CSS spec; the layout/render whitespace
+    // collapse helper consults this on the text node, which is always a
+    // child of an element — without inheritance the text wouldn't see
+    // `<pre>`'s `white-space: pre` declaration.
+    "white-space",
+    // Without it, the UA defaults that put `<pre>` / `<code>` / `<kbd>` /
+    // `<samp>` / `<tt>` into a monospace family would never reach the text
+    // child the renderer actually shapes.
+    "font-family",
+    // Same for font-weight: `<b>`, `<strong>`, `<th>`, headings are bold in
+    // the UA defaults, but the renderer shapes the *text* child.
+    "font-weight",
+];
+
+/// Resolve `inherit` / `initial` / `unset` / `revert` / `revert-layer` in
+/// place (see the call site). Returns the inherited properties that became
+/// `initial`, which the inheritance copy must leave alone.
+fn resolve_css_wide_keywords(
+    values: &mut PropertyMap,
+    parent: Option<&PropertyMap>,
+) -> Vec<&'static str> {
+    let mut forced_initial = Vec::new();
+    let keyworded: Vec<(String, String)> = values
+        .iter()
+        .filter_map(|(name, value)| match value {
+            Value::Keyword(k)
+                if crate::css::properties::CSS_WIDE_KEYWORDS.contains(&k.as_str()) =>
+            {
+                Some((name.clone(), k.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    for (name, keyword) in keyworded {
+        let inherited = INHERITED_PROPERTIES.iter().find(|p| **p == name).copied();
+        let from_parent = keyword == "inherit" || (inherited.is_some() && keyword != "initial");
+        match parent.and_then(|p| p.get(&name)).filter(|_| from_parent) {
+            Some(value) => {
+                values.insert(name, value.clone());
+            }
+            None => {
+                values.remove(&name);
+                if let (Some(property), false) = (inherited, from_parent) {
+                    forced_initial.push(property);
+                }
+            }
+        }
+    }
+    forced_initial
 }
 
 /// Clamp a computed number into the range layout can add up without
@@ -753,8 +831,10 @@ mod tests {
         );
         let styled = style::style_tree(&document, root, &[stylesheet]);
         assert_eq!(styled.value("width"), Some(&Value::Length(320.0, Unit::Px)));
+        // `border-color` is a shorthand for the per-side colours (step 1b),
+        // which the painter prefers over the UA's single `border-color`.
         assert_eq!(
-            styled.value("border-color"),
+            styled.value("border-top-color"),
             Some(&Value::Color(Color {
                 r: 255,
                 g: 0,
@@ -2090,7 +2170,8 @@ mod tests {
     fn var_reference_cycle_collapses_to_initial_keyword() {
         // `--a` → `--b` → `--a` would loop forever without cycle protection.
         // The resolve pass should bail out at the first revisited name and
-        // produce `Keyword("initial")` instead of recursing.
+        // produce `Keyword("initial")` instead of recursing — which the
+        // CSS-wide keyword pass then resolves to "no value" (step 1b).
         let (document, root) = parse_html(r#"<div class="card">x</div>"#);
         let stylesheet = parse_css(
             r#"
@@ -2103,10 +2184,7 @@ mod tests {
         );
 
         let styled = style::style_tree(&document, root, &[stylesheet]);
-        assert_eq!(
-            styled.value("color"),
-            Some(&Value::Keyword("initial".into()))
-        );
+        assert_eq!(styled.value("color"), None);
     }
 
     #[test]
@@ -2416,6 +2494,117 @@ mod tests {
         let p = find_tag(&styled, "p").unwrap();
         assert_eq!(p.value("top"), Some(&Value::Length(0.0, Unit::Px)));
         assert_eq!(p.value("line-height"), Some(&Value::Number(0.0)));
+    }
+
+    #[test]
+    fn border_none_zeroes_width() {
+        // A side whose computed style is none/hidden has a 0 border width —
+        // later `border: none` beats an earlier width, and a shorthand that
+        // omits the style resets it to none (CSS 2.1 §8.5.3).
+        let border = |html_class: &str, css: &str| {
+            let styled = styled_p(&format!(r#"<p class="{html_class}">x</p>"#), css);
+            ["top", "right", "bottom", "left"]
+                .map(|side| styled.value(&format!("border-{side}")).cloned())
+        };
+        let zero = Some(px(0.0));
+        assert_eq!(
+            border("a b", ".a { border: 1px solid red; } .b { border: none; }"),
+            [zero.clone(), zero.clone(), zero.clone(), zero.clone()]
+        );
+        assert_eq!(
+            border(
+                "a",
+                ".a { border-top: 2px solid; border-style: hidden none; }"
+            )[0],
+            zero
+        );
+        assert_eq!(
+            border("a", ".a { border-top: 2px; }")[0],
+            zero,
+            "style omitted = none"
+        );
+        assert_eq!(border("a", ".a { border: 2px solid; }")[0], Some(px(2.0)));
+        assert_eq!(
+            border("a", ".a { border-bottom: 3px dotted; }")[2],
+            Some(px(3.0))
+        );
+    }
+
+    #[test]
+    fn global_keywords_resolve_in_the_cascade() {
+        let page =
+            r#"<!DOCTYPE html><html><body><div class="d"><p class="p">x</p></div></body></html>"#;
+        let p_of = |css: &str| {
+            find_tag(
+                &style_page(
+                    page,
+                    &format!(".d {{ color: #ff0000; margin-left: 5px; }} {css}"),
+                ),
+                "p",
+            )
+            .unwrap()
+            .clone()
+        };
+        let red = Value::Color(Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        });
+        let blue = Value::Color(Color {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        });
+        // inherit: the parent's computed value, inherited property or not.
+        let p = p_of("p { color: blue; } .p { color: inherit; margin-left: inherit; }");
+        assert_eq!(p.value("color"), Some(&red));
+        assert_eq!(p.value("margin-left"), Some(&px(5.0)));
+        // initial: no value (the consumer's initial), even for an inherited one.
+        let p = p_of(".p { color: initial; margin-left: initial; }");
+        assert_eq!(p.value("color"), None);
+        assert_eq!(p.value("margin-left"), None);
+        // unset / revert / revert-layer (≈ unset): inherited → parent, else initial.
+        for kw in ["unset", "revert", "revert-layer"] {
+            let p = p_of(&format!(
+                "p {{ color: blue; margin-left: 9px; }} .p {{ color: {kw}; margin-left: {kw}; }}"
+            ));
+            assert_eq!(p.value("color"), Some(&red), "{kw}");
+            assert_eq!(p.value("margin-left"), None, "{kw}");
+        }
+        let _ = blue;
+    }
+
+    #[test]
+    fn all_unset_resets_earlier_declarations_and_ua_defaults() {
+        let page = r#"<!DOCTYPE html><html><body><div class="d"><button class="b">x</button></div></body></html>"#;
+        let styled = style_page(
+            page,
+            ".d { color: #ff0000; } button { margin-left: 7px; } .b { all: unset; padding-left: 2px; }",
+        );
+        let button = find_tag(&styled, "button").unwrap();
+        assert_eq!(
+            button.value("margin-left"),
+            None,
+            "earlier author value reset"
+        );
+        assert_eq!(
+            button.value("padding-left"),
+            Some(&px(2.0)),
+            "later declaration applies"
+        );
+        assert_eq!(button.value("border-top"), None, "UA border reset");
+        assert_eq!(
+            button.value("color"),
+            Some(&Value::Color(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            })),
+            "unset inherits"
+        );
     }
 
     #[test]

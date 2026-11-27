@@ -113,6 +113,32 @@ pub(crate) fn definite_height(node: &StyledNode) -> Option<f32> {
     height_value(node, "height").map(|height| clamp_height(node, height))
 }
 
+/// The cascaded `font-family` as the one lowercased name the renderer acts
+/// on: `monospace` when the list (step 1b `FontFamilies`) names a
+/// monospace family — the generic, `ui-monospace`, or a font whose name says
+/// so (`SFMono-Regular`, `Menlo`, `Consolas`, `Courier New`…) — else the
+/// first family. Only `monospace` changes shaping today; real font
+/// selection is out of scope.
+pub(crate) fn font_family_name(node: &StyledNode) -> Option<String> {
+    match node.value("font-family") {
+        Some(Value::Keyword(keyword)) => Some(keyword.to_ascii_lowercase()),
+        Some(Value::FontFamilies(families)) => {
+            let lower: Vec<String> = families.iter().map(|f| f.to_ascii_lowercase()).collect();
+            let monospace = lower.iter().any(|f| {
+                f.contains("mono")
+                    || f.contains("courier")
+                    || matches!(f.as_str(), "menlo" | "consolas" | "monaco")
+            });
+            if monospace {
+                Some("monospace".into())
+            } else {
+                lower.into_iter().next()
+            }
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn is_auto(node: &StyledNode, name: &str) -> bool {
     matches!(node.value(name), Some(Value::Keyword(keyword)) if keyword == "auto")
 }

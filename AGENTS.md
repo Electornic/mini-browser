@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 961 (workspace 합계, 2026-11-28 호환성 3차 1q scrollHeight·단위 없는 0 +6; 1p 퍼센트 높이는 955, 1a `!important` 는 943). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 980 (workspace 합계, 2026-11-28 호환성 3차 1b 값 파서 +19; 1q scrollHeight·단위 없는 0 은 961, 1p 퍼센트 높이는 955). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -219,6 +219,11 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
 ### CSS 파서는 조용히 버린다
 - 선언 값은 `parse_entirely` 안에서 읽혀서, 전용 파서가 없는 속성은 토큰이 둘 이상이면(`border: 1px solid`, 쉼표 목록, `calc()`) **선언 통째로** 사라진다. `!important` 는 1a 부터 파싱된다 — 값 파서는 `!` 앞까지만 보고(`parse_until_before(Bang)`), 플래그는 `Declaration::important`, 캐스케이드는 두 패스(작성자 일반 < 인라인 일반 < 작성자 중요 < 인라인 중요). 새 값 파서도 `!` 를 신경 쓸 필요 없다. 지원 안 하는 의사 클래스 하나가 있으면 **규칙 통째로**(콤마로 묶인 셀렉터까지), `@media` 외 at-rule 은 **본문 통째로**(`@layer`·`@supports` 포함 — 2.2·2.3 전까지). 실사이트에서 "왜 이 스타일이 안 먹지?" 는 먼저 `css::parse_with_report` 로 확인.
+
+### 테두리 키와 CSS 전역 키워드 (호환성 3차 1b)
+- 테두리는 표준 longhand 이름이 아니다: 폭 = `border-{side}`(레이아웃의 `edge_sizes(node, "border")` 가 읽음), 스타일 = `border-{side}-style`, 색 = `border-{side}-color`(페인터가 단일 `border-color` 보다 먼저). `border`·`border-{side}`·`border-width/-style/-color`·`border-{side}-width` 파서가 이 키로 펼친다. 스타일 패스가 명시적 `none`/`hidden` 면의 폭을 0 으로 만든다 — 스타일 키가 없는 폭(UA 기본)은 그대로 그려진다. 진짜 longhand 체계로의 전환은 4차 후보.
+- `inherit/initial/unset/revert/revert-layer` 와 `all` 은 스타일 패스(`resolve_css_wide_keywords`)와 캐스케이드(`apply_all`)가 푼다 — 소비자 코드가 `Keyword("inherit")` 를 볼 일은 없다. "초기값" = 맵에 값 없음(소비자의 기본값). 상속 속성 목록은 `style::INHERITED_PROPERTIES` 하나 — 상속을 추가하면 거기에.
+- 새 shorthand 를 파싱하면 `css::longhands_of` 에도 넣을 것(전역 키워드가 longhand 마다 가도록).
 
 ### `@media` 는 평가된다 (호환성 3차 2.1)
 - 규칙은 `Rule::media`(감싼 블록, 중첩은 `parent` 사슬 = AND)를 달고, 스타일 패스가 시작할 때 `media::evaluate_blocks` 로 블록마다 한 번 평가한다 — 노드마다 평가하지 말 것. 평가 입력은 `MediaContext`(페이지 뷰포트 = 창 − `CHROME_HEIGHT`)뿐, 나머지는 상수(라이트·hover·fine·1dppx·scripting) — 관전 창의 Retina·OS 테마가 페이지에 새면 안 된다(결정성). `matchMedia` 를 만들면 `css::media::evaluate` 를 쓸 것.

@@ -506,7 +506,7 @@ mod tests {
         // classified by the value before it — `important` would mean the
         // flag itself broke an otherwise valid declaration (a bug).
         assert_eq!(
-            reason("border: 1px solid red !important"),
+            reason("outline: 1px solid red !important"),
             DropReason::MultiToken
         );
         assert_eq!(
@@ -517,7 +517,13 @@ mod tests {
             reason("color: red !important foo"),
             DropReason::InvalidValue
         );
-        assert_eq!(reason("border: 1px solid red"), DropReason::MultiToken);
+        assert_eq!(reason("outline: 1px solid red"), DropReason::MultiToken);
+        // `border` has a dedicated parser since step 1b: a value it rejects
+        // is `invalid-value`, not `multi-token`.
+        assert_eq!(
+            reason("border: 1px solid red blue"),
+            DropReason::InvalidValue
+        );
         assert_eq!(reason("--shadow: 0 1px 2px red"), DropReason::MultiToken);
         assert_eq!(
             reason("-webkit-transition: opacity .2s"),

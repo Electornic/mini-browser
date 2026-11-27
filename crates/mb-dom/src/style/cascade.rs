@@ -136,7 +136,29 @@ fn parent_is_center(document: &Document, node_id: NodeId) -> bool {
 /// the same property name overwrite earlier ones.
 fn apply_declarations(values: &mut PropertyMap, declarations: &[Declaration], important: bool) {
     for declaration in declarations.iter().filter(|d| d.important == important) {
+        if declaration.name == "all" {
+            apply_all(values, &declaration.value);
+            continue;
+        }
         values.insert(declaration.name.clone(), declaration.value.clone());
+    }
+}
+
+/// `all: <css-wide keyword>` (step 1b): every property set so far — UA
+/// defaults and lower-priority declarations included — and every inherited
+/// one takes the keyword; custom properties are exempt (CSS Cascade 4
+/// §3.2). Declarations after it in the cascade still win. The keyword is
+/// resolved per property afterwards (`resolve_css_wide_keywords`).
+fn apply_all(values: &mut PropertyMap, keyword: &Value) {
+    for (name, value) in values.iter_mut() {
+        if !name.starts_with("--") {
+            *value = keyword.clone();
+        }
+    }
+    for &name in super::INHERITED_PROPERTIES {
+        values
+            .entry(name.to_string())
+            .or_insert_with(|| keyword.clone());
     }
 }
 

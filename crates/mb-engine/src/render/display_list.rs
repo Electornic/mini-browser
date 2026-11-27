@@ -69,6 +69,10 @@ pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<Dis
             DisplayCommand::Image(image) => {
                 image.x += dx;
                 image.y += dy;
+                if let Some(tile) = image.tile.as_mut() {
+                    tile.x += dx;
+                    tile.y += dy;
+                }
             }
             DisplayCommand::Gradient(gradient) => {
                 gradient.rect.x += dx;
@@ -325,6 +329,13 @@ fn bake_axis_aligned(commands: &mut [DisplayCommand], transform: Affine) {
                 image.y = y;
                 image.width *= transform.a;
                 image.height *= transform.d;
+                if let Some(tile) = image.tile.as_mut() {
+                    let (x, y) = transform.apply_point(tile.x, tile.y);
+                    tile.x = x;
+                    tile.y = y;
+                    tile.width *= transform.a;
+                    tile.height *= transform.d;
+                }
             }
             DisplayCommand::Gradient(gradient) => {
                 transform_rect_in_place(&mut gradient.rect, transform)
@@ -494,6 +505,26 @@ fn background_image_command(layout_box: &LayoutBox, ctx: &PaintContext) -> Optio
     // existing scale-to-fit behaviour.
     let source_x = -read_position_axis(node, "background-position-x");
     let source_y = -read_position_axis(node, "background-position-y");
+    // `background-size` (step 1b): place the scaled image explicitly; the
+    // position offsets the tile. Without it the legacy shapes stay (stretch
+    // to the box, or a native-size sprite slice) — unchanged rendering for
+    // pages that never set a size.
+    let tile = match node.value("background-size") {
+        Some(Value::BackgroundSize(size)) => background_tile_size(
+            *size,
+            rect.width,
+            rect.height,
+            image.width as f32,
+            image.height as f32,
+        )
+        .map(|(width, height)| Rect {
+            x: rect.x - source_x,
+            y: rect.y - source_y,
+            width,
+            height,
+        }),
+        _ => None,
+    };
     Some(DisplayCommand::Image(ImageCommand {
         x: rect.x,
         y: rect.y,
@@ -504,7 +535,48 @@ fn background_image_command(layout_box: &LayoutBox, ctx: &PaintContext) -> Optio
         pixels: std::rc::Rc::new(image.pixels.clone()),
         source_x,
         source_y,
+        tile,
     }))
+}
+
+/// The painted image size for `background-size` in a `box_w × box_h`
+/// background area (CSS Backgrounds 3 §3.9). `None` for a degenerate image.
+fn background_tile_size(
+    size: crate::css::BackgroundSize,
+    box_w: f32,
+    box_h: f32,
+    image_w: f32,
+    image_h: f32,
+) -> Option<(f32, f32)> {
+    use crate::css::{BackgroundSize, SizeAxis};
+    if image_w <= 0.0 || image_h <= 0.0 {
+        return None;
+    }
+    let ratio = image_w / image_h;
+    let axis = |axis: SizeAxis, base: f32| match axis {
+        SizeAxis::Length(v, Unit::Percent) => Some(v / 100.0 * base),
+        SizeAxis::Length(v, _) => Some(v),
+        SizeAxis::Auto => None,
+    };
+    let (w, h) = match size {
+        BackgroundSize::Cover | BackgroundSize::Contain => {
+            let scale_w = box_w / image_w;
+            let scale_h = box_h / image_h;
+            let scale = if matches!(size, BackgroundSize::Cover) {
+                scale_w.max(scale_h)
+            } else {
+                scale_w.min(scale_h)
+            };
+            (image_w * scale, image_h * scale)
+        }
+        BackgroundSize::Size(width, height) => match (axis(width, box_w), axis(height, box_h)) {
+            (Some(w), Some(h)) => (w, h),
+            (Some(w), None) => (w, w / ratio),
+            (None, Some(h)) => (h * ratio, h),
+            (None, None) => (image_w, image_h),
+        },
+    };
+    (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0).then_some((w, h))
 }
 
 fn read_position_axis(node: &crate::style::StyledNode, name: &str) -> f32 {
@@ -867,9 +939,20 @@ fn border_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayCommand> {
     // means a `<hr>` or `<div style="border-top: 1px solid">` paints
     // even without an explicit border-color, matching what every real
     // browser does.
-    let color = match node.value("border-color") {
-        Some(Value::Color(color)) => apply_alpha(*color, alpha),
-        _ => apply_alpha(text_color(node), alpha),
+    // Per side (step 1b): `border-{side}-color` from the author's border
+    // shorthands/longhands wins; `currentcolor` (what the `border`
+    // shorthand resets the colour to) is the text colour; otherwise the
+    // single UA `border-color`, else the text colour.
+    let side_color = |side: &str| {
+        let color = match node.value(&format!("border-{side}-color")) {
+            Some(Value::Color(color)) => *color,
+            Some(Value::Keyword(_)) => text_color(node),
+            _ => match node.value("border-color") {
+                Some(Value::Color(color)) => *color,
+                _ => text_color(node),
+            },
+        };
+        apply_alpha(color, alpha)
     };
     let border = layout_box.dimensions.border;
     if border.left == 0.0 && border.right == 0.0 && border.top == 0.0 && border.bottom == 0.0 {
@@ -881,7 +964,7 @@ fn border_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayCommand> {
 
     if border.top > 0.0 {
         commands.push(DisplayCommand::SolidRect(
-            color,
+            side_color("top"),
             Rect {
                 x: border_box.x,
                 y: border_box.y,
@@ -893,7 +976,7 @@ fn border_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayCommand> {
 
     if border.bottom > 0.0 {
         commands.push(DisplayCommand::SolidRect(
-            color,
+            side_color("bottom"),
             Rect {
                 x: border_box.x,
                 y: border_box.y + border_box.height - border.bottom,
@@ -905,7 +988,7 @@ fn border_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayCommand> {
 
     if border.left > 0.0 {
         commands.push(DisplayCommand::SolidRect(
-            color,
+            side_color("left"),
             Rect {
                 x: border_box.x,
                 y: border_box.y,
@@ -917,7 +1000,7 @@ fn border_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayCommand> {
 
     if border.right > 0.0 {
         commands.push(DisplayCommand::SolidRect(
-            color,
+            side_color("right"),
             Rect {
                 x: border_box.x + border_box.width - border.right,
                 y: border_box.y,
@@ -950,10 +1033,7 @@ fn font_size(node: &crate::style::StyledNode) -> f32 {
 /// other family name still ships down so a future commit can add named
 /// families without re-plumbing through the layout / paint walks.
 fn font_family_keyword(node: &crate::style::StyledNode) -> Option<String> {
-    match node.value("font-family") {
-        Some(Value::Keyword(keyword)) => Some(keyword.to_ascii_lowercase()),
-        _ => None,
-    }
+    crate::layout::font_family_name(node)
 }
 
 /// Resolve the cascaded `font-weight` to the CSS numeric scale (1-1000).

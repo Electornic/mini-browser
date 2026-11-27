@@ -89,8 +89,16 @@ pub(super) fn layout_flex_children(
     // item's `width`/`height` along the main axis, so the override happens
     // after pass 1 even though it would also have been valid to substitute
     // the basis upstream.
+    // A percentage basis resolves against the container's main size: the
+    // content width for a row, its definite height for a column (`None` →
+    // the basis behaves as `content`, i.e. auto) — step 1b, `flex: 1` is
+    // `1 1 0%`.
+    let main_size = match direction {
+        FlexDirection::Row => Some(content_width),
+        FlexDirection::Column => containing_block_height(),
+    };
     for &(i, child) in &in_flow {
-        if let Some(basis) = flex_basis_content_main(child) {
+        if let Some(basis) = flex_basis_content_main(child, main_size) {
             force_item_content_main(&mut boxes[i], basis, direction);
         }
     }
@@ -284,12 +292,13 @@ fn flex_shrink(node: &StyledNode) -> f32 {
     }
 }
 
-fn flex_basis_content_main(node: &StyledNode) -> Option<f32> {
-    // Only the explicit `<length>` form drives the content-axis override.
-    // `auto` (default) leaves layout_flex_item's width/shrink-to-fit logic in
-    // charge, and percent / keyword forms are not yet implemented.
+fn flex_basis_content_main(node: &StyledNode, main_size: Option<f32>) -> Option<f32> {
+    // A length or a resolvable percentage drives the content-axis
+    // override; `auto` / `content` leave layout_flex_item's width /
+    // shrink-to-fit logic in charge.
     match node.value("flex-basis") {
         Some(Value::Length(value, Unit::Px)) => Some(*value),
+        Some(Value::Length(value, Unit::Percent)) => main_size.map(|size| *value / 100.0 * size),
         _ => None,
     }
 }

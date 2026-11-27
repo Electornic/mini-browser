@@ -158,6 +158,7 @@ mod tests {
                 pixels: std::rc::Rc::new(vec![0xFF0000]),
                 source_x: 0.0,
                 source_y: 0.0,
+                tile: None,
             })]
         );
     }

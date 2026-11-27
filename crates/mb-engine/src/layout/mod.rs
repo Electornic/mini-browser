@@ -29,6 +29,8 @@ pub(super) use properties::{
 };
 use table::is_table_container;
 
+pub(crate) use properties::font_family_name;
+
 // Layout uses a single rectangular box model for both block and simple inline flow.
 // Every node becomes a box with a content rect plus margin/padding/border around it.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -496,10 +498,12 @@ mod tests {
             r#"
                 .panel {
                     width: 100px;
-                    border-left: 4px;
-                    border-right: 6px;
-                    border-top: 2px;
-                    border-bottom: 3px;
+                    /* A side shorthand needs a style to have a width
+                       (step 1b: an omitted style is none → 0). */
+                    border-left: 4px solid;
+                    border-right: 6px solid;
+                    border-top: 2px solid;
+                    border-bottom: 3px solid;
                 }
             "#,
         );
@@ -2467,8 +2471,8 @@ mod tests {
 
     #[test]
     fn flex_shorthand_one_number_sets_grow_only() {
-        // `flex: 2` should expand to flex-grow: 2 (with shrink: 1 default and
-        // basis unset). Verifies the parser-side shorthand handler.
+        // `flex: 2` = `2 1 0%` (step 1b — the basis used to stay unset,
+        // i.e. the 50px width): all 400px are free space, split 2:1.
         let styled = styled_root(
             r#"<div id="row"><div class="a"></div><div class="b"></div></div>"#,
             r#"
@@ -2481,9 +2485,8 @@ mod tests {
         let a = &layout.children[0];
         let b = &layout.children[1];
 
-        // Free = 300, total grow = 3, .a gets 200, .b gets 100.
-        assert_eq!(a.dimensions.content.width, 250.0);
-        assert_eq!(b.dimensions.content.width, 150.0);
+        assert!((a.dimensions.content.width - 800.0 / 3.0).abs() < 0.01);
+        assert!((b.dimensions.content.width - 400.0 / 3.0).abs() < 0.01);
     }
 
     #[test]
@@ -3525,7 +3528,7 @@ mod tests {
         // Any boundary leaf (inline content) with side margins, in block flow…
         let styled = styled_root(
             r#"<body><div><blockquote class="q">quoted text</blockquote></div></body>"#,
-            ".q { margin: 0 40px; padding: 0 5px; border-left: 2px; border-right: 2px; }",
+            ".q { margin: 0 40px; padding: 0 5px; border-left: 2px solid; border-right: 2px solid; }",
         );
         let layout = layout_tree(&styled, 800.0);
         let quote = &layout.children[0].children[0];
@@ -3816,6 +3819,49 @@ mod tests {
             rel.content.y - rel.padding.top,
         );
         assert_eq!((abs.content.x, abs.content.y), padding_box);
+    }
+
+    #[test]
+    fn inset_zero_pins_an_absolute_box_to_the_padding_box() {
+        let layout = page(
+            r#"<div class="gap"></div><div class="rel"><p>text</p><div class="abs">x</div></div>"#,
+            concat!(
+                ".gap { height: 50px; } ",
+                ".rel { position: relative; margin-left: 30px; padding: 10px; } ",
+                ".abs { position: absolute; inset: 0; width: 20px; }"
+            ),
+            (800.0, 600.0),
+        );
+        let rel = by_class(&layout, "rel").dimensions;
+        let abs = by_class(&layout, "abs").dimensions;
+        assert_eq!(
+            (abs.content.x, abs.content.y),
+            (
+                rel.content.x - rel.padding.left,
+                rel.content.y - rel.padding.top
+            )
+        );
+    }
+
+    #[test]
+    fn flex_one_items_split_the_row_equally() {
+        // `flex: 1` = `1 1 0%` (step 1b): the basis is 0, so the free space
+        // splits evenly whatever the content widths.
+        for extra in ["", LEGACY] {
+            let layout = page(
+                &format!(
+                    r#"<div class="row">{extra}<div class="a">short</div><div class="b">a much longer piece of text</div></div>"#
+                ),
+                ".row { display: flex; width: 600px; } .a, .b { flex: 1; }",
+                (800.0, 600.0),
+            );
+            let a = by_class(&layout, "a").dimensions.content.width;
+            let b = by_class(&layout, "b").dimensions.content.width;
+            assert!(
+                (a - 300.0).abs() < 0.5 && (b - 300.0).abs() < 0.5,
+                "{extra:?}: {a} / {b}"
+            );
+        }
     }
 
     #[test]

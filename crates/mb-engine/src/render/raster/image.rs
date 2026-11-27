@@ -66,7 +66,13 @@ pub(super) fn draw_image(pixmap: &mut Pixmap, image: &ImageCommand, transform: A
     // the legacy stretch path runs and existing `<img>` / bg tests
     // continue to assert the same geometry.
     let is_sprite = image.source_x != 0.0 || image.source_y != 0.0;
-    let pattern_transform = if is_sprite {
+    let pattern_transform = if let Some(tile) = image.tile {
+        // 3. `background-size`: the source scaled to the tile rect, placed
+        //    at the tile origin; the box rect below clips it.
+        let scale_x = tile.width / image.source_width.max(1) as f32;
+        let scale_y = tile.height / image.source_height.max(1) as f32;
+        TsTransform::from_scale(scale_x, scale_y).post_translate(tile.x, tile.y)
+    } else if is_sprite {
         TsTransform::from_translate(image.x - image.source_x, image.y - image.source_y)
     } else {
         let scale_x = image.width / image.source_width as f32;

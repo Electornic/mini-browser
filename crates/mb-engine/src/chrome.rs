@@ -478,6 +478,7 @@ pub fn chrome_commands(chrome: ChromeState<'_>) -> Vec<render::DisplayCommand> {
             pixels: std::rc::Rc::new(favicon.pixels.clone()),
             source_x: 0.0,
             source_y: 0.0,
+            tile: None,
         }));
     }
 

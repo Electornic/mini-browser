@@ -48,6 +48,18 @@ use mb_runtime::{
 /// accepted and then ignored. Kept by hand from `styled.value("…")` call
 /// sites; inherited lookups (`color`, `font-*`…) included.
 const CONSUMED: &[&str] = &[
+    // Step 1b: `all` (the cascade), per-side border colours (paint) and
+    // styles (the style pass zeroes a `none`/`hidden` side), background-size.
+    "all",
+    "background-size",
+    "border-bottom-color",
+    "border-bottom-style",
+    "border-left-color",
+    "border-left-style",
+    "border-right-color",
+    "border-right-style",
+    "border-top-color",
+    "border-top-style",
     "align-content",
     "align-items",
     "align-self",

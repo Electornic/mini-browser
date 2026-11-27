@@ -385,6 +385,7 @@ fn image_command_for_layout_box(
         pixels: std::rc::Rc::new(image.pixels.clone()),
         source_x: 0.0,
         source_y: 0.0,
+        tile: None,
     }))
 }
 

@@ -10,7 +10,7 @@ use cssparser::{Parser as CssParser, Token};
 use super::color::named_color;
 use super::error::{convert_basic_error_at, convert_error, token_error};
 use super::gradient::{parse_linear_gradient, parse_radial_gradient};
-use super::{Color, ParseError, Unit, Value};
+use super::{ClipBox, ClipEdge, ClipFunction, Color, ParseError, Unit, Value};
 
 pub(super) fn parse_value<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     input.skip_whitespace();
@@ -114,6 +114,7 @@ fn parse_function<'i>(name: &str, input: &mut CssParser<'i>) -> Result<Value, Pa
                 "radial-gradient" => parse_radial_gradient(inner),
                 "url" => parse_url_function(inner),
                 "var" => parse_var_function(inner),
+                "light-dark" => parse_light_dark(inner),
                 other => Err(ParseError::new(
                     inner.position().byte_index(),
                     format!("unsupported function '{other}'"),
@@ -122,6 +123,161 @@ fn parse_function<'i>(name: &str, input: &mut CssParser<'i>) -> Result<Value, Pa
             result.map_err(cssparser::ParseError::custom)
         })
         .map_err(convert_error)
+}
+
+/// `light-dark(<light>, <dark>)` → the light value: the engine renders the
+/// light scheme only (step 1b). Both arguments must parse.
+fn parse_light_dark<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
+    let light = parse_value(input)?;
+    expect_token_comma(input)?;
+    parse_value(input)?;
+    input.skip_whitespace();
+    input
+        .expect_exhausted()
+        .map_err(|e| convert_basic_error_at(input.position().byte_index(), e))?;
+    Ok(light)
+}
+
+/// `font-family`: a comma list of family names — a quoted string, or one
+/// or more identifiers joined by single spaces (`Apple SD Gothic Neo`).
+/// Generic families (`monospace`) are names like any other here.
+pub(super) fn parse_font_family<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
+    let mut families = Vec::new();
+    loop {
+        input.skip_whitespace();
+        let position = input.position().byte_index();
+        let mut words: Vec<String> = Vec::new();
+        loop {
+            input.skip_whitespace();
+            let state = input.state();
+            match input.next() {
+                Ok(Token::QuotedString(s)) if words.is_empty() => {
+                    words.push(s.to_string());
+                    break;
+                }
+                Ok(Token::Ident(ident)) => words.push(ident.to_string()),
+                _ => {
+                    input.reset(&state);
+                    break;
+                }
+            }
+        }
+        if words.is_empty() {
+            return Err(ParseError::new(
+                position,
+                "font-family: expected a family name",
+            ));
+        }
+        families.push(words.join(" "));
+        input.skip_whitespace();
+        if input.is_exhausted() {
+            return Ok(Value::FontFamilies(families));
+        }
+        expect_token_comma(input)?;
+    }
+}
+
+/// Properties the engine accepts and keeps but nothing downstream reads
+/// (step 1b "parse-only": `transition*`, `animation*` and their `-webkit-`
+/// forms): any token sequence, stored as its source text, so they stop
+/// counting as dropped declarations.
+pub(super) fn is_parse_only(name: &str) -> bool {
+    let name = name.strip_prefix("-webkit-").unwrap_or(name);
+    name.starts_with("transition") || name.starts_with("animation")
+}
+
+pub(super) fn parse_raw<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
+    input.skip_whitespace();
+    let start = input.position();
+    while input.next().is_ok() {}
+    let raw = input.slice_from(start).trim().to_string();
+    if raw.is_empty() {
+        return Err(ParseError::new(start.byte_index(), "empty value"));
+    }
+    Ok(Value::Keyword(raw))
+}
+
+/// `clip: rect(<top>, <right>, <bottom>, <left>)` (commas or spaces;
+/// lengths or `auto`) and `clip-path: inset(<1–4 lengths> [round …]?)`
+/// (step 1b — kept for step 3's clipping). Anything else goes through the
+/// generic single-token parser (`auto`, `none`).
+pub(super) fn parse_clip<'i>(name: &str, input: &mut CssParser<'i>) -> Result<Value, ParseError> {
+    let function = if name == "clip" { "rect" } else { "inset" };
+    let state = input.state();
+    let is_function =
+        matches!(input.next(), Ok(Token::Function(f)) if f.eq_ignore_ascii_case(function));
+    if !is_function {
+        input.reset(&state);
+        return parse_value(input);
+    }
+    let edges = input
+        .parse_nested_block(|inner| {
+            parse_clip_edges(function, inner).map_err(cssparser::ParseError::custom)
+        })
+        .map_err(convert_error)?;
+    Ok(Value::ClipBox(ClipBox {
+        function: if function == "rect" {
+            ClipFunction::Rect
+        } else {
+            ClipFunction::Inset
+        },
+        edges,
+    }))
+}
+
+fn parse_clip_edges<'i>(
+    function: &str,
+    input: &mut CssParser<'i>,
+) -> Result<[ClipEdge; 4], ParseError> {
+    let mut edges = Vec::new();
+    loop {
+        input.skip_whitespace();
+        if function == "inset"
+            && input
+                .try_parse(|i| i.expect_ident_matching("round"))
+                .is_ok()
+        {
+            // Corner radii: parsed, not kept (rounded clipping is out of scope).
+            while input.next().is_ok() {}
+            break;
+        }
+        if input.is_exhausted() || edges.len() == 4 {
+            break;
+        }
+        if function == "rect" && !edges.is_empty() {
+            let _ = input.try_parse(|i| i.expect_comma());
+            input.skip_whitespace();
+        }
+        if function == "rect" && input.try_parse(|i| i.expect_ident_matching("auto")).is_ok() {
+            edges.push(ClipEdge::Auto);
+            continue;
+        }
+        edges.push(match parse_length_or_number(input)? {
+            Value::Number(0.0) => ClipEdge::Length(0.0, Unit::Px),
+            Value::Length(v, unit) => ClipEdge::Length(v, unit),
+            _ => {
+                return Err(ParseError::new(
+                    input.position().byte_index(),
+                    "clip: expected a length",
+                ));
+            }
+        });
+    }
+    input.skip_whitespace();
+    input
+        .expect_exhausted()
+        .map_err(|e| convert_basic_error_at(input.position().byte_index(), e))?;
+    match (function, edges.as_slice()) {
+        ("rect", [t, r, b, l]) => Ok([*t, *r, *b, *l]),
+        ("inset", [v]) => Ok([*v; 4]),
+        ("inset", [v, h]) => Ok([*v, *h, *v, *h]),
+        ("inset", [t, h, b]) => Ok([*t, *h, *b, *h]),
+        ("inset", [t, r, b, l]) => Ok([*t, *r, *b, *l]),
+        _ => Err(ParseError::new(
+            input.position().byte_index(),
+            "clip: wrong number of edges",
+        )),
+    }
 }
 
 fn parse_rgb_function<'i>(input: &mut CssParser<'i>, has_alpha: bool) -> Result<Value, ParseError> {

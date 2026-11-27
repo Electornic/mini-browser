@@ -833,10 +833,7 @@ fn measure_inline_text(node: &StyledNode, text: &str) -> f32 {
 }
 
 fn inline_font_family(node: &StyledNode) -> Option<String> {
-    match node.value("font-family") {
-        Some(Value::Keyword(keyword)) => Some(keyword.to_ascii_lowercase()),
-        _ => None,
-    }
+    super::properties::font_family_name(node)
 }
 
 /// CSS `vertical-align` shift in pixels relative to the line's baseline.
