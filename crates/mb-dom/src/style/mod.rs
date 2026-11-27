@@ -418,9 +418,15 @@ fn style_tree_inner(
     let node_data = document
         .get(node_id)
         .expect("style_tree_inner called with invalid NodeId");
+    // An inline `<svg>` is replaced content (follow-up F1): the engine
+    // doesn't render SVG, and its `<title>`/`<text>`/shapes must not lay
+    // out as page boxes — layout sizes the `<svg>` box from its attributes.
+    let replaced = matches!(&node_data.node_type,
+        NodeType::Element(element) if element.tag_name == "svg");
     let children = node_data
         .children
         .iter()
+        .filter(|_| !replaced)
         .map(|child_id| {
             style_tree_inner(
                 document,

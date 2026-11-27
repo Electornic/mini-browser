@@ -210,7 +210,7 @@ fn escape_into(out: &mut String, text: &str, attr: bool) {
 
 const TAGS: &[&str] = &[
     "div", "span", "p", "a", "button", "input", "table", "tr", "td", "ul", "li", "img", "label",
-    "form",
+    "form", "svg",
 ];
 const CLASSES: &[&str] = &["a", "b", "c", "d", "e"];
 const AREA_NAMES: &[&str] = &["a", "b", "c", "."];
@@ -359,6 +359,29 @@ impl Gen {
                 }
                 if self.rng.chance(30) {
                     attrs.push(("alt", self.text()));
+                }
+            }
+            // Follow-up F1: inline SVG sized from attributes and viewBox.
+            "svg" => {
+                for name in ["width", "height", "viewBox"] {
+                    if self.rng.chance(50) {
+                        let value = *self.rng.pick(&[
+                            "0",
+                            "16",
+                            "24px",
+                            "-3",
+                            "1e30",
+                            "inf",
+                            "NaN",
+                            "100%",
+                            "abc",
+                            "0 0 24 24",
+                            "0 0 0 0",
+                            "0,0,1e-30,1e30",
+                            "1 2 3",
+                        ]);
+                        attrs.push((name, value.to_string()));
+                    }
                 }
             }
             "input" => {
@@ -1623,6 +1646,13 @@ const CSS_DEDICATED: &[&str] = &[
     "border",
     "font",
     "gap",
+    // Follow-up F1: logical properties.
+    "inline-size",
+    "margin-inline",
+    "padding-block",
+    "inset-inline",
+    "border-inline",
+    "border-block-color",
     // Step 1b value parsers.
     "border-top",
     "border-width",
@@ -1934,6 +1964,17 @@ fn soup_value(rng: &mut Rng, property: &str) -> String {
             .to_string();
     }
     let template = match property {
+        "margin-inline" | "padding-block" | "inset-inline" => *rng.pick(&[
+            "1px 2px",
+            "auto",
+            "0",
+            "1px 2px 3px",
+            "-1e39px auto",
+            "50% 1em",
+        ]),
+        "border-inline" => *rng.pick(&["1px solid red", "0", "thick dashed", "1e39px solid"]),
+        "border-block-color" => *rng.pick(&["red blue", "red", "red blue green"]),
+        "inline-size" => *rng.pick(&["10px", "-1px", "1e39px", "50%", "auto"]),
         "background" => *rng.pick(&[
             "red url(a.png) 1px 2px no-repeat",
             "url(s.png) -1px -1px / 1px 1px no-repeat",

@@ -9,6 +9,7 @@ mod error;
 mod gradient;
 mod grid;
 pub mod layer;
+mod logical;
 pub mod media;
 mod parse;
 pub mod properties;
@@ -817,6 +818,10 @@ fn parse_declaration_value<'i>(
     name: &str,
     input: &mut CssParser<'i>,
 ) -> Result<Vec<Declaration>, ParseError> {
+    // Flow-relative properties become physical ones (follow-up F1).
+    if let Some(mapping) = logical::logical(name) {
+        return parse_logical(mapping, input);
+    }
     // CSS-wide keywords are valid for every property; a shorthand passes
     // them to each of its longhands (the cascade resolves them, step 1b).
     if let Ok(keyword) = input.try_parse(parse_css_wide_keyword) {
@@ -939,6 +944,53 @@ fn parse_declaration_value<'i>(
         value,
         important: false,
     }])
+}
+
+/// A logical property's value through its physical properties' parsers.
+fn parse_logical<'i>(
+    mapping: logical::Logical,
+    input: &mut CssParser<'i>,
+) -> Result<Vec<Declaration>, ParseError> {
+    let invalid = |input: &CssParser<'i>| {
+        ParseError::new(
+            input.position().byte_index(),
+            "invalid logical property value",
+        )
+    };
+    let parse = |name: &str, text: &str, input: &CssParser<'i>| {
+        parse_property_value(name, text).ok_or_else(|| invalid(input))
+    };
+    match mapping {
+        logical::Logical::Rename(physical) => parse_declaration_value(physical, input),
+        logical::Logical::Pair(start, end) => {
+            // One or two top-level components (a function is one).
+            let mut parts = Vec::new();
+            loop {
+                input.skip_whitespace();
+                let from = input.position();
+                if input.next().is_err() {
+                    break;
+                }
+                parts.push(input.slice_from(from));
+            }
+            let (first, second) = match parts.as_slice() {
+                [one] => (*one, *one),
+                [one, two] => (*one, *two),
+                _ => return Err(invalid(input)),
+            };
+            let mut declarations = parse(start, first, input)?;
+            declarations.extend(parse(end, second, input)?);
+            Ok(declarations)
+        }
+        logical::Logical::Both(start, end) => {
+            let from = input.position();
+            while input.next().is_ok() {}
+            let text = input.slice_from(from);
+            let mut declarations = parse(start, text, input)?;
+            declarations.extend(parse(end, text, input)?);
+            Ok(declarations)
+        }
+    }
 }
 
 /// How deeply a value may nest blocks, functions and `var()` fallbacks
@@ -1079,6 +1131,12 @@ fn parse_css_wide_keyword<'i>(input: &mut CssParser<'i>) -> Result<String, ()> {
 /// The longhands a shorthand sets, under the engine's keys; any other name
 /// is its own single longhand.
 fn longhands_of(name: &str) -> Vec<String> {
+    if let Some(mapping) = logical::logical(name) {
+        return logical::targets(mapping)
+            .into_iter()
+            .flat_map(longhands_of)
+            .collect();
+    }
     const SIDES: [&str; 4] = ["top", "right", "bottom", "left"];
     let each = |f: &dyn Fn(&str) -> String| SIDES.iter().map(|side| f(side)).collect();
     match name {
@@ -2922,6 +2980,116 @@ mod tests {
         let sheet = parse(&chain).unwrap();
         let ranks = super::layer::document_layer_ranks(std::slice::from_ref(&sheet));
         assert_eq!(ranks[0].first(), Some(&(ranks[0].len() as u32 - 1)));
+    }
+
+    fn ordered(css: &str) -> Vec<(String, Value)> {
+        super::parse_inline_style(css)
+            .into_iter()
+            .map(|d| (d.name, d.value))
+            .collect()
+    }
+
+    fn length(v: f32) -> Value {
+        Value::Length(v, super::Unit::Px)
+    }
+
+    #[test]
+    fn logical_longhands_map_to_physical_ones() {
+        // Follow-up F1: horizontal-tb, ltr only.
+        let got = ordered(
+            "inline-size: 10px; block-size: 11px; min-inline-size: 1px; max-block-size: 2px;
+             margin-inline-start: 3px; margin-block-end: 4px; padding-inline-end: 5px;
+             padding-block-start: 6px; inset-inline-start: 7px; inset-block-end: 8px;
+             border-start-end-radius: 9px",
+        );
+        let names: Vec<_> = got.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "width",
+                "height",
+                "min-width",
+                "max-height",
+                "margin-left",
+                "margin-bottom",
+                "padding-right",
+                "padding-top",
+                "left",
+                "bottom",
+                "border-top-right-radius"
+            ]
+        );
+        assert_eq!(got[0].1, length(10.0));
+        assert_eq!(got[8].1, length(7.0));
+        // Border sides take the side parsers.
+        let got = ordered("border-inline-start: 2px solid red; border-block-end-width: 3px");
+        let names: Vec<_> = got.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"border-left"), "{names:?}");
+        assert!(names.contains(&"border-left-style"), "{names:?}");
+        assert!(names.contains(&"border-bottom"), "{names:?}");
+        // CSS-wide keywords go to the physical longhand.
+        assert_eq!(
+            ordered("inline-size: inherit"),
+            [("width".to_string(), Value::Keyword("inherit".into()))]
+        );
+    }
+
+    #[test]
+    fn logical_pairs_split_into_start_and_end() {
+        assert_eq!(
+            ordered("margin-inline: 1px 2px"),
+            [
+                ("margin-left".into(), length(1.0)),
+                ("margin-right".into(), length(2.0))
+            ]
+        );
+        assert_eq!(
+            ordered("padding-block: 3px"),
+            [
+                ("padding-top".into(), length(3.0)),
+                ("padding-bottom".into(), length(3.0))
+            ]
+        );
+        assert_eq!(
+            ordered("inset-inline: auto 0"),
+            [
+                ("left".into(), Value::Keyword("auto".into())),
+                ("right".into(), length(0.0))
+            ]
+        );
+        assert_eq!(
+            ordered("margin-block: auto"),
+            [
+                ("margin-top".into(), Value::Keyword("auto".into())),
+                ("margin-bottom".into(), Value::Keyword("auto".into()))
+            ]
+        );
+        let names: Vec<_> = ordered("border-inline: 2px solid red")
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert!(names.contains(&"border-left".to_string()), "{names:?}");
+        assert!(
+            names.contains(&"border-right-color".to_string()),
+            "{names:?}"
+        );
+        let names: Vec<_> = ordered("border-block-color: red blue")
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, ["border-top-color", "border-bottom-color"]);
+        // Three values, or junk: the declaration drops.
+        assert!(ordered("margin-inline: 1px 2px 3px").is_empty());
+        assert!(ordered("margin-inline:").is_empty());
+    }
+
+    #[test]
+    fn logical_properties_with_var_expand_to_physical_longhands() {
+        let names: Vec<_> = ordered("margin-inline: var(--a) 2px; inline-size: var(--w)")
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, ["margin-left", "margin-right", "width"]);
     }
 
     #[test]

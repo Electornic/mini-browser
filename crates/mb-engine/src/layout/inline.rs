@@ -441,6 +441,7 @@ fn is_inline_node(node: &StyledNode) -> bool {
                 | "strong"
                 | "sub"
                 | "sup"
+                | "svg"
                 | "time"
                 | "tt"
                 | "u"

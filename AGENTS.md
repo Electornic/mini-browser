@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1028 (workspace 합계, 2026-11-28 호환성 3차 2.3 `@supports` +16; 2.2 `@layer` 는 1012, 2.2·2.3 P probe 는 997). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1034 (workspace 합계, 2026-11-28 호환성 3차 후속 F1 SVG 크기·논리 속성 +6; 2.3 `@supports` 는 1028, 2.2 `@layer` 는 1012). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -238,6 +238,10 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 ### `@layer` 순위는 스타일 패스마다 문서 단위로 (호환성 3차 2.2)
 - 규칙은 `Rule::layer`(시트 안 레이어 번호)만 들고, 순위는 `style_pass` 가 시작할 때 `css::layer::document_layer_ranks` 가 **모든 시트를 합쳐** 매긴다(같은 이름 = 같은 레이어, 후위 순서 — 자식 레이어 < 부모 직속 규칙). 시트 하나만 보고 순위를 정하지 말 것(뒤 시트·뒤 문장이 순서를 바꾼다). 캐스케이드 키는 `(순위, 특정성, 순서)` 이고, 중요 패스는 순위를 뒤집는다. 레이어 밖은 `UNLAYERED`(`u32::MAX`). `style` 속성은 레이어보다 먼저 비교되어 같은 중요도의 모든 레이어를 이긴다.
 - 거짓 `@media` 안에서 처음 나온 레이어도 등장 순으로 순서에 든다(문서화된 근사).
+
+### 논리 속성과 인라인 SVG (호환성 3차 후속 F1)
+- `inline-size`·`margin-inline(-start/-end)`·`padding-block`·`inset-inline`·`border-inline(-*)`·`border-start-end-radius` 등은 **파싱 때 물리 속성으로 바뀐다**(`css/logical.rs` — 가로 쓰기·ltr 고정, 이름 바꾸기 / 한두 값을 시작·끝으로 / 같은 값을 양쪽으로). 캐스케이드·레이아웃·페인트는 물리 이름만 본다 — 소비자 코드에서 논리 이름을 찾지 말 것. 새 논리 속성은 `logical::logical` 표에(`longhands_of` 가 같은 표로 `var()` 경로도 펼친다).
+- 인라인 `<svg>` 는 **대체 요소**다: 스타일 트리가 자식을 버리고(`<title>`·`<text>` 가 글자로 배치되지 않게), `width`/`height` 속성은 CSS 프레젠테이션 힌트(`style/presentational.rs` — `1em`·`%` 도), 레이아웃의 고유 크기는 `properties::svg_intrinsic_size`(변마다 해석된 CSS px, 없으면 속성 — CSS `width:auto` 여도 속성, 한 변만 있으면 `viewBox` 비율, 없으면 300×150). 인라인 SVG 는 아직 그리지 않는다(빈 상자).
 
 ### `@supports` 의 "지원" = 렌더링함 (호환성 3차 2.3)
 - 조건은 파싱 때 한 번 평가된다(`css::supports::evaluate` — 뷰포트와 무관). 거짓 블록도 본문은 파싱한다(레이어 순서·보고) — 규칙만 버린다. `(prop: value)` 가 참이려면 아는 속성 + 우리가 모델링하는 값 종류(`ValueKind::Other` 는 거짓) + 그 종류의 값으로 파싱(`Keyword` 폴백·`var()` 거짓) + 펼친 longhand 가 모두 엔진이 읽는 속성(`css::properties::RENDERED` — 손으로 관리, probe 의 "파싱만" 열도 이것) + `css::supports::UNRENDERED` 에 없음. `(--x: …)` 는 참, `-webkit-` 별칭은 표준 이름으로(`properties::unprefixed`), `selector()` 는 캐스케이드와 같은 비관용 파서.

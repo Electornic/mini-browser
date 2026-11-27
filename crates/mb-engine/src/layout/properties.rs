@@ -17,6 +17,7 @@ use crate::{
 };
 
 use super::{EdgeSizes, LayoutBox};
+use crate::style::MAX_CSS_LENGTH;
 
 pub(crate) fn edge_sizes(node: &StyledNode, prefix: &str, base: f32) -> EdgeSizes {
     // CSS resolves percent margin/padding against the containing block's *width*, even
@@ -233,6 +234,62 @@ pub(crate) fn shift_layout_subtree(layout_box: &mut LayoutBox, dx: f32, dy: f32)
     layout_box.dimensions.content.y += dy;
     for child in &mut layout_box.children {
         shift_layout_subtree(child, dx, dy);
+    }
+}
+
+/// An inline `<svg>`'s intrinsic size (follow-up F1), as Chrome sizes a
+/// replaced element. Its `width`/`height` attributes also reach the
+/// cascade as presentation hints (`style::presentational`). Per side: the
+/// resolved CSS px size, else the attribute; a missing side is derived
+/// from the `viewBox` ratio, else 300×150. Callers use this only where CSS gave no size. The
+/// engine doesn't paint inline SVG; the box keeps icons and icon-only
+/// buttons their real size.
+pub(crate) fn svg_intrinsic_size(node: &StyledNode, element: &ElementData) -> (f32, f32) {
+    const DEFAULT: (f32, f32) = (300.0, 150.0);
+    // The used CSS size when there is one (hints included), else the
+    // attribute itself — Blink's intrinsic size reads the attribute even
+    // when CSS says `width: auto`.
+    let font_size = match node.value("font-size") {
+        Some(Value::Length(v, Unit::Px)) if v.is_finite() => *v,
+        _ => 16.0,
+    };
+    let attribute = |name: &str| {
+        let raw = element.attributes.get(name)?.trim().to_ascii_lowercase();
+        let (number, scale) = if let Some(n) = raw.strip_suffix("px") {
+            (n, 1.0)
+        } else if let Some(n) = raw.strip_suffix("rem") {
+            (n, 16.0)
+        } else if let Some(n) = raw.strip_suffix("em") {
+            (n, font_size)
+        } else {
+            (raw.as_str(), 1.0)
+        };
+        let v = number.trim().parse::<f32>().ok()? * scale;
+        (v.is_finite() && (0.0..=MAX_CSS_LENGTH).contains(&v)).then_some(v)
+    };
+    let px = |name: &str| match node.value(name) {
+        Some(Value::Length(v, Unit::Px)) if v.is_finite() && *v >= 0.0 => Some(*v),
+        _ => attribute(name),
+    };
+    // viewBox = "min-x min-y width height" (commas allowed); width/height
+    // must be positive for a ratio.
+    let ratio = element.attributes.get("viewBox").and_then(|view_box| {
+        let numbers: Vec<f32> = view_box
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse::<f32>().ok())
+            .collect::<Option<_>>()?;
+        match numbers.as_slice() {
+            [_, _, w, h] if w.is_finite() && h.is_finite() && *w > 0.0 && *h > 0.0 => Some(w / h),
+            _ => None,
+        }
+    });
+    let bounded = |v: f32| (v.is_finite() && v >= 0.0).then(|| v.min(MAX_CSS_LENGTH));
+    match (px("width"), px("height")) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, ratio.and_then(|r| bounded(w / r)).unwrap_or(DEFAULT.1)),
+        (None, Some(h)) => (ratio.and_then(|r| bounded(h * r)).unwrap_or(DEFAULT.0), h),
+        (None, None) => DEFAULT,
     }
 }
 

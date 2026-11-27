@@ -311,6 +311,9 @@ pub(super) fn intrinsic_width(node: &StyledNode) -> Option<f32> {
         NodeType::Element(element) if element.tag_name == "img" => {
             attribute_length(element, "width").or(Some(200.0))
         }
+        NodeType::Element(element) if element.tag_name == "svg" => {
+            Some(properties::svg_intrinsic_size(node, element).0)
+        }
         _ => None,
     }
 }
@@ -322,6 +325,9 @@ pub(super) fn intrinsic_height(node: &StyledNode) -> f32 {
         // Images also get a default height so the renderer has an area to paint into.
         NodeType::Element(element) if element.tag_name == "img" => {
             attribute_length(element, "height").unwrap_or(150.0)
+        }
+        NodeType::Element(element) if element.tag_name == "svg" => {
+            properties::svg_intrinsic_size(node, element).1
         }
         // <input> is an atomic widget with no children, so its content height
         // has to come from somewhere — use the font-size so a single-line
@@ -3632,6 +3638,122 @@ mod tests {
             b.children.iter().find_map(|c| find(c, class))
         }
         find(layout, class).unwrap_or_else(|| panic!("no box with class {class}"))
+    }
+
+    fn size_of(layout: &LayoutBox, class: &str) -> (f32, f32) {
+        let d = &by_class(layout, class).dimensions.content;
+        (d.width, d.height)
+    }
+
+    /// Inline `<svg>` is a replaced element (follow-up F1): its size comes
+    /// from `width`/`height` attributes, a missing one from the `viewBox`
+    /// ratio, else 300×150 — and CSS still wins. Every layout path: inline
+    /// flow, block, flex (taffy), legacy boundary.
+    #[test]
+    fn inline_svg_takes_its_attribute_size() {
+        let svg = |attrs: &str| {
+            format!(r#"<svg class="s" {attrs}><path d="M0 0h1"/><title>Icon</title></svg>"#)
+        };
+        for (attrs, size) in [
+            (r#"width="50" height="30""#, (50.0, 30.0)),
+            (r#"width="16px" height="16px""#, (16.0, 16.0)),
+            (r#"width="40" viewBox="0 0 20 10""#, (40.0, 20.0)),
+            (r#"height="10" viewBox="0 0 20 10""#, (20.0, 10.0)),
+            (r#"width="40""#, (40.0, 150.0)),
+            (r#"viewBox="0 0 24 24""#, (300.0, 150.0)),
+            ("", (300.0, 150.0)),
+            (r#"width="inf" height="NaN""#, (300.0, 150.0)),
+            (r#"width="-5" height="1e30""#, (300.0, 150.0)),
+        ] {
+            for (wrap_open, wrap_close, css) in [
+                ("<p>", "</p>", ""),
+                ("<p>text ", " text</p>", ""),
+                ("<div>", "</div>", ".s { display: block; }"),
+                (r#"<div style="display:flex">"#, "</div>", ""),
+                (
+                    &format!("<div>{LEGACY}"),
+                    "</div>",
+                    ".s { display: block; }",
+                ),
+            ] {
+                let layout = page(
+                    &format!("{wrap_open}{}{wrap_close}", svg(attrs)),
+                    css,
+                    (800.0, 600.0),
+                );
+                assert_eq!(size_of(&layout, "s"), size, "{attrs} in {wrap_open}{css}");
+            }
+        }
+        // The attributes are presentation hints (Chrome): CSS units work —
+        // `1em` icons (react-icons) follow the font size.
+        let layout = page(
+            &format!(
+                r#"<p style="font-size:20px">{}</p>"#,
+                svg(r#"width="1em" height="1em""#)
+            ),
+            "",
+            (800.0, 600.0),
+        );
+        assert_eq!(size_of(&layout, "s"), (20.0, 20.0));
+        let layout = page(
+            &format!(
+                r#"<div style="width:200px">{}</div>"#,
+                svg(r#"width="50%" height="10""#)
+            ),
+            ".s { display: block; }",
+            (800.0, 600.0),
+        );
+        assert_eq!(size_of(&layout, "s"), (100.0, 10.0));
+        // `width: auto` overrides the hint, but the intrinsic size still
+        // comes from the attributes (Blink's `SVGSVGElement::IntrinsicWidth`;
+        // apple.com's global-nav icons).
+        let layout = page(
+            &format!(
+                "<p>{}</p>",
+                svg(r#"width="30" height="44" viewBox="0 0 30 44""#)
+            ),
+            ".s { width: auto; height: auto; }",
+            (800.0, 600.0),
+        );
+        assert_eq!(size_of(&layout, "s"), (30.0, 44.0));
+        // A CSS size on one side takes the other from the viewBox ratio.
+        let layout = page(
+            &format!("<p>{}</p>", svg(r#"viewBox="0 0 100 26""#)),
+            ".s { height: 26px; }",
+            (800.0, 600.0),
+        );
+        assert_eq!(size_of(&layout, "s"), (100.0, 26.0));
+        // CSS sizes override the attributes.
+        let layout = page(
+            &format!("<p>{}</p>", svg(r#"width="16" height="16""#)),
+            ".s { width: 24px; height: 20px; display: inline-block; }",
+            (800.0, 600.0),
+        );
+        assert_eq!(size_of(&layout, "s"), (24.0, 20.0));
+    }
+
+    #[test]
+    fn svg_icon_button_keeps_its_size() {
+        // bbc "Open menu": a borderless, paddingless button whose only
+        // content is an icon.
+        let layout = page(
+            r#"<p><button class="b" aria-label="Open menu"><svg width="50" height="30" viewBox="0 0 50 30"><path d="M0 0"/></svg></button></p>"#,
+            ".b { border: 0; padding: 0; background: none; }",
+            (800.0, 600.0),
+        );
+        let (w, h) = size_of(&layout, "b");
+        assert!(w >= 50.0 && h >= 30.0, "button {w}x{h}");
+    }
+
+    #[test]
+    fn svg_children_get_no_boxes() {
+        // `<title>`/`<text>` inside an icon must not lay out as page text.
+        let layout = page(
+            r#"<p><svg class="s" width="10" height="10"><title>Close</title><text>X</text></svg></p>"#,
+            "",
+            (800.0, 600.0),
+        );
+        assert!(by_class(&layout, "s").children.is_empty());
     }
 
     /// `css::supports::UNRENDERED` value entries are really unrendered:

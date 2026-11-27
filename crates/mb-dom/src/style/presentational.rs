@@ -71,6 +71,23 @@ pub(super) fn presentational_hints(element: &ElementData) -> PropertyMap {
         }
     }
 
+    // An outer `<svg>`'s width / height attributes are presentation
+    // attributes for CSS width / height (SVG 2 §8.4; Chrome): CSS lengths
+    // — a bare number is px, `1em` icons follow the font, `%` the
+    // container. Negative, non-finite or junk values are ignored (the
+    // layout falls back to the viewBox ratio, then 300×150).
+    if tag == "svg" {
+        for name in ["width", "height"] {
+            if let Some(value) = element
+                .attributes
+                .get(name)
+                .and_then(|raw| svg_length(name, raw))
+            {
+                hints.insert(name.into(), value);
+            }
+        }
+    }
+
     // align — meaning depends on the element. On floatable embeds (img,
     // table) "left"/"right" map to CSS float; on block / table-section
     // elements every keyword maps to text-align. We don't model "center"
@@ -242,6 +259,20 @@ fn named_html_color(name: &str) -> Option<crate::css::Color> {
         _ => return None,
     };
     Some(crate::css::Color { r, g, b, a: 255 })
+}
+
+/// An SVG `width`/`height` attribute as a CSS length (follow-up F1).
+fn svg_length(name: &str, raw: &str) -> Option<Value> {
+    let declarations = crate::css::parse_property_value(name, raw.trim())?;
+    match declarations.into_iter().next()?.value {
+        Value::Length(v, unit) if v.is_finite() && (0.0..=super::MAX_CSS_LENGTH).contains(&v) => {
+            Some(Value::Length(v, unit))
+        }
+        Value::Number(v) if v.is_finite() && (0.0..=super::MAX_CSS_LENGTH).contains(&v) => {
+            Some(Value::Length(v, crate::css::Unit::Px))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -862,6 +862,61 @@ P 의 발견을 1a 전에 고친다(사용자 결정: 문서 요소를 DOM 에 �
 
 ---
 
+## 2단계 후속 묶음 (F1–F4, 2026-11-28)
+
+2단계가 남긴 갭을 3단계 전에 정리한다(사용자 결정). 네 부분으로 나눠 부분마다 멈추고 부모 세션이 검증·커밋한다: **F1** 에이전트가 보는 크기(인라인 SVG·논리 속성) → **F2** 값 파서 갭(이름 있는 색·`#rgba`·별칭·`transform: none`) → **F3** 둥근 테두리 → **F4** 셀렉터 규칙 색인.
+
+### F1 — 인라인 SVG 고유 크기 + 논리 속성 (2026-11-28)
+
+**인라인 `<svg>`** — 대체 요소로 다룬다:
+- **크기**: Chrome 처럼 바깥 `<svg>` 의 `width`/`height` 속성은 **CSS `width`/`height` 의 프레젠테이션 힌트**다(`style/presentational.rs`, SVG 2 §8.4).
+  - CSS 길이로 읽는다: 숫자 = px, `16px`, `1em`(react-icons 가 씀 — 글꼴 크기를 따름), `%`.
+  - 음수·비유한·`MAX_CSS_LENGTH` 초과·쓰레기 값은 버린다.
+  - 작성자 CSS 가 이긴다.
+- **고유 크기**(`layout::properties::svg_intrinsic_size` — CSS 가 크기를 안 줄 때 레이아웃이 씀): 변마다 해석된 CSS px, 없으면 **속성 자체**(숫자·`px`·`em`·`rem`) — Blink `SVGSVGElement::IntrinsicWidth` 와 같다.
+  - apple.com 글로벌 내비 아이콘은 CSS `width:auto` 가 힌트를 덮는데도 Chrome 에서 30×44 다. 처음 구현(CSS 만 봄)은 이것을 300×150 으로 만들어서 고쳤다.
+  - 한 변만 있으면 다른 변은 `viewBox` 비율로, 그것도 없으면 300×150.
+  - **근사**: 크기가 전혀 없고 `viewBox` 만 있는 SVG 는 Chrome 에선 포함 블록 폭을 채우지만 우리는 300×150.
+- **자식**: 스타일 트리가 `<svg>` 의 자식을 버린다. `<title>`·`<text>`·도형이 페이지 상자(글자)로 배치되지 않는다. 인라인 SVG 는 여전히 **그리지 않는다** — 크기만 맞는 빈 상자.
+- `svg` 를 인라인 수준 태그 목록에 넣었다. Chrome 처럼 글줄 안에 놓이고, 전엔 블록으로 쌓였다.
+
+**논리 속성**(`css/logical.rs`) — 가로 쓰기·ltr 고정이라 파싱 때 물리 속성으로 바꾼다. 캐스케이드부터는 물리 이름만 본다. 같은 변의 논리·물리 선언이 한 속성으로 캐스케이드된다(이 쓰기 모드에서 브라우저와 같음).
+- 이름 바꾸기:
+  - `inline-size`/`block-size`(+`min-`/`max-`)
+  - `margin`·`padding`·`inset` 의 `-inline/-block-start/-end`
+  - `border-{inline,block}-{start,end}(-width/-style/-color)`
+  - `border-{start,end}-{start,end}-radius`
+- 한두 값 → 시작·끝: `margin-inline`·`margin-block`·`padding-inline`·`padding-block`·`inset-inline`·`inset-block`·`border-{inline,block}-{width,style,color}`.
+- 같은 값 → 양쪽: `border-inline`·`border-block`.
+- 전역 키워드·`var()` 경로도 같은 표를 쓴다(`longhands_of` 가 물리 longhand 로 펼친다).
+- `properties.rs` 표(아는 속성·값 종류)는 바꾸지 않았다 — 0b 분류는 그대로.
+
+**테스트 +6**(1028 → **1034**), 모두 구현 전 실패 확인:
+- 레이아웃 3:
+  - `inline_svg_takes_its_attribute_size` — 속성·`px`·`viewBox` 비율·300×150·비유한/음수/거대 값 × 인라인 흐름·글 사이·블록·flex(taffy)·레거시 경계 다섯 경로, `1em`·`%`·한 변 CSS + `viewBox`·`width:auto` 에도 속성, CSS 우선
+  - `svg_icon_button_keeps_its_size` — bbc 모양
+  - `svg_children_get_no_boxes`
+- 파서 3: 이름 바꾸기·짝·양쪽·`var()`.
+
+**퍼저**: 구조 생성기 태그에 `svg`(`width`/`height`/`viewBox` 에 `16`·`24px`·`-3`·`1e30`·`inf`·`NaN`·`100%`·`0 0 0 0`·`0,0,1e-30,1e30` 등), CSS 풀에 논리 속성 6개와 값 틀. 긴 실행(release) CSS 10만 무결.
+- **레이아웃 3만에서 실패 한 건(seed 28718) — 기존 버그**: `* { padding-right: 82%; grid-template-columns: max-content max-content min-content }` + `display:grid` 인 `<ul>` 안 중첩 인라인 → 폭 14,645,578px(`TooWide`, 상한 1e7). 축소된 입력에 SVG·논리 속성이 없다. 생성기에 `svg` 태그를 더해 시드 흐름이 바뀌면서 새로 뽑혔다. **커밋된 HEAD(`45ba9d9`)에서도 같은 값이 나오는 것을** 임시 worktree 로 확인했다.
+  - 원인 추정: % 패딩 × max-content 트랙의 증폭(0c 의 F3 류).
+  - 이번엔 안 고친다 → [부록 C](#부록-c--0c-퍼저에서-찾은-것) 후보, 별도 수정 권고.
+
+**코퍼스**(라벨 `f1`, `supports` 대비): 결과·기대 컨트롤·오프라인 미스·슬리버 그대로, `[mb-budget]` 0.
+- **요소 목록 diff**(모두 정상 — 전엔 0 크기라 빠져 있었다):
+  - github +1 `button "Appearance settings"`(2.2 에서 사라진 것)
+  - bbc +1 `button "Open menu"`(1b 에서 사라진 것)
+  - mdn +1 `link "MDN logo"`
+  - velog +2 `link ""`(헤더·복제 헤더의 홈 로고 링크 — `<svg width=71 height=24>` 뿐이고 `<title>`·`aria-label` 이 없어 Chrome 에서도 이름이 비어 있다)
+- **SVG 크기 조사**(일회성 예제로 사이트마다 SVG 상자를 크기 출처별로 셈 — 남기지 않음):
+  - 6곳 189개 — github 103(16×16 86 · 12×12 14) · apple 26 · bbc 34 · velog 14 · google 8 · mdn 4.
+  - 전엔 CSS 크기가 없는 SVG 가 자식에서 크기를 얻었다(대개 0×0).
+  - 이제 CSS 또는 속성 크기 179, 300×150 기본 10(apple 9 — 크기 없이 `viewBox` 만, Chrome 은 컨테이너 폭; google 1 — 화면 밖 x=1292). 이 10개는 요소 목록·문서 높이를 바꾸지 않았다.
+  - 첫 구현에서 velog 10·bbc 11 이 300×150 이던 것(`width="1em"` 류 — 프레젠테이션 힌트로 해결)과 apple 11(`width:auto` — 속성 고유 크기로 해결)을 이 조사로 찾았다.
+- 문서 높이: mdn 9,230 → 9,359 · github 6,502 → 6,514 · bbc 24,670 → 25,582(아이콘·로고가 자리를 차지).
+- **파싱만** 20곳 12,649 → **10,181**(github 4,296 → 2,593, apple 1,637 → 974, google 364 → 314) — 논리 속성이 이제 읽히는 물리 속성이 됨. 합산 지표 3,310 → 3,303.
+
 ## 3단계 — overflow 클리핑
 
 ### 목표
@@ -1068,6 +1123,7 @@ GitHub 간격(`margin-top: calc(var(--base-size-8) + var(--Layout-row-gap))` 류
 | 1 값 파서 | ✅ P·1r·1a·1p·1q·1b 완료 · 1c 완료(미커밋) — **목표 달성** | P `e470230` · 1r `9de59c9` · 1a `80766d8` · 1p `1ca47b2` · 1q `994d8c8` · 1b `35f1218` · 1c 미커밋 | 915 → 919 (P) → 932 (1r) → 943 (1a) → 955 (1p) → 961 (1q) → 980 (1b) → 996 (1c) | 1a: ok 17 + ok* 3(github·yna 새 이미지 요청 미스) · nav-fail 1 · panic 0 · timeout 0 · `[mb-budget]` 0 | 목표 ≤1,478 (동결, ours 기준) — **전(`step1-before`)**: 5곳 ours 7,371 · 합계(ours + IACVT 2,143 + `Keyword` 폴백 113 + var 폴백 0) **9,627** (20곳 14,078 · 18,204) → **1r(`html-root`)**: ours 그대로 · IACVT 128 · 합계 **7,612** (20곳 IACVT 318 · 합계 15,075) → **1a(`important`)**: ours **4,387** · 합계 **4,645**(20곳 9,643 · 10,680), 사유 `important` 5,097 → **0** → **1b(`value-parsers`)**: ours **3,941** · 합계 **4,213**(20곳 7,123 · 8,086), `multi-token` 4,319 → 1,098 → **1c(`var`)**: ours **335** · 합계 **738** ✅ ≤1,478(20곳 1,806 · 3,037) | — | 5곳 15 · 20곳 325 그대로 | 8/20 → 1a 7/20(enwiki 3/3), 1c 까지 7/20 | [1단계 구현 메모](#1단계-구현-메모-2026-11-27). P = 계산값 시점 열 `iacvt`·`var_keyword_fallback`·`decl_drop_total`(`style_tree_with_report`), 기존 열은 `grid` 와 25곳 동일. **1r** = `<html>` 을 단일 루트로(`:root`·`html{}`·rem·`documentElement`), 루트 여백 비겹침, 캔버스 배경(색), `--*` 공유 스코프(첫 실행 `[mb-budget]` 3 → 0). 요소 diff: github +1(로고 링크, 토큰으로 크기 생김) · enwiki −3(`.client-nojs` 숨김 — `document.cookie` 없어 시작 스크립트가 죽음, 후속)  **1a** = 파싱·두 패스 캐스케이드·인라인 `!important`·분류표 `important` 행 수정. 요소 diff: yna −4·microsoft −2(`display:none!important` 유틸리티, 정상) · docsrs −1(`<noscript>` 시트를 우리가 적용 — 기존 버그, 후속) · enwiki +3(헤더 레이아웃 이상 — 레거시 % 높이 = 부모 폭 기준, 3단계 항목, 진단만; 문서 높이 18,008 → 1,280)  **1p** = % 높이를 확정 포함 블록 높이 기준으로(아니면 auto), 루트 = 뷰포트, absolute % 는 패딩 상자, absolute 자식 블록화, 인라인 블록 높이 근사. 요소 diff: docsrs +15(`<a><code>` 문서 링크, 정상) 뿐. enwiki 헤더 1,292 → 124px, +3 링크 유지. `page_height` 가 `html,body{height:100%}` 4곳에서 800 — (c) `scrollHeight` 권고. 슬리버 319 → 340(블록화된 sr-only, 3단계 몫)  **1q** = `page_height`·스크롤 상한을 `DocumentView::document_height`(넘친 내용 포함) 하나로, 단위 없는 0 = `0px`. 요소 diff: korea-kr −1(썸네일 `height:0` + 버려지는 `calc()` 패딩 — 5단계). d2·enwiki `page_height` 800 → 5,458·12,732. 슬리버 340 → 413(0×0 sr-only, 3단계)  **1b** = border 계열·`font-family`·`box-shadow` 목록·`transition/animation` 파싱만·`flex` 완성(`flex:1` = basis 0%)·`background-size` 페인트·`clip`/`clip-path`·`light-dark()`·`inset`·전역 키워드·`all`(전엔 `inherit` 등을 아예 안 풀었다). 요소 diff: korea-kr +1(1q 썸네일 링크 복귀) · bbc −1(`border:0` 이 UA 테두리를 지우자 0×0 SVG 만 남은 버튼 — 인라인 `<svg>` 고유 크기 갭, 후속). `ok*` 5곳 늘어남(살아난 배경 단축의 이미지).  **1c** = `Unparsed`(커스텀 속성·`var()`), 정의 노드에서 치환 후 상속, 재파싱 메모, IACVT = `unset`, 64KiB 상한; 코퍼스 첫 실행에서 정의된 이름 + 폴백이 전부 실패하던 버그(`parse_nested_block` 은 parse_entirely) 고침. 요소 diff 없음. 리뷰 후 `var()`·함수 중첩 상한 `css::MAX_VAR_NESTING` 32(스택 넘침 abort 방지). [완료 판정](#1단계-완료-판정-2026-11-28-라벨-var) |
 | 2 @media/@layer/@supports | ✅ 2.1 · P · 2.2 완료 · 2.3 완료(미커밋) — [완료 판정](#2단계-완료-판정-2026-11-28-라벨-supports) | 2.1 `4bd8146` · P `a1863ae` · 2.2 `928b779` · 2.3 미커밋 | 876 → 878 (2.1 probe) → 902 (2.1) → 997 (2.2·2.3 P) → 1012 (2.2) → 1028 (2.3) | 25곳 그대로: ok 19 + ok* 1 · nav-fail 1(K5) · panic 0 · timeout 0 · `[mb-budget]` 0 | 5곳 ours 7,389 / browser-too 15 (변화 없음 — 2.1 은 버림을 안 바꿈) | 5곳 ours 1,745 / browser-too 11 (변화 없음) | 5곳 10 → **218**(kowiki 0→203), 20곳 275 → **984**(enwiki 66→552) — 아래 메모 | 8/20 그대로(naver·daum·hani·korea-kr·velog·d2·google·enwiki) | **2.1**: 코퍼스 `media-before`(probe 만 바꾼 옛 엔진) → `media-after`. 20곳 `@media` 블록 3,786 → 3,789(`<link media>` 3개가 이제 블록) · 블록 안 규칙 15,417 → 16,220 · 적용 15,417 → **5,754** · "wrong at 1280x800" 범주 규칙 적용 9,223 → **1**(GitHub `print,screen and (width<=1349px) and (width>=768px)` — probe 휴리스틱 오분류, 1280 에서 참이 맞음) · 무효 쿼리 0. 결과·버림·오프라인 미스·기대 컨트롤은 25곳 동일. **요소 목록 diff 10곳** — 모바일 전용이 사라짐(정상): yna −186(메뉴 열기/닫기 ×29 + 모바일 서랍 메뉴 링크·APP설치·광고삭제·뉴스레터), apple −11(모바일 푸터 아코디언 버튼), d2 −2(모바일 검색·메뉴 링크), docsrs −1(모바일 "Crate tokio"), github −1("View all files"). 데스크톱 전용이 나타남(정상): bbc +69(섹션 내비·월드 서비스 언어), yna +20(캐러셀 버튼), github +18(파일 목록·Go to file·Branches/Tags), apple +17(글로벌 내비·검색·장바구니), microsoft +10(상단 내비), hani +6(섹션 링크), d2 +4(검색창·D2 News·Hello world), kowiki +14(전거 통제·바닥글 링크). **버그 → 5단계 몫**: enwiki −494 +240 — Vector 2022 데스크톱 격자(`@media screen and (min-width:1120px)` 의 `.mw-body{display:grid; grid-template: … / minmax(0,59.25rem) min-content; grid-template-areas: …}`)가 이제 적용되는데 `grid-template` 단축·`minmax()` 를 못 읽어 본문 열이 0폭 → navbox 링크 494개가 0폭(관찰에서 빠짐), 슬리버 enwiki 66→552·kowiki 0→203(같은 원인, kowiki 는 링크가 남음). 나타난 240 은 참고문헌 역링크·"145 languages" 버튼(Chrome 데스크톱에도 있음). 기대 컨트롤 enwiki 2/3 그대로. 미리보기 `compat-cache/previews/2.1/`(후만 — 전은 옛 빌드가 필요해 생략): HN 데스크톱 표(문서 높이 1,377 → 1,020, 모바일 규칙 빠짐), GitHub 위쪽 어두운 띠 = 로그아웃 헤더 `div[data-color-mode=dark]`(Chrome 에서도 어두움)가 레이아웃 갭으로 늘어난 것 — `@media` 와 무관, "GitHub 라이트" 판정은 2.2 때. **비트셋 비용**: GitHub `@media` 517블록(쿼리 534) **3.6µs/프레임**, 코퍼스 최대 yna 1,571블록 17µs(release) — 매 프레임 키 확인에 그대로 씀. 퍼저 CSS 긴 실행 10만 무결. 남음: 2.2 `@layer`(GitHub 의 레이어 안 다크 블록 49개는 2.1 평가가 있어 펼쳐도 꺼짐)·2.3 `@supports` — 1단계 뒤. **2.2·2.3 P**(라벨 `layer-before`): 기존 열 25곳 `var` 와 동일 · 건너뛴 at-rule 본문 GitHub **45.6%**(`@layer` 1,161,812B) · `@layer` 최상위 블록 4 + 문장 1(GitHub 만) · `@supports` 120블록 전부 거짓(본문 버림) — [P 메모](#p--probe-변경--전-측정-1). **2.2**(라벨 `layer`): GitHub 만 바뀜 — 건너뛴 at-rule 바이트 **45.6% → 0.7%**, 레이어 안 규칙 5,202 적용, 다크 블록 적용 0 유지, **미리보기 라이트**, 요소 −3("More items" ×2 정상 · "Appearance settings" 버그 = 논리 속성·인라인 SVG 크기 갭, 후속), 합산 지표 5곳 738 → 989, 스타일 패스 647 → 980ms — [2.2 메모](#22--layer-2026-11-28). **2.3**(라벨 `supports`): `@supports` 149블록 참 46 · 거짓 103, GitHub 건너뛴 바이트 0.7% → **0.4%**, 판정을 `RENDERED`(옛 probe `CONSUMED`)로 "엔진이 읽는 속성" 까지, 요소 diff enwiki +11(목차, 정상), 5곳 합산 989 → 994, 스타일 시간 그대로 — [2.3 메모](#23--supports-2026-11-28) |
 | 2.1a 위키 그리드 | 🔶 완료(미커밋) | 미커밋 | 902 → **915** | 25곳 그대로(ok 19 + ok* 1 · nav-fail 1 · panic 0 · timeout 0 · `[mb-budget]` 0) | 5곳 ours 7,389 → **7,371** / 15 (20곳 14,112 → 14,078 — `grid-template`·`minmax` 가 이제 읽힘: github 17·enwiki 6·mdn 6·docsrs 2·bbc 2·google 1) | 그대로 | 5곳 218 → **15**, 20곳 984 → **325**(enwiki 552→71 · kowiki 203→0 · **mdn 0→25**) | 8/20 그대로 | [2.1a 메모](#21a-위키-그리드-회귀-수정-2026-11-27). 요소 diff(`media-after` → `grid`) 2곳뿐: enwiki **+484**·kowiki **+230** = navbox 링크(요소 678→1,162 · 767→997). 2.1 전(`media-before`) 대비로는 enwiki +241 −11(+240 은 2.1 의 참고문헌 역링크·언어 버튼), kowiki +244(2.1 의 +14 + navbox 230 — kowiki navbox 는 **2.1 전에도** colspan 표 버그로 빠져 있었고 이번에 처음 보임). 2.1 전 대비 enwiki −11 은 navbox 그룹 셀(`width:1%`) — 표 min-content 바닥 없음, 후속. mdn 슬리버는 사용자 속성 트랙·calc 곱셈 미디어 쿼리(1·5단계 몫), 요소 변화 없음. 문서 높이: enwiki 35,445→16,790 · kowiki 16,345→11,983 · hani 11,898→10,426 · mdn 5,791→6,755 · bbc 25,226→26,042 · docsrs 5,947→6,029 · apple 26,569→26,617(간격·영역 폭 배치·내용 크기 `fr` 행; 요소 목록 동일) |
+| 2F 후속 묶음 | 🔶 F1 완료(미커밋) · F2–F4 ⏳ | F1 미커밋 | 1028 → 1034 (F1) | 25곳 그대로 · `[mb-budget]` 0 | 20곳 합산 3,310 → 3,303 | — | 417 그대로 | 7/20 그대로 | [F1 메모](#f1--인라인-svg-고유-크기--논리-속성-2026-11-28): 인라인 SVG = 대체 요소(속성 = 프레젠테이션 힌트, 고유 크기 = 속성 → `viewBox` 비율 → 300×150, 자식 버림), 논리 속성 → 물리. 요소 diff github +1 "Appearance settings" · bbc +1 "Open menu" · mdn +1 · velog +2(로고 링크), 파싱만 12,649 → 10,181. 퍼저가 기존 버그 하나(seed 28718, % 패딩 × max-content 그리드 폭 증폭) 발견 — HEAD 에서도 재현, 별도 |
 | 3 클리핑 | ⏳ | | | 0/0/0 | — | — | 목표 0 | | |
 | 4 셀렉터 | ⏳ | | | 0/0/0 | — | 목표: 대상 범주 0 | — | | |
 | 5 calc/트랙 | ⏳ | | | 0/0/0 | 목표 ours −95% (2차 환산 ≤380) | — | — | | 위키 레이아웃, taffy 스파이크 결과 |
