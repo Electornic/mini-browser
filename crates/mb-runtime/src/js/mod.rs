@@ -1073,6 +1073,58 @@ mod tests {
     }
 
     #[test]
+    fn append_child_refuses_an_ancestor_with_hierarchy_request_error() {
+        // A cycle would make every recursive pass (style, layout, paint)
+        // loop until the stack overflows — an abort.
+        let mut rt = rt_with_html(r#"<div id="a"><div id="b"></div></div>"#);
+        let err = rt
+            .execute("document.getElementById('b').appendChild(document.getElementById('a'))")
+            .unwrap_err();
+        assert!(err.contains("HierarchyRequestError"), "got: {err}");
+        assert_eq!(
+            rt.execute("document.getElementById('b').parentElement.id")
+                .unwrap(),
+            "\"a\"",
+            "nothing moved"
+        );
+    }
+
+    #[test]
+    fn inner_html_and_text_content_at_the_depth_cap() {
+        // Script-built chain to the cap: innerHTML below it flattens like
+        // the parser (nothing lost); content *at* the cap has no room.
+        let mut rt = rt_with_html(r#"<div id="root"></div>"#);
+        let made = rt
+            .execute(
+                "var n = document.getElementById('root'); var made = 0;
+                 while (true) { var c = document.createElement('div');
+                   try { n.appendChild(c); n = c; made++; } catch (e) { break; } }
+                 made",
+            )
+            .unwrap();
+        assert_eq!(made, (crate::dom::MAX_DOM_DEPTH - 1).to_string());
+        let err = rt.execute("n.innerHTML = '<b>x</b>'").unwrap_err();
+        assert!(err.contains("nested too deep"), "got: {err}");
+        let err = rt.execute("n.textContent = 'x'").unwrap_err();
+        assert!(err.contains("nested too deep"), "got: {err}");
+        assert_eq!(
+            rt.execute("n.innerHTML = ''; n.children.length").unwrap(),
+            "0"
+        );
+        // Five levels up there is room for five; twenty nested divs flatten.
+        rt.execute(
+            "var up = n; for (var i = 0; i < 5; i++) up = up.parentElement;
+             up.innerHTML = '<div>'.repeat(20) + 'x';",
+        )
+        .unwrap();
+        assert_eq!(
+            rt.execute("up.querySelectorAll('div').length").unwrap(),
+            "20",
+            "flattened, not dropped"
+        );
+    }
+
+    #[test]
     fn element_remove_child_throws_when_argument_isnt_a_child() {
         let mut rt = rt_with_html(r#"<div id="a"></div><div id="b"></div>"#);
         let err = rt

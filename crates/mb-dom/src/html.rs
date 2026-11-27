@@ -33,20 +33,14 @@ pub struct ParseError {
     pub message: String,
 }
 
-/// The deepest an element can sit in a parsed tree (counting the arena root
-/// as 1). Deeper content is attached to the element at this depth's parent
-/// instead — it becomes a run of siblings at the cap, in document order —
-/// the same idea as Blink/WebKit's `kMaximumHTMLParserDOMTreeDepth` (512).
-///
-/// Ours is lower because our passes recurse per level and layout is the
-/// hungriest: measured with nested `<div>`s, the full pipeline plus the
-/// agent's observation overflowed at ~540 levels in a debug build on an
-/// 8 MB stack (the browser's main thread) and ~980 in release on a 2 MB
-/// thread (docs/compat-round3.md D1). 256 leaves ≥ 2× headroom on both.
-/// A stack overflow is an abort, not a panic — `catch_unwind` can't save
-/// the session. Trees built by script (`appendChild` in a loop) are not
-/// capped.
-pub const MAX_DOM_DEPTH: usize = 256;
+/// The deepest a node can sit in a parsed tree (counting the tree's root
+/// as 1) — the document-wide cap, defined with its rationale in
+/// [`crate::dom::MAX_DOM_DEPTH`]. The parser **flattens** at it: deeper
+/// content is attached to the capped element's parent instead — a run of
+/// siblings at the cap, in document order — the same idea as Blink/WebKit's
+/// `kMaximumHTMLParserDOMTreeDepth` (512). Script mutations are refused
+/// instead (`dom.rs`).
+pub use crate::dom::MAX_DOM_DEPTH;
 
 pub fn parse(source: &str) -> Result<Document, ParseError> {
     let mut document = Document::new();
@@ -89,10 +83,26 @@ pub fn parse(source: &str) -> Result<Document, ParseError> {
 /// Parse `source` as a fragment — zero or more sibling nodes — into the
 /// existing `document`. Returns the freshly created top-level NodeIds; they
 /// are detached (not in `document.roots()` and have no parent) so callers
-/// can splice them under any existing element via `append_child`. Used by
-/// the JS `innerHTML` setter to swap an element's children without
-/// destroying the rest of the tree.
+/// can splice them under any existing element via `append_child`. The
+/// top-level nodes count as depth 1 for the cap; to insert under an
+/// element, use [`parse_fragment_at`] with that element's depth + 1.
 pub fn parse_fragment(source: &str, document: &mut Document) -> Result<Vec<NodeId>, ParseError> {
+    parse_fragment_at(source, document, 1)
+}
+
+/// [`parse_fragment`] for nodes that will sit at `depth` (the context
+/// element's depth + 1) — the JS `innerHTML` setter. Content that would go
+/// past [`MAX_DOM_DEPTH`] is flattened as in a document parse; a fragment
+/// whose top level itself would be past the cap yields no nodes at all
+/// (the caller refuses).
+pub fn parse_fragment_at(
+    source: &str,
+    document: &mut Document,
+    depth: usize,
+) -> Result<Vec<NodeId>, ParseError> {
+    if depth > MAX_DOM_DEPTH {
+        return Ok(Vec::new());
+    }
     let context = QualName::new(None, ns!(html), LocalName::from("body"));
     // Last arg = scripting_enabled. We run scripts ourselves on top of the
     // arena (`BrowserState::run_scripts`), so the parser must leave inline
@@ -102,16 +112,12 @@ pub fn parse_fragment(source: &str, document: &mut Document) -> Result<Vec<NodeI
 
     // `parse_fragment` builds:
     //   #Document → <html> (synthetic context wrapper) → ...real siblings...
-    let mut roots = Vec::new();
     let document_kids = dom.document.children.borrow();
-    if let Some(context_root) = document_kids.first() {
-        for child in context_root.children.borrow().iter() {
-            if let Some(node_id) = build_into_arena(document, child) {
-                roots.push(node_id);
-            }
-        }
-    }
-    Ok(roots)
+    let Some(context_root) = document_kids.first() else {
+        return Ok(Vec::new());
+    };
+    let top_level: Vec<Handle> = context_root.children.borrow().clone();
+    Ok(build_nodes(document, &top_level, depth))
 }
 
 fn parser_opts() -> ParseOpts {
@@ -156,40 +162,56 @@ fn contains_tag_open(source: &str, tag: &str) -> bool {
     false
 }
 
-/// Translate one rcdom `Handle` and its subtree into our arena. Returns
-/// `None` for nodes we don't model (Document, Doctype, Comment,
-/// ProcessingInstruction) — those are simply skipped along with their
-/// subtree.
-///
-/// Iterative, and depth-capped at [`MAX_DOM_DEPTH`]: the children of an
-/// element at the cap are attached to that element's parent instead, right
-/// after it (pre-order = document order). rcdom itself drops iteratively,
-/// so a 100 000-deep source is fine up to here.
+/// Translate one rcdom `Handle` and its subtree into our arena (a document
+/// root: depth 1). `None` for nodes we don't model.
 fn build_into_arena(document: &mut Document, handle: &Handle) -> Option<NodeId> {
-    let root = create_node(document, handle)?;
-    // (handle, arena parent, depth the handle will sit at)
-    let mut stack: Vec<(Handle, NodeId, usize)> = Vec::new();
-    push_children(&mut stack, handle, root, 2);
+    build_nodes(document, std::slice::from_ref(handle), 1)
+        .into_iter()
+        .next()
+}
+
+/// Translate rcdom `handles` (siblings) and their subtrees into our arena;
+/// returns the top-level NodeIds, detached, in document order. The handles
+/// sit at `top_depth` (≤ [`MAX_DOM_DEPTH`]). Nodes we don't model (Document,
+/// Doctype, Comment, ProcessingInstruction) are skipped with their subtree.
+///
+/// Iterative, and depth-capped at [`MAX_DOM_DEPTH`]: the children of a node
+/// at the cap are attached to that node's parent instead, right after it
+/// (pre-order = document order) — for a top-level node at the cap, they
+/// become top-level nodes too. rcdom itself drops iteratively, so a
+/// 100 000-deep source is fine up to here. Fresh nodes and the cap make
+/// the unchecked attach safe.
+fn build_nodes(document: &mut Document, handles: &[Handle], top_depth: usize) -> Vec<NodeId> {
+    let mut top = Vec::new();
+    // (handle, arena parent — None = top level, depth the handle will sit at)
+    let mut stack: Vec<(Handle, Option<NodeId>, usize)> = handles
+        .iter()
+        .rev()
+        .map(|h| (h.clone(), None, top_depth))
+        .collect();
     while let Some((handle, parent, depth)) = stack.pop() {
         let Some(id) = create_node(document, &handle) else {
             continue;
         };
-        document.append_child(parent, id);
+        match parent {
+            Some(parent) => document.attach_unchecked(parent, id),
+            None => top.push(id),
+        }
         if depth < MAX_DOM_DEPTH {
-            push_children(&mut stack, &handle, id, depth + 1);
+            push_children(&mut stack, &handle, Some(id), depth + 1);
         } else {
             push_children(&mut stack, &handle, parent, depth);
         }
     }
-    Some(root)
+    top
 }
 
 /// Queue `handle`'s children (reversed, so they pop in document order) to
-/// be attached under `parent` at `depth`.
+/// be attached under `parent` (None = top level) at `depth`.
 fn push_children(
-    stack: &mut Vec<(Handle, NodeId, usize)>,
+    stack: &mut Vec<(Handle, Option<NodeId>, usize)>,
     handle: &Handle,
-    parent: NodeId,
+    parent: Option<NodeId>,
     depth: usize,
 ) {
     for child in handle.children.borrow().iter().rev() {
@@ -241,7 +263,7 @@ pub fn is_void_element(tag_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_DOM_DEPTH, parse, parse_fragment};
+    use super::{MAX_DOM_DEPTH, parse, parse_fragment, parse_fragment_at};
     use crate::dom::{Document, NodeId, NodeType};
 
     /// (deepest element depth, element count, text) — iteratively, because
@@ -287,6 +309,28 @@ mod tests {
             .map(|i| char::from(b'0' + (i % 10) as u8))
             .collect();
         assert_eq!(text, expected, "document order is kept");
+    }
+
+    #[test]
+    fn fragment_parsed_below_a_deep_element_flattens_within_the_cap() {
+        // innerHTML at depth d parses at d + 1: the fragment's own depth
+        // budget is what is left under the cap. At the cap itself the top
+        // level's children become top-level nodes; past it, nothing.
+        let source = "<div>".repeat(20) + "x";
+        let mut document = Document::new();
+        let tops = parse_fragment_at(&source, &mut document, MAX_DOM_DEPTH - 4).unwrap();
+        assert_eq!(tops.len(), 1);
+        let (deepest, elements, text) = shape(&document, tops[0]);
+        assert_eq!(deepest, 5, "depth MAX-4 ..= MAX");
+        assert_eq!((elements, text.as_str()), (20, "x"));
+
+        let tops = parse_fragment_at(&source, &mut document, MAX_DOM_DEPTH).unwrap();
+        assert_eq!(tops.len(), 21, "every node a top-level sibling at the cap");
+        assert!(
+            parse_fragment_at(&source, &mut document, MAX_DOM_DEPTH + 1)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

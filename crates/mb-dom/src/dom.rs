@@ -54,6 +54,47 @@ pub struct NodeData {
     pub children: Vec<NodeId>,
 }
 
+/// The deepest a node may sit in any tree — attached or detached — counting
+/// the tree's root as 1. Every pass over the tree (style, layout, paint, the
+/// agent's index) recurses per level, and a stack overflow is an **abort**:
+/// `catch_unwind` can't save the session. Measured with nested `<div>`s,
+/// the full pipeline plus the agent's observation overflowed at ~540 levels
+/// in a debug build on an 8 MB stack (the browser's main thread) and ~980 in
+/// release on a 2 MB thread (docs/compat-round3.md D1); 256 leaves ≥ 2×
+/// headroom on both. Blink/WebKit's parser uses 512
+/// (`kMaximumHTMLParserDOMTreeDepth`) and caps only the parser.
+///
+/// Two ways in, two behaviours: the HTML parser (documents, `innerHTML`)
+/// **flattens** — content past the cap becomes siblings at the cap, like
+/// Blink's parser (`html.rs`); the tree-mutation methods below **refuse**
+/// with [`TreeError::TooDeep`] (the JS bridge throws), because silently
+/// reparenting a node a script placed would break the script's own model
+/// of the tree (`parentNode` not what it set), which frameworks rely on.
+pub const MAX_DOM_DEPTH: usize = 256;
+
+/// Why a tree mutation was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeError {
+    /// A stale id, or the reference / old node isn't a child of the parent.
+    NotAChild,
+    /// The node is the parent or one of its ancestors (DOM
+    /// `HierarchyRequestError`): inserting it would make a cycle, and every
+    /// recursive pass would loop until the stack overflows.
+    Cycle,
+    /// The result would put some node deeper than [`MAX_DOM_DEPTH`].
+    TooDeep,
+}
+
+impl std::fmt::Display for TreeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TreeError::NotAChild => "the reference node is not a child of this node",
+            TreeError::Cycle => "HierarchyRequestError: the new child contains the parent",
+            TreeError::TooDeep => "HierarchyRequestError: the tree would be nested too deep",
+        })
+    }
+}
+
 // Arena-backed DOM. `nodes` is indexed by NodeId; `Option<NodeData>` reserves
 // a tombstone for nodes that get removed later, so a stale handle whose slot
 // has been freed observably resolves to `None` instead of pointing at a
@@ -150,10 +191,22 @@ impl Document {
     }
 
     /// Wire `child` into `parent`'s children list and set the back-pointer.
-    /// Panics on bogus ids — callers should only pass NodeIds the same arena
-    /// just produced, so an invalid id signals a genuine bug rather than user
-    /// input.
-    pub fn append_child(&mut self, parent: NodeId, child: NodeId) {
+    /// `child` must be detached (callers moving a node `detach` it first).
+    /// Refused — nothing changes — when `child` is `parent` or one of its
+    /// ancestors, or when `child`'s subtree would end up deeper than
+    /// [`MAX_DOM_DEPTH`]. Panics on bogus ids — callers should only pass
+    /// NodeIds the same arena just produced.
+    pub fn append_child(&mut self, parent: NodeId, child: NodeId) -> Result<(), TreeError> {
+        self.check_insert(parent, child)?;
+        self.attach_unchecked(parent, child);
+        Ok(())
+    }
+
+    /// `append_child` without the cycle / depth check, for builders that
+    /// guarantee both themselves: the HTML parser (fresh nodes, its own
+    /// flattening at the cap) and `clone_node` (a copy is no taller than
+    /// its source).
+    pub(crate) fn attach_unchecked(&mut self, parent: NodeId, child: NodeId) {
         let child_slot = self
             .get_mut(child)
             .expect("append_child: child id missing from arena");
@@ -163,6 +216,66 @@ impl Document {
             .expect("append_child: parent id missing from arena");
         parent_slot.children.push(child);
         self.touch();
+    }
+
+    /// The depth of `id` in its tree (attached or detached): 1 for a root.
+    /// Walks up — at most [`MAX_DOM_DEPTH`] steps while the cap holds.
+    pub fn depth(&self, id: NodeId) -> usize {
+        let mut depth = 1;
+        let mut current = self.get(id).and_then(|n| n.parent);
+        while let Some(node) = current {
+            depth += 1;
+            if depth > self.nodes.len() {
+                break; // a cycle; can't happen through the checked methods
+            }
+            current = self.get(node).and_then(|n| n.parent);
+        }
+        depth
+    }
+
+    /// Whether `child` may become a child of `parent`: not a cycle, and
+    /// `depth(parent) + height(child) <= MAX_DOM_DEPTH`. Moving a subtree
+    /// moves every descendant, so the subtree's height counts, not just the
+    /// node. Cost: the walk up from `parent` (≤ the cap) plus a walk of
+    /// `child`'s subtree, cut off as soon as it is too tall — O(1) for the
+    /// common leaf / new node.
+    pub fn check_insert(&self, parent: NodeId, child: NodeId) -> Result<(), TreeError> {
+        if self.get(parent).is_none() || self.get(child).is_none() {
+            return Err(TreeError::NotAChild);
+        }
+        let mut parent_depth = 0;
+        let mut current = Some(parent);
+        while let Some(node) = current {
+            if node == child {
+                return Err(TreeError::Cycle);
+            }
+            parent_depth += 1;
+            if parent_depth > self.nodes.len() {
+                return Err(TreeError::Cycle);
+            }
+            current = self.get(node).and_then(|n| n.parent);
+        }
+        // Room left below `parent`: `child` sits at parent_depth + 1.
+        let room = MAX_DOM_DEPTH.saturating_sub(parent_depth);
+        if self.subtree_taller_than(child, room) {
+            return Err(TreeError::TooDeep);
+        }
+        Ok(())
+    }
+
+    /// Whether `id`'s subtree has more than `levels` levels (`id` alone is
+    /// one), iteratively, stopping at the first node past the limit.
+    fn subtree_taller_than(&self, id: NodeId, levels: usize) -> bool {
+        let mut stack = vec![(id, 1usize)];
+        while let Some((node, level)) = stack.pop() {
+            if level > levels {
+                return true;
+            }
+            if let Some(data) = self.get(node) {
+                stack.extend(data.children.iter().map(|c| (*c, level + 1)));
+            }
+        }
+        false
     }
 
     pub fn element_data(&self, id: NodeId) -> Option<&ElementData> {
@@ -253,11 +366,18 @@ impl Document {
     /// Drop every child of `id`, tombstone the freed subtrees, and replace
     /// them with a single text node carrying `text`. Mirrors the DOM
     /// `textContent =` setter: the element survives, its descendants don't.
-    pub fn replace_with_text(&mut self, id: NodeId, text: String) {
+    ///
+    /// Refused with [`TreeError::TooDeep`] — nothing changes — when `id`
+    /// already sits at [`MAX_DOM_DEPTH`] (its new text child would be past
+    /// it); `NotAChild` for a stale id.
+    pub fn replace_with_text(&mut self, id: NodeId, text: String) -> Result<(), TreeError> {
         let kids: Vec<NodeId> = match self.get(id) {
             Some(node) => node.children.clone(),
-            None => return,
+            None => return Err(TreeError::NotAChild),
         };
+        if self.depth(id) >= MAX_DOM_DEPTH {
+            return Err(TreeError::TooDeep);
+        }
         if let Some(node) = self.get_mut(id) {
             node.children.clear();
         }
@@ -265,7 +385,8 @@ impl Document {
             self.tombstone_subtree(child);
         }
         let text_id = self.create_text(text);
-        self.append_child(id, text_id);
+        self.attach_unchecked(id, text_id);
+        Ok(())
     }
 
     /// Replace a Text node's data in place. Returns `false` for stale ids
@@ -283,20 +404,27 @@ impl Document {
     }
 
     /// Insert `new_child` directly before `ref_child` in `parent`'s children
-    /// list. Returns `false` when any id is stale or `ref_child` isn't a
-    /// direct child of `parent`. `new_child` is detached from its current
-    /// location first, so the same node can be moved (including reordered
-    /// among existing siblings) without ending up in two places.
-    pub fn insert_before(&mut self, parent: NodeId, new_child: NodeId, ref_child: NodeId) -> bool {
-        if self.get(parent).is_none() || self.get(new_child).is_none() {
-            return false;
-        }
+    /// list. `NotAChild` when any id is stale or `ref_child` isn't a direct
+    /// child of `parent`; `Cycle` / `TooDeep` as for [`Self::append_child`].
+    /// `new_child` is detached from its current location first, so the same
+    /// node can be moved (including reordered among existing siblings)
+    /// without ending up in two places. Nothing changes on an error.
+    pub fn insert_before(
+        &mut self,
+        parent: NodeId,
+        new_child: NodeId,
+        ref_child: NodeId,
+    ) -> Result<(), TreeError> {
         let belongs = self
             .get(parent)
             .is_some_and(|p| p.children.contains(&ref_child));
-        if !belongs {
-            return false;
+        if !belongs || self.get(new_child).is_none() {
+            return Err(TreeError::NotAChild);
         }
+        if new_child == ref_child {
+            return Ok(()); // already in place (DOM: inserting before itself is a no-op move)
+        }
+        self.check_insert(parent, new_child)?;
         // Detach first; this can shift `ref_child`'s index when `new_child`
         // was already a sibling, so recompute the position afterwards.
         self.detach(new_child);
@@ -311,23 +439,30 @@ impl Document {
             p.children.insert(pos, new_child);
         }
         self.touch();
-        true
+        Ok(())
     }
 
     /// Replace `old_child` with `new_child` in `parent`'s children list.
     /// On success `old_child`'s subtree is tombstoned; `new_child` is
-    /// detached from its current location first. Returns `false` for stale
-    /// ids or when `old_child` isn't a direct child of `parent`.
-    pub fn replace_child(&mut self, parent: NodeId, new_child: NodeId, old_child: NodeId) -> bool {
-        if self.get(parent).is_none() || self.get(new_child).is_none() {
-            return false;
-        }
+    /// detached from its current location first. `NotAChild` for stale ids
+    /// or when `old_child` isn't a direct child of `parent`; `Cycle` /
+    /// `TooDeep` as for [`Self::append_child`]. Nothing changes on an error.
+    pub fn replace_child(
+        &mut self,
+        parent: NodeId,
+        new_child: NodeId,
+        old_child: NodeId,
+    ) -> Result<(), TreeError> {
         let belongs = self
             .get(parent)
             .is_some_and(|p| p.children.contains(&old_child));
-        if !belongs {
-            return false;
+        if !belongs || self.get(new_child).is_none() {
+            return Err(TreeError::NotAChild);
         }
+        if new_child == old_child {
+            return Ok(());
+        }
+        self.check_insert(parent, new_child)?;
         self.detach(new_child);
         // `new_child` detach may have shifted indices when it was already
         // a sibling of `old_child`; recompute against the post-detach list.
@@ -345,7 +480,7 @@ impl Document {
             old.parent = None;
         }
         self.tombstone_subtree(old_child);
-        true
+        Ok(())
     }
 
     /// Recursively clone `id`. The returned NodeId is detached: it has no
@@ -371,7 +506,8 @@ impl Document {
         let new_id = self.alloc(data);
         for child in kids {
             if let Some(child_clone) = self.clone_node(child, true) {
-                self.append_child(new_id, child_clone);
+                // A copy is no taller than its (capped) source.
+                self.attach_unchecked(new_id, child_clone);
             }
         }
         Some(new_id)
@@ -403,7 +539,7 @@ mod tests {
         attrs.insert("id".into(), "root".into());
         let root = doc.create_element("div", attrs);
         let text = doc.create_text("hi");
-        doc.append_child(root, text);
+        doc.append_child(root, text).unwrap();
         doc.append_root(root);
 
         assert_eq!(doc.roots(), &[root]);
@@ -421,7 +557,7 @@ mod tests {
         let mut doc = Document::new();
         let parent = doc.create_element("div", AttrMap::new());
         let child = doc.create_element("p", AttrMap::new());
-        doc.append_child(parent, child);
+        doc.append_child(parent, child).unwrap();
         doc.append_root(parent);
 
         doc.detach(child);
@@ -449,7 +585,7 @@ mod tests {
         let parent = doc.create_element("div", AttrMap::new());
         let kid = doc.create_element("p", AttrMap::new());
         let stranger = doc.create_element("span", AttrMap::new());
-        doc.append_child(parent, kid);
+        doc.append_child(parent, kid).unwrap();
 
         // Stranger isn't a child — caller should observe the failure rather
         // than silently corrupt the tree by clearing parent's `kid` pointer.
@@ -467,8 +603,8 @@ mod tests {
         let outer = doc.create_element("section", AttrMap::new());
         let inner = doc.create_element("p", AttrMap::new());
         let leaf = doc.create_text("x");
-        doc.append_child(inner, leaf);
-        doc.append_child(outer, inner);
+        doc.append_child(inner, leaf).unwrap();
+        doc.append_child(outer, inner).unwrap();
         doc.append_root(outer);
 
         doc.tombstone_subtree(outer);
@@ -485,11 +621,11 @@ mod tests {
         let host = doc.create_element("div", AttrMap::new());
         let stale_a = doc.create_element("p", AttrMap::new());
         let stale_b = doc.create_text("old");
-        doc.append_child(stale_a, stale_b);
-        doc.append_child(host, stale_a);
+        doc.append_child(stale_a, stale_b).unwrap();
+        doc.append_child(host, stale_a).unwrap();
         doc.append_root(host);
 
-        doc.replace_with_text(host, "fresh".to_string());
+        doc.replace_with_text(host, "fresh".to_string()).unwrap();
 
         // The old subtree is gone, both slots stale.
         assert!(doc.get(stale_a).is_none());
@@ -527,11 +663,11 @@ mod tests {
         let b = doc.create_element("li", AttrMap::new());
         let c = doc.create_element("li", AttrMap::new());
         let new_kid = doc.create_element("li", AttrMap::new());
-        doc.append_child(parent, a);
-        doc.append_child(parent, b);
-        doc.append_child(parent, c);
+        doc.append_child(parent, a).unwrap();
+        doc.append_child(parent, b).unwrap();
+        doc.append_child(parent, c).unwrap();
 
-        assert!(doc.insert_before(parent, new_kid, b));
+        assert!(doc.insert_before(parent, new_kid, b).is_ok());
         assert_eq!(doc.get(parent).unwrap().children, vec![a, new_kid, b, c]);
         assert_eq!(doc.get(new_kid).unwrap().parent, Some(parent));
     }
@@ -547,12 +683,12 @@ mod tests {
         let a = doc.create_element("li", AttrMap::new());
         let b = doc.create_element("li", AttrMap::new());
         let c = doc.create_element("li", AttrMap::new());
-        doc.append_child(parent, a);
-        doc.append_child(parent, b);
-        doc.append_child(parent, c);
+        doc.append_child(parent, a).unwrap();
+        doc.append_child(parent, b).unwrap();
+        doc.append_child(parent, c).unwrap();
 
         // Move c to before a.
-        assert!(doc.insert_before(parent, c, a));
+        assert!(doc.insert_before(parent, c, a).is_ok());
         assert_eq!(doc.get(parent).unwrap().children, vec![c, a, b]);
     }
 
@@ -563,9 +699,9 @@ mod tests {
         let kid = doc.create_element("p", AttrMap::new());
         let stranger = doc.create_element("span", AttrMap::new());
         let new_kid = doc.create_element("em", AttrMap::new());
-        doc.append_child(parent, kid);
+        doc.append_child(parent, kid).unwrap();
 
-        assert!(!doc.insert_before(parent, new_kid, stranger));
+        assert!(doc.insert_before(parent, new_kid, stranger).is_err());
         // The new node was NOT inserted (still detached).
         assert_eq!(doc.get(parent).unwrap().children, vec![kid]);
         assert_eq!(doc.get(new_kid).unwrap().parent, None);
@@ -577,11 +713,11 @@ mod tests {
         let parent = doc.create_element("section", AttrMap::new());
         let old = doc.create_element("p", AttrMap::new());
         let old_kid = doc.create_text("gone");
-        doc.append_child(old, old_kid);
-        doc.append_child(parent, old);
+        doc.append_child(old, old_kid).unwrap();
+        doc.append_child(parent, old).unwrap();
         let fresh = doc.create_element("p", AttrMap::new());
 
-        assert!(doc.replace_child(parent, fresh, old));
+        assert!(doc.replace_child(parent, fresh, old).is_ok());
         assert_eq!(doc.get(parent).unwrap().children, vec![fresh]);
         assert_eq!(doc.get(fresh).unwrap().parent, Some(parent));
         // Old subtree is fully tombstoned.
@@ -596,7 +732,7 @@ mod tests {
         attrs.insert("id".into(), "src".into());
         let src = doc.create_element("div", attrs);
         let kid = doc.create_text("hi");
-        doc.append_child(src, kid);
+        doc.append_child(src, kid).unwrap();
 
         let dup = doc.clone_node(src, false).unwrap();
         // Same tag + attributes, but no children and parent=None.
@@ -619,8 +755,8 @@ mod tests {
         let src = doc.create_element("ul", AttrMap::new());
         let li = doc.create_element("li", AttrMap::new());
         let txt = doc.create_text("one");
-        doc.append_child(li, txt);
-        doc.append_child(src, li);
+        doc.append_child(li, txt).unwrap();
+        doc.append_child(src, li).unwrap();
 
         let dup = doc.clone_node(src, true).unwrap();
         // The new subtree mirrors the structure but uses fresh ids.
@@ -653,7 +789,7 @@ mod tests {
         assert!(after_root > 0);
 
         let child = doc.create_element("p", AttrMap::new());
-        doc.append_child(parent, child);
+        doc.append_child(parent, child).unwrap();
         assert!(doc.revision() > after_root);
     }
 
@@ -667,7 +803,7 @@ mod tests {
         let mut doc = Document::new();
         let outer = doc.create_element("section", AttrMap::new());
         let inner_text = doc.create_text("hi");
-        doc.append_child(outer, inner_text);
+        doc.append_child(outer, inner_text).unwrap();
         doc.append_root(outer);
         let baseline = doc.revision();
 
@@ -718,8 +854,8 @@ mod tests {
         let outer = doc.create_element("section", AttrMap::new());
         let inner = doc.create_element("p", AttrMap::new());
         let leaf = doc.create_text("x");
-        doc.append_child(inner, leaf);
-        doc.append_child(outer, inner);
+        doc.append_child(inner, leaf).unwrap();
+        doc.append_child(outer, inner).unwrap();
         doc.append_root(outer);
 
         // [0] = outer, [0,0] = inner, [0,0,0] = leaf
@@ -729,5 +865,88 @@ mod tests {
         // Out-of-range indices produce None rather than panicking.
         assert_eq!(doc.resolve_path(&[0, 5]), None);
         assert_eq!(doc.resolve_path(&[]), None);
+    }
+
+    /// A chain `levels` deep under a fresh root; returns (root, deepest).
+    fn chain(doc: &mut Document, levels: usize) -> (NodeId, NodeId) {
+        let root = doc.create_element("div", AttrMap::new());
+        let mut last = root;
+        for _ in 1..levels {
+            let next = doc.create_element("div", AttrMap::new());
+            doc.append_child(last, next).unwrap();
+            last = next;
+        }
+        (root, last)
+    }
+
+    #[test]
+    fn script_mutations_past_the_depth_cap_are_refused() {
+        // The parser flattens at MAX_DOM_DEPTH; a script's appendChild loop
+        // must not get past it either — every recursive pass would overflow
+        // the stack (an abort). Refused means nothing changed.
+        let mut doc = Document::new();
+        let (root, deepest) = chain(&mut doc, MAX_DOM_DEPTH);
+        doc.append_root(root);
+        assert_eq!(doc.depth(deepest), MAX_DOM_DEPTH);
+        let extra = doc.create_element("b", AttrMap::new());
+        assert_eq!(doc.append_child(deepest, extra), Err(TreeError::TooDeep));
+        assert!(doc.get(deepest).unwrap().children.is_empty());
+        assert_eq!(doc.get(extra).unwrap().parent, None);
+        let sibling = doc.create_element("i", AttrMap::new());
+        doc.append_child(deepest, sibling).unwrap_err();
+        // textContent on a node at the cap would add a text child past it.
+        assert_eq!(
+            doc.replace_with_text(deepest, "x".into()),
+            Err(TreeError::TooDeep)
+        );
+
+        // Moving a subtree moves its descendants: a 10-level detached chain
+        // fits under depth 246 but not under 247.
+        let (tall, _) = chain(&mut doc, 10);
+        let mut at = deepest;
+        for _ in 0..(MAX_DOM_DEPTH - 247) {
+            at = doc.get(at).unwrap().parent.unwrap();
+        }
+        assert_eq!(doc.depth(at), 247);
+        assert_eq!(doc.append_child(at, tall), Err(TreeError::TooDeep));
+        let first = doc.get(at).unwrap().children[0];
+        assert_eq!(doc.insert_before(at, tall, first), Err(TreeError::TooDeep));
+        assert_eq!(doc.replace_child(at, tall, first), Err(TreeError::TooDeep));
+        let parent_246 = doc.get(at).unwrap().parent.unwrap();
+        doc.append_child(parent_246, tall).unwrap();
+        assert_eq!(doc.depth(tall) + 9, MAX_DOM_DEPTH);
+    }
+
+    #[test]
+    fn inserting_an_ancestor_into_its_descendant_is_refused() {
+        // DOM HierarchyRequestError. Without it a script makes a cycle and
+        // the next style pass recurses until the stack overflows.
+        let mut doc = Document::new();
+        let (root, deepest) = chain(&mut doc, 5);
+        doc.append_root(root);
+        let mid = doc.get(deepest).unwrap().parent.unwrap();
+        assert_eq!(doc.append_child(deepest, root), Err(TreeError::Cycle));
+        assert_eq!(doc.append_child(deepest, deepest), Err(TreeError::Cycle));
+        let kid = doc.create_text("k");
+        doc.append_child(deepest, kid).unwrap();
+        assert_eq!(doc.insert_before(deepest, mid, kid), Err(TreeError::Cycle));
+        assert_eq!(doc.replace_child(deepest, mid, kid), Err(TreeError::Cycle));
+        assert_eq!(doc.depth(deepest), 5, "nothing moved");
+    }
+
+    #[test]
+    fn insert_before_itself_and_replace_with_itself_are_no_ops_not_panics() {
+        // Both used to detach the node, then `expect` to find it again as
+        // the reference — a panic from `p.insertBefore(x, x)`.
+        let mut doc = Document::new();
+        let parent = doc.create_element("ul", AttrMap::new());
+        let a = doc.create_element("li", AttrMap::new());
+        let b = doc.create_element("li", AttrMap::new());
+        doc.append_child(parent, a).unwrap();
+        doc.append_child(parent, b).unwrap();
+        assert!(doc.insert_before(parent, a, a).is_ok());
+        assert!(doc.replace_child(parent, b, b).is_ok());
+        assert_eq!(doc.get(parent).unwrap().children, vec![a, b]);
+        assert!(doc.get(b).is_some(), "not tombstoned");
     }
 }
