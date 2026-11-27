@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 842 (workspace 합계, 2026-11-27 호환성 3차 0b — 조사 캐시 GET 전용·속성 표·버림 사유 분류 + 코퍼스에서 찾은 settle·오류 페이지·`queueMicrotask` 수정 +13). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 843 (workspace 합계, 2026-11-27 호환성 3차 K4 — `queueMicrotask` species 고리 +1; 0b 는 842). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -218,6 +218,9 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
 ### settle 의 두 예산
 - `AgentBrowser::settle` 은 프레임 상한(`MAX_SETTLE_FRAMES` 600)과 벽시계(`settle_timeout`) 둘로 끝난다. **이동 대기 프레임은 프레임 상한에 안 센다** — 로드 스레드를 기다리는 건 실제 네트워크 시간이라 벽시계만 자를 수 있다. 세면 ~1.5초보다 느린 사이트가 로드 전 빈 화면(URL 없음, `settled: false`)으로 관찰된다(3차 코퍼스 daum·yna). 테스트 서버는 빠르니 이 차이는 실사이트나 `/slow` 같은 지연 라우트로만 보인다.
+
+### 부트스트랩 JS 심은 페이지가 바꿀 수 있는 것을 읽지 않는다
+- 엔진이 JS 로 만든 내장(`queueMicrotask` 등)은 페이지 스크립트와 같은 전역을 공유한다. core-js 같은 폴리필은 `globalThis.Promise` 를 바꾸고, 네이티브 `Promise.prototype` 의 `constructor` 를 지우고 프로토타입을 다시 잇는다. 심이 호출 때 `Promise` 를 찾거나(3차 K3) `then` 의 species 를 거치면(K4) 폴리필로 들어가 무한 고리가 된다(daum·hani·bbc 120초 멈춤). 필요한 내장은 **부트스트랩 때 붙잡고**, 프로미스를 쓸 땐 species 가 안 새게(`constructor: undefined` 를 자기 소유로) — `js/window.rs` 의 `queueMicrotask` 참고.
 
 ### rquickjs 기본 eval 은 strict
 - `EvalOptions::default()` 는 `strict: true` 다. 페이지 스크립트는 `js::classic_script_options()`(sloppy)로 평가할 것 — 안 그러면 암묵 전역(`RLQ = window.RLQ || []`)이 터진다.

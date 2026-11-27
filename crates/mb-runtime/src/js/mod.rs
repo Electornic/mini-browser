@@ -908,6 +908,38 @@ mod tests {
     }
 
     #[test]
+    fn queue_microtask_never_builds_a_page_promise_through_species() {
+        // core-js, when it replaces `Promise`, deletes the native
+        // prototype's `constructor` and reparents it onto the polyfill's
+        // prototype. `then` builds its result via SpeciesConstructor, so a
+        // `queueMicrotask` made of `then` constructed a *polyfill* promise
+        // per call; resolving it ran the polyfill's notify, which calls
+        // `queueMicrotask` again — one microtask forever (compat round 3
+        // K4: daum, hani, bbc). A real `queueMicrotask` creates no promise.
+        let mut rt = fresh();
+        rt.execute(
+            "var NativePromise = Promise, constructed = 0, ticks = 0;
+             function P(executor) {
+                 constructed++;
+                 var self = this;
+                 executor(function () { notify(self); }, function () {});
+             }
+             function notify(p) {
+                 if (constructed > 1000) return; // keep a regression finite
+                 queueMicrotask(function () {});
+             }
+             Object.defineProperty(P, Symbol.species, { get: function () { return this; } });
+             delete NativePromise.prototype.constructor;
+             Object.setPrototypeOf(NativePromise.prototype, P.prototype);
+             globalThis.Promise = P;
+             queueMicrotask(function () { ticks++; });",
+        )
+        .unwrap();
+        assert_eq!(rt.execute("ticks").unwrap(), "1");
+        assert_eq!(rt.execute("constructed").unwrap(), "0");
+    }
+
+    #[test]
     fn queue_microtask_survives_a_page_replacing_promise() {
         // core-js swaps in its own `Promise` when it distrusts the native
         // one and schedules that polyfill's reactions with

@@ -59,9 +59,18 @@ pub(super) fn register_window_aliases(
     // `queueMicrotask` — looking `Promise` up at call time made the two
     // feed each other until the stack ran out (seen inside core-js on
     // hani, bbc and daum in the compat round 3 corpus).
+    //
+    // A real `queueMicrotask` creates no promise, but `then` builds its
+    // result through SpeciesConstructor(`resolved.constructor`). core-js
+    // deletes the native prototype's `constructor` and reparents it onto
+    // its polyfill, so every call built a polyfill promise whose resolve
+    // queued the next microtask — forever (compat round 3 K4). An own
+    // `constructor: undefined` makes SpeciesConstructor use the realm's
+    // intrinsic %Promise%, which no page can replace.
     let qmt_src = r#"
         (function () {
             var resolved = Promise.resolve();
+            Object.defineProperty(resolved, 'constructor', { value: undefined });
             var then = Promise.prototype.then;
             globalThis.queueMicrotask = function (cb) {
                 if (typeof cb !== 'function') {

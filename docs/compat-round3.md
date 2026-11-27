@@ -1,6 +1,6 @@
 # 호환성 3차 설계 — 견고성 + CSS 파서·캐스케이드
 
-> 상태: **설계 확정 (2026-11-26, 1차 검토 + 다각도 검토 — 코드 대조·웹 표준·실행/측정 — 반영) · 0a 완료(`d6801bb`, 829) · 0b 구현·녹화·기준선 완료(미커밋, 842 green)** — 0c(퍼저)·K4(JS 타임아웃 3곳) 남음 · 근거 = [compat-survey.md](compat-survey.md) (호환성 2차 실사이트 조사) · 기준선 `4588aba` 804 → 조사 캐시 2차 수정 후 **806** → 0a **829** → 0b **842** · 진행은 [진행 표](#진행-표)
+> 상태: **설계 확정 (2026-11-26, 1차 검토 + 다각도 검토 — 코드 대조·웹 표준·실행/측정 — 반영) · 0a 완료(`d6801bb`, 829) · 0b 완료(`15775d6`, 842) · K4(JS 타임아웃 3곳) 원인 수정(미커밋, 843)** — 0c(퍼저) 남음 · 근거 = [compat-survey.md](compat-survey.md) (호환성 2차 실사이트 조사) · 기준선 `4588aba` 804 → 조사 캐시 2차 수정 후 **806** → 0a **829** → 0b **842** → K4 **843** · 진행은 [진행 표](#진행-표)
 
 이 문서만 읽고 어느 단계든 이어받을 수 있게 쓴다. 단계마다 **목표 → 세부 항목 → 설계 결정 → 테스트 → 측정·완료 기준 → 위험 → 노력** 순서다. 2차 조사의 수치·용어(슬리버, 버린 선언, `compat_probe`, `MB_NET_CACHE`)는 [compat-survey.md 방법](compat-survey.md#방법) 참고.
 
@@ -613,14 +613,14 @@ GitHub 간격(`margin-top: calc(var(--base-size-8) + var(--Layout-row-gap))` 류
 
 ## 진행 표
 
-버린 선언·규칙 목표(≤1,500 · ≤380 등)는 [공통 규칙](#범위와-순서)대로 `ours` 기준이다 — 0b 기준선(2차 5곳, 새 캐시)으로 다시 환산하면 **버린 선언 ours 7,389 → 1단계 −80% = ≤1,478, 5단계 −95% = ≤369**(코퍼스 17곳 합계로는 13,251 → ≤2,650 / ≤663). browser-too(5곳 15, 17곳 236)는 목표 밖.
+버린 선언·규칙 목표(≤1,500 · ≤380 등)는 [공통 규칙](#범위와-순서)대로 `ours` 기준이다 — 0b 기준선(2차 5곳, 새 캐시)으로 다시 환산하면 **버린 선언 ours 7,389 → 1단계 −80% = ≤1,478, 5단계 −95% = ≤369**(코퍼스 측정 20곳 합계로는 14,112 → ≤2,822 / ≤706 — K4 수정으로 daum·hani·bbc 가 들어와 0b 의 17곳 13,251 에서 늘었다). browser-too(5곳 15, 17곳 236)는 목표 밖.
 
 단계를 마칠 때마다 이 표와 [compat-survey.md](compat-survey.md) 의 사이트별 수치를 갱신한다. 수치는 `scripts/compat-corpus.sh run` 의 `corpus-report.tsv` 합계(코퍼스 전체)와, 비교용으로 2차 5곳 합계를 따로.
 
 | 단계 | 상태 | 커밋 | 테스트 수 | 코퍼스 fail/panic/timeout | 버린 선언 (5곳) | 버린 규칙 (5곳) | sr-only 슬리버 | 에이전트 컨트롤 누락 사이트 | 메모 |
 |---|---|---|---|---|---|---|---|---|---|
 | 2차 기준 | ✅ | `78bedff`·`4588aba` | 804 | (5곳) 0/0/0 | 7,593 (ours/browser-too 분리는 0단계에서) | 1,931 (같음) | 19 (GitHub 17·위키 2; naver "검색" 은 2글자라 probe 기준 밖) | naver(모듈) | 출발점 |
-| 0 견고성 | 🔶 0a·0b 완료(0b 미커밋) — 0c 남음 | `d6801bb`(0a) | 806 → 829 (0a) → 842 (0b) | **0b 기준선(25곳)**: ok 16 + ok* 1 · nav-fail 1(crates.io K5) · panic 0 · timeout 3(daum·hani·bbc K4) · blocked 2 · robots skip 2 · `[mb-budget]` 0. 목표 0/0/0 미달 → K4·K5 | 5곳 **ours 7,389 / browser-too 15** (17곳 13,251 / 236) | 5곳 **ours 1,745 / browser-too 11** (17곳 10,114 / 53) | 5곳 17 (17곳 249) | 6/17: naver·korea-kr·velog·d2·google·enwiki | **0a**: Robustness Rules(AGENTS.md) + `[mb-budget]` 워치독 · 검토 표 [부록 A](#부록-a--04-표적-코드-검토-표-0a)(grep 140곳: 안전 117·수정 10·보류 2·거짓 양성 11 + grep 밖 발견 수정 5 — 패닉 4: 멀티바이트 `#색`·`bgcolor`·`@font-face`, colspan 오버플로 / 할당 폭주 1: 거대 grid 줄) · 리소스 수집 `Result` 제거 · 스크립트 에러 위치(콘솔) · `compat3` 골든 + `compat3-menu` eval(오늘은 실패가 정상). **0b**: 코퍼스 도구(`compat-corpus.sh`·`compat-sites.tsv`·probe `summary.tsv`)·조사 캐시 GET 전용·`css/properties.rs`·버림 사유 코드·[분류표](#0b-분류표-동결--바꾸려면-이-표를-먼저-고친다) 동결 · 녹화 2026-11-26(캐시 동결) · 발견 수정 K1 settle·K2 빈 오류 페이지·K3 `queueMicrotask` ([부록 B](#부록-b--0b-코퍼스에서-찾은-것-알려진-문제--담당)) · 사이트별 표 [survey](compat-survey.md#3차-코퍼스-기준선-0b). 남음: 0c 퍼저, K4 |
+| 0 견고성 | 🔶 0a·0b 완료, K4 수정(미커밋) — 0c 남음 | `d6801bb`(0a) · `15775d6`(0b) | 806 → 829 (0a) → 842 (0b) → 843 (K4) | **기준선(25곳, K4 뒤)**: ok 19 + ok* 1 · nav-fail 1(crates.io K5) · panic 0 · **timeout 0**(0b 때 3 — daum·hani·bbc, K4 로 해결) · blocked 2 · robots skip 2 · `[mb-budget]` 0. 목표 0/0/0 중 nav-fail 1 남음 → K5 | 5곳 **ours 7,389 / browser-too 15** (20곳 14,112 / 256; 0b 17곳 13,251 / 236) | 5곳 **ours 1,745 / browser-too 11** (20곳 10,451 / 58; 0b 17곳 10,114 / 53) | 5곳 17 (20곳 297; 0b 17곳 249) | 8/20: naver·daum·hani·korea-kr·velog·d2·google·enwiki | **0a**: Robustness Rules(AGENTS.md) + `[mb-budget]` 워치독 · 검토 표 [부록 A](#부록-a--04-표적-코드-검토-표-0a)(grep 140곳: 안전 117·수정 10·보류 2·거짓 양성 11 + grep 밖 발견 수정 5 — 패닉 4: 멀티바이트 `#색`·`bgcolor`·`@font-face`, colspan 오버플로 / 할당 폭주 1: 거대 grid 줄) · 리소스 수집 `Result` 제거 · 스크립트 에러 위치(콘솔) · `compat3` 골든 + `compat3-menu` eval(오늘은 실패가 정상). **0b**: 코퍼스 도구(`compat-corpus.sh`·`compat-sites.tsv`·probe `summary.tsv`)·조사 캐시 GET 전용·`css/properties.rs`·버림 사유 코드·[분류표](#0b-분류표-동결--바꾸려면-이-표를-먼저-고친다) 동결 · 녹화 2026-11-26(캐시 동결) · 발견 수정 K1 settle·K2 빈 오류 페이지·K3 `queueMicrotask` · **K4**(미커밋): `queueMicrotask` 가 `then` 의 species 를 통해 페이지 폴리필 Promise 를 만들던 것 — daum·hani·bbc timeout → ok(~250ms), 나머지 22곳 수치·요소 목록 변화 없음(`diff`) ([부록 B](#부록-b--0b-코퍼스에서-찾은-것-알려진-문제--담당)) · 사이트별 표 [survey](compat-survey.md#3차-코퍼스-기준선-0b). 남음: 0c 퍼저, K5 |
 | 1 값 파서 | ⏳ | | | 0/0/0 | 목표 ours −80% (2차 환산 ≤1,500) | — | — | | 2.1 뒤에 실행 |
 | 2 @media/@layer/@supports | ⏳ | | | 0/0/0 | — | — | — | | 2.1 먼저, 2.2·2.3 은 1 뒤. GitHub 라이트 |
 | 3 클리핑 | ⏳ | | | 0/0/0 | — | — | 목표 0 | | |
@@ -694,7 +694,7 @@ grep 패턴은 `[ident]`·`[ident ± 1]` 만 잡아서 `&s[0..2]` 같은 **문�
 
 ## 부록 B — 0b 코퍼스에서 찾은 것 (알려진 문제 → 담당)
 
-2026-11-26 녹화 · 2026-11-27 기준선(`compat-cache/corpus/baseline-0b/`). 사이트별 수치는 [compat-survey.md 3차 코퍼스 기준선](compat-survey.md#3차-코퍼스-기준선-0b).
+2026-11-26 녹화 · 2026-11-27 기준선(`compat-cache/corpus/baseline-0b/`; K4 수정 뒤 `baseline-k4/`). 사이트별 수치는 [compat-survey.md 3차 코퍼스 기준선](compat-survey.md#3차-코퍼스-기준선-0b).
 
 **0b 에서 고친 것** (각각 손으로 쓴 재현 → 실패 테스트 → 수정):
 
@@ -703,13 +703,14 @@ grep 패턴은 `[ident]`·`[ident ± 1]` 만 잡아서 `&s[0..2]` 같은 **문�
 | K1 | 로드가 ~1.5초보다 느린 페이지가 **로드 전 빈 화면**으로 관찰됨 — `url: (none)`, 요소 0, `settled: false` (녹화 중 daum·yna) | `AgentBrowser::settle` 이 이동 대기 프레임도 `MAX_SETTLE_FRAMES`(600 × ~2.5ms)에 셌다. 실제 MCP 세션의 느린 사이트도 같음 | 이동 대기 프레임은 프레임 상한에 안 셈(벽시계 `settle_timeout` 만 자름) · `settle_waits_for_a_slow_document_load_within_the_wall_clock_budget`(2.5초 지연 라우트) |
 | K2 | 문서 로드가 실패하면 에이전트가 **이유를 못 봄** — 오류 페이지가 비어 `url: (none)`·요소 0·글자 0 (crates.io 404, stackoverflow·w3c 403) | `error_document`/`text_document` 가 `<div>…</div>` 앞뒤 공백을 남겨 조각 파싱의 마지막 루트(=그려지는 유일한 것)가 공백 텍스트 (AGENTS.md "테스트 HTML 과 루트" 함정 그대로) | HTML 을 `trim` · `failed_load_tells_the_agent_why`(404 → 관찰에 `load failed`·`http status 404`), `canned_documents_parse_to_a_single_root`. **`text/plain` 문서도 같은 이유로 빈 화면이었다** |
 | K3 | core-js 의 Promise 폴리필 안에서 스택 소진 (hani·bbc·daum, 임시 인터럽트로 위치 확인) | `queueMicrotask` 심이 호출 때마다 전역 `Promise` 를 찾음 → 페이지가 `Promise` 를 폴리필로 바꾸고 그 반응을 `queueMicrotask` 로 예약하면 서로를 끝없이 부름 | 엔진 `Promise` 를 부트스트랩 때 한 번 묶음 · `queue_microtask_survives_a_page_replacing_promise` |
+| K4 | **hani·bbc·daum `timeout`**(120초) — K3 뒤에도 프레임마다 마이크로태스크가 끝없이(드레인 한 번에 30만 개+) | 임시 계측(되돌림 — 드레인 5만 번째마다 인터럽트를 걸고 잡힌 예외의 스택을 찍음)으로 세 곳 모두 같은 고리: core-js 의 flush/notify → **우리 `queueMicrotask`**(부트스트랩 `then.call(resolved, cb)`) → 네이티브 `then` → **폴리필의 `Promise` 생성자**. `then` 은 결과 프로미스를 SpeciesConstructor(`resolved.constructor`)로 만드는데, core-js 는 Promise 를 바꿀 때 네이티브 프로토타입의 `constructor` 를 지우고 프로토타입을 폴리필 쪽으로 다시 잇는다(`setSpecies` 도 함). 그래서 호출마다 폴리필 프로미스가 생기고, 잡이 돌며 그걸 resolve → 폴리필 notify → 다시 `queueMicrotask` → … 한 잡이 다음 잡 하나를 낳는 무한 사슬. Chrome 의 `queueMicrotask` 는 프로미스를 만들지 않아(`constructor` 를 안 읽음) 이 고리가 없다 | 비공개 `resolved` 에 자기 `constructor: undefined` 를 둬서 SpeciesConstructor 가 렐름의 내장 %Promise% 를 쓰게(페이지가 못 바꿈) · `queue_microtask_never_builds_a_page_promise_through_species`(core-js 의 그 세 동작만 흉내 낸 손 재현 — 수정 전 폴리필 생성 1001회(테스트의 상한), 후 0). 세 곳 timeout → ok(daum 277·hani 220·bbc 266ms). **안전망(드레인당 마이크로태스크 상한)은 넣지 않음** — 원인 수정만으로 세 곳 다 끝나고, Chrome 도 상한이 없어 상한은 정상 페이지의 의미를 바꿀 수 있다. 같은 종류가 또 나오면 그때 `[mb-budget]` 식 보고와 함께 검토 |
 
 **남은 것**:
 
 | # | 증상 | 확인한 것 | 담당 |
 |---|---|---|---|
-| K4 | **hani·bbc·daum `timeout`**(120초) — K3 를 고친 뒤에도 페이지 JS 가 끝나지 않음 | 프레임마다 마이크로태스크 큐가 비지 않는다: 임시 계측(되돌림)으로 드레인 한 번에 30만 개+, 100초 동안 140~200번. `drain_pending_jobs` 의 마이크로태스크 안쪽 루프엔 상한이 없다(바깥 타이머 교대만 1024). 실제 Chrome 에선 안 멈추므로 우리 환경 차이(폴리필이 켜지는 조건 — core-js 가 네이티브 Promise 를 불신하는 이유, 빠진 API)로 보이지만 원인 미확정. 상한만 두면 매 프레임 다시 차서 여전히 느림 | **0단계 안**(0c 전에 원인 조사 — 타임박스 규칙상 넘길 수 있으나 3곳이라 우선). JS 런타임 문제라 CSS 단계와 무관 — 이 3곳은 CSS 수치가 없어 1~5단계 비교에서 빠진다 |
 | K5 | crates.io `nav-fail`: 문서 요청에 **404·빈 본문·Content-Type 없음** | 엔진의 문서 요청에 `Accept` 헤더가 없다. crates.io 는 HTML 을 받는다고 밝힌 요청에만 앱 껍데기를 주는 것으로 보인다(**추정** — 확인하려면 재방문이 필요해 안 함) | 4차(네트워크) — 고치면 캐시 정체성에 헤더가 없으므로 보충 녹화로도 안 바뀐다. 그 사이트만 캐시 항목을 지우고 다시 녹화해야 함(재방문 = 사용자 결정) |
 | K6 | stackoverflow·w3c `blocked`(403 챌린지), robots.txt 도 418/403 | 우회하지 않음(규칙) | 없음 — 표에 사유만 |
 | K7 | JS `fetch('/path')`·XHR 상대 URL 이 실패(`invalid URL`) | `js/fetch.rs` 가 `String(url)` 을 기준 URL 없이 `Url::parse` | 4차(JS 소소) |
-| K8 | 11st·old.reddit 는 robots.txt 가 `*` 에 `Disallow: /` | 녹화 안 함 | 없음 — 녹화 23곳, 그중 측정된(ok/ok*) 17곳 |
+| K8 | 11st·old.reddit 는 robots.txt 가 `*` 에 `Disallow: /` | 녹화 안 함 | 없음 — 녹화 23곳, 그중 측정된(ok/ok*) 20곳(K4 전 17곳) |
+| K9 | daum 이 `ok` 인데 **요소 0·텍스트 0** (K4 뒤 처음 보임) | 서버 HTML 의 `<body>` 는 정적 마크업이 317바이트(링크 3개)뿐인 껍데기 — 화면 전체를 자기 `index.js` 가 그리는데 그 앱이 빠진 DOM API(`createTreeWalker`, WebSocket `removeEventListener`, `customElements`)에서 죽는다. naver 의 ES 모듈과 같은 "JS 가 그리는 본문" 부류 | 4차(JS API 표면) — CSS 단계와 무관. daum 의 CSS 수치(선언 471/20 등)는 시트 파싱이라 유효 |
