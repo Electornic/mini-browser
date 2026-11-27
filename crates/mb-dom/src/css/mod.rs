@@ -19,7 +19,8 @@ mod transform;
 use grid::{parse_grid_placement, parse_grid_template_areas, parse_grid_track_list};
 use parse::parse_value;
 pub use report::{
-    AtRuleSeen, DropReason, DroppedDeclaration, DroppedRule, Origin, ParseReport, parse_with_report,
+    AtRuleSeen, DropReason, DroppedDeclaration, DroppedRule, MediaVerdict, Origin, ParseReport,
+    media_verdict, parse_with_report,
 };
 use selector::SelectorParserImpl;
 pub use selector::{CssString, MiniBrowserSelectorImpl, NonTSPseudoClass, PseudoElement, Selector};
@@ -405,7 +406,8 @@ impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler {
 /// `Reject` arm so `parse_block` can return an empty Vec without invoking
 /// any parsing.
 enum AtRulePrelude {
-    Media,
+    /// Carries the block's index in the parse report (when one is active).
+    Media(Option<usize>),
     Reject,
 }
 
@@ -432,16 +434,9 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
         // Consume the prelude (for `@media`, the condition list) so cssparser
         // moves on to the block. The condition is a no-op match today.
         while input.next().is_ok() {}
-        report::record(|r| {
-            r.at_rules.push(report::AtRuleSeen {
-                name: name.to_ascii_lowercase(),
-                prelude: report::excerpt(input.slice_from(start)),
-                kept: is_media,
-                skipped_bytes: 0,
-            })
-        });
+        let seen = report::record_at_rule(&name, input.slice_from(start), is_media);
         if is_media {
-            return Ok(AtRulePrelude::Media);
+            return Ok(AtRulePrelude::Media(seen));
         }
         // Other at-rules (@charset, @keyframes, @font-face, …) keep the
         // pre-6.F behaviour: skip the prelude + body. parse_block returns
@@ -456,16 +451,18 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler {
         input: &mut CssParser<'i>,
     ) -> Result<Self::AtRule, CssParseError<Self::Error>> {
         match prelude {
-            AtRulePrelude::Media => {
+            AtRulePrelude::Media(seen) => {
                 // Recurse into the @media body using the same handler.
                 // The inner StyleSheetParser walks qualified rules just
                 // like the outer pass, so nested `@media` blocks would
                 // also flatten — which matches what real browsers do
                 // for chained media conditions when both happen to match.
+                report::enter_media(seen);
                 let mut handler = StylesheetHandler;
                 let iter = StyleSheetParser::new(input, &mut handler);
                 let mut rules = Vec::new();
                 collect_rules(iter, &mut rules);
+                report::leave_media(seen, rules.len());
                 Ok(rules)
             }
             AtRulePrelude::Reject => {

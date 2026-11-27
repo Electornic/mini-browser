@@ -185,7 +185,12 @@ fn main() {
     // what says why (`http status 403`), whether or not it renders.
     let load_error = state.current_url.is_none().then(|| dom_text(&document));
     let inline_css = inline_style_text(&document);
-    let css_report = css_drops(&state.stylesheet, &inline_css);
+    let media_ctx = (
+        browser.config().viewport_width as f32,
+        browser.config().viewport_height as f32,
+    );
+    let mut css_report = css_drops(&state.stylesheet, &inline_css, media_ctx);
+    css_report.counts.media_attr_sheets = media_attr_sheets(&document);
     write(&out, "css.txt", &css_report.text);
 
     let view = state.current_view().expect("a laid-out view");
@@ -378,6 +383,16 @@ fn push_columns(row: &mut Row, columns: Option<&Columns>) {
     col("import", &|c| c.css.imports.to_string());
     col("nesting", &|c| c.css.nesting.to_string());
     col("media", &|c| c.css.media.to_string());
+    col("media_rules", &|c| c.css.media_rules.to_string());
+    col("media_applied", &|c| c.css.media_applied.to_string());
+    col("media_wrong", &|c| c.css.media_wrong.to_string());
+    col("media_wrong_applied", &|c| {
+        c.css.media_wrong_applied.to_string()
+    });
+    col("media_invalid", &|c| c.css.media_invalid.to_string());
+    col("media_attr_sheets", &|c| {
+        c.css.media_attr_sheets.to_string()
+    });
     col("decl_reasons", &|c| c.css.decl_reasons.clone());
     col("css_bytes", &|c| c.css_bytes.to_string());
     col("document_height", &|c| {
@@ -563,16 +578,57 @@ fn inline_style_text(document: &Document) -> String {
         if let NodeType::Element(element) = &node.node_type
             && element.tag_name.eq_ignore_ascii_case("style")
         {
+            // `<style media=…>` as a block, the way the engine joins it
+            // (docs/compat-round3.md 2.1) — so the counts match what applies.
+            let media = sheet_media(element.attributes.get("media"));
+            if let Some(media) = media {
+                let _ = writeln!(css, "@media {media} {{");
+            }
             for child in &node.children {
                 if let Some(NodeType::Text(text)) = document.get(*child).map(|n| &n.node_type) {
                     css.push_str(text);
                     css.push('\n');
                 }
             }
+            if media.is_some() {
+                css.push_str("}\n");
+            }
         }
         stack.extend(node.children.iter().rev().copied());
     }
     css
+}
+
+/// A `media` attribute that limits a sheet (`None` = applies everywhere).
+fn sheet_media(media: Option<&String>) -> Option<&str> {
+    media
+        .map(|m| m.trim())
+        .filter(|m| !m.is_empty() && !m.eq_ignore_ascii_case("all"))
+}
+
+/// `<link rel=stylesheet>` and `<style>` elements with a limiting `media`.
+fn media_attr_sheets(document: &Document) -> usize {
+    let mut count = 0;
+    let mut stack: Vec<NodeId> = document.roots().iter().rev().copied().collect();
+    while let Some(id) = stack.pop() {
+        let Some(node) = document.get(id) else {
+            continue;
+        };
+        if let NodeType::Element(element) = &node.node_type {
+            let tag = element.tag_name.to_ascii_lowercase();
+            let sheet = tag == "style"
+                || (tag == "link"
+                    && element
+                        .attributes
+                        .get("rel")
+                        .is_some_and(|rel| rel.eq_ignore_ascii_case("stylesheet")));
+            if sheet && sheet_media(element.attributes.get("media")).is_some() {
+                count += 1;
+            }
+        }
+        stack.extend(node.children.iter().rev().copied());
+    }
+    count
 }
 
 // ---------------------------------------------------------------------------
@@ -607,12 +663,26 @@ struct CssCounts {
     /// Nested rules inside blocks + top-level selectors with `&`; kept out
     /// of the declaration counts.
     nesting: usize,
+    /// `@media` blocks (nested ones included).
     media: usize,
+    /// Rules inside `@media` blocks / of those, the ones the engine applies
+    /// at the probe's viewport.
+    media_rules: usize,
+    media_applied: usize,
+    /// Rules inside a block `media_kind` says must not apply at 1280x800
+    /// light (`… (wrong…)`, the block or an enclosing one) / of those, the
+    /// ones the engine applies anyway. The goal is `media_wrong_applied` 0.
+    media_wrong: usize,
+    media_wrong_applied: usize,
+    /// Comma-separated queries the engine couldn't parse (`not all`).
+    media_invalid: usize,
+    /// `<link rel=stylesheet>` / `<style>` with a limiting `media` attribute.
+    media_attr_sheets: usize,
     /// `code:count` of every declaration drop reason.
     decl_reasons: String,
 }
 
-fn css_drops(external: &str, inline: &str) -> CssReport {
+fn css_drops(external: &str, inline: &str, (width, height): (f32, f32)) -> CssReport {
     let mut text = String::new();
     let mut c = CssCounts::default();
     let mut ignored: BTreeMap<String, usize> = BTreeMap::new();
@@ -622,7 +692,8 @@ fn css_drops(external: &str, inline: &str) -> CssReport {
     let mut decl_reasons: BTreeMap<DropReason, usize> = BTreeMap::new();
     let mut rule_causes: BTreeMap<(Origin, &'static str), (usize, String)> = BTreeMap::new();
     let mut at_rules: BTreeMap<String, (usize, bool, usize)> = BTreeMap::new();
-    let mut media_kinds: BTreeMap<&'static str, usize> = BTreeMap::new();
+    // kind → (blocks, rules, rules applied)
+    let mut media_kinds: BTreeMap<&'static str, (usize, usize, usize)> = BTreeMap::new();
 
     for source in [external, inline] {
         let (sheet, report) = css::parse_with_report(source);
@@ -674,11 +745,8 @@ fn css_drops(external: &str, inline: &str) -> CssReport {
                 .or_insert((0, rule.selector.clone()));
             entry.0 += 1;
         }
+        count_media(&report.at_rules, (width, height), &mut c, &mut media_kinds);
         for at_rule in &report.at_rules {
-            if at_rule.name == "media" {
-                c.media += 1;
-                *media_kinds.entry(media_kind(&at_rule.prelude)).or_default() += 1;
-            }
             if at_rule.name == "import" {
                 c.imports += 1;
             }
@@ -702,7 +770,7 @@ fn css_drops(external: &str, inline: &str) -> CssReport {
         .join(",");
 
     let headline = format!(
-        "css: {} rules kept, rules dropped {} ours / {} browser-too, declarations dropped {} ours / {} browser-too ({}), {} declarations kept ({} keyword fallbacks, {} parse-only), {} nested rules, {} @import, {} @media (all treated as matching), at-rules skipped {} ours / {} browser-too ({} bytes)",
+        "css: {} rules kept, rules dropped {} ours / {} browser-too, declarations dropped {} ours / {} browser-too ({}), {} declarations kept ({} keyword fallbacks, {} parse-only), {} nested rules, {} @import, {} @media ({} rules, {} applied; {} should not apply, {} of them applied; {} invalid queries), at-rules skipped {} ours / {} browser-too ({} bytes)",
         c.rule_kept,
         c.rule_ours,
         c.rule_browser,
@@ -715,6 +783,11 @@ fn css_drops(external: &str, inline: &str) -> CssReport {
         c.nesting,
         c.imports,
         c.media,
+        c.media_rules,
+        c.media_applied,
+        c.media_wrong,
+        c.media_wrong_applied,
+        c.media_invalid,
         c.at_ours,
         c.at_browser,
         c.at_skipped_bytes
@@ -763,10 +836,10 @@ fn css_drops(external: &str, inline: &str) -> CssReport {
 
     let _ = writeln!(
         text,
-        "\n## @media conditions (all applied today; 'wrong at 1280x800 light' = should NOT apply)"
+        "\n## @media conditions (blocks, rules, rules applied by the engine at {width}x{height}; 'wrong at 1280x800 light' = should NOT apply)"
     );
-    for (kind, count) in &media_kinds {
-        let _ = writeln!(text, "{count:6}  {kind}");
+    for (kind, (blocks, rules, applied)) in &media_kinds {
+        let _ = writeln!(text, "{blocks:6} {rules:6} {applied:6}  {kind}");
     }
 
     let _ = writeln!(
@@ -789,6 +862,62 @@ fn css_drops(external: &str, inline: &str) -> CssReport {
         headline,
         text,
         counts: c,
+    }
+}
+
+/// Fold one sheet's `@media` blocks into the counts. A nested block
+/// applies when it and every enclosing block do; its rules are counted
+/// once, in the innermost block.
+fn count_media(
+    at_rules: &[css::AtRuleSeen],
+    (width, height): (f32, f32),
+    c: &mut CssCounts,
+    kinds: &mut BTreeMap<&'static str, (usize, usize, usize)>,
+) {
+    // Per at-rule: (applies, should-not-apply), the enclosing chain folded in.
+    let mut chain: Vec<(bool, bool)> = Vec::with_capacity(at_rules.len());
+    let mut nested_rules = vec![0usize; at_rules.len()];
+    for at_rule in at_rules {
+        if at_rule.name == "media"
+            && let Some(parent) = at_rule.parent
+            && let Some(slot) = nested_rules.get_mut(parent)
+        {
+            *slot += at_rule.rules;
+        }
+    }
+    for (index, at_rule) in at_rules.iter().enumerate() {
+        let (outer_applies, outer_wrong) = at_rule
+            .parent
+            .and_then(|p| chain.get(p).copied())
+            .unwrap_or((true, false));
+        if at_rule.name != "media" {
+            chain.push((outer_applies, outer_wrong));
+            continue;
+        }
+        let verdict = css::media_verdict(&at_rule.prelude, width, height);
+        let kind = media_kind(&at_rule.prelude);
+        let applies = outer_applies && verdict.applies;
+        let wrong = outer_wrong || kind.contains("(wrong");
+        chain.push((applies, wrong));
+        let rules = at_rule.rules.saturating_sub(nested_rules[index]);
+        c.media += 1;
+        c.media_rules += rules;
+        c.media_invalid += verdict.invalid_queries;
+        if applies {
+            c.media_applied += rules;
+        }
+        if wrong {
+            c.media_wrong += rules;
+            if applies {
+                c.media_wrong_applied += rules;
+            }
+        }
+        let entry = kinds.entry(kind).or_default();
+        entry.0 += 1;
+        entry.1 += rules;
+        if applies {
+            entry.2 += rules;
+        }
     }
 }
 

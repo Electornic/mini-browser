@@ -33,6 +33,9 @@ pub struct ParseReport {
     pub dropped_declarations: Vec<DroppedDeclaration>,
     /// Every at-rule seen, in source order.
     pub at_rules: Vec<AtRuleSeen>,
+    /// Indexes (into `at_rules`) of the `@media` blocks being parsed, outer
+    /// first — how a nested block finds its [`AtRuleSeen::parent`].
+    open_media: Vec<usize>,
 }
 
 /// Why something was dropped. Mechanical (what the parser hit), checked in
@@ -137,6 +140,35 @@ pub struct AtRuleSeen {
     pub kept: bool,
     /// Size of a skipped body in source bytes (0 when kept or block-less).
     pub skipped_bytes: usize,
+    /// Rules kept from a kept body, nested `@media` blocks' rules included.
+    pub rules: usize,
+    /// Index in [`ParseReport::at_rules`] of the `@media` block this one
+    /// sits in (`None` at the top level).
+    pub parent: Option<usize>,
+}
+
+/// What the engine does with one `@media` block, for surveys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaVerdict {
+    /// Whether the block's rules apply at the given viewport (on its own;
+    /// an enclosing block is evaluated separately).
+    pub applies: bool,
+    /// Comma-separated queries in the prelude that failed to parse (each
+    /// one counts as `not all`).
+    pub invalid_queries: usize,
+}
+
+/// How the engine treats a `@media` block with this prelude at a
+/// `viewport_width` × `viewport_height` CSS px viewport (light theme).
+///
+/// The engine doesn't evaluate media queries yet: every block applies and
+/// no prelude is parsed (docs/compat-round3.md 2.1 replaces this).
+pub fn media_verdict(prelude: &str, viewport_width: f32, viewport_height: f32) -> MediaVerdict {
+    let _ = (prelude, viewport_width, viewport_height);
+    MediaVerdict {
+        applies: true,
+        invalid_queries: 0,
+    }
 }
 
 impl AtRuleSeen {
@@ -177,6 +209,50 @@ pub(super) fn record(update: impl FnOnce(&mut ParseReport)) {
 
 pub(super) fn is_active() -> bool {
     REPORT.with(|slot| slot.borrow().is_some())
+}
+
+/// Note an at-rule; returns its index in [`ParseReport::at_rules`] (`None`
+/// when no report is being collected).
+pub(super) fn record_at_rule(name: &str, prelude: &str, kept: bool) -> Option<usize> {
+    REPORT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let report = slot.as_mut()?;
+        let name = name.to_ascii_lowercase();
+        // A media prelude is kept whole: the probe re-reads it as a query.
+        let prelude = if name == "media" {
+            excerpt_unbounded(prelude)
+        } else {
+            excerpt(prelude)
+        };
+        report.at_rules.push(AtRuleSeen {
+            name,
+            prelude,
+            kept,
+            skipped_bytes: 0,
+            rules: 0,
+            parent: report.open_media.last().copied(),
+        });
+        Some(report.at_rules.len() - 1)
+    })
+}
+
+/// Bracket the parse of a kept `@media` body: `enter` before, `leave`
+/// with the number of rules it produced after.
+pub(super) fn enter_media(index: Option<usize>) {
+    if let Some(index) = index {
+        record(|r| r.open_media.push(index));
+    }
+}
+
+pub(super) fn leave_media(index: Option<usize>, rules: usize) {
+    if let Some(index) = index {
+        record(|r| {
+            r.open_media.pop();
+            if let Some(seen) = r.at_rules.get_mut(index) {
+                seen.rules = rules;
+            }
+        });
+    }
 }
 
 /// Classify a declaration the parser rejected, from its full source text.
@@ -337,6 +413,35 @@ mod tests {
                 )
             ]
         );
+    }
+
+    #[test]
+    fn media_blocks_count_their_rules_and_know_their_parent() {
+        let (_, report) = parse_with_report(
+            "@media screen { .a{} @supports (x:y) { .s{} } @media (min-width: 1px) { .b{} .c{} } .d{} }
+             @media print { .e{} }",
+        );
+        let seen: Vec<_> = report
+            .at_rules
+            .iter()
+            .map(|a| (a.name.as_str(), a.rules, a.parent))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("media", 4, None),
+                ("supports", 0, Some(0)),
+                ("media", 2, Some(0)),
+                ("media", 1, None)
+            ]
+        );
+    }
+
+    #[test]
+    fn media_prelude_is_kept_whole() {
+        let long = format!("(min-width: 1px){}", ", print".repeat(40));
+        let (_, report) = parse_with_report(&format!("@media {long} {{ .a{{}} }}"));
+        assert_eq!(report.at_rules[0].prelude, long);
     }
 
     #[test]
