@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 872 (workspace 합계, 2026-11-27 호환성 3차 R2 경계 잎 여백·flex/grid 항목 속성 +3; R3 는 869). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 875 (workspace 합계, 2026-11-27 호환성 3차 R4 이미지 디코드 제자리 변환 +3; R2 는 872). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -124,6 +124,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 ### 코드 스타일
 - 작은 함수 + 좋은 이름 우선, 주석은 *왜* 만 (무엇은 코드가 말함).
 - 모든 변경은 cargo fmt 통과. clippy clean.
+- `unsafe` 는 한 곳뿐: `mb-dom/src/resource.rs` `as_bytes_mut`(디코더가 `Vec<u32>` 에 바로 쓰게 하는 바이트 보기, 호환성 3차 R4). 새로 쓰려면 같은 수준의 안전 근거 주석과 리뷰.
 - 새 dep 추가는 의식적으로 — crate 분할의 dep 그래프를 깨지 말 것 (mb-dom 에 IO 금지, mb-engine 에 네트워크 금지, mb-agent 는 mb-runtime 만 등).
 - 한 crate 안에서 다른 crate 의 데이터 타입을 참조할 때:
   - mb-engine 내부에서는 `crate::css::Color` 처럼 짧게 (`pub(crate) use mb_dom::*` 덕분).

@@ -51,10 +51,83 @@ pub fn decode_image(url: Url, bytes: &[u8]) -> Result<LoadedImage, ResourceError
         return decode_svg(url, bytes);
     }
 
-    // Decode to a simple RGB pixel buffer so rendering does not depend on image crate types.
+    // Decode to a simple 0xRRGGBB pixel buffer so rendering does not depend
+    // on image crate types.
+    let (width, height, pixels) = decode_raster(bytes)?;
+    Ok(LoadedImage {
+        url,
+        width: width as usize,
+        height: height as usize,
+        pixels,
+    })
+}
+
+/// Decode a raster image straight into the engine's `Vec<u32>`.
+///
+/// This used to be `load_from_memory(..).to_rgba8()` and then a third
+/// buffer for the packed pixels — two full-size copies alive at once, ~8
+/// bytes per pixel at the peak for a 4-byte result (590 MB for an 8000²
+/// RGBA PNG). Now the decoder writes its raw 8-bit samples into the start
+/// of the final buffer, which is then expanded in place to 0xRRGGBB from
+/// the last pixel backwards (a pixel's ≤ 4 source bytes never sit past its
+/// own 4-byte slot, so nothing unread is overwritten) — ~4 bytes per pixel
+/// (compat round 3 R4). Formats with more than 4 bytes per pixel (16-bit,
+/// float) keep the old path. The `image` crate's 512 MB budget still
+/// applies: the output buffer is reserved from it before the decoder runs,
+/// as `load_from_memory` does.
+fn decode_raster(bytes: &[u8]) -> Result<(u32, u32, Vec<u32>), ResourceError> {
+    use image::{ColorType, ImageDecoder, ImageReader, Limits};
+
+    let decode_error = |error: image::ImageError| ResourceError::DecodeImage(error.to_string());
+    let reader = || {
+        ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|error| ResourceError::DecodeImage(error.to_string()))
+    };
+    let (width, height) = reader()?.into_dimensions().map_err(decode_error)?;
+    let pixel_count = u64::from(width) * u64::from(height);
+    let mut limits = Limits::default();
+    limits.reserve(pixel_count * 4).map_err(decode_error)?;
+    let mut reader = reader()?;
+    reader.limits(limits);
+    let decoder = reader.into_decoder().map_err(decode_error)?;
+    let bytes_per_pixel = match decoder.color_type() {
+        ColorType::L8 => 1,
+        ColorType::La8 => 2,
+        ColorType::Rgb8 => 3,
+        ColorType::Rgba8 => 4,
+        _ => return decode_raster_via_rgba8(bytes),
+    };
+    let pixel_count = usize::try_from(pixel_count)
+        .map_err(|_| ResourceError::DecodeImage("image too large".into()))?;
+    let raw_len = pixel_count * bytes_per_pixel;
+    if decoder.total_bytes() != raw_len as u64 {
+        return decode_raster_via_rgba8(bytes);
+    }
+    let mut pixels = vec![0u32; pixel_count];
+    let buffer = as_bytes_mut(&mut pixels);
+    decoder
+        .read_image(&mut buffer[..raw_len])
+        .map_err(decode_error)?;
+    for i in (0..pixel_count).rev() {
+        let at = i * bytes_per_pixel;
+        let (r, g, b) = if bytes_per_pixel >= 3 {
+            (buffer[at], buffer[at + 1], buffer[at + 2])
+        } else {
+            (buffer[at], buffer[at], buffer[at]) // grey (+ alpha, dropped)
+        };
+        let packed = (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
+        buffer[i * 4..i * 4 + 4].copy_from_slice(&packed.to_ne_bytes());
+    }
+    Ok((width, height, pixels))
+}
+
+/// The general path for sample formats wider than 8 bits: via the `image`
+/// crate's RGBA8 conversion (two copies at the peak — rare on the web).
+fn decode_raster_via_rgba8(bytes: &[u8]) -> Result<(u32, u32, Vec<u32>), ResourceError> {
     let decoded = image::load_from_memory(bytes)
         .map_err(|error| ResourceError::DecodeImage(error.to_string()))?
-        .to_rgba8();
+        .into_rgba8();
     let (width, height) = decoded.dimensions();
     let pixels = decoded
         .pixels()
@@ -63,13 +136,17 @@ pub fn decode_image(url: Url, bytes: &[u8]) -> Result<LoadedImage, ResourceError
             (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
         })
         .collect();
+    Ok((width, height, pixels))
+}
 
-    Ok(LoadedImage {
-        url,
-        width: width as usize,
-        height: height as usize,
-        pixels,
-    })
+/// The bytes of a `u32` buffer, for a decoder to write into.
+fn as_bytes_mut(pixels: &mut [u32]) -> &mut [u8] {
+    let len = std::mem::size_of_val(pixels);
+    // SAFETY: `u8` has alignment 1 and no invalid bit patterns, every byte
+    // of an initialised `[u32]` is initialised, and `len` is exactly the
+    // slice's size — the view covers the same memory, and it borrows
+    // `pixels` mutably for its whole lifetime, so nothing else can alias.
+    unsafe { std::slice::from_raw_parts_mut(pixels.as_mut_ptr().cast::<u8>(), len) }
 }
 
 // SVG sniff: real-world SVG payloads start with either an XML prologue
@@ -412,5 +489,111 @@ mod tests {
         );
         let image = decode_image(fake_url(), svg.as_bytes()).expect("100 levels decode");
         assert_eq!(image.pixels[0], 0xFF0000);
+    }
+
+    /// The pre-R4 conversion, kept as the reference: decode to the `image`
+    /// crate's buffer, `to_rgba8`, pack 0xRRGGBB (alpha dropped).
+    fn reference_pixels(bytes: &[u8]) -> (usize, usize, Vec<u32>) {
+        let rgba = image::load_from_memory(bytes).unwrap().to_rgba8();
+        let (w, h) = rgba.dimensions();
+        let pixels = rgba
+            .pixels()
+            .map(|p| (u32::from(p.0[0]) << 16) | (u32::from(p.0[1]) << 8) | u32::from(p.0[2]))
+            .collect();
+        (w as usize, h as usize, pixels)
+    }
+
+    #[test]
+    fn raster_decode_matches_the_reference_conversion_for_every_format() {
+        use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, LumaA, Rgb, Rgba};
+        let (w, h) = (37, 23); // odd sizes: no row padding assumptions
+        let rgba = ImageBuffer::from_fn(w, h, |x, y| {
+            Rgba([
+                (x * 7) as u8,
+                (y * 11) as u8,
+                ((x ^ y) * 5) as u8,
+                (x * y) as u8,
+            ])
+        });
+        let images = [
+            DynamicImage::ImageLuma8(ImageBuffer::from_fn(w, h, |x, y| Luma([(x * 3 + y) as u8]))),
+            DynamicImage::ImageLumaA8(ImageBuffer::from_fn(w, h, |x, y| {
+                LumaA([(x * 5) as u8, (y * 9) as u8])
+            })),
+            DynamicImage::ImageRgb8(ImageBuffer::from_fn(w, h, |x, y| {
+                Rgb([(x * 7) as u8, (y * 11) as u8, (x + y) as u8])
+            })),
+            DynamicImage::ImageRgba8(rgba.clone()),
+            DynamicImage::ImageRgba8(rgba).into_rgb16().into(), // 16-bit: the fallback path
+        ];
+        let mut cases = Vec::new();
+        for image in &images {
+            let mut png = std::io::Cursor::new(Vec::new());
+            image.write_to(&mut png, ImageFormat::Png).unwrap();
+            cases.push((format!("png {:?}", image.color()), png.into_inner()));
+        }
+        for format in [ImageFormat::Jpeg, ImageFormat::Gif, ImageFormat::Bmp] {
+            let mut out = std::io::Cursor::new(Vec::new());
+            let image = if format == ImageFormat::Jpeg {
+                images[2].clone()
+            } else {
+                images[3].clone()
+            };
+            image.write_to(&mut out, format).unwrap();
+            cases.push((format!("{format:?}"), out.into_inner()));
+        }
+        for (name, bytes) in cases {
+            let decoded =
+                decode_image(fake_url(), &bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let (rw, rh, reference) = reference_pixels(&bytes);
+            assert_eq!((decoded.width, decoded.height), (rw, rh), "{name}");
+            assert!(
+                decoded.pixels == reference,
+                "{name}: pixels differ from the reference conversion"
+            );
+        }
+    }
+
+    #[test]
+    fn raster_header_claiming_too_many_pixels_hits_the_512_mb_budget() {
+        // The output buffer is reserved from `image`'s default budget before
+        // anything is allocated: a 20000² PNG (1.6 GB of pixels) is a decode
+        // error, not an allocation.
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut crc = 0xFFFF_FFFFu32;
+            for &byte in bytes {
+                crc ^= u32::from(byte);
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 {
+                        (crc >> 1) ^ 0xEDB8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = b"IHDR".to_vec();
+        ihdr.extend(20_000u32.to_be_bytes());
+        ihdr.extend(20_000u32.to_be_bytes());
+        ihdr.extend([8, 6, 0, 0, 0]); // 8-bit RGBA
+        let mut chunk = |data: &[u8]| {
+            png.extend(((data.len() - 4) as u32).to_be_bytes());
+            png.extend(data);
+            png.extend(crc32(data).to_be_bytes());
+        };
+        chunk(&ihdr);
+        chunk(b"IDAT\x78\x9c\x03\x00\x00\x00\x00\x01");
+        chunk(b"IEND");
+        match decode_image(fake_url(), &png) {
+            Err(ResourceError::DecodeImage(message)) => {
+                assert!(
+                    message.to_lowercase().contains("limit") || message.contains("memory"),
+                    "{message}"
+                )
+            }
+            other => panic!("{:?}", other.map(|i| (i.width, i.height))),
+        }
     }
 }
