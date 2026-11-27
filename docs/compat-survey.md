@@ -333,6 +333,8 @@ MB_NET_CACHE_OFFLINE=1 ./target/debug/mb-mcp --start-url https://news.ycombinato
 
 **F2 재측정** (2026-11-28, 라벨 `f2`, `f1b` 대비 — 이름 있는 색 148·`currentcolor`·`#rgba`·Chrome `-webkit-` 별칭·`transform` 값, [compat-round3.md F2](compat-round3.md#f2--값-파서-갭-이름-있는-색rgba-webkit--별칭transform-2026-11-28)): 결과·기대 컨트롤·오프라인 미스·슬리버 그대로, 요소 목록 diff 없음, `[mb-budget]` 0. 버린 선언 ours 20곳 1,977 → 1,488(github 400 → 236 · kakaocorp 302 → 154 · rustlang 100 → 63 · apple 89 → 55), 합산 지표 3,303 → 2,766(2차 5곳 992 → 779). mdn 의 `not (color: light-dark(tan,tan))` 8블록이 거짓이 됨(`@supports` 참 17 → 9).
 
+**F3 재측정** (2026-11-28, 라벨 `f3`, `f2` 대비 — 둥근 테두리, [compat-round3.md F3](compat-round3.md#f3--둥근-테두리-2026-11-28)): `load_ms` 외 25곳 모든 열 동일, 요소 목록 diff 없음(페인트만 바뀜). 미리보기에서 GitHub 버튼 테두리가 둥글다.
+
 - `ms` = `navigate`(settle 포함) 벽시계, 이 맥에서. 두 실행 사이 차이는 대부분 ±10% 안, 가장 큰 것은 kowiki 256 → 197(−23%)·github 1,829 → 1,562(−15%) — 시간은 비교용이 아니라 timeout 판정용.
 - 기대 컨트롤 **누락 사이트 8곳**(naver·daum·hani·korea-kr·velog·d2·google·enwiki; 0b 때는 측정된 17곳 중 6곳). 원인 분류는 각 단계에서 — 지금 표는 기준선. naver 검색창은 ARIA `combobox` 다(역할 오기를 녹화 후 tsv 에서 고침).
 - **콘솔 에러**(`prompts.rs` "제3자 스크립트 콘솔 에러" 결정용 입력): 측정된 20곳 중 **16곳이 1건 이상**, 합 104건 중 98건이 `Uncaught in script`. 많은 곳 korea-kr 33·bbc 15·yna 13·daum 9·google 6·kakaocorp 6. 대부분 빠진 API(`getElementsByTagName` 류, [JS API 표면 프로브](#js-api-표면-프로브)). naver 광고 2건은 이번 스냅샷에서 `near "document.getElementsByTagName"` / `near "Na"`(gfp-core 의 축약 별칭 — 2차의 `console.debug` 가 이번 빌드에선 지역 변수로 줄여져 있음)로 읽힌다. 0a 권고(지금은 `prompts.rs` 를 안 바꿈)를 바꿀 근거는 아직 없다 — 다음은 제3자 에러가 있는 손으로 쓴 eval 페이지로 확인.

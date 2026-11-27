@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
     Affine, CornerRadii, DisplayCommand, GradientCommand, ImageCommand, ResolvedStop,
-    ShadowCommand, TextCommand,
+    RoundedBorderCommand, ShadowCommand, TextCommand,
 };
 
 /// Side data the paint walk needs to resolve `background-image: url(...)`
@@ -61,6 +61,10 @@ pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<Dis
             DisplayCommand::RoundedRect(_, rect, _) => {
                 rect.x += dx;
                 rect.y += dy;
+            }
+            DisplayCommand::RoundedBorder(border) => {
+                border.rect.x += dx;
+                border.rect.y += dy;
             }
             DisplayCommand::Text(text) => {
                 text.x += dx;
@@ -324,6 +328,19 @@ fn bake_axis_aligned(commands: &mut [DisplayCommand], transform: Affine) {
         match command {
             DisplayCommand::SolidRect(_, rect) => transform_rect_in_place(rect, transform),
             DisplayCommand::RoundedRect(_, rect, _) => transform_rect_in_place(rect, transform),
+            DisplayCommand::RoundedBorder(border) => {
+                transform_rect_in_place(&mut border.rect, transform);
+                let (sx, sy) = (transform.a.abs(), transform.d.abs());
+                let r = scalar_scale(transform).abs();
+                border.radii = CornerRadii {
+                    tl: border.radii.tl * r,
+                    tr: border.radii.tr * r,
+                    br: border.radii.br * r,
+                    bl: border.radii.bl * r,
+                };
+                let [top, right, bottom, left] = border.widths;
+                border.widths = [top * sy, right * sx, bottom * sy, left * sx];
+            }
             DisplayCommand::Text(text) => {
                 let (x, y) = transform.apply_point(text.x, text.y);
                 text.x = x;
@@ -971,6 +988,22 @@ fn border_commands(layout_box: &LayoutBox, alpha: f32) -> Vec<DisplayCommand> {
     }
 
     let border_box = layout_box.dimensions.border_box();
+    // Rounded corners (follow-up F3): one ring with the corners cut, not
+    // four square strips over the rounded background.
+    let radii = border_radii(node);
+    if radii.tl > 0.0 || radii.tr > 0.0 || radii.br > 0.0 || radii.bl > 0.0 {
+        return vec![DisplayCommand::RoundedBorder(RoundedBorderCommand {
+            rect: border_box,
+            radii,
+            widths: [border.top, border.right, border.bottom, border.left],
+            colors: [
+                side_color("top"),
+                side_color("right"),
+                side_color("bottom"),
+                side_color("left"),
+            ],
+        })];
+    }
     let mut commands = Vec::new();
 
     if border.top > 0.0 {

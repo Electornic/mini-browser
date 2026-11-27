@@ -151,6 +151,9 @@ impl Affine {
 pub enum DisplayCommand {
     SolidRect(Color, Rect),
     RoundedRect(Color, Rect, CornerRadii),
+    /// A border on a box with `border-radius` (follow-up F3): the ring
+    /// between the rounded border box and the rounded padding box.
+    RoundedBorder(RoundedBorderCommand),
     Text(TextCommand),
     Image(ImageCommand),
     /// Linear or radial gradient fill. Stops are pre-resolved to absolute
@@ -188,6 +191,20 @@ pub struct GradientCommand {
 pub struct ResolvedStop {
     pub position: f32,
     pub color: Color,
+}
+
+/// A rounded border ring (follow-up F3). The rasterizer fills the area
+/// between the border box (`rect`, corners `radii`) and the padding box
+/// inset by `widths`, each side in its colour (sides meet on the corner
+/// diagonals, as in browsers). Every style paints as solid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RoundedBorderCommand {
+    pub rect: Rect,
+    pub radii: CornerRadii,
+    /// top, right, bottom, left.
+    pub widths: [f32; 4],
+    /// top, right, bottom, left.
+    pub colors: [Color; 4],
 }
 
 // Per-corner radii so tabs (top corners only) and pills (uniform) share one primitive.
@@ -294,6 +311,19 @@ pub fn scale_display_list(commands: &[DisplayCommand], factor: f32) -> Vec<Displ
                     bl: radii.bl * factor,
                 },
             ),
+            DisplayCommand::RoundedBorder(border) => {
+                DisplayCommand::RoundedBorder(RoundedBorderCommand {
+                    rect: rect(&border.rect),
+                    radii: CornerRadii {
+                        tl: border.radii.tl * factor,
+                        tr: border.radii.tr * factor,
+                        br: border.radii.br * factor,
+                        bl: border.radii.bl * factor,
+                    },
+                    widths: border.widths.map(|w| w * factor),
+                    colors: border.colors,
+                })
+            }
             DisplayCommand::Text(text) => DisplayCommand::Text(TextCommand {
                 x: text.x * factor,
                 y: text.y * factor,
@@ -2437,6 +2467,115 @@ mod tests {
         // the box — so it should NOT be painted red.
         let outside = pixels[2 * 16 + 8];
         assert_ne!(outside & 0x00FFFFFF, 0x00FF0000);
+    }
+
+    // ---- F3: rounded borders ----
+
+    /// Pixel (x, y) of a `w`-wide raster, RGB only.
+    fn rgb_at(pixels: &[u32], w: usize, x: usize, y: usize) -> u32 {
+        pixels[y * w + x] & 0x00FF_FFFF
+    }
+
+    #[test]
+    fn rounded_border_is_one_ring_not_square_strips() {
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            "#card { width: 30px; height: 30px; border: 4px solid red; border-radius: 12px; }",
+        );
+        assert!(
+            commands
+                .iter()
+                .all(|c| !matches!(c, DisplayCommand::SolidRect(..))),
+            "square strips: {commands:?}"
+        );
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|c| matches!(c, DisplayCommand::RoundedBorder(_)))
+                .count(),
+            1
+        );
+        // No radius: the four strips as before.
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            "#card { width: 30px; height: 30px; border: 4px solid red; }",
+        );
+        assert_eq!(commands.len(), 4, "{commands:?}");
+    }
+
+    #[test]
+    fn rounded_border_paints_a_ring_with_round_corners() {
+        // 38×38 border box (30 + 2×4), radius 12, on a white page.
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            "#card { width: 30px; height: 30px; border: 4px solid red; border-radius: 12px; }",
+        );
+        let mut all = vec![DisplayCommand::SolidRect(
+            Color {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 255,
+            },
+            layout::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 40.0,
+                height: 40.0,
+            },
+        )];
+        all.extend(commands);
+        let pixels = render::rasterize(&all, 40, 40);
+        let red = 0x00FF_0000;
+        let white = 0x00FF_FFFF;
+        assert_eq!(rgb_at(&pixels, 40, 0, 0), white, "outer corner cut off");
+        assert_eq!(rgb_at(&pixels, 40, 19, 1), red, "top edge");
+        assert_eq!(rgb_at(&pixels, 40, 1, 19), red, "left edge");
+        assert_eq!(rgb_at(&pixels, 40, 36, 19), red, "right edge");
+        assert_eq!(rgb_at(&pixels, 40, 19, 36), red, "bottom edge");
+        assert_eq!(
+            rgb_at(&pixels, 40, 19, 19),
+            white,
+            "the hole stays unpainted"
+        );
+        // Just inside the outer arc, past the straight edge: the ring
+        // follows the curve (diagonal point at ~2px in from the corner).
+        assert_eq!(rgb_at(&pixels, 40, 4, 4), red, "ring along the corner arc");
+        // Inside the inner arc (radius 8 around (12, 12)): hole.
+        assert_eq!(
+            rgb_at(&pixels, 40, 9, 9),
+            white,
+            "inner corner is rounded too"
+        );
+    }
+
+    #[test]
+    fn rounded_border_keeps_per_side_colours() {
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            "#card { width: 30px; height: 30px; border: 4px solid blue; border-top-color: red;
+                     border-radius: 10px; }",
+        );
+        let pixels = render::rasterize(&commands, 40, 40);
+        assert_eq!(rgb_at(&pixels, 40, 19, 1), 0x00FF_0000, "top is red");
+        assert_eq!(rgb_at(&pixels, 40, 1, 19), 0x0000_00FF, "left is blue");
+        assert_eq!(rgb_at(&pixels, 40, 19, 36), 0x0000_00FF, "bottom is blue");
+    }
+
+    #[test]
+    fn rounded_border_wider_than_its_radius_has_square_inner_corners() {
+        // Inner radius = max(0, 4 - 10): the hole is a plain rectangle.
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            "#card { width: 20px; height: 20px; border: 10px solid red; border-radius: 4px; }",
+        );
+        let pixels = render::rasterize(&commands, 40, 40);
+        assert_ne!(
+            rgb_at(&pixels, 40, 10, 10),
+            0x00FF_0000,
+            "inner corner pixel is in the hole"
+        );
+        assert_eq!(rgb_at(&pixels, 40, 9, 9), 0x00FF_0000);
     }
 
     #[test]

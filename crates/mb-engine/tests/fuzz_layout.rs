@@ -1049,6 +1049,21 @@ fn check_commands(commands: &[DisplayCommand]) -> Result<(), Failure> {
             DisplayCommand::SolidRect(_, r) | DisplayCommand::RoundedRect(_, r, _) => Some(*r),
             DisplayCommand::Gradient(g) => Some(g.rect),
             DisplayCommand::BoxShadow(s) => Some(s.rect),
+            DisplayCommand::RoundedBorder(b) => {
+                let r = &b.radii;
+                if !b
+                    .widths
+                    .iter()
+                    .chain([r.tl, r.tr, r.br, r.bl].iter())
+                    .all(|v| v.is_finite())
+                {
+                    return Err(Failure {
+                        kind: Kind::NonFinite,
+                        detail: format!("rounded border with non-finite widths/radii: {b:?}"),
+                    });
+                }
+                Some(b.rect)
+            }
             DisplayCommand::Text(t) => Some(layout::Rect {
                 x: t.x,
                 y: t.y,

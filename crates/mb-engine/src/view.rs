@@ -187,6 +187,7 @@ fn command_bottom(command: &render::DisplayCommand) -> f32 {
     match command {
         render::DisplayCommand::SolidRect(_, rect) => rect.y + rect.height,
         render::DisplayCommand::RoundedRect(_, rect, _) => rect.y + rect.height,
+        render::DisplayCommand::RoundedBorder(border) => border.rect.y + border.rect.height,
         render::DisplayCommand::Text(text) => text.y + text.font_size,
         render::DisplayCommand::Image(image) => image.y + image.height,
         render::DisplayCommand::Gradient(gradient) => gradient.rect.y + gradient.rect.height,
@@ -209,6 +210,7 @@ fn projected_command_bottom(command: &render::DisplayCommand, transform: render:
     let bounds = match command {
         render::DisplayCommand::SolidRect(_, rect) => *rect,
         render::DisplayCommand::RoundedRect(_, rect, _) => *rect,
+        render::DisplayCommand::RoundedBorder(border) => border.rect,
         render::DisplayCommand::Text(text) => layout::Rect {
             x: text.x,
             y: text.y,

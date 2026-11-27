@@ -37,7 +37,7 @@ use tiny_skia::{Color as TsColor, Pixmap};
 use gradient::fill_gradient;
 use image::draw_image;
 use shadow::fill_box_shadow;
-use shapes::{fill_rounded_rect, fill_solid_rect};
+use shapes::{fill_rounded_border, fill_rounded_rect, fill_solid_rect};
 use text::draw_text;
 
 pub use text::{
@@ -104,6 +104,7 @@ fn rasterize_command(pixmap: &mut Pixmap, command: &DisplayCommand, transform: A
         DisplayCommand::RoundedRect(color, rect, radii) => {
             fill_rounded_rect(pixmap, *color, *rect, *radii, transform)
         }
+        DisplayCommand::RoundedBorder(border) => fill_rounded_border(pixmap, border, transform),
         DisplayCommand::Text(text) => draw_text(pixmap, text, transform),
         DisplayCommand::Image(image) => draw_image(pixmap, image, transform),
         DisplayCommand::Gradient(gradient) => fill_gradient(pixmap, gradient, transform),
