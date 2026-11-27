@@ -6,7 +6,10 @@ mod variables;
 use cascade::specified_values;
 use variables::resolve_var_references;
 
-use std::collections::BTreeMap;
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use crate::{
     css::{
@@ -108,6 +111,56 @@ pub fn style_tree_with_state(
     state: InteractionState<'_>,
     media: &MediaContext,
 ) -> StyledNode {
+    style_pass(document, root, stylesheets, state, media, None)
+}
+
+/// What one style pass found at computed-value time — for the compat
+/// probe only (docs/compat-round3.md 1단계 "probe 변경"); the browser never
+/// asks for it. Entries are [`declaration_key`]s of the *declared* value,
+/// so the probe can count the stylesheet declarations they came from.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StyleReport {
+    /// Declarations that were invalid at computed-value time on at least
+    /// one node: a `var()` that didn't resolve (undefined with no
+    /// fallback, or a cycle).
+    pub iacvt: BTreeSet<String>,
+    /// Declarations whose `var()` substitution left a `Keyword` the
+    /// property's value kind doesn't accept (`width: var(--w)` with
+    /// `--w: 100vw`) — the computed-time twin of the parse-time keyword
+    /// fallback count.
+    pub var_keyword_fallback: BTreeSet<String>,
+}
+
+/// The identity [`StyleReport`] records a declaration under: property name
+/// plus the declared (unsubstituted) value. Two identical declarations in
+/// different rules share a key — the probe counts every sheet occurrence of
+/// a reported key.
+pub fn declaration_key(name: &str, value: &Value) -> String {
+    format!("{name}: {value:?}")
+}
+
+/// [`style_tree_with_state`] plus the pass's [`StyleReport`]. Same styled
+/// tree; only the bookkeeping differs.
+pub fn style_tree_with_report(
+    document: &Document,
+    root: NodeId,
+    stylesheets: &[Stylesheet],
+    state: InteractionState<'_>,
+    media: &MediaContext,
+) -> (StyledNode, StyleReport) {
+    let report = RefCell::new(StyleReport::default());
+    let styled = style_pass(document, root, stylesheets, state, media, Some(&report));
+    (styled, report.into_inner())
+}
+
+fn style_pass(
+    document: &Document,
+    root: NodeId,
+    stylesheets: &[Stylesheet],
+    state: InteractionState<'_>,
+    media: &MediaContext,
+    report: Option<&RefCell<StyleReport>>,
+) -> StyledNode {
     let media_results: Vec<Vec<bool>> = stylesheets
         .iter()
         .map(|sheet| media::evaluate_blocks(&sheet.media, media))
@@ -115,6 +168,7 @@ pub fn style_tree_with_state(
     let cascade = Cascade {
         stylesheets,
         media: &media_results,
+        report,
     };
     // Resolve the user-supplied paths into NodeIds once. The matching layer
     // walks parent links from these NodeIds to compute :hover / :focus /
@@ -160,6 +214,8 @@ pub fn style_tree_with_state(
 pub(super) struct Cascade<'a> {
     pub stylesheets: &'a [Stylesheet],
     pub media: &'a [Vec<bool>],
+    /// Only the probe's pass collects one (`style_tree_with_report`).
+    pub report: Option<&'a RefCell<StyleReport>>,
 }
 
 /// Walk a `Vec<usize>` child-index path starting from `root` (rather than
@@ -235,7 +291,7 @@ fn style_tree_inner(
     // a length (e.g. `--gap: 1em`) goes through the same em/rem conversion
     // as if it had been written inline. Cycle-protected; unresolved
     // references with no fallback degrade to `Keyword("initial")`.
-    resolve_var_references(&mut specified_values);
+    resolve_var_references(&mut specified_values, cascade.report);
 
     // Font-size is resolved first because every other em-based length on this node depends
     // on it. Parent font-size has already been resolved to Px during the parent's pass, so
@@ -2107,6 +2163,93 @@ mod tests {
                 other => panic!("{name} = {other:?}"),
             }
         }
+    }
+
+    /// Style pass with a computed-value-time report (docs/compat-round3.md
+    /// 1단계 probe 변경), at the agent's default viewport.
+    fn report_for(html_source: &str, css_source: &str) -> style::StyleReport {
+        let (document, root) = parse_html(html_source);
+        let sheet = parse_css(css_source);
+        let (_, report) = style::style_tree_with_report(
+            &document,
+            root,
+            std::slice::from_ref(&sheet),
+            style::InteractionState::default(),
+            &crate::css::media::MediaContext::default(),
+        );
+        report
+    }
+
+    fn sheet_key(css_source: &str, property: &str) -> String {
+        let sheet = parse_css(css_source);
+        let decl = sheet
+            .rules
+            .iter()
+            .flat_map(|rule| &rule.declarations)
+            .find(|decl| decl.name == property)
+            .expect("declaration kept");
+        style::declaration_key(&decl.name, &decl.value)
+    }
+
+    #[test]
+    fn style_report_counts_unresolved_var_as_iacvt() {
+        let css = "p { color: var(--undefined); width: var(--w); } div { --w: 5px; }";
+        let report = report_for("<div><p>x</p></div>", css);
+        assert!(
+            report.iacvt.contains(&sheet_key(css, "color")),
+            "{report:?}"
+        );
+        // Resolved on the node that uses it: not IACVT.
+        assert!(
+            !report.iacvt.contains(&sheet_key(css, "width")),
+            "{report:?}"
+        );
+        assert!(report.var_keyword_fallback.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn style_report_counts_cyclic_var_as_iacvt() {
+        let css = "p { --a: var(--b); --b: var(--a); margin-left: var(--a); }";
+        let report = report_for("<div><p>x</p></div>", css);
+        assert!(
+            report.iacvt.contains(&sheet_key(css, "margin-left")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn style_report_counts_substituted_keyword_the_property_rejects() {
+        // `100vw` is a single-token Keyword today; `width` doesn't take it.
+        let css = ":root { --w: 100vw; --c: red; } p { width: var(--w); color: var(--c); }";
+        let report = report_for("<div><p>x</p></div>", css);
+        assert!(
+            report
+                .var_keyword_fallback
+                .contains(&sheet_key(css, "width")),
+            "{report:?}"
+        );
+        assert!(
+            !report
+                .var_keyword_fallback
+                .contains(&sheet_key(css, "color"))
+        );
+        assert!(report.iacvt.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn style_tree_without_report_matches_with_report() {
+        let css = "p { color: var(--undefined); width: var(--w); } div { --w: 5px; }";
+        let (document, root) = parse_html("<div><p>x</p></div>");
+        let sheet = parse_css(css);
+        let plain = style::style_tree(&document, root, std::slice::from_ref(&sheet));
+        let (reported, _) = style::style_tree_with_report(
+            &document,
+            root,
+            std::slice::from_ref(&sheet),
+            style::InteractionState::default(),
+            &crate::css::media::MediaContext::default(),
+        );
+        assert_eq!(plain, reported);
     }
 
     fn find_tag<'a>(node: &'a style::StyledNode, tag: &str) -> Option<&'a style::StyledNode> {

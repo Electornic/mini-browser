@@ -5,11 +5,14 @@
 // only top-level Var values get substituted, which is what real pages
 // reach for (`color: var(--accent)`).
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
-use crate::css::Value;
+use crate::css::{Value, properties};
 
-use super::PropertyMap;
+use super::{PropertyMap, StyleReport, declaration_key};
 
 /// Substitute every `Value::Var` in `values` with the looked-up `--*` value
 /// in the same map. Custom properties inherit, so by the time this runs the
@@ -23,7 +26,12 @@ use super::PropertyMap;
 /// transforms, …) are not walked into — only top-level Var values are
 /// substituted, which covers `color: var(--accent)` style use which is what
 /// 5.1's site-color recovery target needs.
-pub(super) fn resolve_var_references(values: &mut PropertyMap) {
+/// `report` (the compat probe's pass only) collects the declarations whose
+/// substitution failed or left a keyword the property rejects.
+pub(super) fn resolve_var_references(
+    values: &mut PropertyMap,
+    report: Option<&RefCell<StyleReport>>,
+) {
     let custom_props: HashMap<String, Value> = values
         .iter()
         .filter(|(name, _)| name.starts_with("--"))
@@ -37,17 +45,38 @@ pub(super) fn resolve_var_references(values: &mut PropertyMap) {
             // value. Each descendant runs its own resolve pass.
             continue;
         }
-        resolve_var_value(value, &custom_props);
+        let Some(report) = report else {
+            resolve_var_value(value, &custom_props);
+            continue;
+        };
+        if !matches!(value, Value::Var { .. }) {
+            continue;
+        }
+        let declared = value.clone();
+        let resolved = resolve_var_value(value, &custom_props);
+        let mut report = report.borrow_mut();
+        if !resolved {
+            report.iacvt.insert(declaration_key(name, &declared));
+        } else if let (Some(kind), Value::Keyword(keyword)) = (properties::lookup(name), &*value)
+            && kind.is_typed()
+            && !kind.accepts_keyword(keyword)
+        {
+            report
+                .var_keyword_fallback
+                .insert(declaration_key(name, &declared));
+        }
     }
 }
 
-fn resolve_var_value(value: &mut Value, custom_props: &HashMap<String, Value>) {
+/// Substitute in place. False = invalid at computed-value time (a cycle,
+/// or an undefined name with no fallback): the value became `initial`.
+fn resolve_var_value(value: &mut Value, custom_props: &HashMap<String, Value>) -> bool {
     let mut seen: HashSet<String> = HashSet::new();
     while let Value::Var { name, fallback } = value {
         if !seen.insert(name.clone()) {
             // Cycle detected — collapse to the spec-defined "initial" sentinel.
             *value = Value::Keyword("initial".into());
-            return;
+            return false;
         }
         match custom_props.get(name) {
             Some(resolved) => {
@@ -55,11 +84,15 @@ fn resolve_var_value(value: &mut Value, custom_props: &HashMap<String, Value>) {
             }
             None => {
                 let fb = fallback.take();
-                *value = match fb {
-                    Some(boxed) => *boxed,
-                    None => Value::Keyword("initial".into()),
-                };
+                match fb {
+                    Some(boxed) => *value = *boxed,
+                    None => {
+                        *value = Value::Keyword("initial".into());
+                        return false;
+                    }
+                }
             }
         }
     }
+    true
 }

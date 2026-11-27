@@ -40,7 +40,7 @@ use mb_runtime::{
     css::{self, DropReason, Origin, Value, properties},
     dom::{Document, NodeId, NodeType},
     layout::{BoxType, LayoutBox},
-    net,
+    net, style,
 };
 
 /// Properties something downstream of the cascade actually reads (layout,
@@ -189,7 +189,25 @@ fn main() {
         browser.config().viewport_width as f32,
         browser.config().viewport_height as f32,
     );
-    let mut css_report = css_drops(&state.stylesheet, &inline_css, media_ctx);
+    // One more style pass, the same one the last frame ran (default
+    // interaction state), this time with the computed-value-time report:
+    // IACVT and keyword fallbacks only exist after substitution.
+    let style_report = document.roots().last().map(|&root| {
+        style::style_tree_with_report(
+            &document,
+            root,
+            &state.parsed_stylesheets,
+            style::InteractionState::default(),
+            &css::media::MediaContext::new(media_ctx.0, media_ctx.1),
+        )
+        .1
+    });
+    let mut css_report = css_drops(
+        &state.stylesheet,
+        &inline_css,
+        media_ctx,
+        &style_report.unwrap_or_default(),
+    );
     css_report.counts.media_attr_sheets = media_attr_sheets(&document);
     write(&out, "css.txt", &css_report.text);
 
@@ -377,6 +395,11 @@ fn push_columns(row: &mut Row, columns: Option<&Columns>) {
     col("rule_kept", &|c| c.css.rule_kept.to_string());
     col("keyword_fallback", &|c| c.css.keyword_fallback.to_string());
     col("parse_only", &|c| c.css.parse_only.to_string());
+    col("iacvt", &|c| c.css.iacvt.to_string());
+    col("var_keyword_fallback", &|c| {
+        c.css.var_keyword_fallback.to_string()
+    });
+    col("decl_drop_total", &|c| c.css.drop_total().to_string());
     col("at_skipped_ours", &|c| c.css.at_ours.to_string());
     col("at_skipped_browser", &|c| c.css.at_browser.to_string());
     col("at_skipped_bytes", &|c| c.css.at_skipped_bytes.to_string());
@@ -659,6 +682,12 @@ struct CssCounts {
     keyword_fallback: usize,
     /// Kept declarations nothing downstream reads (see `CONSUMED`).
     parse_only: usize,
+    /// Kept declarations invalid at computed-value time on at least one
+    /// node (`style::StyleReport::iacvt`) — a `var()` that didn't resolve.
+    iacvt: usize,
+    /// Kept declarations whose `var()` substitution left a keyword the
+    /// property rejects (`StyleReport::var_keyword_fallback`).
+    var_keyword_fallback: usize,
     imports: usize,
     /// Nested rules inside blocks + top-level selectors with `&`; kept out
     /// of the declaration counts.
@@ -682,9 +711,27 @@ struct CssCounts {
     decl_reasons: String,
 }
 
-fn css_drops(external: &str, inline: &str, (width, height): (f32, f32)) -> CssReport {
+impl CssCounts {
+    /// The step-1 target metric (docs/compat-round3.md "측정 프로토콜"):
+    /// parser drops (ours) + invalid at computed-value time + both keyword
+    /// fallbacks — so a failure moving from parse time to substitution
+    /// time doesn't vanish from the count.
+    fn drop_total(&self) -> usize {
+        self.decl_ours + self.iacvt + self.keyword_fallback + self.var_keyword_fallback
+    }
+}
+
+fn css_drops(
+    external: &str,
+    inline: &str,
+    (width, height): (f32, f32),
+    computed: &style::StyleReport,
+) -> CssReport {
     let mut text = String::new();
     let mut c = CssCounts::default();
+    // property → (count, sample) of the computed-value-time failures
+    let mut iacvt_props: BTreeMap<String, (usize, String)> = BTreeMap::new();
+    let mut var_fallback_props: BTreeMap<String, (usize, String)> = BTreeMap::new();
     let mut ignored: BTreeMap<String, usize> = BTreeMap::new();
     let mut fallbacks: BTreeMap<String, (usize, String)> = BTreeMap::new();
     let mut dropped_props: BTreeMap<(Origin, DropReason, String), (usize, String)> =
@@ -699,7 +746,28 @@ fn css_drops(external: &str, inline: &str, (width, height): (f32, f32)) -> CssRe
         let (sheet, report) = css::parse_with_report(source);
         c.rule_kept += sheet.rules.len();
         for rule in &sheet.rules {
+            // A key counts once per rule (a shorthand expanded into
+            // longhands that share one declared value is one declaration).
+            let mut seen_keys: Vec<String> = Vec::new();
             for decl in &rule.declarations {
+                let key = style::declaration_key(&decl.name, &decl.value);
+                let first_in_rule = !seen_keys.contains(&key);
+                if first_in_rule {
+                    let failed = if computed.iacvt.contains(&key) {
+                        c.iacvt += 1;
+                        Some(&mut iacvt_props)
+                    } else if computed.var_keyword_fallback.contains(&key) {
+                        c.var_keyword_fallback += 1;
+                        Some(&mut var_fallback_props)
+                    } else {
+                        None
+                    };
+                    if let Some(props) = failed {
+                        let entry = props.entry(decl.name.clone()).or_insert((0, key.clone()));
+                        entry.0 += 1;
+                    }
+                    seen_keys.push(key);
+                }
                 c.decl_kept += 1;
                 if !decl.name.starts_with("--") && !CONSUMED.contains(&decl.name.as_str()) {
                     c.parse_only += 1;
@@ -770,7 +838,7 @@ fn css_drops(external: &str, inline: &str, (width, height): (f32, f32)) -> CssRe
         .join(",");
 
     let headline = format!(
-        "css: {} rules kept, rules dropped {} ours / {} browser-too, declarations dropped {} ours / {} browser-too ({}), {} declarations kept ({} keyword fallbacks, {} parse-only), {} nested rules, {} @import, {} @media ({} rules, {} applied; {} should not apply, {} of them applied; {} invalid queries), at-rules skipped {} ours / {} browser-too ({} bytes)",
+        "css: {} rules kept, rules dropped {} ours / {} browser-too, declarations dropped {} ours / {} browser-too ({}), {} declarations kept ({} keyword fallbacks, {} parse-only; computed time: {} invalid (IACVT), {} var keyword fallbacks; drop total {}), {} nested rules, {} @import, {} @media ({} rules, {} applied; {} should not apply, {} of them applied; {} invalid queries), at-rules skipped {} ours / {} browser-too ({} bytes)",
         c.rule_kept,
         c.rule_ours,
         c.rule_browser,
@@ -780,6 +848,9 @@ fn css_drops(external: &str, inline: &str, (width, height): (f32, f32)) -> CssRe
         c.decl_kept,
         c.keyword_fallback,
         c.parse_only,
+        c.iacvt,
+        c.var_keyword_fallback,
+        c.drop_total(),
         c.nesting,
         c.imports,
         c.media,
@@ -850,6 +921,24 @@ fn css_drops(external: &str, inline: &str, (width, height): (f32, f32)) -> CssRe
     fallbacks.sort_by(|a, b| b.1.0.cmp(&a.1.0));
     for (name, (count, sample)) in fallbacks.iter().take(40) {
         let _ = writeln!(text, "{count:6}  {name:28} {}", clip(sample, 60));
+    }
+
+    for (title, props) in [
+        (
+            "invalid at computed-value time (IACVT): declarations whose var() didn't resolve on some node (count, sample)",
+            iacvt_props,
+        ),
+        (
+            "var keyword fallbacks: substitution left a keyword the property rejects (count, sample)",
+            var_fallback_props,
+        ),
+    ] {
+        let _ = writeln!(text, "\n## {title}");
+        let mut props: Vec<_> = props.into_iter().collect();
+        props.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+        for (name, (count, sample)) in props.iter().take(40) {
+            let _ = writeln!(text, "{count:6}  {name:28} {}", clip(sample, 80));
+        }
     }
 
     let _ = writeln!(text, "\n## parsed but never read downstream (count)");
