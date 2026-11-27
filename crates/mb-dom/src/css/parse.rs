@@ -100,10 +100,36 @@ fn expand_hex(ch: char) -> Result<u8, ParseError> {
     parse_hex_pair(&pair)
 }
 
+thread_local! {
+    /// How many `parse_function` calls are open on this thread: value
+    /// functions nest through `parse_value` (`light-dark(light-dark(…))`,
+    /// gradient stops), each a recursion.
+    static FUNCTION_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Drive a function-call value (`rgb()`, `linear-gradient()`, etc). The caller
 /// has already consumed the leading `Function(name)` token, so we open a nested
 /// block and route by name.
 fn parse_function<'i>(name: &str, input: &mut CssParser<'i>) -> Result<Value, ParseError> {
+    // Bounded like the `var()` walks (Robustness Rule 2 — an overflow is an
+    // abort): past `MAX_VAR_NESTING` the value is invalid.
+    struct Leave;
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            FUNCTION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        }
+    }
+    let depth = FUNCTION_DEPTH.with(|d| {
+        d.set(d.get() + 1);
+        d.get()
+    });
+    let _leave = Leave;
+    if depth > super::MAX_VAR_NESTING {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            "functions nested too deeply",
+        ));
+    }
     let lower = name.to_ascii_lowercase();
     input
         .parse_nested_block(|inner| {

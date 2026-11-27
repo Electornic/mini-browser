@@ -130,6 +130,19 @@ pub enum Value {
     // `clip: rect(…)` / `clip-path: inset(…)` (step 1b) — kept for the
     // overflow-clipping step (compat round 3 step 3); nothing reads it yet.
     ClipBox(ClipBox),
+    // A value kept as source text until the cascade (step 1c): every
+    // custom property (`--*`, the spec's token sequence), and any value
+    // containing `var(` — substituted, then re-parsed after the cascade
+    // (`style::variables`). A shorthand's value is stored on each of its
+    // longhands with `shorthand` set, so the cascade orders longhands as
+    // usual and the re-parse runs the shorthand parser. Never reaches the
+    // styled tree.
+    Unparsed {
+        shorthand: Option<String>,
+        raw: String,
+    },
+    // Removal candidate: the parser no longer produces it (step 1c routes
+    // every `var(` through `Unparsed`).
     // `var(--name)` / `var(--name, fallback)` reference. Survives parse time
     // unresolved; the cascade in `style.rs` walks every value at style time
     // and substitutes the looked-up `--*` declaration in scope (custom
@@ -652,6 +665,16 @@ impl<'i> cssparser::DeclarationParser<'i> for DeclHandler {
         // else (`!ie`, `!important foo`) leaves input behind and the
         // declaration drops, as in Chrome. Value parsers never see the flag.
         let mut decls = input.parse_until_before(cssparser::Delimiter::Bang, |input| {
+            // Custom properties are token sequences, and a value with
+            // `var()` can only be parsed once substituted (step 1c): keep
+            // both as source text for the cascade.
+            let custom = name.starts_with("--");
+            let state = input.state();
+            let has_var = scan_var_references(input).map_err(CssParseError::custom)?;
+            input.reset(&state);
+            if custom || has_var {
+                return Ok(unparsed_declarations(&name, take_raw(input)));
+            }
             parse_declaration_value(&name, input).map_err(CssParseError::custom)
         })?;
         if input.try_parse(cssparser::parse_important).is_ok() {
@@ -816,6 +839,129 @@ fn parse_declaration_value<'i>(
     }])
 }
 
+/// How deeply a value may nest blocks, functions and `var()` fallbacks
+/// before the engine gives up on it — the walks over them recurse, and a
+/// stack overflow is an uncatchable abort (Robustness Rule 2). Past it a
+/// declaration drops at parse time, or is invalid at computed-value time
+/// during `var()` substitution (a custom-property chain counts each link).
+/// Same as `media::MAX_MEDIA_NESTING`; real pages stay far below.
+pub const MAX_VAR_NESTING: usize = MAX_MEDIA_NESTING;
+
+/// Whether the value contains a `var()` (at any nesting depth); an error
+/// for a malformed one — `var(` must start with a `--name`, optionally
+/// followed by a comma and a fallback — or for nesting past
+/// [`MAX_VAR_NESTING`], which drops the declaration.
+fn scan_var_references<'i>(input: &mut CssParser<'i>) -> Result<bool, ParseError> {
+    scan_var_references_at(input, 0)
+}
+
+fn scan_var_references_at<'i>(input: &mut CssParser<'i>, depth: usize) -> Result<bool, ParseError> {
+    if depth > MAX_VAR_NESTING {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            "value nested too deeply",
+        ));
+    }
+    let mut found = false;
+    loop {
+        let token = match input.next() {
+            Ok(token) => token.clone(),
+            Err(_) => return Ok(found),
+        };
+        let nested = match token {
+            cssparser::Token::Function(ref f) if f.eq_ignore_ascii_case("var") => {
+                found = true;
+                input
+                    .parse_nested_block(|inner| {
+                        check_var_arguments(inner, depth + 1).map_err(CssParseError::custom)
+                    })
+                    .map_err(error::convert_error)?;
+                continue;
+            }
+            cssparser::Token::Function(_)
+            | cssparser::Token::ParenthesisBlock
+            | cssparser::Token::SquareBracketBlock
+            | cssparser::Token::CurlyBracketBlock => input
+                .parse_nested_block(|inner| {
+                    scan_var_references_at(inner, depth + 1).map_err(CssParseError::custom)
+                })
+                .map_err(error::convert_error)?,
+            _ => false,
+        };
+        found |= nested;
+    }
+}
+
+fn check_var_arguments<'i>(input: &mut CssParser<'i>, depth: usize) -> Result<(), ParseError> {
+    let position = input.position().byte_index();
+    let name_ok =
+        matches!(input.next(), Ok(cssparser::Token::Ident(name)) if name.starts_with("--"));
+    if !name_ok {
+        return Err(ParseError::new(
+            position,
+            "var() needs a --custom-property name",
+        ));
+    }
+    if input.is_exhausted() {
+        return Ok(());
+    }
+    if input.expect_comma().is_err() {
+        return Err(ParseError::new(
+            position,
+            "var(): expected `,` before the fallback",
+        ));
+    }
+    // The fallback is any tokens; nested `var()`s are checked too.
+    scan_var_references_at(input, depth).map(|_| ())
+}
+
+/// The rest of the value as trimmed source text.
+fn take_raw<'i>(input: &mut CssParser<'i>) -> String {
+    let start = input.position();
+    while input.next_including_whitespace_and_comments().is_ok() {}
+    input.slice_from(start).trim().to_string()
+}
+
+/// `name: raw` kept for the cascade: a custom property as itself; any
+/// other property on each longhand it sets (`longhands_of`), carrying the
+/// shorthand to re-parse with.
+fn unparsed_declarations(name: &str, raw: String) -> Vec<Declaration> {
+    if name.starts_with("--") {
+        return vec![Declaration {
+            name: name.to_string(),
+            value: Value::Unparsed {
+                shorthand: None,
+                raw,
+            },
+            important: false,
+        }];
+    }
+    let longhands = longhands_of(name);
+    let shorthand = (longhands.len() != 1 || longhands[0] != name).then(|| name.to_string());
+    longhands
+        .into_iter()
+        .map(|longhand| Declaration {
+            name: longhand,
+            value: Value::Unparsed {
+                shorthand: shorthand.clone(),
+                raw: raw.clone(),
+            },
+            important: false,
+        })
+        .collect()
+}
+
+/// Parse `text` as the value of `name` (a property or a shorthand) — the
+/// re-parse after `var()` substitution (step 1c). `None` when invalid.
+pub fn parse_property_value(name: &str, text: &str) -> Option<Vec<Declaration>> {
+    let mut parser = CssParser::new(text);
+    parser
+        .parse_entirely(|input| {
+            parse_declaration_value(name, input).map_err(CssParseError::<CssError>::custom)
+        })
+        .ok()
+}
+
 /// `inherit | initial | unset | revert | revert-layer`, alone, lower-cased.
 fn parse_css_wide_keyword<'i>(input: &mut CssParser<'i>) -> Result<String, ()> {
     let ident = input.expect_ident_cloned().map_err(|_| ())?;
@@ -978,7 +1124,14 @@ mod tests {
         let decls = flagged(":root{--x: 5px !important}");
         assert_eq!(
             decls,
-            [("--x".to_string(), Value::Length(5.0, Unit::Px), true)]
+            [(
+                "--x".to_string(),
+                Value::Unparsed {
+                    shorthand: None,
+                    raw: "5px".into()
+                },
+                true
+            )]
         );
     }
 
@@ -2641,55 +2794,74 @@ mod tests {
 
     #[test]
     fn parses_custom_property_declaration() {
-        // `--accent: #ff0000` should round-trip through the generic
-        // parse_value fallback because `parse_declaration_value` doesn't
-        // special-case `--*` names — they reuse the same value grammar as
-        // every other property.
+        // A custom property is a token sequence, kept as source text (step
+        // 1c) — what it means depends on where it is substituted.
         let stylesheet = parse(":root { --accent: #ff0000; }").unwrap();
         let decl = &stylesheet.rules[0].declarations[0];
         assert_eq!(decl.name, "--accent");
-        assert_eq!(
-            decl.value,
-            Value::Color(Color {
-                r: 255,
-                g: 0,
-                b: 0,
-                a: 255,
-            })
-        );
+        assert_eq!(decl.value, unparsed(None, "#ff0000"));
+    }
+
+    fn unparsed(shorthand: Option<&str>, raw: &str) -> Value {
+        Value::Unparsed {
+            shorthand: shorthand.map(String::from),
+            raw: raw.into(),
+        }
     }
 
     #[test]
     fn parses_var_reference_with_no_fallback() {
+        // Step 1c: any `var(` keeps the value unparsed until the cascade.
         let stylesheet = parse(".a { color: var(--accent); }").unwrap();
         let value = &stylesheet.rules[0].declarations[0].value;
-        match value {
-            Value::Var { name, fallback } => {
-                assert_eq!(name, "--accent");
-                assert!(fallback.is_none());
-            }
-            other => panic!("expected Var, got {other:?}"),
-        }
+        assert_eq!(value, &unparsed(None, "var(--accent)"));
     }
 
     #[test]
     fn parses_var_reference_with_color_fallback() {
         let stylesheet = parse(".a { color: var(--accent, #00ff00); }").unwrap();
         let value = &stylesheet.rules[0].declarations[0].value;
-        match value {
-            Value::Var { name, fallback } => {
-                assert_eq!(name, "--accent");
-                assert_eq!(
-                    fallback.as_deref(),
-                    Some(&Value::Color(Color {
-                        r: 0,
-                        g: 255,
-                        b: 0,
-                        a: 255,
-                    }))
-                );
-            }
-            other => panic!("expected Var, got {other:?}"),
+        assert_eq!(value, &unparsed(None, "var(--accent, #00ff00)"));
+    }
+
+    #[test]
+    fn custom_property_keeps_raw_tokens() {
+        let d = decls("--x: 255,255,255; --y: 0 5px 2px rgba(0,0,0,.2); --e:; --z: red !important");
+        assert_eq!(d["--x"], unparsed(None, "255,255,255"));
+        assert_eq!(d["--y"], unparsed(None, "0 5px 2px rgba(0,0,0,.2)"));
+        assert_eq!(
+            d["--e"],
+            unparsed(None, ""),
+            "an empty custom property is valid"
+        );
+        assert_eq!(
+            d["--z"],
+            unparsed(None, "red"),
+            "the !important flag is not part of the value"
+        );
+        let flags = flagged(".a{--z: red !important}");
+        assert!(flags[0].2);
+    }
+
+    #[test]
+    fn var_values_stay_unparsed_and_shorthands_expand_per_longhand() {
+        let d = decls("color: rgb(var(--x)); padding: 5px var(--p); border-top-width: var(--w)");
+        assert_eq!(d["color"], unparsed(None, "rgb(var(--x))"));
+        for side in ["top", "right", "bottom", "left"] {
+            assert_eq!(
+                d[&format!("padding-{side}")],
+                unparsed(Some("padding"), "5px var(--p)")
+            );
         }
+        // A name the engine stores under another key re-parses through it.
+        assert_eq!(
+            d["border-top"],
+            unparsed(Some("border-top-width"), "var(--w)")
+        );
+        // `var(` anywhere, even nested in a function or a fallback.
+        let d = decls("width: calc(var(--a) + 1px)");
+        assert_eq!(d["width"], unparsed(None, "calc(var(--a) + 1px)"));
+        // A broken `var()` (not a custom name) drops the declaration.
+        assert!(decls("color: var(accent)").is_empty());
     }
 }

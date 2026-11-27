@@ -687,7 +687,17 @@ impl Gen {
                         .pick(&["none", "solid hidden", "hidden"])
                         .to_string(),
                 ),
-                _ => ("inset", self.length()),
+                _ => match self.rng.below(3) {
+                    0 => ("inset", self.length()),
+                    // Step 1c: define and use custom properties.
+                    1 => (*self.rng.pick(&["--g", "--h"]), self.length()),
+                    _ => (
+                        *self
+                            .rng
+                            .pick(&["width", "margin", "padding-left", "height"]),
+                        format!("var(--g, {})", self.length()),
+                    ),
+                },
             },
             14 => (
                 "box-sizing",
@@ -1626,7 +1636,12 @@ const CSS_DEDICATED: &[&str] = &[
     "transition",
     "animation",
     "all",
-];
+    // Step 1c: custom properties and `var()` (cycles, doubling chains,
+    // shorthands and functions around a reference).
+    "--a",
+    "--b",
+    "padding",
+]; // (padding twice: weights var() inside a shorthand)
 
 /// Pieces of `@media` preludes: real features, values, range operators,
 /// `calc`, logic words, and the token soup's breakage.
@@ -1765,6 +1780,39 @@ fn css_input(rng: &mut Rng) -> (String, String) {
             sheet.push('}');
         }
     }
+    // Step 1c review: `var()` nesting far past `css::MAX_VAR_NESTING` —
+    // nested blocks in a fallback, nested fallbacks, nested functions, and
+    // a long custom-property chain on one node (each a recursion if
+    // unbounded; an overflow aborts).
+    if rng.chance(6) {
+        let depth = rng.range(20, 5000);
+        let deep = match rng.below(4) {
+            0 => format!(
+                "p{{width:var(--x,{}1px{})}}",
+                "(".repeat(depth),
+                ")".repeat(depth)
+            ),
+            1 => format!(
+                "p{{width:{}1px{}}}",
+                "var(--x,".repeat(depth),
+                ")".repeat(depth)
+            ),
+            2 => format!(
+                "p{{color:{}red{}}}",
+                "light-dark(".repeat(depth),
+                ",blue)".repeat(depth)
+            ),
+            _ => {
+                let mut chain = String::from(":root{");
+                for i in 0..depth.min(3000) {
+                    chain.push_str(&format!("--c{i}:var(--c{});", i + 1));
+                }
+                chain.push_str("} p{width:var(--c0)}");
+                chain
+            }
+        };
+        sheet.push_str(&deep);
+    }
     (sheet, bodies)
 }
 
@@ -1775,6 +1823,19 @@ fn soup_value(rng: &mut Rng, property: &str) -> String {
     if rng.chance(30) {
         let len = rng.range(0, 8);
         return token_soup(rng, len);
+    }
+    if property != "--a" && property != "--b" && rng.chance(15) {
+        return rng
+            .pick(&[
+                "var(--a)",
+                "1px var(--b, 2px)",
+                "rgb(var(--a))",
+                "calc(var(--a) + 1px)",
+                "var(--b, var(--a, red))",
+                "var(--nope)",
+                "var(--a",
+            ])
+            .to_string();
     }
     let template = match property {
         "background" => *rng.pick(&[
@@ -1847,6 +1908,15 @@ fn soup_value(rng: &mut Rng, property: &str) -> String {
             "none",
         ]),
         "all" => *rng.pick(&["unset", "inherit", "initial", "revert"]),
+        "--a" => *rng.pick(&[
+            "1px",
+            "var(--b) var(--b)",
+            "255,0,0",
+            "var(--a)",
+            "",
+            "inherit",
+        ]),
+        "--b" => *rng.pick(&["var(--a, 1px)", "1px 2px", "var(--b)", "solid red"]),
         _ => *rng.pick(&["1px", "1px 2px 3px 4px", "1%", "1em", "1", "red"]),
     };
     const NUMBERS: &[&str] = &[
@@ -2452,6 +2522,7 @@ fn fuzz_generator_covers_its_spec() {
     let mut important_rules = 0;
     let mut important_inline = 0;
     let mut root_rules = 0;
+    let mut var_uses = 0;
     let mut korean = 0;
     for seed in 1..=200 {
         let case = Gen::case(seed);
@@ -2473,6 +2544,9 @@ fn fuzz_generator_covers_its_spec() {
         }
         if case.css().contains("html, body {") {
             root_rules += 1;
+        }
+        if case.css().contains("var(--g") || case.html().contains("var(--g") {
+            var_uses += 1;
         }
         if case.html().contains("!important") {
             important_inline += 1;
@@ -2512,6 +2586,7 @@ fn fuzz_generator_covers_its_spec() {
         root_rules >= 20,
         "{root_rules}/200 cases with an `html, body` rule"
     );
+    assert!(var_uses >= 20, "{var_uses}/200 cases using var(--g)");
     // The CSS soup wraps rules in `@media`, sometimes past the nesting cap.
     let mut media = 0;
     let mut past_cap = 0;

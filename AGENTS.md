@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 980 (workspace 합계, 2026-11-28 호환성 3차 1b 값 파서 +19; 1q scrollHeight·단위 없는 0 은 961, 1p 퍼센트 높이는 955). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 996 (workspace 합계, 2026-11-28 호환성 3차 1c 커스텀 속성·`var()` +16 — 깊이 테스트 포함; 1b 값 파서는 980, 1q 는 961). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -225,6 +225,11 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - `inherit/initial/unset/revert/revert-layer` 와 `all` 은 스타일 패스(`resolve_css_wide_keywords`)와 캐스케이드(`apply_all`)가 푼다 — 소비자 코드가 `Keyword("inherit")` 를 볼 일은 없다. "초기값" = 맵에 값 없음(소비자의 기본값). 상속 속성 목록은 `style::INHERITED_PROPERTIES` 하나 — 상속을 추가하면 거기에.
 - 새 shorthand 를 파싱하면 `css::longhands_of` 에도 넣을 것(전역 키워드가 longhand 마다 가도록).
 
+### `var()` 는 계산값 시점에 (호환성 3차 1c)
+- `--*` 와 `var(` 가 든 값은 `Value::Unparsed { shorthand, raw }`(원문)로 캐스케이드를 지나고, 스타일 패스가 치환 → 재파싱한다(`style/variables.rs`). 소비자 코드는 `Unparsed`·`Var` 를 볼 일이 없다. 실패는 `unset`(앞선 선언으로 안 돌아감). 커스텀 속성은 정의한 노드에서 치환된 글로 상속(`CustomScope`). 새 shorthand 파서를 만들면 `css::longhands_of` 에 넣어야 `var()` 가 든 그 shorthand 가 longhand 마다 펼쳐진다.
+- cssparser 의 `parse_nested_block` 은 클로저를 **`parse_entirely`** 로 돌린다 — 블록의 남은 토큰을 다 소비하지 않고 `Ok` 를 돌려주면 에러가 된다(1c 의 `var(--x, 폴백)` 버그). 일찍 끝내는 클로저는 나머지를 `next_including_whitespace_and_comments` 로 비울 것. 또 파서마다 중첩 블록 상한(`REASONABLE_NESTED_BLOCK_LIMIT` 75)이 있지만 **새 `Parser` 는 0 부터** 다시 센다 — 글을 잘라 새 파서로 재귀하는 걸음(폴백 치환)은 그 상한의 보호를 못 받으니 깊이를 직접 넘길 것.
+- 치환 결과는 `MAX_SUBSTITUTED_LEN`(64KiB)을 넘으면 invalid — 두 배씩 커지는 `var()` 사슬 방어. 치환·`var(` 탐지 걸음은 블록·폴백·사슬 고리마다 재귀하므로 깊이를 넘겨 받아 `css::MAX_VAR_NESTING` 에서 멈춘다 — 새 재귀 걸음을 더하면 같은 깊이를 지나게 하고 `crates/mb-dom/tests/var_depth.rs`(자식 프로세스·2MB 스레드)에 모양을 더할 것.
+
 ### `@media` 는 평가된다 (호환성 3차 2.1)
 - 규칙은 `Rule::media`(감싼 블록, 중첩은 `parent` 사슬 = AND)를 달고, 스타일 패스가 시작할 때 `media::evaluate_blocks` 로 블록마다 한 번 평가한다 — 노드마다 평가하지 말 것. 평가 입력은 `MediaContext`(페이지 뷰포트 = 창 − `CHROME_HEIGHT`)뿐, 나머지는 상수(라이트·hover·fine·1dppx·scripting) — 관전 창의 Retina·OS 테마가 페이지에 새면 안 된다(결정성). `matchMedia` 를 만들면 `css::media::evaluate` 를 쓸 것.
 - `<link media>`·`<style media>` 는 시트가 한 문자열로 합쳐지므로 `css::media::scope_sheet` 로 `@media` 블록이 되어 들어간다 — 시트를 합치는 새 경로를 만들면 같은 함수를 지날 것.
@@ -277,7 +282,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 [compat-round3.md 0.1](docs/compat-round3.md#01-불변식을-규칙으로) 에서 승격. 2차 실사이트 조사에서 에이전트를 막은 버그는 세 종류였다 — 이동 전체 실패, 패닉, 끝없는 시간. 페이지 HTML·CSS·JS·이미지 바이트·속성 값은 전부 **신뢰할 수 없는 입력**이다.
 
 1. **하위 리소스·요소 하나가 이동 전체를 실패시키지 않는다.** 문서 로드가 실패할 수 있는 건 문서 응답 자체(네트워크 에러, 상태 코드, 지원 안 하는 Content-Type, 인코딩)뿐. CSS·스크립트·이미지·폰트·파비콘·속성 값 하나의 실패는 그 리소스만 건너뛴다. 코드 규칙: `resource.rs` 의 수집·로드 함수는 `Result` 가 아니라 `Vec`/`HashMap` 을 돌려준다(0a 에서 시그니처를 바꿈) — `?` 로 `ResourceError` 를 다시 올리지 말 것. 속성은 `resolve_attr` 로(없음·빈 값·해석 실패 = 건너뜀).
-2. **어떤 입력에도 패닉하지 않는다.** 레이아웃·스타일·페인트·파서에서 인덱싱은 `get()`, 정수 나눗셈은 0 검사, `unwrap()`/`expect()` 는 불변식이 코드로 보장될 때만 — 그 자리에 이유를 주석으로. 자주 밟는 것: **문자열을 바이트 인덱스로 자르기**(`&s[0..2]`, `s.len() == 3` 후 슬라이스 — 멀티바이트 글자 한가운데서 패닉; 먼저 `is_ascii()` 또는 `char_indices`), **페이지가 주는 개수로 할당**(`colspan`, `grid-row: 2000000000`, `span N` — HTML/브라우저 상한으로 자를 것: colspan 1000, 그리드 줄 1000), 덧셈 오버플로(debug 에서 패닉). 0c 퍼저로 정한 상한: 계산된 길이·수 ±33,554,431px(`style::MAX_CSS_LENGTH`, Blink `LayoutUnit`)와 `layout_tree` 출력 포화(비유한 좌표 금지), DOM 깊이 256(`dom::MAX_DOM_DEPTH` — 붙은 트리든 떼어 낸 트리든; 파서·`innerHTML` 은 더 깊은 내용을 형제로 **평탄화**, 스크립트 변경(`append_child`·`insert_before`·`replace_child`·`replace_with_text`)은 `TreeError::TooDeep` 로 **거절**·고리는 `TreeError::Cycle` — 새 변경 경로는 이 메서드들을 지나게 하고, 떼어 내기 전에 `check_insert`; 재귀 패스의 스택 넘침은 **abort** 라 `catch_unwind` 로 못 막는다), SVG 래스터 긴 변 4096·요소 깊이 256·내용 범위 ±1e6px·격리 층 넓이 합, 래스터 글자 크기 2048, `@media` 중첩·쿼리 괄호 깊이 32(`css::media::MAX_MEDIA_NESTING` — 넘으면 블록 규칙 버림 / unknown). 최후 방어선 `mb-mcp/src/worker.rs` 의 `catch_unwind`(브라우저 재생성)는 **세션 손실**이라 해결책이 아니다.
+2. **어떤 입력에도 패닉하지 않는다.** 레이아웃·스타일·페인트·파서에서 인덱싱은 `get()`, 정수 나눗셈은 0 검사, `unwrap()`/`expect()` 는 불변식이 코드로 보장될 때만 — 그 자리에 이유를 주석으로. 자주 밟는 것: **문자열을 바이트 인덱스로 자르기**(`&s[0..2]`, `s.len() == 3` 후 슬라이스 — 멀티바이트 글자 한가운데서 패닉; 먼저 `is_ascii()` 또는 `char_indices`), **페이지가 주는 개수로 할당**(`colspan`, `grid-row: 2000000000`, `span N` — HTML/브라우저 상한으로 자를 것: colspan 1000, 그리드 줄 1000), 덧셈 오버플로(debug 에서 패닉). 0c 퍼저로 정한 상한: 계산된 길이·수 ±33,554,431px(`style::MAX_CSS_LENGTH`, Blink `LayoutUnit`)와 `layout_tree` 출력 포화(비유한 좌표 금지), DOM 깊이 256(`dom::MAX_DOM_DEPTH` — 붙은 트리든 떼어 낸 트리든; 파서·`innerHTML` 은 더 깊은 내용을 형제로 **평탄화**, 스크립트 변경(`append_child`·`insert_before`·`replace_child`·`replace_with_text`)은 `TreeError::TooDeep` 로 **거절**·고리는 `TreeError::Cycle` — 새 변경 경로는 이 메서드들을 지나게 하고, 떼어 내기 전에 `check_insert`; 재귀 패스의 스택 넘침은 **abort** 라 `catch_unwind` 로 못 막는다), SVG 래스터 긴 변 4096·요소 깊이 256·내용 범위 ±1e6px·격리 층 넓이 합, 래스터 글자 크기 2048, `@media` 중첩·쿼리 괄호 깊이 32(`css::media::MAX_MEDIA_NESTING` — 넘으면 블록 규칙 버림 / unknown), 값 안 블록·함수·`var()` 폴백 중첩과 커스텀 속성 사슬 32(`css::MAX_VAR_NESTING` — 파싱 때 넘으면 선언 버림, 치환 때 넘으면 IACVT; 일반 값의 함수 중첩도 `parse_function` 의 깊이 카운터로 같은 상한), `var()` 치환 결과 64KiB(`style::variables::MAX_SUBSTITUTED_LEN`). 최후 방어선 `mb-mcp/src/worker.rs` 의 `catch_unwind`(브라우저 재생성)는 **세션 손실**이라 해결책이 아니다.
 3. **스타일·레이아웃은 시간 예산 안에서 끝난다.** 노드 수에 대해 거의 선형 — 자식을 두 번 훑는 재귀 금지(2차 C3 의 2^깊이), 같은 서브트리를 다시 재는 측정은 메모하거나 한 번에(예: 인라인 크기는 `layout_tree` 한 번 동안 `(NodeId, 폭)` 으로 메모 — 호환성 3차 R1; 키에 `StyledNode` 주소를 쓰지 말 것, 사본이 패스 중에 해제·재사용된다). 예산 초과는 감지해서 보고한다: `BrowserState` 가 `build_document_view` 를 재고 release 2초(debug ×10)를 넘으면 stderr 에 `[mb-budget] style+layout took {ms}ms on {쿼리 뺀 URL} ({n} nodes, {µs}µs/node)`. 중단하지 않는다(반쪽 화면이 더 혼란스럽다).
 
 검토 기록: [compat-round3.md 부록 A](docs/compat-round3.md#부록-a--04-표적-코드-검토-표-0a) — 지점별 안전/수정/보류. 새 파서·레이아웃 코드를 쓰면 같은 기준으로.

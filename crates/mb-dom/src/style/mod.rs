@@ -4,7 +4,7 @@ mod presentational;
 mod variables;
 
 use cascade::specified_values;
-use variables::{CustomScope, resolve_var_references};
+use variables::{CustomScope, VarMemo, resolve_var_references};
 
 use std::{
     cell::RefCell,
@@ -137,7 +137,19 @@ pub struct StyleReport {
 /// different rules share a key — the probe counts every sheet occurrence of
 /// a reported key.
 pub fn declaration_key(name: &str, value: &Value) -> String {
-    format!("{name}: {value:?}")
+    match value {
+        // A shorthand's value sits on each of its longhands (step 1c): one
+        // key for all of them, so it counts as the one declaration it was.
+        Value::Unparsed {
+            shorthand: Some(shorthand),
+            raw,
+        } => format!("{shorthand}: {raw:?}"),
+        Value::Unparsed {
+            shorthand: None,
+            raw,
+        } => format!("{name}: {raw:?}"),
+        _ => format!("{name}: {value:?}"),
+    }
 }
 
 /// [`style_tree_with_state`] plus the pass's [`StyleReport`]. Same styled
@@ -166,10 +178,12 @@ fn style_pass(
         .iter()
         .map(|sheet| media::evaluate_blocks(&sheet.media, media))
         .collect();
+    let var_memo = RefCell::new(VarMemo::new());
     let cascade = Cascade {
         stylesheets,
         media: &media_results,
         report,
+        var_memo: &var_memo,
     };
     // Resolve the user-supplied paths into NodeIds once. The matching layer
     // walks parent links from these NodeIds to compute :hover / :focus /
@@ -218,6 +232,8 @@ pub(super) struct Cascade<'a> {
     pub media: &'a [Vec<bool>],
     /// Only the probe's pass collects one (`style_tree_with_report`).
     pub report: Option<&'a RefCell<StyleReport>>,
+    /// `var()` re-parse results for this pass (step 1c).
+    pub var_memo: &'a RefCell<VarMemo>,
 }
 
 /// Walk a `Vec<usize>` child-index path starting from `root` (rather than
@@ -257,7 +273,12 @@ fn style_tree_inner(
     // a length (e.g. `--gap: 1em`) goes through the same em/rem conversion
     // as if it had been written inline. Cycle-protected; unresolved
     // references with no fallback degrade to `Keyword("initial")`.
-    resolve_var_references(&mut specified_values, &custom, cascade.report);
+    resolve_var_references(
+        &mut specified_values,
+        &custom,
+        cascade.var_memo,
+        cascade.report,
+    );
 
     // CSS-wide keywords (step 1b): `inherit` takes the parent's computed
     // value; `initial` drops the value (the consumer's default is the
@@ -2604,6 +2625,146 @@ mod tests {
                 a: 255
             })),
             "unset inherits"
+        );
+    }
+
+    // ---- 1c: custom properties and var() ----
+
+    fn p_with(css: &str) -> style::StyledNode {
+        styled_p(r#"<p class="a b">x</p>"#, css)
+    }
+
+    fn red() -> Value {
+        Value::Color(Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        })
+    }
+
+    #[test]
+    fn rgb_of_var_resolves_after_cascade() {
+        let p = p_with(":root { --x: 255,0,0; } p { color: rgb(var(--x)); }");
+        assert_eq!(p.value("color"), Some(&red()));
+        let p = p_with(":root { --x: 255, 0, 0; } p { color: rgba(var(--x), 1); }");
+        assert_eq!(p.value("color"), Some(&red()));
+    }
+
+    #[test]
+    fn shorthand_with_var_expands_after_substitution() {
+        let p = p_with(":root { --x: 7px; } p { padding: 5px var(--x); }");
+        let sides =
+            ["top", "right", "bottom", "left"].map(|s| p.value(&format!("padding-{s}")).cloned());
+        assert_eq!(
+            sides,
+            [Some(px(5.0)), Some(px(7.0)), Some(px(5.0)), Some(px(7.0))]
+        );
+        let p = p_with(":root { --c: #ff0000; } p { border: 2px solid var(--c); }");
+        assert_eq!(p.value("border-left-color"), Some(&red()));
+        assert_eq!(p.value("border-left"), Some(&px(2.0)));
+    }
+
+    #[test]
+    fn invalid_after_substitution_falls_back_to_inherited() {
+        // Invalid at computed-value time = `unset`: an inherited property
+        // takes the parent's value, another its initial value.
+        let p = p_with(
+            "div { color: #ff0000; } :root { --x: foo; } p { color: var(--x); width: var(--x); }",
+        );
+        assert_eq!(p.value("color"), Some(&red()));
+        assert_eq!(p.value("width"), None);
+    }
+
+    #[test]
+    fn iacvt_does_not_fall_back_to_earlier_declaration() {
+        let p = p_with(
+            ".a { background-color: red; width: 3px; } .b { background-color: var(--undef); width: calc(var(--w) + 1px); }",
+        );
+        assert_eq!(p.value("background-color"), None);
+        assert_eq!(
+            p.value("width"),
+            None,
+            "calc() is step 5: invalid, not the earlier 3px"
+        );
+    }
+
+    #[test]
+    fn shorthand_var_and_longhand_cascade_in_order() {
+        let p = p_with(":root { --x: 9px; } .a { padding-left: 3px; } .a.b { padding: var(--x); }");
+        assert_eq!(p.value("padding-left"), Some(&px(9.0)));
+        let p = p_with(":root { --x: 9px; } .a.b { padding-left: 3px; } .a { padding: var(--x); }");
+        assert_eq!(p.value("padding-left"), Some(&px(3.0)));
+        assert_eq!(p.value("padding-top"), Some(&px(9.0)));
+    }
+
+    #[test]
+    fn custom_property_inherits_substituted_value() {
+        // Custom properties inherit their computed (substituted) value:
+        // `--a` is resolved on :root, a child's `--b` doesn't change it.
+        let styled = style_page(
+            r#"<!DOCTYPE html><html><body><div class="d">x</div></body></html>"#,
+            ":root { --b: 1px; --a: var(--b); } div { --b: 9px; width: var(--a); height: var(--b); }",
+        );
+        let div = find_tag(&styled, "div").unwrap();
+        assert_eq!(div.value("width"), Some(&px(1.0)));
+        assert_eq!(div.value("height"), Some(&px(9.0)));
+    }
+
+    #[test]
+    fn var_fallbacks_take_commas_and_nest() {
+        let p = p_with("p { margin: var(--none, 1px 2px); color: var(--n1, var(--n2, #ff0000)); }");
+        assert_eq!(p.value("margin-right"), Some(&px(2.0)));
+        assert_eq!(p.value("color"), Some(&red()));
+        // A defined-but-empty property substitutes nothing: `4px `.
+        let p = p_with(":root { --e:; } p { width: 4px var(--e); }");
+        assert_eq!(p.value("width"), Some(&px(4.0)));
+    }
+
+    #[test]
+    fn defined_var_ignores_an_unresolvable_fallback() {
+        // GitHub's `color: var(--fgColor-default,var(--color-fg-default))`:
+        // the fallback is never needed when the name is defined.
+        let p = p_with(":root { --fg: #ff0000; } p { color: var(--fg,var(--nope)); }");
+        assert_eq!(p.value("color"), Some(&red()));
+        let p = p_with(
+            ":root { --fg: #ff0000; } p { color: rgb(255 0 0 / 1); color: var(--fg, var(--nope)); }",
+        );
+        assert_eq!(p.value("color"), Some(&red()));
+    }
+
+    #[test]
+    fn custom_property_cycle_is_invalid_and_uses_the_fallback() {
+        let p =
+            p_with("p { --a: var(--b); --b: var(--a); width: var(--a, 3px); height: var(--b); }");
+        assert_eq!(p.value("width"), Some(&px(3.0)));
+        assert_eq!(p.value("height"), None);
+    }
+
+    #[test]
+    fn exponential_var_expansion_is_bounded() {
+        // Each level doubles the text: 2^40 tokens if nothing stopped it.
+        let mut css = String::from(":root { --a0: x;");
+        for i in 1..=40 {
+            css.push_str(&format!(" --a{i}: var(--a{}) var(--a{});", i - 1, i - 1));
+        }
+        css.push_str(" } p { width: var(--a40); color: #ff0000; }");
+        let started = std::time::Instant::now();
+        let p = p_with(&css);
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        assert_eq!(p.value("width"), None);
+        assert_eq!(p.value("color"), Some(&red()));
+    }
+
+    #[test]
+    fn unparsed_values_never_reach_the_styled_tree() {
+        let p = p_with(":root { --x: 1px; } p { width: var(--x); margin: var(--x) var(--nope); }");
+        assert!(
+            p.specified_values
+                .values()
+                .all(|v| !matches!(v, Value::Unparsed { .. })),
+            "{:?}",
+            p.specified_values
         );
     }
 
