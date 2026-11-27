@@ -986,6 +986,54 @@ mod tests {
     }
 
     #[test]
+    fn absurd_font_size_text_is_skipped_by_the_rasterizer() {
+        // `font-size` saturates at 3.3e7 px in the cascade, and a scale-only
+        // transform is baked into the font size. With fonts installed swash
+        // then rendered a 3e7 px glyph bitmap (minutes, gigabytes); the
+        // no-font bitmap fallback overflowed `column * scale` (debug panic).
+        // A glyph that size can't be seen on any surface we draw.
+        let text_at = |x: f32, y: f32, font_size: f32| {
+            DisplayCommand::Text(TextCommand {
+                text: "Hi 안녕".into(),
+                x,
+                y,
+                color: Color {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                },
+                font_size,
+                wrap_width: None,
+                font_family: None,
+                font_weight: 400,
+            })
+        };
+        let text = |font_size: f32| text_at(0.0, 0.0, font_size);
+        for font_size in [3.3e7, 2e31, f32::INFINITY, f32::NAN] {
+            let pixels = rasterize(&[text(font_size)], 8, 8);
+            assert!(
+                pixels.iter().all(|p| *p == 0xFFFFFF),
+                "font-size {font_size} painted"
+            );
+        }
+        let normal = rasterize(&[text(16.0)], 32, 32);
+        assert!(
+            normal.iter().any(|p| *p != 0xFFFFFF),
+            "ordinary text still paints"
+        );
+        // A far-away position (a `text-shadow: 1e30px …` offset) is just
+        // off-canvas: the bitmap fallback used to overflow `i32` adding to it.
+        for (x, y) in [(1e30, 0.0), (0.0, -1e30), (3.3e7, 3.3e7)] {
+            let pixels = rasterize(&[text_at(x, y, 64.0)], 8, 8);
+            assert!(
+                pixels.iter().all(|p| *p == 0xFFFFFF),
+                "text at ({x}, {y}) painted"
+            );
+        }
+    }
+
+    #[test]
     fn rasterizes_background_pixels() {
         let pixels = rasterize(
             &[DisplayCommand::SolidRect(

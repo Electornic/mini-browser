@@ -86,6 +86,11 @@ pub enum BoxType {
     AnonymousBlock,
 }
 
+/// The largest magnitude a layout coordinate or size can have (Blink's
+/// `LayoutUnit` range, the same bound the cascade puts on lengths). See
+/// [`saturate_layout`].
+pub const MAX_LAYOUT_COORDINATE: f32 = mb_dom::style::MAX_CSS_LENGTH;
+
 pub fn layout_tree(root: &StyledNode, viewport_width: f32) -> LayoutBox {
     // Element roots route through taffy (the bridge's measure-callback
     // boundary handles every shape taffy itself doesn't understand). Only
@@ -115,7 +120,50 @@ pub fn layout_tree(root: &StyledNode, viewport_width: f32) -> LayoutBox {
     mb_dom::profile::time_block("layout::reposition_absolutes", || {
         reposition_absolutes(&mut layout_box, initial_cb, initial_cb);
     });
+    saturate_layout(&mut layout_box);
     layout_box
+}
+
+/// Clamp every coordinate and size into ±[`MAX_LAYOUT_COORDINATE`], NaN → 0.
+///
+/// The cascade already bounds each length (`style::MAX_CSS_LENGTH`), but
+/// legal CSS still compounds past f32 — `width: 1000%` nested 40 deep, taffy
+/// adding saturated paddings — and `inf - inf` turns into NaN. Blink avoids
+/// it by saturating every `LayoutUnit` operation; we saturate the result
+/// once, so paint, hit testing, `document_height` (which sizes buffers) and
+/// the agent's rects never see a non-finite number. Iterative: the tree can
+/// be as deep as the parser lets it (docs/compat-round3.md D1).
+fn saturate_layout(root: &mut LayoutBox) {
+    fn clamp(v: &mut f32) {
+        *v = if v.is_nan() {
+            0.0
+        } else {
+            v.clamp(-MAX_LAYOUT_COORDINATE, MAX_LAYOUT_COORDINATE)
+        };
+    }
+    let mut stack = vec![root];
+    while let Some(layout_box) = stack.pop() {
+        let d = &mut layout_box.dimensions;
+        for v in [
+            &mut d.content.x,
+            &mut d.content.y,
+            &mut d.content.width,
+            &mut d.content.height,
+        ] {
+            clamp(v);
+        }
+        for edges in [&mut d.padding, &mut d.border, &mut d.margin] {
+            for v in [
+                &mut edges.left,
+                &mut edges.right,
+                &mut edges.top,
+                &mut edges.bottom,
+            ] {
+                clamp(v);
+            }
+        }
+        stack.extend(layout_box.children.iter_mut());
+    }
 }
 
 pub(super) fn box_styled_node(layout_box: &LayoutBox) -> Option<&StyledNode> {
@@ -3124,5 +3172,181 @@ mod tests {
             super::collapsed_text(&styled, "Hello\n  world"),
             "Hello\n  world"
         );
+    }
+
+    #[test]
+    fn nested_percent_widths_saturate_instead_of_overflowing_to_inf() {
+        // `width: 1000%` per level is legal CSS; 45 levels is 800 × 10^45 px —
+        // past f32. Like Blink's LayoutUnit, layout saturates instead of
+        // handing paint / hit testing / the agent's rects an `inf` or `NaN`.
+        let mut source = String::new();
+        for _ in 0..45 {
+            source.push_str(r#"<div class="w">"#);
+        }
+        source.push('x');
+        for _ in 0..45 {
+            source.push_str("</div>");
+        }
+        let styled = styled_root(&source, ".w { width: 1000%; padding-left: 50%; }");
+
+        let layout = layout_tree(&styled, 800.0);
+        fn check(layout_box: &super::LayoutBox) {
+            let d = &layout_box.dimensions;
+            for v in [
+                d.content.x,
+                d.content.y,
+                d.content.width,
+                d.content.height,
+                d.padding.left,
+                d.padding.right,
+                d.margin.left,
+                d.margin.right,
+            ] {
+                assert!(
+                    v.is_finite() && v.abs() <= super::MAX_LAYOUT_COORDINATE,
+                    "{v} in {d:?}"
+                );
+            }
+            layout_box.children.iter().for_each(check);
+        }
+        check(&layout);
+    }
+
+    #[test]
+    fn shrink_to_fit_width_is_never_negative_around_negative_margins() {
+        // An inline box around a block with negative side margins: the
+        // children's outer widths sum to -200px. Shrink-to-fit is a size —
+        // floored at 0 — otherwise each wrapper with several such children
+        // multiplies the negative width (fuzzer: -1e7 px at depth 10).
+        let styled = styled_root(
+            r#"<body><span><table style="margin: 0 -100px"></table></span></body>"#,
+            "",
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let span = &layout.children[0];
+        assert!(
+            span.dimensions.content.width >= 0.0,
+            "{:?}",
+            span.dimensions
+        );
+        // Same for an inline-block's shrink-to-fit width.
+        let styled = styled_root(
+            r#"<body><span style="display: inline-block"><table style="margin: 0 -100px"></table></span></body>"#,
+            "",
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let inline_block = &layout.children[0];
+        assert!(
+            inline_block.dimensions.content.width >= 0.0,
+            "{:?}",
+            inline_block.dimensions
+        );
+
+        // Two such children per level, four levels deep: stays bounded.
+        let leaf = r#"<table style="margin: 0 -100px"></table>"#;
+        let mut html = format!("{leaf}{leaf}");
+        for _ in 0..4 {
+            html = format!("<span>{html}</span><span>{html}</span>");
+        }
+        let styled = styled_root(&format!("<body>{html}</body>"), "");
+        let layout = layout_tree(&styled, 800.0);
+        fn check(b: &super::LayoutBox) {
+            assert!(b.dimensions.content.width >= 0.0, "{:?}", b.dimensions);
+            b.children.iter().for_each(check);
+        }
+        check(&layout);
+    }
+
+    #[test]
+    fn percent_padding_inside_an_inline_box_resolves_against_the_block_container() {
+        // An inline box is not a containing block: `50%` inside a `<span>`
+        // is half of the block container's width, not half of the span. Using the span's own (content-sized) width made
+        // every nested level resolve against an already-grown base — the
+        // fuzzer saw 1.8e7 px ten levels down.
+        let styled = styled_root(
+            r#"<body><span><span class="p">x</span></span></body>"#,
+            ".p { padding-left: 50%; }",
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let body_width = layout.dimensions.content.width;
+        let inner = &layout.children[0].children[0];
+        assert_eq!(
+            inner.dimensions.padding.left,
+            body_width / 2.0,
+            "{:?}",
+            inner.dimensions
+        );
+
+        // Nested ten deep, nothing grows past the viewport-derived base.
+        let mut html = "x".to_string();
+        for _ in 0..10 {
+            html = format!(r#"<span class="p">{html}</span>"#);
+        }
+        let styled = styled_root(&format!("<body>{html}</body>"), ".p { padding-left: 50%; }");
+        let layout = layout_tree(&styled, 800.0);
+        let half = layout.dimensions.content.width / 2.0;
+        fn check(b: &super::LayoutBox, half: f32) {
+            assert!(b.dimensions.padding.left <= half, "{:?}", b.dimensions);
+            b.children.iter().for_each(|c| check(c, half));
+        }
+        check(&layout, half);
+    }
+
+    #[test]
+    fn flex_items_with_inline_content_size_to_their_text_not_the_probe_width() {
+        // A block flex item holding inline text is a legacy boundary leaf.
+        // Its max-content probe laid it out against a 1e6 px stand-in and
+        // reported that whole width, so the items' flex bases were all 1e6:
+        // shrinking split the row evenly instead of by content, and with
+        // `flex-shrink: 0` nested rows stayed 1e6 px wide (fuzzer).
+        let styled = styled_root(
+            r#"<body><header id="nav"><a class="link">Posts</a><a class="link">Categories</a><a class="link">About</a></header></body>"#,
+            "#nav { display: flex; } .link { display: block; font-size: 16px; }",
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let nav = &layout.children[0];
+        let widths: Vec<f32> = nav
+            .children
+            .iter()
+            .map(|c| c.dimensions.content.width)
+            .collect();
+        let text: Vec<f32> = nav
+            .children
+            .iter()
+            .map(|c| c.children[0].dimensions.content.width)
+            .collect();
+        assert_eq!(widths, text, "items are as wide as their text");
+        // Centered / right-aligned lines sit in the middle / at the end of
+        // the probe width: the line's span counts, not its right edge.
+        for align in ["center", "right"] {
+            let styled = styled_root(
+                r#"<body><header id="nav"><a class="link">Posts</a><a class="link">Categories</a></header></body>"#,
+                &format!(
+                    "#nav {{ display: flex; }} .link {{ display: block; font-size: 16px; text-align: {align}; flex-shrink: 0; }}"
+                ),
+            );
+            let layout = layout_tree(&styled, 800.0);
+            let widths: Vec<f32> = layout.children[0]
+                .children
+                .iter()
+                .map(|c| c.dimensions.content.width)
+                .collect();
+            assert_eq!(widths, vec![60.0, 120.0], "text-align: {align}");
+        }
+
+        let mut html = "<i></i>".to_string();
+        for _ in 0..4 {
+            html = format!("<div><i></i>{html}</div>");
+        }
+        let styled = styled_root(
+            &format!("<body>{html}</body>"),
+            "div { display: flex; flex-shrink: 0; }",
+        );
+        let layout = layout_tree(&styled, 800.0);
+        fn check(b: &super::LayoutBox) {
+            assert!(b.dimensions.content.width <= 800.0, "{:?}", b.dimensions);
+            b.children.iter().for_each(check);
+        }
+        check(&layout);
     }
 }

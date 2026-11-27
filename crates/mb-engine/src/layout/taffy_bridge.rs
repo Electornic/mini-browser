@@ -541,19 +541,27 @@ fn measure_boundary(avail: Size<AvailableSpace>, ctx: Option<&mut NodeBoundary>)
         AvailableSpace::MinContent => 0.0,
     };
     let mut lb = boundary.layout(parent_width);
-    if matches!(boundary.content, BoundaryContent::InlineRun { .. })
-        && !matches!(avail.width, AvailableSpace::Definite(_))
+    if !matches!(avail.width, AvailableSpace::Definite(_))
+        && probe_sizes_to_lines(&boundary.content)
     {
-        // Intrinsic-size probe: an anonymous block's min/max-content width
+        // Intrinsic-size probe: an anonymous block's — or an auto-width
+        // element's whose children are all inline — min/max-content width
         // is its widest line, not the 0 / 1e6 proxy it was packed against.
-        lb.dimensions.content.width = lb
+        // Reporting the proxy made every such flex item's basis 1e6 px:
+        // shrinking split the row evenly instead of by content, and with
+        // `flex-shrink: 0` the item stayed 1e6 px wide (compat round 3
+        // fuzzer). Other boundary shapes (tables, floats …) still report
+        // what the legacy layout gave.
+        // The lines' span, not their right edge: `text-align: center` /
+        // `right` puts them in the middle / at the end of the proxy width.
+        let (left, right) = lb
             .children
             .iter()
-            .map(|child| {
-                let outer = outer_rect(child);
-                outer.x + outer.width
-            })
-            .fold(0.0, f32::max);
+            .map(outer_rect)
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(l, r), outer| {
+                (l.min(outer.x), r.max(outer.x + outer.width))
+            });
+        lb.dimensions.content.width = (right - left).max(0.0);
     }
     let outer = outer_rect(&lb);
     let margin_w = lb.dimensions.margin.left + lb.dimensions.margin.right;
@@ -567,6 +575,17 @@ fn measure_boundary(avail: Size<AvailableSpace>, ctx: Option<&mut NodeBoundary>)
     Size {
         width: (outer.width - margin_w).max(0.0),
         height: (outer.height - margin_h).max(0.0),
+    }
+}
+
+/// Whether an intrinsic-size probe of this boundary should measure its laid
+/// out lines instead of trusting the proxy width (see `measure_boundary`).
+fn probe_sizes_to_lines(content: &BoundaryContent) -> bool {
+    match content {
+        BoundaryContent::InlineRun { .. } => true,
+        BoundaryContent::Node(node) => {
+            uses_inline_flow(node) && !matches!(node.value("width"), Some(Value::Length(_, _)))
+        }
     }
 }
 

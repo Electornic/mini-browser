@@ -209,6 +209,13 @@ pub(super) fn parse_flex_shorthand<'i>(
 
     let grow_value = grow.unwrap_or(1.0);
     let shrink_value = shrink.unwrap_or(1.0);
+    // Negative flex factors are invalid — the whole shorthand drops.
+    if grow_value < 0.0 || shrink_value < 0.0 {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            "flex shorthand: negative flex factors are invalid",
+        ));
+    }
     let mut decls = vec![
         Declaration {
             name: "flex-grow".into(),

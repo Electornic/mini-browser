@@ -197,7 +197,14 @@ fn layout_inline_node(node: &StyledNode, x: f32, y: f32, parent_width: f32) -> L
     let children = if matches!(&node.node_type, NodeType::Element(element) if element.tag_name != "img")
     {
         let align = inline_align_for(node);
-        layout_inline_sequence_no_wrap(&node.children, content_x, content_y, content_width, align)
+        layout_inline_sequence_no_wrap(
+            &node.children,
+            content_x,
+            content_y,
+            content_width,
+            parent_width,
+            align,
+        )
     } else {
         Vec::new()
     };
@@ -221,11 +228,19 @@ fn layout_inline_node(node: &StyledNode, x: f32, y: f32, parent_width: f32) -> L
     layout_box
 }
 
+/// Lays out an inline box's children on one line. `content_width` is the
+/// box's own width (for `text-align` slack); `containing_width` is the
+/// width of the nearest block container — the base for the children's
+/// percentages and their wrap limit, because an inline box is not a
+/// containing block (CSS 2.1 §10.1). Passing the inline box's own
+/// content-sized width there made nested `padding: 50%` grow level by
+/// level (compat round 3 fuzzer).
 fn layout_inline_sequence_no_wrap(
     children: &[StyledNode],
     content_x: f32,
     y: f32,
     content_width: f32,
+    containing_width: f32,
     align: InlineAlign,
 ) -> Vec<LayoutBox> {
     // Sum widths first so we know how much horizontal slack the line has
@@ -235,7 +250,7 @@ fn layout_inline_sequence_no_wrap(
     let total_width: f32 = children
         .iter()
         .filter(|child| !is_out_of_flow(child) && !is_display_none(child))
-        .map(|child| inline_total_size(child, content_width).width)
+        .map(|child| inline_total_size(child, containing_width).width)
         .sum();
     let line_offset = match align {
         InlineAlign::Left => 0.0,
@@ -253,11 +268,11 @@ fn layout_inline_sequence_no_wrap(
         if is_out_of_flow(child) {
             // Static position approximation: at the parent's content origin.
             // Pass 2 will move it once the containing block is known.
-            let abs_box = layout_inline_or_inline_block(child, content_x, y, content_width);
+            let abs_box = layout_inline_or_inline_block(child, content_x, y, containing_width);
             boxes.push(abs_box);
             continue;
         }
-        let child_box = layout_inline_or_inline_block(child, cursor_x, y, content_width);
+        let child_box = layout_inline_or_inline_block(child, cursor_x, y, containing_width);
         cursor_x += outer_rect(&child_box).width;
         boxes.push(child_box);
     }
@@ -489,7 +504,11 @@ fn inline_block_resolved_width(node: &StyledNode, available_width: f32) -> f32 {
 fn inline_block_shrink_to_fit_width(node: &StyledNode, available_width: f32) -> f32 {
     // Toy shrink-to-fit: text uses approximate glyph width; element uses the
     // sum of inline child widths, capped to the available content width so a
-    // long run still wraps rather than overflowing the container.
+    // long run still wraps rather than overflowing the container. Floored at
+    // 0: negative child margins can make the sum negative, and a wrapper
+    // summing several such children multiplied it level by level (compat
+    // round 3 fuzzer — `-1e7px` ten levels down). Chrome's intrinsic sizes
+    // are clamped the same way.
     let natural = match &node.node_type {
         // CSS-collapsed character count: runs of whitespace render as a
         // single space, so width must be measured against the collapsed
@@ -502,7 +521,7 @@ fn inline_block_shrink_to_fit_width(node: &StyledNode, available_width: f32) -> 
             .map(|child| inline_total_size(child, available_width).width)
             .sum(),
     };
-    natural.min(available_width)
+    natural.min(available_width).max(0.0)
 }
 
 pub(super) fn layout_inline_block_node(
@@ -606,7 +625,10 @@ fn inline_content_size(node: &StyledNode, parent_width: f32) -> (f32, f32) {
                 let size = inline_total_size(child, parent_width);
                 (w + size.width, h.max(size.height))
             });
-            (width, height.max(intrinsic_height(node)))
+            // A size, so never negative: children with negative side
+            // margins can sum below 0, and nested wrappers then multiply it
+            // (see `inline_block_shrink_to_fit_width`).
+            (width.max(0.0), height.max(intrinsic_height(node)))
         }
     };
     (

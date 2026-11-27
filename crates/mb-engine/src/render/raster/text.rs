@@ -218,7 +218,18 @@ fn measure_with_cosmic(
     Some(result)
 }
 
+/// The largest font size (device px) we rasterize. Glyphs are rendered as
+/// bitmaps, so `font-size: 3e7px` (the cascade's ceiling, or a scale-only
+/// transform baked into the size) made swash render a 3e7 px glyph —
+/// minutes and gigabytes — and overflowed the bitmap fallback's
+/// `column * scale`. A glyph this big is larger than any surface we draw
+/// (window, screenshot) even at 2× device scale, so it is skipped.
+const MAX_RASTER_FONT_SIZE: f32 = 2048.0;
+
 pub(super) fn draw_text(pixmap: &mut Pixmap, text: &TextCommand, transform: Affine) {
+    if !(text.font_size.is_finite() && text.font_size <= MAX_RASTER_FONT_SIZE) {
+        return;
+    }
     if transform.is_identity() {
         draw_text_aligned(pixmap, text);
     } else {
@@ -477,9 +488,12 @@ fn draw_text_bitmap(pixmap: &mut Pixmap, text: &TextCommand) {
 }
 
 fn draw_bitmap_char(pixmap: &mut Pixmap, ch: char, x: f32, y: f32, color: Color, font_size: f32) {
-    let scale = (font_size / 8.0).max(1.0).round() as usize;
-    let cursor_x = x.round() as i32;
-    let baseline_y = y.round() as i32;
+    // f32 throughout: a far-off position (`text-shadow: 1e30px …`)
+    // saturates `as i32` and then overflowed the additions below. The rect
+    // fill clips to the canvas anyway.
+    let scale = (font_size / 8.0).max(1.0).round();
+    let cursor_x = x.round();
+    let baseline_y = y.round();
 
     if ch == ' ' {
         return;
@@ -491,16 +505,16 @@ fn draw_bitmap_char(pixmap: &mut Pixmap, ch: char, x: f32, y: f32, color: Color,
             if pixel == ' ' {
                 continue;
             }
-            let px = cursor_x + (column_index * scale) as i32;
-            let py = baseline_y + (row_index * scale) as i32;
+            let px = cursor_x + column_index as f32 * scale;
+            let py = baseline_y + row_index as f32 * scale;
             fill_solid_rect(
                 pixmap,
                 color,
                 Rect {
-                    x: px as f32,
-                    y: py as f32,
-                    width: scale as f32,
-                    height: scale as f32,
+                    x: px,
+                    y: py,
+                    width: scale,
+                    height: scale,
                 },
                 Affine::IDENTITY,
             );

@@ -33,6 +33,21 @@ pub struct ParseError {
     pub message: String,
 }
 
+/// The deepest an element can sit in a parsed tree (counting the arena root
+/// as 1). Deeper content is attached to the element at this depth's parent
+/// instead — it becomes a run of siblings at the cap, in document order —
+/// the same idea as Blink/WebKit's `kMaximumHTMLParserDOMTreeDepth` (512).
+///
+/// Ours is lower because our passes recurse per level and layout is the
+/// hungriest: measured with nested `<div>`s, the full pipeline plus the
+/// agent's observation overflowed at ~540 levels in a debug build on an
+/// 8 MB stack (the browser's main thread) and ~980 in release on a 2 MB
+/// thread (docs/compat-round3.md D1). 256 leaves ≥ 2× headroom on both.
+/// A stack overflow is an abort, not a panic — `catch_unwind` can't save
+/// the session. Trees built by script (`appendChild` in a loop) are not
+/// capped.
+pub const MAX_DOM_DEPTH: usize = 256;
+
 pub fn parse(source: &str) -> Result<Document, ParseError> {
     let mut document = Document::new();
 
@@ -141,11 +156,49 @@ fn contains_tag_open(source: &str, tag: &str) -> bool {
     false
 }
 
-/// Recursively translate one rcdom `Handle` into our arena, descending into
-/// children. Returns `None` for nodes we don't model (Document, Doctype,
-/// Comment, ProcessingInstruction) — those are simply skipped along with
-/// their subtree.
+/// Translate one rcdom `Handle` and its subtree into our arena. Returns
+/// `None` for nodes we don't model (Document, Doctype, Comment,
+/// ProcessingInstruction) — those are simply skipped along with their
+/// subtree.
+///
+/// Iterative, and depth-capped at [`MAX_DOM_DEPTH`]: the children of an
+/// element at the cap are attached to that element's parent instead, right
+/// after it (pre-order = document order). rcdom itself drops iteratively,
+/// so a 100 000-deep source is fine up to here.
 fn build_into_arena(document: &mut Document, handle: &Handle) -> Option<NodeId> {
+    let root = create_node(document, handle)?;
+    // (handle, arena parent, depth the handle will sit at)
+    let mut stack: Vec<(Handle, NodeId, usize)> = Vec::new();
+    push_children(&mut stack, handle, root, 2);
+    while let Some((handle, parent, depth)) = stack.pop() {
+        let Some(id) = create_node(document, &handle) else {
+            continue;
+        };
+        document.append_child(parent, id);
+        if depth < MAX_DOM_DEPTH {
+            push_children(&mut stack, &handle, id, depth + 1);
+        } else {
+            push_children(&mut stack, &handle, parent, depth);
+        }
+    }
+    Some(root)
+}
+
+/// Queue `handle`'s children (reversed, so they pop in document order) to
+/// be attached under `parent` at `depth`.
+fn push_children(
+    stack: &mut Vec<(Handle, NodeId, usize)>,
+    handle: &Handle,
+    parent: NodeId,
+    depth: usize,
+) {
+    for child in handle.children.borrow().iter().rev() {
+        stack.push((child.clone(), parent, depth));
+    }
+}
+
+/// The arena node for one rcdom node, without its children.
+fn create_node(document: &mut Document, handle: &Handle) -> Option<NodeId> {
     match &handle.data {
         NodeData::Element { name, attrs, .. } => {
             let mut attrmap = AttrMap::new();
@@ -156,13 +209,7 @@ fn build_into_arena(document: &mut Document, handle: &Handle) -> Option<NodeId> 
                 // reads attributes by their local name.
                 attrmap.insert(attr.name.local.to_string(), attr.value.to_string());
             }
-            let id = document.create_element(name.local.to_string(), attrmap);
-            for child in handle.children.borrow().iter() {
-                if let Some(child_id) = build_into_arena(document, child) {
-                    document.append_child(id, child_id);
-                }
-            }
-            Some(id)
+            Some(document.create_element(name.local.to_string(), attrmap))
         }
         NodeData::Text { contents } => Some(document.create_text(contents.borrow().to_string())),
         _ => None,
@@ -190,4 +237,65 @@ pub fn is_void_element(tag_name: &str) -> bool {
             | "track"
             | "wbr"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_DOM_DEPTH, parse, parse_fragment};
+    use crate::dom::{Document, NodeId, NodeType};
+
+    /// (deepest element depth, element count, text) — iteratively, because
+    /// the point is trees too deep to recurse over.
+    fn shape(document: &Document, root: NodeId) -> (usize, usize, String) {
+        let (mut deepest, mut elements, mut text) = (0, 0, String::new());
+        let mut stack = vec![(root, 1)];
+        while let Some((id, depth)) = stack.pop() {
+            let node = document.get(id).expect("live node");
+            match &node.node_type {
+                NodeType::Element(_) => {
+                    elements += 1;
+                    deepest = deepest.max(depth);
+                }
+                NodeType::Text(t) => text.push_str(t),
+            }
+            for child in node.children.iter().rev() {
+                stack.push((*child, depth + 1));
+            }
+        }
+        (deepest, elements, text)
+    }
+
+    #[test]
+    fn deeply_nested_source_is_flattened_at_the_depth_cap() {
+        // Every pass over the tree (style, layout, paint, the agent's index)
+        // recurses per level; ~10 000 nested `<div>`s overflowed the stack —
+        // an abort that `catch_unwind` can't catch. Like Blink/WebKit's
+        // parser cap, content deeper than the cap becomes siblings at the
+        // cap's level: nothing is dropped, document order is kept.
+        let depth = MAX_DOM_DEPTH + 44;
+        let mut source = String::new();
+        for i in 0..depth {
+            source.push_str(&format!("<div>{}", i % 10));
+        }
+        source.push_str(&"</div>".repeat(depth));
+        let document = parse(&source).unwrap();
+        let root = document.roots()[0];
+        let (deepest, elements, text) = shape(&document, root);
+        assert_eq!(deepest, MAX_DOM_DEPTH);
+        assert_eq!(elements, depth, "no element is lost");
+        let expected: String = (0..depth)
+            .map(|i| char::from(b'0' + (i % 10) as u8))
+            .collect();
+        assert_eq!(text, expected, "document order is kept");
+    }
+
+    #[test]
+    fn fragment_parsing_has_the_same_depth_cap() {
+        let source = "<span>".repeat(MAX_DOM_DEPTH * 2);
+        let mut document = Document::new();
+        let roots = parse_fragment(&source, &mut document).unwrap();
+        let (deepest, elements, _) = shape(&document, roots[0]);
+        assert_eq!(deepest, MAX_DOM_DEPTH);
+        assert_eq!(elements, MAX_DOM_DEPTH * 2);
+    }
 }

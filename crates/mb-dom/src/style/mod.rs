@@ -20,6 +20,12 @@ pub type PropertyMap = BTreeMap<String, Value>;
 // no font-size is in scope (root with no font-size declaration, em/rem on the root, etc.).
 const DEFAULT_FONT_SIZE: f32 = 16.0;
 
+/// The largest magnitude a computed length, percentage or number can have —
+/// Blink's `LayoutUnit` range (`INT_MAX / 64` ≈ 3.3e7 px). Page CSS can write
+/// `1e39px` (f32 `inf` once parsed) or compound `font-size: 1000%` past f32;
+/// the cascade saturates here so layout only ever adds finite values.
+pub const MAX_CSS_LENGTH: f32 = 33_554_431.0;
+
 // StyledNode mirrors the DOM tree but replaces raw attributes with resolved CSS properties.
 //
 // `node_id` is the back-reference into the arena that produced this tree —
@@ -211,11 +217,11 @@ fn style_tree_inner(
             _ => None,
         })
         .unwrap_or(DEFAULT_FONT_SIZE);
-    let own_font_size = resolve_font_size(
+    let own_font_size = saturate(resolve_font_size(
         specified_values.get("font-size"),
         parent_font_size,
         root_font_size,
-    );
+    ));
 
     // Replace own font-size with the resolved Px value so descendants see the cascaded
     // value, then resolve every other em/rem/ch to Px in place. Percent stays
@@ -261,6 +267,7 @@ fn style_tree_inner(
             }
             _ => {}
         }
+        saturate_value(value);
     }
 
     // The selectors crate walks the live DOM via the `Element` trait
@@ -292,6 +299,35 @@ fn style_tree_inner(
         node_type: node_data.node_type.clone(),
         specified_values,
         children,
+    }
+}
+
+/// Clamp a computed number into the range layout can add up without
+/// overflowing f32 (see [`MAX_CSS_LENGTH`]); NaN — which no parser should
+/// produce — becomes 0.
+fn saturate(v: f32) -> f32 {
+    if v.is_nan() {
+        0.0
+    } else {
+        v.clamp(-MAX_CSS_LENGTH, MAX_CSS_LENGTH)
+    }
+}
+
+/// Saturate every number layout reads from a computed value: lengths and
+/// percentages, bare numbers (`flex-grow`, `line-height`), grid track sizes.
+/// Paint-only values (shadows, transforms, gradients) keep what they parsed.
+fn saturate_value(value: &mut Value) {
+    match value {
+        Value::Length(v, _) | Value::Number(v) => *v = saturate(*v),
+        Value::TrackList(tracks) => {
+            for track in tracks.iter_mut() {
+                match track {
+                    TrackSize::Length(v, _) | TrackSize::Fraction(v) => *v = saturate(*v),
+                    TrackSize::Auto => {}
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1922,5 +1958,67 @@ mod tests {
             styled.value("color"),
             Some(&Value::Keyword("initial".into()))
         );
+    }
+
+    #[test]
+    fn overflowing_length_literal_resolves_to_a_finite_px() {
+        // `1e39` overflows f32, so cssparser hands us `inf`; `3e38px` is
+        // finite but two of them already overflow when layout adds them.
+        // Computed lengths saturate at Blink's LayoutUnit range instead.
+        let (document, root) = parse_html(r#"<div class="card">x</div>"#);
+        let stylesheet = parse_css(
+            r#".card { padding-left: 1e39px; margin-top: -1e39px; width: 3e38px; height: 1e39%; flex-grow: 1e39; }"#,
+        );
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let max = style::MAX_CSS_LENGTH;
+        assert_eq!(
+            styled.value("padding-left"),
+            Some(&Value::Length(max, Unit::Px))
+        );
+        assert_eq!(
+            styled.value("margin-top"),
+            Some(&Value::Length(-max, Unit::Px))
+        );
+        assert_eq!(styled.value("width"), Some(&Value::Length(max, Unit::Px)));
+        assert_eq!(
+            styled.value("height"),
+            Some(&Value::Length(max, Unit::Percent))
+        );
+        assert_eq!(styled.value("flex-grow"), Some(&Value::Number(max)));
+    }
+
+    #[test]
+    fn compounding_font_size_stays_finite() {
+        // 1000% per level overflows f32 after ~40 levels (16 × 10^40), and
+        // every em length below it with it.
+        let mut source = String::new();
+        for _ in 0..45 {
+            source.push_str(r#"<div class="big">"#);
+        }
+        source.push_str(r#"<p class="em">x</p>"#);
+        for _ in 0..45 {
+            source.push_str("</div>");
+        }
+        let (document, root) = parse_html(&source);
+        let stylesheet = parse_css(".big { font-size: 1000%; } .em { margin-left: 2em; }");
+
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let deepest_p = find_tag(&styled, "p").expect("the <p> is styled");
+        for name in ["font-size", "margin-left"] {
+            match deepest_p.value(name) {
+                Some(Value::Length(v, Unit::Px)) => {
+                    assert!(v.is_finite() && *v <= style::MAX_CSS_LENGTH, "{name} = {v}")
+                }
+                other => panic!("{name} = {other:?}"),
+            }
+        }
+    }
+
+    fn find_tag<'a>(node: &'a style::StyledNode, tag: &str) -> Option<&'a style::StyledNode> {
+        if matches!(&node.node_type, crate::dom::NodeType::Element(el) if el.tag_name == tag) {
+            return Some(node);
+        }
+        node.children.iter().find_map(|child| find_tag(child, tag))
     }
 }

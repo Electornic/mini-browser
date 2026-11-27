@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 843 (workspace 합계, 2026-11-27 호환성 3차 K4 — `queueMicrotask` species 고리 +1; 0b 는 842). 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 862 (workspace 합계, 2026-11-27 호환성 3차 0c — 퍼저 6 + 발견 수정 테스트 13; K4 는 843). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -258,13 +258,14 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 [compat-round3.md 0.1](docs/compat-round3.md#01-불변식을-규칙으로) 에서 승격. 2차 실사이트 조사에서 에이전트를 막은 버그는 세 종류였다 — 이동 전체 실패, 패닉, 끝없는 시간. 페이지 HTML·CSS·JS·이미지 바이트·속성 값은 전부 **신뢰할 수 없는 입력**이다.
 
 1. **하위 리소스·요소 하나가 이동 전체를 실패시키지 않는다.** 문서 로드가 실패할 수 있는 건 문서 응답 자체(네트워크 에러, 상태 코드, 지원 안 하는 Content-Type, 인코딩)뿐. CSS·스크립트·이미지·폰트·파비콘·속성 값 하나의 실패는 그 리소스만 건너뛴다. 코드 규칙: `resource.rs` 의 수집·로드 함수는 `Result` 가 아니라 `Vec`/`HashMap` 을 돌려준다(0a 에서 시그니처를 바꿈) — `?` 로 `ResourceError` 를 다시 올리지 말 것. 속성은 `resolve_attr` 로(없음·빈 값·해석 실패 = 건너뜀).
-2. **어떤 입력에도 패닉하지 않는다.** 레이아웃·스타일·페인트·파서에서 인덱싱은 `get()`, 정수 나눗셈은 0 검사, `unwrap()`/`expect()` 는 불변식이 코드로 보장될 때만 — 그 자리에 이유를 주석으로. 자주 밟는 것: **문자열을 바이트 인덱스로 자르기**(`&s[0..2]`, `s.len() == 3` 후 슬라이스 — 멀티바이트 글자 한가운데서 패닉; 먼저 `is_ascii()` 또는 `char_indices`), **페이지가 주는 개수로 할당**(`colspan`, `grid-row: 2000000000`, `span N` — HTML/브라우저 상한으로 자를 것: colspan 1000, 그리드 줄 1000), 덧셈 오버플로(debug 에서 패닉). 최후 방어선 `mb-mcp/src/worker.rs` 의 `catch_unwind`(브라우저 재생성)는 **세션 손실**이라 해결책이 아니다.
+2. **어떤 입력에도 패닉하지 않는다.** 레이아웃·스타일·페인트·파서에서 인덱싱은 `get()`, 정수 나눗셈은 0 검사, `unwrap()`/`expect()` 는 불변식이 코드로 보장될 때만 — 그 자리에 이유를 주석으로. 자주 밟는 것: **문자열을 바이트 인덱스로 자르기**(`&s[0..2]`, `s.len() == 3` 후 슬라이스 — 멀티바이트 글자 한가운데서 패닉; 먼저 `is_ascii()` 또는 `char_indices`), **페이지가 주는 개수로 할당**(`colspan`, `grid-row: 2000000000`, `span N` — HTML/브라우저 상한으로 자를 것: colspan 1000, 그리드 줄 1000), 덧셈 오버플로(debug 에서 패닉). 0c 퍼저로 정한 상한: 계산된 길이·수 ±33,554,431px(`style::MAX_CSS_LENGTH`, Blink `LayoutUnit`)와 `layout_tree` 출력 포화(비유한 좌표 금지), 파서 DOM 깊이 256(`html::MAX_DOM_DEPTH` — 더 깊은 내용은 형제로; 재귀 패스의 스택 넘침은 **abort** 라 `catch_unwind` 로 못 막는다), SVG 래스터 긴 변 4096·요소 깊이 256·내용 범위 ±1e6px·격리 층 넓이 합, 래스터 글자 크기 2048. 최후 방어선 `mb-mcp/src/worker.rs` 의 `catch_unwind`(브라우저 재생성)는 **세션 손실**이라 해결책이 아니다.
 3. **스타일·레이아웃은 시간 예산 안에서 끝난다.** 노드 수에 대해 거의 선형 — 자식을 두 번 훑는 재귀 금지(2차 C3 의 2^깊이), 같은 서브트리를 다시 재는 측정은 메모하거나 한 번에. 예산 초과는 감지해서 보고한다: `BrowserState` 가 `build_document_view` 를 재고 release 2초(debug ×10)를 넘으면 stderr 에 `[mb-budget] style+layout took {ms}ms on {쿼리 뺀 URL} ({n} nodes, {µs}µs/node)`. 중단하지 않는다(반쪽 화면이 더 혼란스럽다).
 
 검토 기록: [compat-round3.md 부록 A](docs/compat-round3.md#부록-a--04-표적-코드-검토-표-0a) — 지점별 안전/수정/보류. 새 파서·레이아웃 코드를 쓰면 같은 기준으로.
 
 ## Tooling Notes
 
+- 퍼저 ([compat-round3.md 0.3](docs/compat-round3.md#03-퍼징), `crates/mb-engine/tests/fuzz_layout.rs`): 기본 `cargo test` 에 시드 200(레이아웃)·500(CSS 토큰)·300(이미지 바이트)·깊이 10,000 한 케이스가 들어 있다. 긴 실행은 `MB_FUZZ_CASES=100000 cargo test --release -p mb-engine --test fuzz_layout -- --ignored --nocapture --test-threads=1`(`MB_FUZZ_SEED` 시작 시드, `MB_FUZZ_FONTS=1` 실제 셰이핑, `MB_FUZZ_DUMP=1` 이미지 입력을 미리 찍기 — abort 추적용). 실패하면 시드와 **축소된** HTML/CSS 가 찍힌다 → 손으로 정리해 해당 모듈에 증상 이름의 단위 테스트로(시드를 테스트로 쓰지 말 것). 생성기·판정을 바꾸면 `fuzz_generator_covers_its_spec` 가 아직 깊이·값 풀을 다 내는지 본다.
 - `crates/mb-dom/examples/css_diag.rs` — CSS 파서 진단 (`cargo run -p mb-dom --example css_diag -- <file.css>`).
 - 실사이트 호환성 조사 ([docs/compat-survey.md](docs/compat-survey.md)): `MB_NET_CACHE=DIR` 이면 모든 fetch 가 디스크 캐시를 거친다 (첫 실행만 네트워크, `MB_NET_CACHE_OFFLINE=1` 은 재생 전용). `crates/mb-agent/examples/compat_probe.rs URL OUT_DIR` 가 관찰·CSS 버림(`css::parse_with_report`)·레이아웃 이상을 덤프. 캐시와 출력은 반드시 git-ignored `compat-cache/` 에 — 실사이트 HTML/CSS/이미지/스크린샷은 커밋 금지(저작권, 공개 저장소). 테스트는 손으로 쓴 작은 페이지로.
 - 3차 코퍼스(~25곳, [compat-round3.md 0.2](docs/compat-round3.md#02-코퍼스-점검)): `scripts/compat-sites.tsv`(이름·URL·기대 컨트롤, 커밋됨) + `scripts/compat-corpus.sh record|run [라벨]|diff A B`. 녹화는 이미 끝났고 캐시 `compat-cache/net/` 는 **3차 동안 동결** — 단계 전후 측정은 `MB_NET_CACHE=$PWD/compat-cache/net scripts/compat-corpus.sh run <라벨>`(항상 오프라인, release) → `compat-cache/corpus/<라벨>/corpus-report.tsv`. `record` 는 녹화된 사이트를 다시 방문하지 않는다(보충은 `--supplement`, 규칙은 문서). 캐시가 켜져 있으면 GET 이 아닌 요청은 보내지 않는다(`net/cache.rs`). 버림 사유·ours/browser-too 분류는 `css/report.rs` `DropReason` + `css/properties.rs`(Chrome 이 아는 속성 표) — 동결된 표는 문서 "0b 분류표".

@@ -252,7 +252,7 @@ MB_NET_CACHE_OFFLINE=1 ./target/debug/mb-mcp --start-url https://news.ycombinato
 
 ## 3차 코퍼스 기준선 (0b)
 
-> 2026-11-26 녹화(사이트당 문서 1회 + 하위 리소스 1회, robots 준수, 2초 간격) · 2026-11-27 측정 · 엔진 = `15775d6`(0b, 수정 K1~K3) + **K4**(미커밋 — [compat-round3.md 부록 B](compat-round3.md#부록-b--0b-코퍼스에서-찾은-것-알려진-문제--담당)) · release · 1280×800 라이트 · 캐시 `compat-cache/net/` **동결**. 같은 캐시로 두 번 돌려 `load_ms` 외 모든 열·요소 목록이 **똑같음**을 확인(결정성). K4 수정 뒤 다시 돌린 `baseline-k4` 는 daum·hani·bbc 만 바뀌고(timeout → ok) 나머지 22곳은 `load_ms` 외 똑같다(`diff` 빈 결과).
+> 2026-11-26 녹화(사이트당 문서 1회 + 하위 리소스 1회, robots 준수, 2초 간격) · 2026-11-27 측정 · 엔진 = `15775d6`(0b, 수정 K1~K3) + **K4**(`0e0ccc9` — [compat-round3.md 부록 B](compat-round3.md#부록-b--0b-코퍼스에서-찾은-것-알려진-문제--담당)) · release · 1280×800 라이트 · 캐시 `compat-cache/net/` **동결**. 같은 캐시로 두 번 돌려 `load_ms` 외 모든 열·요소 목록이 **똑같음**을 확인(결정성). K4 수정 뒤 다시 돌린 `baseline-k4` 는 daum·hani·bbc 만 바뀌고(timeout → ok) 나머지 22곳은 `load_ms` 외 똑같다(`diff` 빈 결과).
 
 도구·열 정의·분류표는 [compat-round3.md 0.2 "0b 구현 메모"·"0b 분류표"](compat-round3.md#0b-분류표-동결--바꾸려면-이-표를-먼저-고친다). 사이트 목록 정본은 [`scripts/compat-sites.tsv`](../scripts/compat-sites.tsv).
 
@@ -298,6 +298,8 @@ MB_NET_CACHE_OFFLINE=1 ./target/debug/mb-mcp --start-url https://news.ycombinato
 | microsoft | ok* | 116 | 63 | 68 | 266/8 | 253/2 | 18 | 20 | 2/2 | | 4 | 4 |
 | example | ok | 11 | 0 | 1 | 3/0 | 0/0 | 1 | 1 | 0/0 | (오늘 판은 링크 없음) | 1 | 1 |
 | w3c | blocked | 20 | 0 | 3 | — | — | — | — | 0/2 | (403) | 0 | 0 |
+
+**0c 재측정** (2026-11-27, 라벨 `0c`, 같은 동결 캐시·release — 0c 엔진 수정 뒤, [compat-round3.md 부록 C](compat-round3.md#부록-c--0c-퍼저에서-찾은-것)): 결과 분포·버린 선언·버린 규칙·요소 수·기대 컨트롤은 25곳 모두 위 표와 **같다**, `scripts/compat-corpus.sh diff baseline-k4 0c` 의 요소 목록 차이 **없음**(에이전트가 보는 역할·이름 목록 동일). 바뀐 것은 기하뿐: 슬리버 **297 → 275**(korea-kr 36→25, github 17→10, enwiki 69→66, rustlang 9→7, apple 17→18; 2차 5곳 17→10), 문서 높이 hani 27,637→27,183 · google 901→753 · rustlang 10,199→9,825 — flex 안 인라인 내용 항목이 내용 폭으로(F11)·인라인 상자 안 % 기준(F3) 때문으로 보이나 사이트별 원인과 Chrome 대조는 안 했다. timeout·panic 0, `[mb-budget]` 0.
 
 - `ms` = `navigate`(settle 포함) 벽시계, 이 맥에서. 두 실행 사이 차이는 대부분 ±10% 안, 가장 큰 것은 kowiki 256 → 197(−23%)·github 1,829 → 1,562(−15%) — 시간은 비교용이 아니라 timeout 판정용.
 - 기대 컨트롤 **누락 사이트 8곳**(naver·daum·hani·korea-kr·velog·d2·google·enwiki; 0b 때는 측정된 17곳 중 6곳). 원인 분류는 각 단계에서 — 지금 표는 기준선. naver 검색창은 ARIA `combobox` 다(역할 오기를 녹화 후 tsv 에서 고침).

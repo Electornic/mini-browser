@@ -630,6 +630,14 @@ fn parse_declaration_value<'i>(
     }
 
     let value = parse_value(input)?;
+    // Flexbox: negative flex factors are invalid (the declaration drops, as
+    // in Chrome). A negative shrink weight would grow overflowing items.
+    if matches!(name, "flex-grow" | "flex-shrink") && matches!(value, Value::Number(n) if n < 0.0) {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            "negative flex factors are invalid",
+        ));
+    }
     Ok(vec![Declaration {
         name: name.to_string(),
         value,
@@ -642,6 +650,29 @@ mod tests {
         BoxShadow, Color, GradientDirection, GradientKind, GridLine, TextShadow, TrackSize,
         TransformOp, Unit, Value, parse,
     };
+
+    #[test]
+    fn negative_flex_factors_are_invalid_and_dropped() {
+        // CSS Flexbox: "Negative numbers are invalid" for flex-grow and
+        // flex-shrink, so Chrome drops the declaration (an earlier valid one
+        // still applies). Kept, a negative shrink weight *grows* overflowing
+        // items — the fuzzer saw 1.7e7 px from `flex-shrink: -1`.
+        for css in [
+            "a{flex-shrink:-1}",
+            "a{flex-grow:-0.5}",
+            "a{flex:-1}",
+            "a{flex:1 -1}",
+            "a{flex:1 -1 0px}",
+        ] {
+            let sheet = parse(css).expect("sheet parses");
+            let decls: Vec<_> = sheet.rules.iter().flat_map(|r| &r.declarations).collect();
+            assert!(decls.is_empty(), "{css:?}: {decls:?}");
+        }
+        let sheet = parse("a{flex-shrink:2; flex-shrink:-1; flex: 0 3}").unwrap();
+        let decls = &sheet.rules[0].declarations;
+        assert_eq!(decls[0].value, Value::Number(2.0));
+        assert_eq!(decls.len(), 3, "valid declarations stay: {decls:?}");
+    }
 
     #[test]
     fn non_ascii_hash_color_drops_the_declaration_not_a_panic() {
