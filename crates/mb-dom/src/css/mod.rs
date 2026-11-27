@@ -16,6 +16,7 @@ mod report;
 mod selector;
 mod shadow;
 mod shorthand;
+pub mod supports;
 mod transform;
 
 use grid::{
@@ -586,6 +587,8 @@ enum AtRulePrelude {
     Media(MediaQueryList, Option<usize>),
     /// `@layer`: the names (none = anonymous block), and the report index.
     Layer(Vec<layer::LayerName>, Option<usize>),
+    /// `@supports`: whether the condition holds, and the report index.
+    Supports(bool, Option<usize>),
     Reject,
 }
 
@@ -617,6 +620,15 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler<'_> {
             return Ok(match names {
                 Ok(names) => AtRulePrelude::Layer(names, seen),
                 Err(()) => AtRulePrelude::Reject,
+            });
+        }
+        if name.eq_ignore_ascii_case("supports") {
+            let condition = supports::SupportsCondition::parse_from(input);
+            while input.next().is_ok() {}
+            let seen = report::record_at_rule(&name, input.slice_from(start), condition.is_some());
+            return Ok(match condition {
+                Some(condition) => AtRulePrelude::Supports(supports::evaluate(&condition), seen),
+                None => AtRulePrelude::Reject,
             });
         }
         while input.next().is_ok() {}
@@ -668,6 +680,17 @@ impl<'i> CssAtRuleParser<'i> for StylesheetHandler<'_> {
                     return Ok(Vec::new());
                 };
                 Ok(self.nested(input, self.media.clone(), Some(layer), seen))
+            }
+            AtRulePrelude::Supports(applies, seen) => {
+                // Same cap as `@media` (one depth for all grouping blocks).
+                if self.depth >= MAX_MEDIA_NESTING {
+                    return Ok(Vec::new());
+                }
+                // A false block is still parsed — its layers take their
+                // place (2.2's approximation) and the report counts its
+                // rules — then dropped.
+                let rules = self.nested(input, self.media.clone(), self.layer, seen);
+                Ok(if applies { rules } else { Vec::new() })
             }
             AtRulePrelude::Reject => {
                 skip_block(input, None);
@@ -2857,7 +2880,13 @@ mod tests {
         // Nested `@layer`/`@media` blocks share one depth cap; past it the
         // block's rules are dropped and what follows still parses.
         let depth = 10_000;
-        for open in ["@layer{", "@layer a{", "@media screen{@layer{"] {
+        for open in [
+            "@layer{",
+            "@layer a{",
+            "@media screen{@layer{",
+            "@supports (display:grid){",
+            "@supports not (x:y){@layer{",
+        ] {
             let css = format!(
                 "{}.deep{{color:red}}{} .after{{color:blue}}",
                 open.repeat(depth),

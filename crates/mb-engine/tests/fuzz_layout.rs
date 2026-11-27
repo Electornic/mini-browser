@@ -1737,6 +1737,56 @@ const LAYER_PRELUDES: &[&str] = &[
     "{",
 ];
 
+/// Pieces of `@supports` conditions: declarations (known, unknown,
+/// unrendered, fallback values, custom), `selector()`, logic words, odd
+/// functions, and breakage.
+const SUPPORTS_TOKENS: &[&str] = &[
+    "(display: grid)",
+    "(display:flexbox)",
+    "(position: sticky)",
+    "(--x: 0)",
+    "(width: 100vw)",
+    "(color: var(--x))",
+    "(-webkit-mask-image: none)",
+    "(frobnicate: 1)",
+    "(colour)",
+    "selector(:is(a, :foo))",
+    "selector(div > p)",
+    "selector(",
+    "font-tech(color-COLRv1)",
+    "not",
+    "and",
+    "or",
+    "(",
+    ")",
+    ":",
+    "{",
+    "}",
+    ";",
+    "\"",
+    "안녕",
+];
+
+/// A `@supports` prelude: a few condition tokens, sometimes very deep `(((…`.
+fn supports_prelude(rng: &mut Rng) -> String {
+    if rng.chance(5) {
+        let depth = rng.range(30, 400);
+        return format!(
+            "{}display: grid{}",
+            "(".repeat(depth),
+            ")".repeat(rng.range(0, depth + 1))
+        );
+    }
+    let mut out = String::new();
+    for _ in 0..rng.range(0, 6) {
+        out.push_str(rng.pick_str(SUPPORTS_TOKENS));
+        if rng.chance(70) {
+            out.push(' ');
+        }
+    }
+    out
+}
+
 /// A layer prelude; now and then a dotted name past the nesting cap.
 fn layer_prelude(rng: &mut Rng) -> String {
     if rng.chance(3) {
@@ -1745,12 +1795,12 @@ fn layer_prelude(rng: &mut Rng) -> String {
     rng.pick_str(LAYER_PRELUDES).to_string()
 }
 
-/// The opening of one grouping block: mostly `@media`, else `@layer`.
+/// The opening of one grouping block: `@media`, `@layer` or `@supports`.
 fn group_open(rng: &mut Rng) -> String {
-    if rng.chance(60) {
-        format!("@media {}{{", media_prelude(rng))
-    } else {
-        format!("@layer {}{{", layer_prelude(rng))
+    match rng.below(10) {
+        0..=4 => format!("@media {}{{", media_prelude(rng)),
+        5..=7 => format!("@layer {}{{", layer_prelude(rng)),
+        _ => format!("@supports {}{{", supports_prelude(rng)),
     }
 }
 
@@ -2023,7 +2073,12 @@ fn css_soup_case(seed: u64) -> Result<usize, Failure> {
     let (source, bodies) = css_input(&mut rng);
     let short_len = rng.range(0, 12);
     let prelude = media_prelude(&mut rng);
+    let condition = supports_prelude(&mut rng);
     let outcome = quietly(|| {
+        // `@supports` on its own (the public `CSS.supports()` entry).
+        if let Some(parsed) = css::supports::SupportsCondition::parse(&condition) {
+            let _ = css::supports::evaluate(&parsed);
+        }
         // `@media` on its own: a soup query list at odd viewports, and a
         // soup `media` attribute wrapping the soup sheet.
         let list = css::media::MediaQueryList::parse(&prelude);
@@ -2562,7 +2617,33 @@ fn media_extremes_stay_bounded() {
             .join(", "),
         "@layer { div { padding: 1px } }".repeat(50_000)
     );
-    for css_src in [nested, parens, list, layers_nested, long_name, many_layers] {
+    // `@supports` (2.3): nested blocks, 10 000 parentheses in a condition,
+    // a 50 000-term `and` chain.
+    let supports_nested = format!(
+        "{}.a{{color:red}}{}",
+        "@supports (display:grid){".repeat(depth),
+        "}".repeat(depth)
+    );
+    let supports_parens = format!(
+        "@supports {}display:grid{} {{ p {{ color: blue }} }}",
+        "(".repeat(depth),
+        ")".repeat(depth)
+    );
+    let supports_chain = format!(
+        "@supports {} {{ div {{ padding: 1px }} }}",
+        vec!["(display: grid)"; 50_000].join(" and ")
+    );
+    for css_src in [
+        nested,
+        parens,
+        list,
+        layers_nested,
+        long_name,
+        many_layers,
+        supports_nested,
+        supports_parens,
+        supports_chain,
+    ] {
         let started = Instant::now();
         let view = run_pipeline(SOUP_PAGE, &css_src);
         check_commands(&view.commands).expect("finite paint commands");
@@ -2658,24 +2739,30 @@ fn fuzz_generator_covers_its_spec() {
     // nesting cap (one cap for both).
     let mut media = 0;
     let mut layers = 0;
+    let mut supports = 0;
     let mut past_cap = 0;
     for seed in 1..=500 {
         let mut rng = Rng::new(seed ^ 0xC55_F022);
         let (source, _) = css_input(&mut rng);
         let media_blocks = source.matches("@media").count();
         let layer_blocks = source.matches("@layer").count();
+        let supports_blocks = source.matches("@supports").count();
+        if supports_blocks > 0 {
+            supports += 1;
+        }
         if media_blocks > 0 {
             media += 1;
         }
         if layer_blocks > 0 {
             layers += 1;
         }
-        if media_blocks + layer_blocks > css::media::MAX_MEDIA_NESTING {
+        if media_blocks + layer_blocks + supports_blocks > css::media::MAX_MEDIA_NESTING {
             past_cap += 1;
         }
     }
     assert!(media >= 70, "{media}/500 CSS inputs with @media");
-    assert!(layers >= 70, "{layers}/500 CSS inputs with @layer");
+    assert!(layers >= 50, "{layers}/500 CSS inputs with @layer");
+    assert!(supports >= 30, "{supports}/500 CSS inputs with @supports");
     assert!(
         past_cap >= 10,
         "{past_cap}/500 CSS inputs nested past the cap"

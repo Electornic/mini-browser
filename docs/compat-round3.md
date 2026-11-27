@@ -739,6 +739,83 @@ P 의 발견을 1a 전에 고친다(사용자 결정: 문서 요소를 DOM 에 �
 - 미리보기 `compat-cache/previews/2.2/github.png`: **페이지가 라이트**(흰 배경)다. 2.1 미리보기의 화면 대부분을 덮던 검은 영역이 없어졌다. 위쪽 검은 띠는 로그아웃 마케팅 헤더(Products·Developers…)로, Chrome 에서도 어둡다. 남은 모양 문제(세로로 쪼개진 "Repository"·"Folders" 글자, 파일 표 위치)는 레이아웃 갭으로 3·5단계·후속 몫이다. 전후 비교 PNG 는 후만 찍었다(전은 옛 빌드가 필요해 2.1 미리보기와 비교).
 - **스타일 시간**(GitHub, release, 같은 문서로 스타일 패스 5회 중 최소): 레이어 규칙을 뺀 시트 647ms → 전부 980ms(+51%, 규칙 +58%). 순위 매기기 자체는 0.8µs. probe `load_ms` 754 → 1,217. `[mb-budget]`(2초) 아래지만 GitHub 이 가장 무겁다 — 셀렉터 매칭이 규칙 수에 선형이라 규칙 색인(오른쪽 끝 복합 셀렉터의 클래스·id·태그로 버킷)이 다음 성능 후보.
 
+##### 2.3 — `@supports` (2026-11-28)
+
+**설계와 달라진 점·정한 것**:
+- **평가는 파싱 때 한 번**(`css::supports::evaluate`). 뷰포트·상태와 무관하므로 스타일 패스·뷰 캐시 키를 건드리지 않는다.
+  - 거짓 블록도 본문은 파싱하고(레이어 등장 순 근사·보고의 규칙 수) 규칙만 버린다.
+  - 무효 프렐류드는 rule 째 버린다(Chrome 과 같음, 보고상 `skipped-at-rule`).
+- **"지원" = 렌더링함**:
+  - 설계의 1·2·3번(아는 속성, 의미 있는 타입, `UNRENDERED`)에 더해, **그 선언이 펼치는 longhand 가 모두 엔진이 읽는 속성이어야** 참이다.
+  - 그 목록은 probe 의 `CONSUMED`(손으로 관리하던 "하류가 읽는 속성" 85개)를 **`css::properties::RENDERED` 로 옮긴 것**이다. probe 의 "파싱만" 열도 같은 목록을 쓰므로 수치는 그대로다.
+  - 이유: 첫 코퍼스 실행에서 enwiki 의 `(overflow-wrap:anywhere)`·`(word-break:break-word)` 가 참이 됐다. 키워드 표가 있는 속성이지만 엔진이 읽지 않는다 — 값 단위 `UNRENDERED` 만으로는 이런 속성 단위 갭을 못 잡는다.
+  - `ValueKind::Other` 속성(값 모양을 모델링하지 않음 — `aspect-ratio`·`backdrop-filter`·`mask*`·`container-type`·`content-visibility`…)은 그 자체로 거짓이다.
+- `(prop: value)` 판정 순서:
+  1. `--*` 면 참.
+  2. `properties::unprefixed` 로 `-webkit-` 별칭을 표준 이름으로 바꾼다. 이 함수는 새로 만들었고, 표가 그렇듯 "Chrome 이 실제로 받는 별칭" 과 "표준 이름이 있는 아무 `-webkit-`" 을 구분하지 않는다.
+  3. 아는 속성이어야 한다.
+  4. `Other` 이거나 값에 `var(` 가 있으면 거짓.
+  5. `UNRENDERED` 에 있으면 거짓.
+  6. `parse_property_value` 가 성공해야 한다.
+  7. 선언마다 값 타입이 종류에 맞아야 한다(`Keyword` 는 허용 목록 안 — `Dedicated` 는 전용 파서 결과 그대로 · 길이 종류엔 `Length` · 색엔 `Color` · 이미지엔 `ImageUrl`/`Gradient`). 또 `RENDERED` 에 있어야 한다.
+- **`UNRENDERED`**(지금 렌더링 상태로 확정):
+  - 값 항목: `position: sticky`/`-webkit-sticky`(레이아웃이 static 으로), `display: contents`/`-webkit-box`/`-webkit-inline-box`/`ruby`/`ruby-text`/`math`(블록으로).
+  - 속성 항목(지금은 `Other` 라 어차피 거짓이지만 종류가 바뀌어도 안 뒤집히게): `aspect-ratio` · `backdrop-filter` · `mask*` · `container*` · `content-visibility` · `field-sizing` · `interpolate-size` · `anchor-name` · `position-anchor` · `position-area`.
+  - 값 항목 셋은 mb-engine `supports_unrendered_list_matches_layout` 이 "정말 렌더링 안 함" 을 고정한다(sticky 는 `top` 무시, contents 는 자기 상자·패딩 유지, `-webkit-box` 는 세로 쌓기). 구현하면 이 테스트가 깨져 목록 정리를 알린다(위험 절의 제안).
+- 문법(Conditional 3):
+  - `not X` | `X [and X]*` | `X [or X]*` — 섞으면 무효, `not not` 무효.
+  - `( 조건 )` 을 먼저 시도하고, 아니면 `( 선언 )`, 그 밖의 괄호·함수(`font-tech()` 등)는 `<general-enclosed>` = 거짓(`not` 하면 참).
+  - `selector(…)` 는 `css::parse_selector`(캐스케이드와 같은 비관용 파서)로 읽고, **복합 셀렉터 하나**만 받는다(목록이면 거짓).
+- **깊이 상한**:
+  - 조건 괄호가 `MAX_MEDIA_NESTING`(32)보다 깊으면 그 괄호는 `<general-enclosed>`(거짓)다. cssparser 가 블록을 재귀 없이 건너뛴다.
+  - `@supports` 블록 중첩은 `@media`·`@layer` 와 같은 깊이 하나로 센다.
+  - `and` 5만 항 사슬은 반복이라 선형이다.
+- `@container` 는 그대로 건너뛴다.
+
+**보고·probe**:
+- `css::supports_verdict` 본문을 `supports::evaluate` 로 바꿨다(P 의 약속).
+- 거짓 블록은 보고상 `kept`(규칙 수 = 파싱된 수)다. probe 의 `count_blocks` 는 거짓 `@supports` 가 부모에게 규칙을 넘기지 않는다는 것만 반영했다(직속 규칙 계산; 옛 엔진에선 거짓 블록 규칙이 0 이라 같은 식).
+- probe 의 `CONSUMED` 는 `properties::is_rendered` 로 바뀌었다(같은 목록).
+
+**테스트 +16**(1012 → **1028**). 구현과 같은 변경에서 썼지만 전부 옛 엔진(본문 버림)·모듈 없음에서 실패하는 단정이다.
+- `css/supports.rs` 11:
+  - 설계 목록: `supports_custom_property_true`·`supports_selector_is_not_forgiving`·`supports_unknown_property_false`·`supports_keyword_fallback_value_false`(`100vw`·`100dvh`·`round()`·`var()`)·`supports_unrendered_value_false`·`supports_selector_function`
+  - 더한 것: 타입 판정(`overflow-wrap`·`word-break`·`visibility` 거짓 포함), `-webkit-` 별칭, 논리, 무효 조건 8가지, 깊이(1만 겹 괄호·`not (` 1만 겹·`and` 5만 항)
+- 캐스케이드 4:
+  - 설계 목록: `supports_true_branch_applies`·`supports_not_branch_skipped_when_supported`
+  - 더한 것: `supports_unrendered_value_takes_the_fallback`·`supports_nests_with_media_and_layers`(거짓 `@supports` 안 레이어 순서 근사 포함)
+- 레이아웃 1: `supports_unrendered_list_matches_layout`
+- 기존 보고 테스트 2개는 기대값을 바꿨다(`@supports` 본문이 이제 유지됨). 깊이 테스트에 `@supports` 모양 둘.
+- 설계의 2단계 테스트 목록은 이제 전부 있다(이름으로 확인).
+
+**퍼저**:
+- 감싸는 블록을 `@media` 50% · `@layer` 30% · `@supports` 20% 로 나눴다. `@supports` 조건 수프(선언·`selector()`·논리어·깨짐 토큰, 5% 는 30–400겹 괄호)를 쓴다.
+- 입력마다 수프 조건을 `SupportsCondition::parse` → `evaluate` 로 따로 돌린다.
+- 생성기 검사: `@supports` 500 중 30 이상.
+- 극단 케이스에 `@supports` 1만 겹 블록·1만 겹 괄호 조건·`and` 5만 항을 더했다.
+- 긴 실행(release) **10만 입력 무결**(15.3초).
+
+**코퍼스**(라벨 `supports`, `layer` 대비, 동결 캐시·오프라인·release):
+- 결과(ok 13 + ok* 7 · nav-fail 1 · blocked 2 · skipped 2)·오프라인 미스·기대 컨트롤·슬리버(417)는 그대로이고 `[mb-budget]` 0.
+- 바뀐 곳은 `@supports` 가 있는 7곳(github·enwiki·mdn·apple·kakaocorp·bbc·microsoft)뿐이다.
+- `@supports` 20곳 149블록: **참 46 · 거짓 103**. 안의 규칙 97 중 1280×800 에서 적용 36.
+- 건너뛴 at-rule 바이트 20곳 1,560,153 → 1,518,144. **GitHub 0.7% → 0.4%**(9,246B — `@container` 4,801 · `@keyframes` 3,600 · `@position-try` 626 · `@font-face` 123 · `@property` 96).
+- 사이트별 판정(css.txt "@supports conditions"):
+  - enwiki 참 24 / 거짓 46. `(display:grid)` 참, mask 조건 거짓 → `not (mask…)` 폴백 22블록 적용. `(overflow-wrap:anywhere)`·`(word-break:break-word)`·`(-webkit-hyphens:none)`·`(aspect-ratio…)`·`(width:round(…))`·`(text-decoration:underline dotted)` 거짓.
+  - mdn 17 전부 참 — 아래 갭 참고.
+  - github 참 5. `not selector(:popover-open)` ×2, `not (anchor-name:…)`, `not (container-type:inline-size)`, `not (grid-template-rows:subgrid)`. `100dvh`·`conic-gradient`·이중 위치 정지점 `linear-gradient`·`subgrid`·`mod()`·`field-sizing` 등은 거짓.
+  - apple 19 전부 거짓(`backdrop-filter`·`100dvh`·`calc(max())`).
+- **요소 목록 diff: enwiki +11**(목차 링크 "(Top)"·"1 Function"… "8 External links"). **정상**이다. `@supports (display:grid){.vector-pinned-container{display:block}}` 가 이제 적용되어 사이드바에 고정된 목차 컨테이너가 보인다. Chrome 데스크톱 1280 에서도 보인다.
+- 버림 열은 새로 유지된 블록 안 내용이 더해져 조금 늘었다.
+  - 20곳 선언 ours 1,970 → 1,982 · 규칙 ours 11,641 → 11,706 · 합산 지표 3,288 → 3,310.
+  - 2차 5곳(naver·kowiki·google·github·hn) 합산 지표 989 → **994**(ours 504) — ≤1,478 유지.
+- **스타일 시간**(GitHub, release, 스타일 패스 5회 최소, 두 번 실행): 1,006·1,021ms(2.2 980ms — 레이어 규칙을 뺀 기준도 647 → 660ms 로 같이 움직여 기계 잡음 범위, 2.3 이 더한 GitHub 규칙은 8개). 시트 파싱 19ms. probe `load_ms` 1,217 → 1,251·1,326(실행마다 흔들림). `[mb-budget]` 0.
+
+**찾은 갭(후속, 이번에 안 고침)**:
+1. **이름 있는 색이 22개뿐**(`css/color.rs` — HTML4 16색 + 몇 개). CSS 의 148개 중 `tan`·`darkgray`·`rebeccapurple` 등이 `Keyword` 로 떨어진다. 그래서 mdn 의 `not (color:light-dark(tan,tan))` 8블록이 참이 되어, Chrome 에선 꺼지는 폴백이 `(color:light-dark(red,red))` 9블록과 함께 적용된다. 색 표를 채우면 `@supports` 와 일반 색 선언이 같이 고쳐진다 — 작은 데이터 변경, 렌더링이 바뀌므로 따로.
+2. `transform: none` 을 전용 파서가 못 읽는다(`(transform: none)` 거짓, 일반 선언도 버림).
+3. `selector(:focus-visible)`·`selector(:popover-open)` 거짓 → `not selector(…)` 폴백 적용(enwiki 1·github 2) — 설계대로 4단계 몫.
+
 ### 테스트 (2단계)
 
 `css/media.rs` 단위(한 줄 쿼리 → bool, 1280×800):
@@ -760,6 +837,19 @@ P 의 발견을 1a 전에 고친다(사용자 결정: 문서 요소를 DOM 에 �
 - GitHub "버린 CSS 바이트"(at-rule 본문 스킵) 46% → 5% 이하(`@container` 와 `@custom-media` 만 남음).
 - HN 레이아웃이 2차와 같거나 나음(모바일 규칙 10개가 빠짐) — 골든이 아니라 미리보기 비교.
 - 에이전트 찾은 컨트롤 수(사이트별) 감소 없음; 모바일 전용 메뉴 버튼 등은 사라지는 게 정상 — 실제 Chrome 데스크톱과 비교.
+
+### 2단계 완료 판정 (2026-11-28, 라벨 `supports`)
+
+| 기준 | 결과 |
+|---|---|
+| GitHub 미리보기가 **라이트** | ✅ `compat-cache/previews/2.3/github.png`(2.2 부터). 흰 페이지. 위쪽 검은 띠는 로그아웃 마케팅 헤더 — Chrome 에서도 어둡다. 2.1 미리보기는 화면 대부분이 검었다. 남은 모양 문제(세로로 쪼개진 글자, 파일 표 위치)는 레이아웃 갭(3·5단계·후속) |
+| "@media 조건" 표의 "wrong at 1280x800" 범주 **적용 0** | ✅(실질) 20곳 적용 **1** — 2.1 부터 같은 한 건. GitHub `print,screen and (width<=1349px) and (width>=768px)` 를 probe 휴리스틱(`max-width < 1280`)이 잘못 분류한 것이고, 1280 에서 참이 맞다. 2.2 로 드러난 레이어 안 블록(범주 규칙 61 → 160)도 적용 0 |
+| GitHub "버린 CSS 바이트"(at-rule 본문 스킵) 46% → **5% 이하** | ✅ 45.6% → 0.7%(2.2) → **0.4%**(2.3). 남은 것은 `@container` 4,801B 와 `@keyframes` 3,600 · `@position-try` 626 · `@font-face` 123 · `@property` 96. 설계는 "`@container` 와 `@custom-media` 만" 이라 했지만, 렌더링과 무관한 at-rule 도 계속 건너뛴다(`@custom-media` 는 본문이 없어 0바이트) |
+| HN 레이아웃이 2차와 같거나 나음 | ✅ `previews/2.3/hn.png` 데스크톱 표, 2.1 미리보기와 같음(1단계 변경으로 2px 세로 이동). 모바일 규칙은 2.1 부터 빠짐 |
+| 기대 컨트롤 감소 없음 · 사라진 요소 판정 | ✅ 기대 컨트롤 누락 **7/20 그대로**(naver·daum·hani·korea-kr·velog·d2·google — JS/ES 모듈 원인, 1단계 끝과 같음). 2단계 요소 diff 판정: 2.1(모바일 전용 사라짐·데스크톱 전용 나타남 — 진행 표 2행; enwiki 그리드는 2.1a 에서 복구), 2.2 GitHub −3("More items" ×2 정상, "Appearance settings" **버그** — 논리 속성·인라인 SVG 크기 갭, 후속), 2.3 enwiki +11(목차, 정상) |
+| (공통) panic·timeout 0 · `[mb-budget]` 0 | ✅ ok 13 + ok* 7 · nav-fail 1(K5) · panic 0 · timeout 0 · `[mb-budget]` 0. GitHub 스타일 패스 ~1.0초(레이어 규칙 +5,202) — 2초 예산의 절반, 다음 성능 후보는 규칙 색인 |
+
+2단계가 남긴 후속: 논리 속성(`inline-size`·`padding-inline`·`margin-inline-*` → 물리), 인라인 SVG 고유 크기, CSS 이름 있는 색 148개, `transform: none`, 셀렉터 규칙 색인(GitHub 스타일 시간), `@container`(별도 설계).
 
 ### 위험 (2단계)
 
@@ -976,7 +1066,7 @@ GitHub 간격(`margin-top: calc(var(--base-size-8) + var(--Layout-row-gap))` 류
 | 2차 기준 | ✅ | `78bedff`·`4588aba` | 804 | (5곳) 0/0/0 | 7,593 (ours/browser-too 분리는 0단계에서) | 1,931 (같음) | 19 (GitHub 17·위키 2; naver "검색" 은 2글자라 probe 기준 밖) | naver(모듈) | 출발점 |
 | 0 견고성 | ✅ 0a·0b·K4·0c 완료 (K5 → 4차) | `d6801bb`(0a) · `15775d6`(0b) · `0e0ccc9`(K4) · 0c 미커밋 | 806 → 829 (0a) → 842 (0b) → 843 (K4) → 862 (0c) → 869 (R3) → 872 (R2) → 875 (R4) → 876 (R1) | **기준선(25곳, K4 뒤)**: ok 19 + ok* 1 · nav-fail 1(crates.io K5) · panic 0 · **timeout 0**(0b 때 3 — daum·hani·bbc, K4 로 해결) · blocked 2 · robots skip 2 · `[mb-budget]` 0. 목표 0/0/0 중 nav-fail 1 남음 → K5 | 5곳 **ours 7,389 / browser-too 15** (20곳 14,112 / 256; 0b 17곳 13,251 / 236) | 5곳 **ours 1,745 / browser-too 11** (20곳 10,451 / 58; 0b 17곳 10,114 / 53) | 5곳 17 (20곳 297; 0b 17곳 249) → 0c 5곳 **10** (20곳 275) | 8/20: naver·daum·hani·korea-kr·velog·d2·google·enwiki | **0a**: Robustness Rules(AGENTS.md) + `[mb-budget]` 워치독 · 검토 표 [부록 A](#부록-a--04-표적-코드-검토-표-0a)(grep 140곳: 안전 117·수정 10·보류 2·거짓 양성 11 + grep 밖 발견 수정 5 — 패닉 4: 멀티바이트 `#색`·`bgcolor`·`@font-face`, colspan 오버플로 / 할당 폭주 1: 거대 grid 줄) · 리소스 수집 `Result` 제거 · 스크립트 에러 위치(콘솔) · `compat3` 골든 + `compat3-menu` eval(오늘은 실패가 정상). **0b**: 코퍼스 도구(`compat-corpus.sh`·`compat-sites.tsv`·probe `summary.tsv`)·조사 캐시 GET 전용·`css/properties.rs`·버림 사유 코드·[분류표](#0b-분류표-동결--바꾸려면-이-표를-먼저-고친다) 동결 · 녹화 2026-11-26(캐시 동결) · 발견 수정 K1 settle·K2 빈 오류 페이지·K3 `queueMicrotask` · **K4**(`0e0ccc9`): `queueMicrotask` 가 `then` 의 species 를 통해 페이지 폴리필 Promise 를 만들던 것 — daum·hani·bbc timeout → ok(~250ms), 나머지 22곳 수치·요소 목록 변화 없음(`diff`) ([부록 B](#부록-b--0b-코퍼스에서-찾은-것-알려진-문제--담당)) · 사이트별 표 [survey](compat-survey.md#3차-코퍼스-기준선-0b). **0c**: 구조적 퍼저 + 축소기 + CSS 토큰·이미지 바이트 퍼징 + 깊이 10,000 케이스([0.3 구현 메모](#03-퍼징)) · 긴 실행(release) 레이아웃·CSS·이미지 각 15만 무결 · 발견 수정 11건([부록 C](#부록-c--0c-퍼저에서-찾은-것)): 비유한 좌표(길이 포화 ±33,554,431 + 레이아웃 출력 포화), 증폭 4(음수 shrink-to-fit 합, 인라인 상자가 자기 폭을 % 기준으로 넘김, 음수 flex 인수, flex 탐색이 1e6 대리 폭을 max-content 로 보고 — 실사이트 flex 내비 균등 분배의 원인), 깊이 abort(파서 평탄화 256), SVG 4(래스터 4096 상한, tiny-skia 이중 패닉 abort, 필터 층 3GB, 중첩 `<svg>` 스택 넘침), 래스터 거대 글리프 · D1·D2·D3 결정([부록 A](#부록-a--04-표적-코드-검토-표-0a)) · 코퍼스 재측정(`0c`, [survey](compat-survey.md#3차-코퍼스-기준선-0b)): 결과·버림 수·요소 목록 25곳 동일, 슬리버 297 → 275, 문서 높이 3곳 변화, timeout·panic·`[mb-budget]` 0. 남음: K5(4차), R5–R7(부록 C; R1–R4 는 후속으로 수정) |
 | 1 값 파서 | ✅ P·1r·1a·1p·1q·1b 완료 · 1c 완료(미커밋) — **목표 달성** | P `e470230` · 1r `9de59c9` · 1a `80766d8` · 1p `1ca47b2` · 1q `994d8c8` · 1b `35f1218` · 1c 미커밋 | 915 → 919 (P) → 932 (1r) → 943 (1a) → 955 (1p) → 961 (1q) → 980 (1b) → 996 (1c) | 1a: ok 17 + ok* 3(github·yna 새 이미지 요청 미스) · nav-fail 1 · panic 0 · timeout 0 · `[mb-budget]` 0 | 목표 ≤1,478 (동결, ours 기준) — **전(`step1-before`)**: 5곳 ours 7,371 · 합계(ours + IACVT 2,143 + `Keyword` 폴백 113 + var 폴백 0) **9,627** (20곳 14,078 · 18,204) → **1r(`html-root`)**: ours 그대로 · IACVT 128 · 합계 **7,612** (20곳 IACVT 318 · 합계 15,075) → **1a(`important`)**: ours **4,387** · 합계 **4,645**(20곳 9,643 · 10,680), 사유 `important` 5,097 → **0** → **1b(`value-parsers`)**: ours **3,941** · 합계 **4,213**(20곳 7,123 · 8,086), `multi-token` 4,319 → 1,098 → **1c(`var`)**: ours **335** · 합계 **738** ✅ ≤1,478(20곳 1,806 · 3,037) | — | 5곳 15 · 20곳 325 그대로 | 8/20 → 1a 7/20(enwiki 3/3), 1c 까지 7/20 | [1단계 구현 메모](#1단계-구현-메모-2026-11-27). P = 계산값 시점 열 `iacvt`·`var_keyword_fallback`·`decl_drop_total`(`style_tree_with_report`), 기존 열은 `grid` 와 25곳 동일. **1r** = `<html>` 을 단일 루트로(`:root`·`html{}`·rem·`documentElement`), 루트 여백 비겹침, 캔버스 배경(색), `--*` 공유 스코프(첫 실행 `[mb-budget]` 3 → 0). 요소 diff: github +1(로고 링크, 토큰으로 크기 생김) · enwiki −3(`.client-nojs` 숨김 — `document.cookie` 없어 시작 스크립트가 죽음, 후속)  **1a** = 파싱·두 패스 캐스케이드·인라인 `!important`·분류표 `important` 행 수정. 요소 diff: yna −4·microsoft −2(`display:none!important` 유틸리티, 정상) · docsrs −1(`<noscript>` 시트를 우리가 적용 — 기존 버그, 후속) · enwiki +3(헤더 레이아웃 이상 — 레거시 % 높이 = 부모 폭 기준, 3단계 항목, 진단만; 문서 높이 18,008 → 1,280)  **1p** = % 높이를 확정 포함 블록 높이 기준으로(아니면 auto), 루트 = 뷰포트, absolute % 는 패딩 상자, absolute 자식 블록화, 인라인 블록 높이 근사. 요소 diff: docsrs +15(`<a><code>` 문서 링크, 정상) 뿐. enwiki 헤더 1,292 → 124px, +3 링크 유지. `page_height` 가 `html,body{height:100%}` 4곳에서 800 — (c) `scrollHeight` 권고. 슬리버 319 → 340(블록화된 sr-only, 3단계 몫)  **1q** = `page_height`·스크롤 상한을 `DocumentView::document_height`(넘친 내용 포함) 하나로, 단위 없는 0 = `0px`. 요소 diff: korea-kr −1(썸네일 `height:0` + 버려지는 `calc()` 패딩 — 5단계). d2·enwiki `page_height` 800 → 5,458·12,732. 슬리버 340 → 413(0×0 sr-only, 3단계)  **1b** = border 계열·`font-family`·`box-shadow` 목록·`transition/animation` 파싱만·`flex` 완성(`flex:1` = basis 0%)·`background-size` 페인트·`clip`/`clip-path`·`light-dark()`·`inset`·전역 키워드·`all`(전엔 `inherit` 등을 아예 안 풀었다). 요소 diff: korea-kr +1(1q 썸네일 링크 복귀) · bbc −1(`border:0` 이 UA 테두리를 지우자 0×0 SVG 만 남은 버튼 — 인라인 `<svg>` 고유 크기 갭, 후속). `ok*` 5곳 늘어남(살아난 배경 단축의 이미지).  **1c** = `Unparsed`(커스텀 속성·`var()`), 정의 노드에서 치환 후 상속, 재파싱 메모, IACVT = `unset`, 64KiB 상한; 코퍼스 첫 실행에서 정의된 이름 + 폴백이 전부 실패하던 버그(`parse_nested_block` 은 parse_entirely) 고침. 요소 diff 없음. 리뷰 후 `var()`·함수 중첩 상한 `css::MAX_VAR_NESTING` 32(스택 넘침 abort 방지). [완료 판정](#1단계-완료-판정-2026-11-28-라벨-var) |
-| 2 @media/@layer/@supports | 🔶 2.1 완료(`4bd8146`) · 2.2·2.3 P 완료 · 2.2 완료(미커밋) · 2.3 ⏳ | 2.1 `4bd8146` · P `a1863ae` · 2.2 미커밋 | 876 → 878 (2.1 probe) → 902 (2.1) → 997 (2.2·2.3 P) → 1012 (2.2) | 25곳 그대로: ok 19 + ok* 1 · nav-fail 1(K5) · panic 0 · timeout 0 · `[mb-budget]` 0 | 5곳 ours 7,389 / browser-too 15 (변화 없음 — 2.1 은 버림을 안 바꿈) | 5곳 ours 1,745 / browser-too 11 (변화 없음) | 5곳 10 → **218**(kowiki 0→203), 20곳 275 → **984**(enwiki 66→552) — 아래 메모 | 8/20 그대로(naver·daum·hani·korea-kr·velog·d2·google·enwiki) | **2.1**: 코퍼스 `media-before`(probe 만 바꾼 옛 엔진) → `media-after`. 20곳 `@media` 블록 3,786 → 3,789(`<link media>` 3개가 이제 블록) · 블록 안 규칙 15,417 → 16,220 · 적용 15,417 → **5,754** · "wrong at 1280x800" 범주 규칙 적용 9,223 → **1**(GitHub `print,screen and (width<=1349px) and (width>=768px)` — probe 휴리스틱 오분류, 1280 에서 참이 맞음) · 무효 쿼리 0. 결과·버림·오프라인 미스·기대 컨트롤은 25곳 동일. **요소 목록 diff 10곳** — 모바일 전용이 사라짐(정상): yna −186(메뉴 열기/닫기 ×29 + 모바일 서랍 메뉴 링크·APP설치·광고삭제·뉴스레터), apple −11(모바일 푸터 아코디언 버튼), d2 −2(모바일 검색·메뉴 링크), docsrs −1(모바일 "Crate tokio"), github −1("View all files"). 데스크톱 전용이 나타남(정상): bbc +69(섹션 내비·월드 서비스 언어), yna +20(캐러셀 버튼), github +18(파일 목록·Go to file·Branches/Tags), apple +17(글로벌 내비·검색·장바구니), microsoft +10(상단 내비), hani +6(섹션 링크), d2 +4(검색창·D2 News·Hello world), kowiki +14(전거 통제·바닥글 링크). **버그 → 5단계 몫**: enwiki −494 +240 — Vector 2022 데스크톱 격자(`@media screen and (min-width:1120px)` 의 `.mw-body{display:grid; grid-template: … / minmax(0,59.25rem) min-content; grid-template-areas: …}`)가 이제 적용되는데 `grid-template` 단축·`minmax()` 를 못 읽어 본문 열이 0폭 → navbox 링크 494개가 0폭(관찰에서 빠짐), 슬리버 enwiki 66→552·kowiki 0→203(같은 원인, kowiki 는 링크가 남음). 나타난 240 은 참고문헌 역링크·"145 languages" 버튼(Chrome 데스크톱에도 있음). 기대 컨트롤 enwiki 2/3 그대로. 미리보기 `compat-cache/previews/2.1/`(후만 — 전은 옛 빌드가 필요해 생략): HN 데스크톱 표(문서 높이 1,377 → 1,020, 모바일 규칙 빠짐), GitHub 위쪽 어두운 띠 = 로그아웃 헤더 `div[data-color-mode=dark]`(Chrome 에서도 어두움)가 레이아웃 갭으로 늘어난 것 — `@media` 와 무관, "GitHub 라이트" 판정은 2.2 때. **비트셋 비용**: GitHub `@media` 517블록(쿼리 534) **3.6µs/프레임**, 코퍼스 최대 yna 1,571블록 17µs(release) — 매 프레임 키 확인에 그대로 씀. 퍼저 CSS 긴 실행 10만 무결. 남음: 2.2 `@layer`(GitHub 의 레이어 안 다크 블록 49개는 2.1 평가가 있어 펼쳐도 꺼짐)·2.3 `@supports` — 1단계 뒤. **2.2·2.3 P**(라벨 `layer-before`): 기존 열 25곳 `var` 와 동일 · 건너뛴 at-rule 본문 GitHub **45.6%**(`@layer` 1,161,812B) · `@layer` 최상위 블록 4 + 문장 1(GitHub 만) · `@supports` 120블록 전부 거짓(본문 버림) — [P 메모](#p--probe-변경--전-측정-1). **2.2**(라벨 `layer`): GitHub 만 바뀜 — 건너뛴 at-rule 바이트 **45.6% → 0.7%**, 레이어 안 규칙 5,202 적용, 다크 블록 적용 0 유지, **미리보기 라이트**, 요소 −3("More items" ×2 정상 · "Appearance settings" 버그 = 논리 속성·인라인 SVG 크기 갭, 후속), 합산 지표 5곳 738 → 989, 스타일 패스 647 → 980ms — [2.2 메모](#22--layer-2026-11-28) |
+| 2 @media/@layer/@supports | ✅ 2.1 · P · 2.2 완료 · 2.3 완료(미커밋) — [완료 판정](#2단계-완료-판정-2026-11-28-라벨-supports) | 2.1 `4bd8146` · P `a1863ae` · 2.2 `928b779` · 2.3 미커밋 | 876 → 878 (2.1 probe) → 902 (2.1) → 997 (2.2·2.3 P) → 1012 (2.2) → 1028 (2.3) | 25곳 그대로: ok 19 + ok* 1 · nav-fail 1(K5) · panic 0 · timeout 0 · `[mb-budget]` 0 | 5곳 ours 7,389 / browser-too 15 (변화 없음 — 2.1 은 버림을 안 바꿈) | 5곳 ours 1,745 / browser-too 11 (변화 없음) | 5곳 10 → **218**(kowiki 0→203), 20곳 275 → **984**(enwiki 66→552) — 아래 메모 | 8/20 그대로(naver·daum·hani·korea-kr·velog·d2·google·enwiki) | **2.1**: 코퍼스 `media-before`(probe 만 바꾼 옛 엔진) → `media-after`. 20곳 `@media` 블록 3,786 → 3,789(`<link media>` 3개가 이제 블록) · 블록 안 규칙 15,417 → 16,220 · 적용 15,417 → **5,754** · "wrong at 1280x800" 범주 규칙 적용 9,223 → **1**(GitHub `print,screen and (width<=1349px) and (width>=768px)` — probe 휴리스틱 오분류, 1280 에서 참이 맞음) · 무효 쿼리 0. 결과·버림·오프라인 미스·기대 컨트롤은 25곳 동일. **요소 목록 diff 10곳** — 모바일 전용이 사라짐(정상): yna −186(메뉴 열기/닫기 ×29 + 모바일 서랍 메뉴 링크·APP설치·광고삭제·뉴스레터), apple −11(모바일 푸터 아코디언 버튼), d2 −2(모바일 검색·메뉴 링크), docsrs −1(모바일 "Crate tokio"), github −1("View all files"). 데스크톱 전용이 나타남(정상): bbc +69(섹션 내비·월드 서비스 언어), yna +20(캐러셀 버튼), github +18(파일 목록·Go to file·Branches/Tags), apple +17(글로벌 내비·검색·장바구니), microsoft +10(상단 내비), hani +6(섹션 링크), d2 +4(검색창·D2 News·Hello world), kowiki +14(전거 통제·바닥글 링크). **버그 → 5단계 몫**: enwiki −494 +240 — Vector 2022 데스크톱 격자(`@media screen and (min-width:1120px)` 의 `.mw-body{display:grid; grid-template: … / minmax(0,59.25rem) min-content; grid-template-areas: …}`)가 이제 적용되는데 `grid-template` 단축·`minmax()` 를 못 읽어 본문 열이 0폭 → navbox 링크 494개가 0폭(관찰에서 빠짐), 슬리버 enwiki 66→552·kowiki 0→203(같은 원인, kowiki 는 링크가 남음). 나타난 240 은 참고문헌 역링크·"145 languages" 버튼(Chrome 데스크톱에도 있음). 기대 컨트롤 enwiki 2/3 그대로. 미리보기 `compat-cache/previews/2.1/`(후만 — 전은 옛 빌드가 필요해 생략): HN 데스크톱 표(문서 높이 1,377 → 1,020, 모바일 규칙 빠짐), GitHub 위쪽 어두운 띠 = 로그아웃 헤더 `div[data-color-mode=dark]`(Chrome 에서도 어두움)가 레이아웃 갭으로 늘어난 것 — `@media` 와 무관, "GitHub 라이트" 판정은 2.2 때. **비트셋 비용**: GitHub `@media` 517블록(쿼리 534) **3.6µs/프레임**, 코퍼스 최대 yna 1,571블록 17µs(release) — 매 프레임 키 확인에 그대로 씀. 퍼저 CSS 긴 실행 10만 무결. 남음: 2.2 `@layer`(GitHub 의 레이어 안 다크 블록 49개는 2.1 평가가 있어 펼쳐도 꺼짐)·2.3 `@supports` — 1단계 뒤. **2.2·2.3 P**(라벨 `layer-before`): 기존 열 25곳 `var` 와 동일 · 건너뛴 at-rule 본문 GitHub **45.6%**(`@layer` 1,161,812B) · `@layer` 최상위 블록 4 + 문장 1(GitHub 만) · `@supports` 120블록 전부 거짓(본문 버림) — [P 메모](#p--probe-변경--전-측정-1). **2.2**(라벨 `layer`): GitHub 만 바뀜 — 건너뛴 at-rule 바이트 **45.6% → 0.7%**, 레이어 안 규칙 5,202 적용, 다크 블록 적용 0 유지, **미리보기 라이트**, 요소 −3("More items" ×2 정상 · "Appearance settings" 버그 = 논리 속성·인라인 SVG 크기 갭, 후속), 합산 지표 5곳 738 → 989, 스타일 패스 647 → 980ms — [2.2 메모](#22--layer-2026-11-28). **2.3**(라벨 `supports`): `@supports` 149블록 참 46 · 거짓 103, GitHub 건너뛴 바이트 0.7% → **0.4%**, 판정을 `RENDERED`(옛 probe `CONSUMED`)로 "엔진이 읽는 속성" 까지, 요소 diff enwiki +11(목차, 정상), 5곳 합산 989 → 994, 스타일 시간 그대로 — [2.3 메모](#23--supports-2026-11-28) |
 | 2.1a 위키 그리드 | 🔶 완료(미커밋) | 미커밋 | 902 → **915** | 25곳 그대로(ok 19 + ok* 1 · nav-fail 1 · panic 0 · timeout 0 · `[mb-budget]` 0) | 5곳 ours 7,389 → **7,371** / 15 (20곳 14,112 → 14,078 — `grid-template`·`minmax` 가 이제 읽힘: github 17·enwiki 6·mdn 6·docsrs 2·bbc 2·google 1) | 그대로 | 5곳 218 → **15**, 20곳 984 → **325**(enwiki 552→71 · kowiki 203→0 · **mdn 0→25**) | 8/20 그대로 | [2.1a 메모](#21a-위키-그리드-회귀-수정-2026-11-27). 요소 diff(`media-after` → `grid`) 2곳뿐: enwiki **+484**·kowiki **+230** = navbox 링크(요소 678→1,162 · 767→997). 2.1 전(`media-before`) 대비로는 enwiki +241 −11(+240 은 2.1 의 참고문헌 역링크·언어 버튼), kowiki +244(2.1 의 +14 + navbox 230 — kowiki navbox 는 **2.1 전에도** colspan 표 버그로 빠져 있었고 이번에 처음 보임). 2.1 전 대비 enwiki −11 은 navbox 그룹 셀(`width:1%`) — 표 min-content 바닥 없음, 후속. mdn 슬리버는 사용자 속성 트랙·calc 곱셈 미디어 쿼리(1·5단계 몫), 요소 변화 없음. 문서 높이: enwiki 35,445→16,790 · kowiki 16,345→11,983 · hani 11,898→10,426 · mdn 5,791→6,755 · bbc 25,226→26,042 · docsrs 5,947→6,029 · apple 26,569→26,617(간격·영역 폭 배치·내용 크기 `fr` 행; 요소 목록 동일) |
 | 3 클리핑 | ⏳ | | | 0/0/0 | — | — | 목표 0 | | |
 | 4 셀렉터 | ⏳ | | | 0/0/0 | — | 목표: 대상 범주 0 | — | | |

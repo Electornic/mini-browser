@@ -20,6 +20,7 @@ use cssparser::Parser as CssParser;
 use super::Stylesheet;
 use super::media;
 use super::properties::{self, ValueKind};
+use super::supports;
 
 /// Longest source excerpt kept per dropped item.
 const EXCERPT_LIMIT: usize = 160;
@@ -180,11 +181,11 @@ pub fn media_verdict(prelude: &str, viewport_width: f32, viewport_height: f32) -
 }
 
 /// Whether the engine applies the body of a `@supports` block with this
-/// prelude (on its own; an enclosing block is evaluated separately).
-/// Before compat round 3 step 2.3 every `@supports` body is skipped, so
-/// nothing in one ever applies.
-pub fn supports_verdict(_prelude: &str) -> bool {
-    false
+/// prelude (on its own; an enclosing block is evaluated separately) — the
+/// same parse and [`supports::evaluate`] the stylesheet parser uses. An
+/// invalid prelude is false (the rule is dropped).
+pub fn supports_verdict(prelude: &str) -> bool {
+    supports::SupportsCondition::parse(prelude).is_some_and(|c| supports::evaluate(&c))
 }
 
 impl AtRuleSeen {
@@ -448,7 +449,11 @@ mod tests {
              @media (min-width: 1px) { .c { colour-ish: 1 2 3 } }
              @supports (display: grid) { .d { display: grid } }",
         );
-        assert_eq!(sheet.rules.len(), 2, "the .a rule and the @media .c rule");
+        assert_eq!(
+            sheet.rules.len(),
+            3,
+            "the .a, @media .c and @supports .d rules"
+        );
         let rules: Vec<_> = report
             .dropped_rules
             .iter()
@@ -480,12 +485,7 @@ mod tests {
             at_rules,
             [
                 ("media", "(min-width: 1px)", true, 0),
-                (
-                    "supports",
-                    "(display: grid)",
-                    false,
-                    " .d { display: grid } ".len()
-                )
+                ("supports", "(display: grid)", true, 0)
             ]
         );
     }
@@ -505,7 +505,9 @@ mod tests {
             seen,
             [
                 ("media", 4, None),
-                ("supports", 0, Some(0)),
+                // A false `@supports` body is parsed (its rule counted
+                // here) and dropped (not in the enclosing block's 4).
+                ("supports", 1, Some(0)),
                 ("media", 2, Some(0)),
                 ("media", 1, None)
             ]
@@ -661,14 +663,17 @@ mod tests {
             DropReason::UnsupportedSelector
         );
         // (`@charset` never reaches the at-rule parser: cssparser eats it.)
+        // An invalid `@supports` prelude drops the rule (ours, as filed).
         let (_, report) = parse_with_report(
-            "@charset \"utf-8\"; @-moz-document url-prefix() { a{} } @font-face { src: url(a) }",
+            "@charset \"utf-8\"; @-moz-document url-prefix() { a{} } @font-face { src: url(a) }
+             @supports display: grid { a{} }",
         );
         let reasons: Vec<_> = report.at_rules.iter().map(|a| a.drop_reason()).collect();
         assert_eq!(
             reasons,
             [
                 Some(DropReason::ForeignAtRule),
+                Some(DropReason::SkippedAtRule),
                 Some(DropReason::SkippedAtRule)
             ]
         );

@@ -845,6 +845,118 @@ pub fn lookup(name: &str) -> Option<ValueKind> {
     None
 }
 
+/// Properties something downstream of the cascade actually reads (layout,
+/// paint, the agent index), sorted. A parsed declaration outside this list
+/// is accepted and then ignored — the compat probe counts those as
+/// "parse-only", and `@supports` (step 2.3) holds them unsupported. Kept by
+/// hand from `styled.value("…")` call sites (inherited lookups included):
+/// when the engine starts reading a property, add it here.
+pub const RENDERED: &[&str] = &[
+    "align-content",
+    "align-items",
+    "align-self",
+    "all",
+    "background-color",
+    "background-image",
+    "background-position-x",
+    "background-position-y",
+    "background-size",
+    "border-bottom",
+    "border-bottom-color",
+    "border-bottom-left-radius",
+    "border-bottom-right-radius",
+    "border-bottom-style",
+    "border-color",
+    "border-left",
+    "border-left-color",
+    "border-left-style",
+    "border-right",
+    "border-right-color",
+    "border-right-style",
+    "border-spacing",
+    "border-style",
+    "border-top",
+    "border-top-color",
+    "border-top-left-radius",
+    "border-top-right-radius",
+    "border-top-style",
+    "border-width",
+    "bottom",
+    "box-shadow",
+    "box-sizing",
+    "clear",
+    "color",
+    "column-gap",
+    "display",
+    "flex-basis",
+    "flex-direction",
+    "flex-grow",
+    "flex-shrink",
+    "flex-wrap",
+    "float",
+    "font-family",
+    "font-size",
+    "font-weight",
+    "gap",
+    "grid-area",
+    "grid-auto-flow",
+    "grid-column",
+    "grid-row",
+    "grid-template-areas",
+    "grid-template-columns",
+    "grid-template-rows",
+    "height",
+    "justify-content",
+    "left",
+    "line-height",
+    "margin-bottom",
+    "margin-left",
+    "margin-right",
+    "margin-top",
+    "max-height",
+    "max-width",
+    "min-height",
+    "min-width",
+    "opacity",
+    "overflow",
+    "overflow-x",
+    "overflow-y",
+    "padding-bottom",
+    "padding-left",
+    "padding-right",
+    "padding-top",
+    "position",
+    "right",
+    "row-gap",
+    "text-align",
+    "text-decoration",
+    "text-shadow",
+    "top",
+    "transform",
+    "vertical-align",
+    "white-space",
+    "width",
+    "z-index",
+];
+
+/// Whether the engine reads `name` (lower-cased) after the cascade.
+pub fn is_rendered(name: &str) -> bool {
+    RENDERED.binary_search(&name).is_ok()
+}
+
+/// The standard name a `-webkit-` alias stands for (`-webkit-transform` →
+/// `transform`); any other name as given. Expects a lower-cased name.
+pub fn unprefixed(name: &str) -> &str {
+    match name.strip_prefix("-webkit-") {
+        Some(standard)
+            if find(name).is_none() && !WEBKIT_ONLY.contains(&name) && find(standard).is_some() =>
+        {
+            standard
+        }
+        _ => name,
+    }
+}
+
 fn find(name: &str) -> Option<ValueKind> {
     PROPERTIES
         .binary_search_by(|(entry, _)| (*entry).cmp(name))
@@ -863,7 +975,7 @@ pub fn is_foreign_vendor_prefix(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{PROPERTIES, ValueKind, WEBKIT_ONLY, is_foreign_vendor_prefix, lookup};
+    use super::{PROPERTIES, RENDERED, ValueKind, WEBKIT_ONLY, is_foreign_vendor_prefix, lookup};
 
     #[test]
     fn table_is_sorted_and_unique_for_binary_search() {
@@ -873,6 +985,10 @@ mod tests {
         for name in WEBKIT_ONLY {
             assert!(name.starts_with("-webkit-"));
         }
+        for pair in RENDERED.windows(2) {
+            assert!(pair[0] < pair[1], "{} !< {}", pair[0], pair[1]);
+        }
+        assert!(RENDERED.iter().all(|name| lookup(name).is_some()));
     }
 
     #[test]

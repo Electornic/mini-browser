@@ -744,6 +744,41 @@ mod tests {
     }
 
     #[test]
+    fn supports_true_branch_applies() {
+        let css = ".t { color: #000001 } @supports (display: grid) { .t { color: #000002 } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 2));
+    }
+
+    #[test]
+    fn supports_not_branch_skipped_when_supported() {
+        let css = ".t { color: #000001 } @supports not (display: grid) { .t { color: #000009 } }
+                   @supports (frobnicate: 1) { .t { color: #000009 } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 1));
+    }
+
+    #[test]
+    fn supports_unrendered_value_takes_the_fallback() {
+        // We don't render `position: sticky`: the fallback branch applies.
+        let css = "@supports (position: sticky) { .t { color: #000009 } }
+                   @supports not (position: sticky) { .t { color: #000002 } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 2));
+    }
+
+    #[test]
+    fn supports_nests_with_media_and_layers() {
+        let css = "@layer a { @supports (display: grid) { .t.t { color: #000002 } } }
+                   .t { color: #000001 }
+                   @media print { @supports (display: grid) { .t { color: #000009 } } }
+                   @supports (display: grid) { @media print { .t { color: #000009 } } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 1));
+        // A layer first named inside a false `@supports` keeps its place
+        // (the 2.2 approximation): `b` comes before `a`.
+        let css = "@supports (frobnicate: 1) { @layer b { } }
+                   @layer a { .t { color: #000001 } } @layer b { .t.t { color: #000002 } }";
+        assert_eq!(layered_color(css), rgb(0, 0, 1));
+    }
+
+    #[test]
     fn media_does_not_change_rule_order() {
         // A skipped block must not shift the source order the cascade
         // sorts by: the later matching rule still wins.

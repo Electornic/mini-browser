@@ -3634,6 +3634,46 @@ mod tests {
         find(layout, class).unwrap_or_else(|| panic!("no box with class {class}"))
     }
 
+    /// `css::supports::UNRENDERED` value entries are really unrendered:
+    /// when one of these starts failing, the feature works — take its
+    /// entry off the list (or `@supports` keeps choosing the fallback).
+    #[test]
+    fn supports_unrendered_list_matches_layout() {
+        let unrendered = |property: &str, value: &str| {
+            css::supports::UNRENDERED.contains(&(property, Some(value)))
+        };
+        // `position: sticky` stays where static flow puts it (a sticky box
+        // with `top: 10px` at the top of the page would sit at y = 10).
+        assert!(unrendered("position", "sticky"));
+        let layout = page(
+            r#"<div class="s">x</div><div style="height:2000px"></div>"#,
+            ".s { position: sticky; top: 10px; }",
+            (800.0, 600.0),
+        );
+        assert_eq!(by_class(&layout, "s").dimensions.content.y, 0.0);
+        // `display: contents` still makes a box of its own (it would
+        // have none, its padding gone).
+        assert!(unrendered("display", "contents"));
+        let layout = page(
+            r#"<div class="c"><p>x</p></div>"#,
+            ".c { display: contents; padding: 10px; }",
+            (800.0, 600.0),
+        );
+        assert_eq!(by_class(&layout, "c").dimensions.padding.top, 10.0);
+        // `display: -webkit-box` stacks its children (Chrome lays them in
+        // a row).
+        assert!(unrendered("display", "-webkit-box"));
+        let layout = page(
+            r#"<div class="w"><div class="a">a</div><div class="b">b</div></div>"#,
+            ".w { display: -webkit-box; } .a, .b { width: 50px; }",
+            (800.0, 600.0),
+        );
+        assert!(
+            by_class(&layout, "b").dimensions.content.y
+                > by_class(&layout, "a").dimensions.content.y
+        );
+    }
+
     fn height_of(layout: &LayoutBox, class: &str) -> f32 {
         by_class(layout, class).dimensions.content.height
     }

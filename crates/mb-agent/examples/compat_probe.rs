@@ -43,100 +43,6 @@ use mb_runtime::{
     net, style,
 };
 
-/// Properties something downstream of the cascade actually reads (layout,
-/// paint, the agent index). A parsed declaration outside this list is
-/// accepted and then ignored. Kept by hand from `styled.value("…")` call
-/// sites; inherited lookups (`color`, `font-*`…) included.
-const CONSUMED: &[&str] = &[
-    // Step 1b: `all` (the cascade), per-side border colours (paint) and
-    // styles (the style pass zeroes a `none`/`hidden` side), background-size.
-    "all",
-    "background-size",
-    "border-bottom-color",
-    "border-bottom-style",
-    "border-left-color",
-    "border-left-style",
-    "border-right-color",
-    "border-right-style",
-    "border-top-color",
-    "border-top-style",
-    "align-content",
-    "align-items",
-    "align-self",
-    "background-color",
-    "background-image",
-    "background-position-x",
-    "background-position-y",
-    "border-bottom",
-    "border-bottom-left-radius",
-    "border-bottom-right-radius",
-    "border-color",
-    "border-left",
-    "border-right",
-    "border-spacing",
-    "border-style",
-    "border-top",
-    "border-top-left-radius",
-    "border-top-right-radius",
-    "border-width",
-    "bottom",
-    "box-shadow",
-    "box-sizing",
-    "clear",
-    "color",
-    "column-gap",
-    "display",
-    "flex-basis",
-    "flex-direction",
-    "flex-grow",
-    "flex-shrink",
-    "flex-wrap",
-    "float",
-    "font-family",
-    "font-size",
-    "font-weight",
-    "gap",
-    "grid-area",
-    "grid-auto-flow",
-    "grid-column",
-    "grid-row",
-    "grid-template-areas",
-    "grid-template-columns",
-    "grid-template-rows",
-    "height",
-    "justify-content",
-    "left",
-    "line-height",
-    "margin-bottom",
-    "margin-left",
-    "margin-right",
-    "margin-top",
-    "max-height",
-    "max-width",
-    "min-height",
-    "min-width",
-    "opacity",
-    "overflow",
-    "overflow-x",
-    "overflow-y",
-    "padding-bottom",
-    "padding-left",
-    "padding-right",
-    "padding-top",
-    "position",
-    "right",
-    "row-gap",
-    "text-align",
-    "text-decoration",
-    "text-shadow",
-    "top",
-    "transform",
-    "vertical-align",
-    "white-space",
-    "width",
-    "z-index",
-];
-
 fn main() {
     let mut args = std::env::args().skip(1);
     let usage = "usage: compat_probe URL OUT_DIR [\"role:name;…\"]";
@@ -709,7 +615,7 @@ struct CssCounts {
     /// Kept declarations of a property with a modelled value kind whose
     /// value is a `Keyword` that kind doesn't accept (`width: 100vw`).
     keyword_fallback: usize,
-    /// Kept declarations nothing downstream reads (see `CONSUMED`).
+    /// Kept declarations nothing downstream reads (`properties::RENDERED`).
     parse_only: usize,
     /// Kept declarations invalid at computed-value time on at least one
     /// node (`style::StyleReport::iacvt`) — a `var()` that didn't resolve.
@@ -818,7 +724,7 @@ fn css_drops(
                     seen_keys.push(key);
                 }
                 c.decl_kept += 1;
-                if !decl.name.starts_with("--") && !CONSUMED.contains(&decl.name.as_str()) {
+                if !decl.name.starts_with("--") && !properties::is_rendered(&decl.name) {
                     c.parse_only += 1;
                     *ignored.entry(decl.name.clone()).or_default() += 1;
                 }
@@ -1091,10 +997,17 @@ fn count_blocks(
     // Rules of the kept blocks directly inside each at-rule.
     let mut nested_rules = vec![0usize; at_rules.len()];
     for at_rule in at_rules {
+        // A false `@supports` body is parsed (its rules counted in it) but
+        // hands none to the enclosing block.
+        let handed_up = if at_rule.name == "supports" && !css::supports_verdict(&at_rule.prelude) {
+            0
+        } else {
+            at_rule.rules
+        };
         if let Some(parent) = at_rule.parent
             && let Some(slot) = nested_rules.get_mut(parent)
         {
-            *slot += at_rule.rules;
+            *slot += handed_up;
         }
     }
     let top = Chain {
