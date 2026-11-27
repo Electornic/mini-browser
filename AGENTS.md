@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1035 (workspace 합계, 2026-11-28 호환성 3차 후속 F1b 크기 탐색 중 `%` 패딩 +1; F1 SVG 크기·논리 속성은 1034, 2.3 `@supports` 는 1028). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1041 (workspace 합계, 2026-11-28 호환성 3차 후속 F2 값 파서 갭 +6; F1b 는 1035, F1 SVG 크기·논리 속성은 1034). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -239,6 +239,11 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 ### `@layer` 순위는 스타일 패스마다 문서 단위로 (호환성 3차 2.2)
 - 규칙은 `Rule::layer`(시트 안 레이어 번호)만 들고, 순위는 `style_pass` 가 시작할 때 `css::layer::document_layer_ranks` 가 **모든 시트를 합쳐** 매긴다(같은 이름 = 같은 레이어, 후위 순서 — 자식 레이어 < 부모 직속 규칙). 시트 하나만 보고 순위를 정하지 말 것(뒤 시트·뒤 문장이 순서를 바꾼다). 캐스케이드 키는 `(순위, 특정성, 순서)` 이고, 중요 패스는 순위를 뒤집는다. 레이어 밖은 `UNLAYERED`(`u32::MAX`). `style` 속성은 레이어보다 먼저 비교되어 같은 중요도의 모든 레이어를 이긴다.
 - 거짓 `@media` 안에서 처음 나온 레이어도 등장 순으로 순서에 든다(문서화된 근사).
+
+### 색·별칭·`transform` (호환성 3차 후속 F2)
+- 이름 있는 색은 CSS 148개 전부(`css/color.rs` 정렬 표). `currentcolor` 는 파서가 `Keyword("currentcolor")` 하나로 정규화하고 **스타일 패스가 색으로 푼다**(`resolve_current_color` — `color` 자신은 부모 색). 소비자 코드에서 `currentcolor` 키워드를 처리하지 말 것.
+- `-webkit-` 별칭은 Chrome 이 받는 것(`properties::WEBKIT_ALIASES`)만 선언 파서가 **표준 이름으로 바꿔** 그 파서로 읽는다 — 선언 이름도 표준 이름이 된다. `-moz-`/`-ms-` 는 별칭이 아니다. 새 별칭은 이 표에(정렬 유지).
+- `transform` 의 이동은 px·`%`·0 만(`%` = `TransformOp::TranslatePercent`, 페인트가 테두리 상자 기준으로 풂), z 성분은 버림, `none` = 빈 목록. 다른 단위를 px 로 읽지 말 것.
 
 ### 논리 속성과 인라인 SVG (호환성 3차 후속 F1)
 - `inline-size`·`margin-inline(-start/-end)`·`padding-block`·`inset-inline`·`border-inline(-*)`·`border-start-end-radius` 등은 **파싱 때 물리 속성으로 바뀐다**(`css/logical.rs` — 가로 쓰기·ltr 고정, 이름 바꾸기 / 한두 값을 시작·끝으로 / 같은 값을 양쪽으로). 캐스케이드·레이아웃·페인트는 물리 이름만 본다 — 소비자 코드에서 논리 이름을 찾지 말 것. 새 논리 속성은 `logical::logical` 표에(`longhands_of` 가 같은 표로 `var()` 경로도 펼친다).

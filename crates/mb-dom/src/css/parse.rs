@@ -29,6 +29,9 @@ pub(super) fn parse_value<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseE
             let raw = ident.to_string();
             if let Some(color) = named_color(&raw) {
                 Value::Color(color)
+            } else if raw.eq_ignore_ascii_case("currentcolor") {
+                // One spelling for the style pass to resolve (F2).
+                Value::Keyword("currentcolor".into())
             } else {
                 Value::Keyword(raw)
             }
@@ -64,28 +67,25 @@ fn parse_hex_color_str<'i>(hex: &str, input: &CssParser<'i>) -> Result<Value, Pa
     // A hash token's value is an identifier and may be multibyte; the
     // length match and byte slicing below assume ASCII.
     let len = if hex.is_ascii() { hex.len() } else { 0 };
-    let (r, g, b) = match len {
-        3 => {
-            let chars: Vec<char> = hex.chars().collect();
-            (
-                expand_hex(chars[0])?,
-                expand_hex(chars[1])?,
-                expand_hex(chars[2])?,
-            )
-        }
-        6 => (
-            parse_hex_pair(&hex[0..2])?,
-            parse_hex_pair(&hex[2..4])?,
-            parse_hex_pair(&hex[4..6])?,
-        ),
+    let digit = |i: usize| -> Result<u8, ParseError> {
+        let c = hex.as_bytes().get(i).copied().unwrap_or(b'x') as char;
+        expand_hex(c)
+    };
+    let pair = |i: usize| -> Result<u8, ParseError> { parse_hex_pair(&hex[i..i + 2]) };
+    // #rgb, #rgba (CSS Color 4 — follow-up F2), #rrggbb, #rrggbbaa.
+    let (r, g, b, a) = match len {
+        3 => (digit(0)?, digit(1)?, digit(2)?, 255),
+        4 => (digit(0)?, digit(1)?, digit(2)?, digit(3)?),
+        6 => (pair(0)?, pair(2)?, pair(4)?, 255),
+        8 => (pair(0)?, pair(2)?, pair(4)?, pair(6)?),
         _ => {
             return Err(ParseError::new(
                 input.position().byte_index(),
-                "hex colors must use either 3 or 6 digits",
+                "hex colors use 3, 4, 6 or 8 digits",
             ));
         }
     };
-    Ok(Value::Color(Color { r, g, b, a: 255 }))
+    Ok(Value::Color(Color { r, g, b, a }))
 }
 
 fn parse_hex_pair(pair: &str) -> Result<u8, ParseError> {

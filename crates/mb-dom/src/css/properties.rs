@@ -944,17 +944,150 @@ pub fn is_rendered(name: &str) -> bool {
     RENDERED.binary_search(&name).is_ok()
 }
 
-/// The standard name a `-webkit-` alias stands for (`-webkit-transform` →
+/// The `-webkit-` names Chrome accepts as aliases of a standard property
+/// (its `css_properties.json5` `alias_for` list, sorted; follow-up F2). The
+/// parser stores a declaration under the standard name and parses it with
+/// that property's parser. Other engines' prefixes (`-moz-`, `-ms-`) are
+/// never aliases in Chrome. [`lookup`] still accepts any `-webkit-` form of
+/// a listed property — the frozen ours / browser-too table — but only
+/// these are routed.
+pub const WEBKIT_ALIASES: &[(&str, &str)] = &[
+    ("-webkit-align-content", "align-content"),
+    ("-webkit-align-items", "align-items"),
+    ("-webkit-align-self", "align-self"),
+    ("-webkit-animation", "animation"),
+    ("-webkit-animation-delay", "animation-delay"),
+    ("-webkit-animation-direction", "animation-direction"),
+    ("-webkit-animation-duration", "animation-duration"),
+    ("-webkit-animation-fill-mode", "animation-fill-mode"),
+    (
+        "-webkit-animation-iteration-count",
+        "animation-iteration-count",
+    ),
+    ("-webkit-animation-name", "animation-name"),
+    ("-webkit-animation-play-state", "animation-play-state"),
+    (
+        "-webkit-animation-timing-function",
+        "animation-timing-function",
+    ),
+    ("-webkit-appearance", "appearance"),
+    ("-webkit-backdrop-filter", "backdrop-filter"),
+    ("-webkit-backface-visibility", "backface-visibility"),
+    ("-webkit-background-clip", "background-clip"),
+    ("-webkit-background-origin", "background-origin"),
+    ("-webkit-background-size", "background-size"),
+    ("-webkit-border-after", "border-block-end"),
+    ("-webkit-border-after-color", "border-block-end-color"),
+    ("-webkit-border-after-style", "border-block-end-style"),
+    ("-webkit-border-after-width", "border-block-end-width"),
+    ("-webkit-border-before", "border-block-start"),
+    ("-webkit-border-before-color", "border-block-start-color"),
+    ("-webkit-border-before-style", "border-block-start-style"),
+    ("-webkit-border-before-width", "border-block-start-width"),
+    (
+        "-webkit-border-bottom-left-radius",
+        "border-bottom-left-radius",
+    ),
+    (
+        "-webkit-border-bottom-right-radius",
+        "border-bottom-right-radius",
+    ),
+    ("-webkit-border-end", "border-inline-end"),
+    ("-webkit-border-end-color", "border-inline-end-color"),
+    ("-webkit-border-end-style", "border-inline-end-style"),
+    ("-webkit-border-end-width", "border-inline-end-width"),
+    ("-webkit-border-radius", "border-radius"),
+    ("-webkit-border-start", "border-inline-start"),
+    ("-webkit-border-start-color", "border-inline-start-color"),
+    ("-webkit-border-start-style", "border-inline-start-style"),
+    ("-webkit-border-start-width", "border-inline-start-width"),
+    ("-webkit-border-top-left-radius", "border-top-left-radius"),
+    ("-webkit-border-top-right-radius", "border-top-right-radius"),
+    ("-webkit-box-shadow", "box-shadow"),
+    ("-webkit-box-sizing", "box-sizing"),
+    ("-webkit-clip-path", "clip-path"),
+    ("-webkit-column-count", "column-count"),
+    ("-webkit-column-gap", "column-gap"),
+    ("-webkit-column-rule", "column-rule"),
+    ("-webkit-column-rule-color", "column-rule-color"),
+    ("-webkit-column-rule-style", "column-rule-style"),
+    ("-webkit-column-rule-width", "column-rule-width"),
+    ("-webkit-column-span", "column-span"),
+    ("-webkit-column-width", "column-width"),
+    ("-webkit-columns", "columns"),
+    ("-webkit-filter", "filter"),
+    ("-webkit-flex", "flex"),
+    ("-webkit-flex-basis", "flex-basis"),
+    ("-webkit-flex-direction", "flex-direction"),
+    ("-webkit-flex-flow", "flex-flow"),
+    ("-webkit-flex-grow", "flex-grow"),
+    ("-webkit-flex-shrink", "flex-shrink"),
+    ("-webkit-flex-wrap", "flex-wrap"),
+    ("-webkit-font-feature-settings", "font-feature-settings"),
+    ("-webkit-hyphens", "hyphens"),
+    ("-webkit-justify-content", "justify-content"),
+    ("-webkit-logical-height", "block-size"),
+    ("-webkit-logical-width", "inline-size"),
+    ("-webkit-margin-after", "margin-block-end"),
+    ("-webkit-margin-before", "margin-block-start"),
+    ("-webkit-margin-end", "margin-inline-end"),
+    ("-webkit-margin-start", "margin-inline-start"),
+    ("-webkit-mask", "mask"),
+    ("-webkit-mask-clip", "mask-clip"),
+    ("-webkit-mask-composite", "mask-composite"),
+    ("-webkit-mask-image", "mask-image"),
+    ("-webkit-mask-origin", "mask-origin"),
+    ("-webkit-mask-position", "mask-position"),
+    ("-webkit-mask-repeat", "mask-repeat"),
+    ("-webkit-mask-size", "mask-size"),
+    ("-webkit-max-logical-height", "max-block-size"),
+    ("-webkit-max-logical-width", "max-inline-size"),
+    ("-webkit-min-logical-height", "min-block-size"),
+    ("-webkit-min-logical-width", "min-inline-size"),
+    ("-webkit-opacity", "opacity"),
+    ("-webkit-order", "order"),
+    ("-webkit-padding-after", "padding-block-end"),
+    ("-webkit-padding-before", "padding-block-start"),
+    ("-webkit-padding-end", "padding-inline-end"),
+    ("-webkit-padding-start", "padding-inline-start"),
+    ("-webkit-perspective", "perspective"),
+    ("-webkit-perspective-origin", "perspective-origin"),
+    ("-webkit-shape-image-threshold", "shape-image-threshold"),
+    ("-webkit-shape-margin", "shape-margin"),
+    ("-webkit-shape-outside", "shape-outside"),
+    ("-webkit-text-emphasis", "text-emphasis"),
+    ("-webkit-text-emphasis-color", "text-emphasis-color"),
+    ("-webkit-text-emphasis-position", "text-emphasis-position"),
+    ("-webkit-text-emphasis-style", "text-emphasis-style"),
+    ("-webkit-text-size-adjust", "text-size-adjust"),
+    ("-webkit-transform", "transform"),
+    ("-webkit-transform-origin", "transform-origin"),
+    ("-webkit-transform-style", "transform-style"),
+    ("-webkit-transition", "transition"),
+    ("-webkit-transition-delay", "transition-delay"),
+    ("-webkit-transition-duration", "transition-duration"),
+    ("-webkit-transition-property", "transition-property"),
+    (
+        "-webkit-transition-timing-function",
+        "transition-timing-function",
+    ),
+    ("-webkit-user-select", "user-select"),
+    ("-webkit-writing-mode", "writing-mode"),
+];
+
+/// The standard property a Chrome `-webkit-` alias stands for (`None` for
+/// any other name). Expects a lower-cased name.
+pub fn chrome_alias(name: &str) -> Option<&'static str> {
+    WEBKIT_ALIASES
+        .binary_search_by(|(alias, _)| (*alias).cmp(name))
+        .ok()
+        .map(|index| WEBKIT_ALIASES[index].1)
+}
+
+/// The standard name of a Chrome `-webkit-` alias (`-webkit-transform` →
 /// `transform`); any other name as given. Expects a lower-cased name.
 pub fn unprefixed(name: &str) -> &str {
-    match name.strip_prefix("-webkit-") {
-        Some(standard)
-            if find(name).is_none() && !WEBKIT_ONLY.contains(&name) && find(standard).is_some() =>
-        {
-            standard
-        }
-        _ => name,
-    }
+    chrome_alias(name).unwrap_or(name)
 }
 
 fn find(name: &str) -> Option<ValueKind> {
@@ -975,7 +1108,10 @@ pub fn is_foreign_vendor_prefix(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{PROPERTIES, RENDERED, ValueKind, WEBKIT_ONLY, is_foreign_vendor_prefix, lookup};
+    use super::{
+        PROPERTIES, RENDERED, ValueKind, WEBKIT_ALIASES, WEBKIT_ONLY, is_foreign_vendor_prefix,
+        lookup,
+    };
 
     #[test]
     fn table_is_sorted_and_unique_for_binary_search() {
@@ -989,6 +1125,13 @@ mod tests {
             assert!(pair[0] < pair[1], "{} !< {}", pair[0], pair[1]);
         }
         assert!(RENDERED.iter().all(|name| lookup(name).is_some()));
+        for pair in WEBKIT_ALIASES.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "{} !< {}", pair[0].0, pair[1].0);
+        }
+        for (alias, standard) in WEBKIT_ALIASES {
+            assert!(alias.starts_with("-webkit-"), "{alias}");
+            assert!(lookup(standard).is_some(), "{alias} → unknown {standard}");
+        }
     }
 
     #[test]

@@ -290,6 +290,9 @@ mod tests {
         // A dedicated parser's result counts.
         assert_eq!(supports("(border: 1px solid red)"), Some(true));
         assert_eq!(supports("(display: flexbox)"), Some(false));
+        // Every named colour (mdn's `not (color: light-dark(tan, tan))`).
+        assert_eq!(supports("(color: light-dark(tan, tan))"), Some(true));
+        assert_eq!(supports("not (color: light-dark(tan, tan))"), Some(false));
         // Typed, parsed, but nothing reads it: unsupported.
         assert_eq!(supports("(overflow-wrap: anywhere)"), Some(false));
         assert_eq!(supports("(word-break: break-word)"), Some(false));

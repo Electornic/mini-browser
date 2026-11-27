@@ -1646,6 +1646,10 @@ const CSS_DEDICATED: &[&str] = &[
     "border",
     "font",
     "gap",
+    // Follow-up F2: Chrome `-webkit-` aliases.
+    "-webkit-transform",
+    "-webkit-box-shadow",
+    "-webkit-flex",
     // Follow-up F1: logical properties.
     "inline-size",
     "margin-inline",
@@ -1991,10 +1995,26 @@ fn soup_value(rng: &mut Rng, property: &str) -> String {
             "0 1px red, inset 0 1px blue",
             "red 0 0 1px",
         ]),
-        "transform" => *rng.pick(&[
+        "transform" | "-webkit-transform" => *rng.pick(&[
             "rotate(1deg) translate(1px, 2px)",
             "scale(2) matrix(1,0,0,1,1,1)",
             "translateX(1%)",
+            // Follow-up F2.
+            "none",
+            "translate(-50%, -50%)",
+            "translate3d(1e39px, 0, 1px) translateZ(0)",
+            "matrix(1e39, 0, 0, -1e39, 1e39, 0)",
+            "matrix(0, 0, 0, 0, 0, 0) scale3d(150%, -1, 0)",
+            "rotateZ(1turn) TRANSLATEY(-1e39%)",
+        ]),
+        "color" | "background-color" => *rng.pick(&[
+            "tan",
+            "RebeccaPurple",
+            "#f008",
+            "#11223380",
+            "#12345",
+            "currentcolor",
+            "transparent",
         ]),
         "flex" => *rng.pick(&["1 1 0%", "2 3", "1px", "none", "1 1 0", "auto 1", "1"]),
         "grid-template-columns" | "grid-template-rows" => *rng.pick(&[

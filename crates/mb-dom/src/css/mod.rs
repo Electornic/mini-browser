@@ -272,6 +272,11 @@ pub enum TransformOp {
     /// CSS unit again). Rotation breaks axis-aligned rasterizing and
     /// triggers the slow inverse-pixel-sample path.
     Rotate(f32),
+    /// The percentage part of a translate (follow-up F2), in percent of the
+    /// box's own border box — paint resolves it (`translate(-50%, -50%)`).
+    TranslatePercent { x: f32, y: f32 },
+    /// `matrix(a, b, c, d, e, f)` — the affine itself (e, f in px).
+    Matrix([f32; 6]),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -762,7 +767,11 @@ impl<'i> cssparser::DeclarationParser<'i> for DeclHandler {
         // Dispatch by property name to mirror the old `parse_declaration`. The
         // value-shape helpers each consume their delimited slice end-to-end so
         // `parse_value` itself just routes by name.
-        let name = name.to_string();
+        // A Chrome `-webkit-` alias is the standard property (F2).
+        let lower = name.to_ascii_lowercase();
+        let name = properties::chrome_alias(&lower)
+            .map(str::to_string)
+            .unwrap_or_else(|| name.to_string());
         // The value ends before a `!`; what follows must be exactly
         // `!important` (any case, whitespace/comments allowed) — anything
         // else (`!ie`, `!important foo`) leaves input behind and the
@@ -1108,6 +1117,7 @@ fn unparsed_declarations(name: &str, raw: String) -> Vec<Declaration> {
 /// Parse `text` as the value of `name` (a property or a shorthand) — the
 /// re-parse after `var()` substitution (step 1c). `None` when invalid.
 pub fn parse_property_value(name: &str, text: &str) -> Option<Vec<Declaration>> {
+    let name = properties::chrome_alias(name).unwrap_or(name);
     let mut parser = CssParser::new(text);
     parser
         .parse_entirely(|input| {
@@ -1980,9 +1990,15 @@ mod tests {
                 a: 0,
             })
         );
+        // Every CSS named colour since follow-up F2 (was the 22 basics).
         assert_eq!(
             stylesheet.rules[1].declarations[0].value,
-            Value::Keyword("SkyBlue".into())
+            Value::Color(Color {
+                r: 135,
+                g: 206,
+                b: 235,
+                a: 255,
+            })
         );
         assert_eq!(
             stylesheet.rules[1].declarations[1].value,
@@ -2980,6 +2996,116 @@ mod tests {
         let sheet = parse(&chain).unwrap();
         let ranks = super::layer::document_layer_ranks(std::slice::from_ref(&sheet));
         assert_eq!(ranks[0].first(), Some(&(ranks[0].len() as u32 - 1)));
+    }
+
+    // ---- F2: value parser gaps ----
+
+    fn rgba(r: u8, g: u8, b: u8, a: u8) -> Value {
+        Value::Color(Color { r, g, b, a })
+    }
+
+    #[test]
+    fn all_css_named_colors_parse() {
+        let d = decls(
+            "color: tan; background-color: RebeccaPurple; border-top-color: darkgrey;
+             outline-color: lightgoldenrodyellow; caret-color: transparent",
+        );
+        assert_eq!(d["color"], rgba(0xd2, 0xb4, 0x8c, 255));
+        assert_eq!(d["background-color"], rgba(0x66, 0x33, 0x99, 255));
+        assert_eq!(d["border-top-color"], rgba(0xa9, 0xa9, 0xa9, 255));
+        assert_eq!(d["outline-color"], rgba(0xfa, 0xfa, 0xd2, 255));
+        assert_eq!(d["caret-color"], rgba(0, 0, 0, 0));
+        // All 148 names (the CSS Color 4 list) and `transparent`.
+        assert_eq!(super::color::NAMED_COLORS.len(), 148);
+        assert!(
+            super::color::NAMED_COLORS
+                .iter()
+                .all(|(name, _)| super::color::named_color(name).is_some())
+        );
+        assert_eq!(decls("color: currentColor")["color"], kw("currentcolor"));
+    }
+
+    #[test]
+    fn hex_colors_take_four_and_eight_digits() {
+        let d = decls("color: #f008; background-color: #11223380; border-top-color: #ABCD");
+        assert_eq!(d["color"], rgba(255, 0, 0, 0x88));
+        assert_eq!(d["background-color"], rgba(0x11, 0x22, 0x33, 0x80));
+        assert_eq!(d["border-top-color"], rgba(0xaa, 0xbb, 0xcc, 0xdd));
+        for bad in ["#12345", "#1234567", "#ggg", "#123456789"] {
+            assert!(
+                !decls(&format!("color: {bad}")).contains_key("color"),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn chrome_webkit_aliases_use_the_standard_parser() {
+        let d = decls(
+            "-webkit-transform: rotate(90deg); -webkit-box-shadow: 0 1px 2px red;
+             -webkit-border-radius: 4px; -webkit-flex: 1; -webkit-margin-start: 3px;
+             -webkit-transition: opacity .2s; -webkit-box-sizing: border-box",
+        );
+        assert!(matches!(d["transform"], Value::TransformList(_)), "{d:?}");
+        assert!(matches!(d["box-shadow"], Value::BoxShadow(_)), "{d:?}");
+        assert_eq!(d["border-top-left-radius"], px(4.0));
+        assert_eq!(d["flex-grow"], Value::Number(1.0));
+        assert_eq!(d["margin-left"], px(3.0));
+        assert_eq!(d["box-sizing"], kw("border-box"));
+        assert!(d.contains_key("transition"));
+        assert!(!d.keys().any(|k| k.starts_with("-webkit-")), "{d:?}");
+        // Not a Chrome alias: no routing (and `-moz-` is never one).
+        let d = decls("-webkit-display: grid; -moz-transform: rotate(1deg)");
+        assert!(!d.contains_key("display"), "{d:?}");
+        assert!(!d.contains_key("transform"), "{d:?}");
+    }
+
+    #[test]
+    fn transform_values_beyond_translate_and_scale() {
+        use super::TransformOp::{Matrix, Rotate, Scale, Translate, TranslatePercent};
+        let list = |v: &str| match decls(&format!("transform: {v}")).remove("transform") {
+            Some(Value::TransformList(ops)) => Some(ops),
+            _ => None,
+        };
+        assert_eq!(list("none"), Some(vec![]));
+        assert_eq!(list("translateZ(0)"), Some(vec![]));
+        assert_eq!(
+            list("translate3d(1px, 2px, 3px)"),
+            Some(vec![Translate { x: 1.0, y: 2.0 }])
+        );
+        assert_eq!(
+            list("translate(-50%, 10px)"),
+            Some(vec![
+                TranslatePercent { x: -50.0, y: 0.0 },
+                Translate { x: 0.0, y: 10.0 }
+            ])
+        );
+        assert_eq!(
+            list("translateY(-50%)"),
+            Some(vec![TranslatePercent { x: 0.0, y: -50.0 }])
+        );
+        assert_eq!(
+            list("TRANSLATEX(1px)"),
+            Some(vec![Translate { x: 1.0, y: 0.0 }])
+        );
+        assert_eq!(list("scale(150%)"), Some(vec![Scale { x: 1.5, y: 1.5 }]));
+        assert_eq!(
+            list("scale3d(2, 3, 4)"),
+            Some(vec![Scale { x: 2.0, y: 3.0 }])
+        );
+        assert_eq!(
+            list("rotateZ(180deg)"),
+            Some(vec![Rotate(std::f32::consts::PI)])
+        );
+        assert_eq!(
+            list("matrix(1, 0, 0, 1, 5, 6)"),
+            Some(vec![Matrix([1.0, 0.0, 0.0, 1.0, 5.0, 6.0])])
+        );
+        // Units the renderer can't place are invalid, not silently px.
+        assert_eq!(list("translate(1em)"), None);
+        assert_eq!(list("scale(2px)"), None);
+        assert_eq!(list("none translate(1px)"), None);
+        assert_eq!(list("matrix(1, 0, 0, 1, 5)"), None);
     }
 
     fn ordered(css: &str) -> Vec<(String, Value)> {

@@ -271,16 +271,27 @@ pub fn transform_for(layout_box: &LayoutBox) -> Affine {
     if ops.is_empty() {
         return Affine::IDENTITY;
     }
+    let border = layout_box.dimensions.border_box();
     let mut raw = Affine::IDENTITY;
     for op in ops {
         let m = match op {
             TransformOp::Translate { x, y } => Affine::translate(*x, *y),
+            TransformOp::TranslatePercent { x, y } => {
+                Affine::translate(x / 100.0 * border.width, y / 100.0 * border.height)
+            }
             TransformOp::Scale { x, y } => Affine::scale(*x, *y),
             TransformOp::Rotate(theta) => Affine::rotate(*theta),
+            TransformOp::Matrix([a, b, c, d, e, f]) => Affine {
+                a: *a,
+                b: *b,
+                c: *c,
+                d: *d,
+                e: *e,
+                f: *f,
+            },
         };
         raw = raw.compose(m);
     }
-    let border = layout_box.dimensions.border_box();
     let cx = border.x + border.width * 0.5;
     let cy = border.y + border.height * 0.5;
     Affine::translate(cx, cy)

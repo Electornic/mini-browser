@@ -2245,6 +2245,32 @@ mod tests {
     }
 
     #[test]
+    fn transform_percent_translate_uses_the_border_box() {
+        // `translate(-50%, -50%)` (the centering idiom) moves by half the
+        // box's own border box, not by 50px (F2).
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            "#card { width: 40px; height: 20px; padding: 0 10px; background-color: red;
+                     transform: translate(-50%, -50%); }",
+        );
+        let rect = match commands.as_slice() {
+            [DisplayCommand::SolidRect(_, rect)] => *rect,
+            other => panic!("expected one SolidRect, got {other:?}"),
+        };
+        assert_eq!((rect.x, rect.y), (-30.0, -10.0));
+        let commands = display_list(
+            r#"<div id="card"></div>"#,
+            "#card { width: 20px; height: 8px; background-color: red;
+                     transform: matrix(1, 0, 0, 1, 5, 6); }",
+        );
+        let rect = match commands.as_slice() {
+            [DisplayCommand::SolidRect(_, rect)] => *rect,
+            other => panic!("expected one SolidRect, got {other:?}"),
+        };
+        assert_eq!((rect.x, rect.y), (5.0, 6.0));
+    }
+
+    #[test]
     fn transform_translate_inherits_to_descendant() {
         // The parent's translate should compose into the child's emitted
         // commands as well (paint-pass thread of `inherited_transform`).

@@ -307,6 +307,12 @@ fn style_tree_inner(
         }
     }
 
+    // `currentcolor` (follow-up F2) is the element's `color`; on `color`
+    // itself it is the parent's. Resolved here, after inheritance, so
+    // paint only ever sees colours (it understood the keyword for border
+    // colours only).
+    resolve_current_color(&mut specified_values, parent_values);
+
     // A side whose border style is `none`/`hidden` has a 0 border width
     // (CSS 2.1 §8.5.3) — `border: none`, or a `border-{side}` shorthand
     // that omitted the style (step 1b). Only an explicit style counts: UA
@@ -469,6 +475,29 @@ pub(super) const INHERITED_PROPERTIES: &[&str] = &[
     // the UA defaults, but the renderer shapes the *text* child.
     "font-weight",
 ];
+
+/// Replace `currentcolor` keywords with the computed `color` (see the call).
+fn resolve_current_color(values: &mut PropertyMap, parent_values: Option<&PropertyMap>) {
+    let is_current = |v: &Value| matches!(v, Value::Keyword(k) if k == "currentcolor");
+    if values.get("color").is_some_and(is_current) {
+        match parent_values.and_then(|p| p.get("color")).cloned() {
+            Some(parent) => {
+                values.insert("color".into(), parent);
+            }
+            None => {
+                values.remove("color");
+            }
+        }
+    }
+    let Some(own) = values.get("color").cloned() else {
+        return;
+    };
+    for (name, value) in values.iter_mut() {
+        if name != "color" && is_current(value) {
+            *value = own.clone();
+        }
+    }
+}
 
 /// Resolve `inherit` / `initial` / `unset` / `revert` / `revert-layer` in
 /// place (see the call site). Returns the inherited properties that became
@@ -747,6 +776,25 @@ mod tests {
                    @layer a. { .t { color: #000009 } }
                    @layer 1x { .t { color: #000009 } }";
         assert_eq!(layered_color(css), rgb(0, 0, 1));
+    }
+
+    #[test]
+    fn currentcolor_resolves_to_the_color_property() {
+        let (document, root) =
+            parse_html(r#"<div class="p"><p class="t">x</p><p class="u">y</p></div>"#);
+        let sheet = parse_css(
+            ".p { color: #000001 }
+             .t { color: #000002; background-color: currentcolor; border-top-color: currentColor }
+             .u { color: currentcolor; outline-color: currentcolor }",
+        );
+        let styled = style::style_tree(&document, root, &[sheet]);
+        let t = &styled.children[0];
+        assert_eq!(t.value("background-color").cloned(), rgb(0, 0, 2));
+        assert_eq!(t.value("border-top-color").cloned(), rgb(0, 0, 2));
+        // `color: currentcolor` is the parent's colour.
+        let u = &styled.children[1];
+        assert_eq!(u.value("color").cloned(), rgb(0, 0, 1));
+        assert_eq!(u.value("outline-color").cloned(), rgb(0, 0, 1));
     }
 
     #[test]
