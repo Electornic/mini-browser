@@ -16,7 +16,8 @@ mod display_list;
 mod raster;
 
 pub use display_list::{
-    PaintContext, build_display_list, field_display_value, transform_for, translate,
+    PaintContext, build_display_list, build_display_list_with_clips, field_display_value,
+    transform_for, translate,
 };
 pub use raster::{
     clear_measure_cache, measure_text_width, measure_text_wrap, measure_text_wrap_with_family,
@@ -171,6 +172,30 @@ pub enum DisplayCommand {
     /// matrices skip the wrapper and bake into the rect directly to keep
     /// the fast rasterizer path on the common case.
     TransformGroup(Affine, Vec<DisplayCommand>),
+    /// Paint the inner commands only inside `Rect` (page coordinates — the
+    /// same space as the other commands' rects; a `TransformGroup` inside
+    /// keeps its matrix, the clip is not transformed by it). Emitted by the
+    /// paint walk for runs of consecutive commands whose boxes share an
+    /// effective overflow clip (`layout::ClipTable`, compat round 3 step 3).
+    /// Never empty and never zero-area: a box whose clip is empty emits
+    /// nothing. Consumers that look for a command kind must descend into it
+    /// — use [`walk_commands`], not a flat `iter()`.
+    ClipGroup(Rect, Vec<DisplayCommand>),
+}
+
+/// Visit every command of `commands` in paint order, descending into
+/// `TransformGroup` and `ClipGroup` (the group itself is visited first).
+/// The one way to look for a command kind in a display list — a flat
+/// `iter()` with a `_ => None` arm silently misses grouped commands.
+pub fn walk_commands<'a>(commands: &'a [DisplayCommand], f: &mut impl FnMut(&'a DisplayCommand)) {
+    for command in commands {
+        f(command);
+        if let DisplayCommand::TransformGroup(_, inner) | DisplayCommand::ClipGroup(_, inner) =
+            command
+        {
+            walk_commands(inner, f);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -358,12 +383,27 @@ pub fn scale_display_list(commands: &[DisplayCommand], factor: f32) -> Vec<Displ
                 },
                 scale_display_list(inner, factor),
             ),
+            DisplayCommand::ClipGroup(clip, inner) => {
+                DisplayCommand::ClipGroup(rect(clip), scale_display_list(inner, factor))
+            }
         })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
+    /// Every text command, grouped ones included (step 3: page text sits
+    /// in `ClipGroup`s — a flat `iter()` misses it).
+    fn text_commands(commands: &[DisplayCommand]) -> Vec<&TextCommand> {
+        let mut out = Vec::new();
+        super::walk_commands(commands, &mut |c| {
+            if let DisplayCommand::Text(t) = c {
+                out.push(t);
+            }
+        });
+        out
+    }
+
     use crate::{css, html, layout, render, style};
 
     use super::{
@@ -523,12 +563,9 @@ mod tests {
         // `attrs_for_run` falls back to sans-serif and the glyph row
         // shapes with the wrong font even when Menlo is loaded.
         let commands = display_list(r#"<code>x</code>"#, "");
-        let text = commands
-            .iter()
-            .find_map(|cmd| match cmd {
-                DisplayCommand::Text(text) if text.text == "x" => Some(text),
-                _ => None,
-            })
+        let text = text_commands(&commands)
+            .into_iter()
+            .find(|text| text.text == "x")
             .expect("code element must paint its text leaf");
         assert_eq!(text.font_family.as_deref(), Some("monospace"));
     }
@@ -701,19 +738,20 @@ mod tests {
             r#"<p>x</p>"#,
             "p { font-family: Menlo, Consolas, monospace; }",
         );
-        let text = commands
-            .iter()
-            .find_map(|cmd| match cmd {
-                DisplayCommand::Text(text) if text.text == "x" => Some(text),
-                _ => None,
-            })
+        let text = text_commands(&commands)
+            .into_iter()
+            .find(|text| text.text == "x")
             .expect("text");
         assert_eq!(text.font_family.as_deref(), Some("monospace"));
         let commands = display_list(
             r#"<p>x</p>"#,
             r#"p { font-family: "Helvetica Neue", Arial; }"#,
         );
-        assert!(commands.iter().any(|cmd| matches!(cmd, DisplayCommand::Text(t) if t.text == "x" && t.font_family.as_deref() != Some("monospace"))));
+        assert!(
+            text_commands(&commands)
+                .iter()
+                .any(|t| t.text == "x" && t.font_family.as_deref() != Some("monospace"))
+        );
     }
 
     fn sprite_commands(css: &str) -> Vec<DisplayCommand> {
@@ -990,12 +1028,9 @@ mod tests {
         // coordinates because the underlying intrinsic-height math may
         // legitimately drift; what matters is that the *value string* is
         // what gets painted (not, e.g., the placeholder, not nothing).
-        let value_text = commands
-            .iter()
-            .find_map(|cmd| match cmd {
-                DisplayCommand::Text(text) if text.text == "hi" => Some(text),
-                _ => None,
-            })
+        let value_text = text_commands(&commands)
+            .into_iter()
+            .find(|text| text.text == "hi")
             .expect("input must paint its value attribute as a Text command");
         assert_eq!(value_text.font_size, 16.0);
     }
@@ -1028,13 +1063,7 @@ mod tests {
         // and each command's text is the line in source order.
         let commands = display_list("<textarea value=\"a\nb\nc\"></textarea>", "");
 
-        let texts: Vec<_> = commands
-            .iter()
-            .filter_map(|cmd| match cmd {
-                DisplayCommand::Text(text) => Some(text),
-                _ => None,
-            })
-            .collect();
+        let texts: Vec<_> = text_commands(&commands).into_iter().collect();
         assert_eq!(
             texts.len(),
             3,
@@ -1059,13 +1088,7 @@ mod tests {
         // path counts blank rows separately.
         let commands = display_list("<textarea value=\"a\n\nb\"></textarea>", "");
 
-        let texts: Vec<_> = commands
-            .iter()
-            .filter_map(|cmd| match cmd {
-                DisplayCommand::Text(text) => Some(text),
-                _ => None,
-            })
-            .collect();
+        let texts: Vec<_> = text_commands(&commands).into_iter().collect();
         assert_eq!(texts.len(), 2);
         assert_eq!(texts[0].text, "a");
         assert_eq!(texts[1].text, "b");
@@ -1075,12 +1098,9 @@ mod tests {
     }
 
     fn texts(commands: &[DisplayCommand]) -> Vec<String> {
-        commands
-            .iter()
-            .filter_map(|c| match c {
-                DisplayCommand::Text(t) => Some(t.text.clone()),
-                _ => None,
-            })
+        text_commands(commands)
+            .into_iter()
+            .map(|t| t.text.clone())
             .collect()
     }
 
@@ -1852,12 +1872,9 @@ mod tests {
             "#,
         );
 
-        let text = commands
-            .iter()
-            .find_map(|cmd| match cmd {
-                DisplayCommand::Text(t) => Some(t),
-                _ => None,
-            })
+        let text = text_commands(&commands)
+            .into_iter()
+            .next()
             .expect("paragraph emits a Text command");
 
         // p has no margin/padding, so its content origin is (0, 0). The line
@@ -2067,13 +2084,7 @@ mod tests {
             "#,
         );
 
-        let texts: Vec<&TextCommand> = commands
-            .iter()
-            .filter_map(|cmd| match cmd {
-                DisplayCommand::Text(text) => Some(text),
-                _ => None,
-            })
-            .collect();
+        let texts: Vec<&TextCommand> = text_commands(&commands).into_iter().collect();
         assert_eq!(texts.len(), 2, "shadow + main = 2 text commands");
 
         let shadow = texts[0];
@@ -2601,5 +2612,256 @@ mod tests {
         let (x, y) = inv.apply_point(10.0, 10.0);
         assert!((x - 3.0).abs() < 1e-5);
         assert!((y - 13.5).abs() < 1e-5);
+    }
+}
+
+/// Overflow clipping in paint and raster (compat round 3 step 3a).
+#[cfg(test)]
+mod clip_tests {
+    use crate::{css, html, layout, layout::Rect, render, style};
+
+    use super::{Color, CornerRadii, DisplayCommand, TextCommand, rasterize, walk_commands};
+
+    const RED: Color = Color {
+        r: 255,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
+
+    fn display_list(html_source: &str, css_source: &str) -> Vec<DisplayCommand> {
+        let document = html::parse(html_source).unwrap();
+        let root = *document.roots().last().unwrap();
+        let stylesheet = css::parse(css_source).unwrap();
+        let styled = style::style_tree(&document, root, &[stylesheet]);
+        let layout = layout::layout_tree_with_viewport(&styled, 400.0, Some(300.0));
+        let images = std::collections::HashMap::new();
+        render::build_display_list(&layout, &render::PaintContext::empty(&images))
+    }
+
+    fn texts(commands: &[DisplayCommand]) -> Vec<String> {
+        let mut out = Vec::new();
+        walk_commands(commands, &mut |c| {
+            if let DisplayCommand::Text(t) = c {
+                out.push(t.text.clone());
+            }
+        });
+        out
+    }
+
+    fn red(buffer: &[u32], width: usize, x: usize, y: usize) -> bool {
+        buffer[y * width + x] == 0x00FF_0000
+    }
+
+    fn white(buffer: &[u32], width: usize, x: usize, y: usize) -> bool {
+        buffer[y * width + x] == 0x00FF_FFFF
+    }
+
+    #[test]
+    fn overflow_hidden_clips_child_paint() {
+        let commands = display_list(
+            "<div id=c><div id=k></div></div>",
+            "#c { width: 10px; height: 10px; overflow: hidden; } #k { width: 20px; height: 20px; background: red; }",
+        );
+        let buffer = rasterize(&commands, 24, 24);
+        assert!(red(&buffer, 24, 5, 5), "inside the clip");
+        assert!(white(&buffer, 24, 15, 15), "outside the clip");
+        assert!(white(&buffer, 24, 15, 5) && white(&buffer, 24, 5, 15));
+    }
+
+    #[test]
+    fn sr_only_text_paints_nothing() {
+        let commands = display_list(
+            "<div><a class=sr href='#m'>Skip to content</a><p>Visible</p></div>",
+            ".sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }",
+        );
+        assert_eq!(texts(&commands), ["Visible"]);
+    }
+
+    #[test]
+    fn positioned_z_layer_keeps_its_clip() {
+        // The absolute child is painted in its own z-layer, outside the
+        // overflow box's run of commands — it still finds its clip.
+        let commands = display_list(
+            "<div id=c><span id=a>Lifted</span></div>",
+            "#c { position: relative; width: 10px; height: 10px; overflow: hidden; } #a { position: absolute; z-index: 5; left: 20px; width: 20px; height: 20px; background: red; }",
+        );
+        let buffer = rasterize(&commands, 48, 48);
+        assert!(
+            (0..48).all(|y| (0..48).all(|x| !red(&buffer, 48, x, y))),
+            "the lifted box sits wholly outside the 10px clip"
+        );
+    }
+
+    #[test]
+    fn consecutive_boxes_share_one_clip_group() {
+        let commands = display_list(
+            "<div id=c><p>one</p><p>two</p><p>three</p></div>",
+            "#c { width: 100px; height: 30px; overflow: hidden; }",
+        );
+        let groups: Vec<usize> = commands
+            .iter()
+            .filter_map(|c| match c {
+                DisplayCommand::ClipGroup(_, inner) => Some(inner.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(groups.len(), 1, "{commands:?}");
+        assert_eq!(texts(&commands), ["one", "two", "three"]);
+    }
+
+    #[test]
+    fn body_overflow_hidden_does_not_clip_page() {
+        let commands = display_list(
+            "<html><head></head><body><p style='margin-top:1000px'>far below</p></body></html>",
+            "html, body { height: 100%; overflow: hidden; }",
+        );
+        assert_eq!(texts(&commands), ["far below"]);
+        assert!(
+            !commands
+                .iter()
+                .any(|c| matches!(c, DisplayCommand::ClipGroup(..))),
+            "nothing is clipped"
+        );
+    }
+
+    #[test]
+    fn absolute_box_resets_flow_clip_for_its_text() {
+        // Background and text of a dropdown that escapes a static overflow
+        // box are both painted, unclipped.
+        let commands = display_list(
+            "<div style='position:relative'><div id=c><div id=d>menu item</div></div></div>",
+            "#c { width: 100px; height: 10px; overflow: hidden; } #d { position: absolute; top: 40px; background: red; }",
+        );
+        assert_eq!(texts(&commands), ["menu item"]);
+        assert!(
+            !commands
+                .iter()
+                .any(|c| matches!(c, DisplayCommand::ClipGroup(..)))
+        );
+    }
+
+    fn clipped(clip: Rect, inner: DisplayCommand) -> DisplayCommand {
+        DisplayCommand::ClipGroup(clip, vec![inner])
+    }
+
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn partially_clipped_text_is_scissored() {
+        // Glyphs are blitted by byte loops that bypass tiny-skia's masks;
+        // the scissor still stops them at the clip edge. (Tests run with
+        // the 7x7 bitmap font: no shared FontSystem.)
+        let text = DisplayCommand::Text(TextCommand {
+            text: "HHHH".into(),
+            x: 0.0,
+            y: 0.0,
+            color: RED,
+            font_size: 8.0,
+            wrap_width: None,
+            font_family: None,
+            font_weight: 400,
+        });
+        let full = rasterize(std::slice::from_ref(&text), 32, 8);
+        let cut = rasterize(&[clipped(rect(0.0, 0.0, 6.0, 8.0), text)], 32, 8);
+        let any_red =
+            |b: &[u32], x0: usize, x1: usize| (0..8).any(|y| (x0..x1).any(|x| red(b, 32, x, y)));
+        assert!(any_red(&full, 6, 32), "the run is wider than the clip");
+        assert!(any_red(&cut, 0, 6), "the first glyph shows");
+        assert!(!any_red(&cut, 6, 32), "nothing past the clip edge");
+    }
+
+    #[test]
+    fn clipped_rounded_rect_and_shadow_stop_at_the_clip() {
+        let clip = rect(0.0, 0.0, 4.0, 8.0);
+        for command in [
+            DisplayCommand::RoundedRect(
+                RED,
+                rect(0.0, 0.0, 8.0, 8.0),
+                CornerRadii {
+                    tl: 1.0,
+                    tr: 1.0,
+                    br: 1.0,
+                    bl: 1.0,
+                },
+            ),
+            DisplayCommand::BoxShadow(super::ShadowCommand {
+                rect: rect(0.0, 0.0, 8.0, 8.0),
+                blur_radius: 0.0,
+                color: RED,
+            }),
+        ] {
+            let buffer = rasterize(&[clipped(clip, command.clone())], 8, 8);
+            assert!(red(&buffer, 8, 2, 4), "{command:?} inside");
+            assert!(white(&buffer, 8, 5, 4), "{command:?} outside");
+        }
+    }
+
+    #[test]
+    fn nested_clip_groups_intersect_and_empty_ones_paint_nothing() {
+        let fill = DisplayCommand::SolidRect(RED, rect(0.0, 0.0, 8.0, 8.0));
+        let nested = clipped(
+            rect(0.0, 0.0, 6.0, 8.0),
+            clipped(rect(2.0, 0.0, 6.0, 8.0), fill.clone()),
+        );
+        let buffer = rasterize(&[nested], 8, 8);
+        assert!(white(&buffer, 8, 1, 4) && red(&buffer, 8, 3, 4) && white(&buffer, 8, 7, 4));
+        let disjoint = clipped(
+            rect(0.0, 0.0, 2.0, 8.0),
+            clipped(rect(4.0, 0.0, 2.0, 8.0), fill),
+        );
+        let buffer = rasterize(&[disjoint], 8, 8);
+        assert!(buffer.iter().all(|&p| p == 0x00FF_FFFF));
+    }
+
+    #[test]
+    fn scale_and_translate_move_the_clip_with_the_content() {
+        let list = vec![clipped(
+            rect(1.0, 2.0, 3.0, 4.0),
+            DisplayCommand::SolidRect(RED, rect(0.0, 0.0, 10.0, 10.0)),
+        )];
+        match super::scale_display_list(&list, 2.0).as_slice() {
+            [DisplayCommand::ClipGroup(clip, _)] => assert_eq!(*clip, rect(2.0, 4.0, 6.0, 8.0)),
+            other => panic!("{other:?}"),
+        }
+        match super::translate(list, 5.0, 7.0).as_slice() {
+            [DisplayCommand::ClipGroup(clip, inner)] => {
+                assert_eq!(*clip, rect(6.0, 9.0, 3.0, 4.0));
+                assert_eq!(
+                    inner[0],
+                    DisplayCommand::SolidRect(RED, rect(5.0, 7.0, 10.0, 10.0))
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn walk_commands_descends_into_groups() {
+        let text = |s: &str| {
+            DisplayCommand::Text(TextCommand {
+                text: s.into(),
+                x: 0.0,
+                y: 0.0,
+                color: RED,
+                font_size: 8.0,
+                wrap_width: None,
+                font_family: None,
+                font_weight: 400,
+            })
+        };
+        let list = vec![
+            text("a"),
+            clipped(rect(0.0, 0.0, 1.0, 1.0), text("b")),
+            DisplayCommand::TransformGroup(super::Affine::rotate(0.5), vec![text("c")]),
+        ];
+        assert_eq!(texts(&list), ["a", "b", "c"]);
     }
 }

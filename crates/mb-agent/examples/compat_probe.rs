@@ -40,7 +40,9 @@ use mb_runtime::{
     css::{self, DropReason, Origin, Value, properties},
     dom::{Document, NodeId, NodeType},
     layout::{self, BoxType, ClipTable, LayoutBox, Rect},
-    net, style,
+    net,
+    render::{self, Affine},
+    style,
 };
 
 fn main() {
@@ -130,12 +132,30 @@ fn main() {
     write(&out, "css.txt", &css_report.text);
 
     let view = state.current_view().expect("a laid-out view");
-    let mut anomalies = Anomalies::default();
+    let mut anomalies = Anomalies {
+        page_width: browser.config().viewport_width as f32,
+        ..Anomalies::default()
+    };
     // The same per-box clip table paint, hit testing and the agent's click
     // target read (step 3) — computed here from the frame's layout.
     let clips = layout::compute_clips(&view.layout_root);
     anomalies.clip_boxes = clips.len();
     walk_layout(&view.layout_root, &document, &clips, &mut anomalies);
+    // Step 3: the cost of the scissor — rasterise the first viewport of the
+    // frame's list as is and with every `ClipGroup` flattened (what an
+    // unclipped engine would paint), median of three each.
+    let (width, height) = (
+        browser.config().viewport_width,
+        browser.config().viewport_height,
+    );
+    let mut groups = 0;
+    render::walk_commands(&view.commands, &mut |c| {
+        groups += usize::from(matches!(c, render::DisplayCommand::ClipGroup(..)));
+    });
+    anomalies.clip_groups = groups;
+    let flat = flatten_clips(&view.commands);
+    anomalies.raster_ms = median_ms(|| render::rasterize(&view.commands, width, height));
+    anomalies.raster_unclipped_ms = median_ms(|| render::rasterize(&flat, width, height));
     let page_width = browser.config().viewport_width as f32;
     write(&out, "layout.txt", &anomalies.render(page_width));
 
@@ -329,10 +349,18 @@ fn push_columns(row: &mut Row, columns: Option<&Columns>) {
     });
     col("text_hidden", &|c| c.clip.text_hidden.to_string());
     col("text_hidden_sr", &|c| c.clip.text_hidden_sr.to_string());
+    col("text_hidden_offpage", &|c| {
+        c.clip.text_hidden_offpage.to_string()
+    });
     col("text_hidden_other", &|c| {
         c.clip.text_hidden_other.to_string()
     });
     col("text_cut", &|c| c.clip.text_cut.to_string());
+    col("clip_groups", &|c| c.clip.clip_groups.to_string());
+    col("raster_ms", &|c| format!("{:.1}", c.clip.raster_ms));
+    col("raster_unclipped_ms", &|c| {
+        format!("{:.1}", c.clip.raster_unclipped_ms)
+    });
     col("at_skipped_ours", &|c| c.css.at_ours.to_string());
     col("at_skipped_browser", &|c| c.css.at_browser.to_string());
     col("at_skipped_bytes", &|c| c.css.at_skipped_bytes.to_string());
@@ -1245,12 +1273,25 @@ struct Anomalies {
     slivers_sr_painted: usize,
     /// Text boxes with area that the `ClipTable` hides completely.
     text_hidden_sr: usize,
-    /// The same outside any sr-only-like ancestor: text a real-sized clip
-    /// (carousel, collapsed list) hides — each must be explained, since
-    /// a wrong clip rule hides what should show (step 3's worst failure).
+    /// The same outside any sr-only-like ancestor, laid out wholly beside
+    /// the page (x past its right edge or before 0 — off-screen carousel
+    /// slides, panels): never on screen, clipped or not.
+    text_hidden_offpage: usize,
+    /// … and the rest: on-page text a real-sized clip hides (collapsed
+    /// list, line clamp — or a wrong clip rule / a box our layout put
+    /// outside its container). Step 3's worst failure: each must be
+    /// explained (listed in layout.txt, grouped by clip ancestor).
     text_hidden_other: Vec<String>,
+    text_hidden_other_by_clip: BTreeMap<String, usize>,
+    /// Page width, for the off-page test.
+    page_width: f32,
     /// Text boxes the `ClipTable` cuts but doesn't hide.
     text_cut: usize,
+    /// `ClipGroup` commands in the frame's display list.
+    clip_groups: usize,
+    /// First-viewport raster time, and the same list unclipped.
+    raster_ms: f64,
+    raster_unclipped_ms: f64,
 }
 
 /// The step 3 columns of `summary.tsv`.
@@ -1263,8 +1304,12 @@ struct ClipCounts {
     slivers_sr_painted: usize,
     text_hidden: usize,
     text_hidden_sr: usize,
+    text_hidden_offpage: usize,
     text_hidden_other: usize,
     text_cut: usize,
+    clip_groups: usize,
+    raster_ms: f64,
+    raster_unclipped_ms: f64,
 }
 
 impl Anomalies {
@@ -1275,22 +1320,29 @@ impl Anomalies {
             slivers_in_sr: self.slivers_in_sr,
             slivers_painted: self.slivers_painted,
             slivers_sr_painted: self.slivers_sr_painted,
-            text_hidden: self.text_hidden_sr + self.text_hidden_other.len(),
+            text_hidden: self.text_hidden_sr
+                + self.text_hidden_offpage
+                + self.text_hidden_other.len(),
             text_hidden_sr: self.text_hidden_sr,
+            text_hidden_offpage: self.text_hidden_offpage,
             text_hidden_other: self.text_hidden_other.len(),
             text_cut: self.text_cut,
+            clip_groups: self.clip_groups,
+            raster_ms: self.raster_ms,
+            raster_unclipped_ms: self.raster_unclipped_ms,
         }
     }
 
     fn clip_headline(&self) -> String {
         format!(
-            "clipping: {} clipped boxes; slivers {} in a clip by style ({} sr-only-like), {} still painted ({} sr-only-like); text boxes hidden by a clip {} sr-only-like + {} other, {} cut",
+            "clipping: {} clipped boxes; slivers {} in a clip by style ({} sr-only-like), {} still painted ({} sr-only-like); text boxes hidden by a clip {} sr-only-like + {} off-page + {} other, {} cut",
             self.clip_boxes,
             self.slivers_in_clip,
             self.slivers_in_sr,
             self.slivers_painted,
             self.slivers_sr_painted,
             self.text_hidden_sr,
+            self.text_hidden_offpage,
             self.text_hidden_other.len(),
             self.text_cut
         )
@@ -1323,9 +1375,15 @@ impl Anomalies {
         }
         let _ = writeln!(
             text,
-            "\n## text hidden by a clip outside sr-only-like boxes (first 60) — each needs a reason"
+            "\n## on-page text hidden by a clip outside sr-only-like boxes — each needs a reason\n### by nearest clipping ancestor"
         );
-        for line in self.text_hidden_other.iter().take(60) {
+        let mut by_clip: Vec<_> = self.text_hidden_other_by_clip.iter().collect();
+        by_clip.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        for (clip, n) in by_clip {
+            let _ = writeln!(text, "{n:5}  {clip}");
+        }
+        let _ = writeln!(text, "### boxes (first 200)");
+        for line in self.text_hidden_other.iter().take(200) {
             let _ = writeln!(text, "{line}");
         }
         let _ = writeln!(
@@ -1350,7 +1408,7 @@ fn walk_layout(layout: &LayoutBox, document: &Document, clips: &ClipTable, out: 
         out,
         path: Vec::new(),
     };
-    walk.visit(layout, &ClipContext::default());
+    walk.visit(layout, &ClipContext::default(), Affine::IDENTITY);
 }
 
 struct Walk<'a> {
@@ -1447,6 +1505,32 @@ fn tag_label(element: &mb_runtime::dom::ElementData) -> String {
     label
 }
 
+/// `commands` with every `ClipGroup` replaced by its contents.
+fn flatten_clips(commands: &[render::DisplayCommand]) -> Vec<render::DisplayCommand> {
+    let mut out = Vec::with_capacity(commands.len());
+    for command in commands {
+        match command {
+            render::DisplayCommand::ClipGroup(_, inner) => out.extend(flatten_clips(inner)),
+            other => out.push(other.clone()),
+        }
+    }
+    out
+}
+
+/// Median wall time of three runs of `f`, in ms (a measurement column —
+/// like `load_ms`, it varies run to run).
+fn median_ms<T>(mut f: impl FnMut() -> T) -> f64 {
+    let mut times: Vec<f64> = (0..3)
+        .map(|_| {
+            let started = Instant::now();
+            std::hint::black_box(f());
+            started.elapsed().as_secs_f64() * 1000.0
+        })
+        .collect();
+    times.sort_by(f64::total_cmp);
+    times[1]
+}
+
 fn area(rect: Rect) -> f32 {
     rect.width.max(0.0) * rect.height.max(0.0)
 }
@@ -1486,7 +1570,11 @@ fn box_label(layout: &LayoutBox) -> String {
 }
 
 impl Walk<'_> {
-    fn visit(&mut self, layout: &LayoutBox, ctx: &ClipContext) {
+    /// `matrix` = the paint walk's inherited transform: clips are in page
+    /// space after axis-aligned transforms, so a text box is compared in
+    /// the same space (a closed drawer moved off-screen by `translateX`).
+    fn visit(&mut self, layout: &LayoutBox, ctx: &ClipContext, matrix: Affine) {
+        let matrix = matrix.compose(render::transform_for(layout));
         let out = &mut *self.out;
         out.boxes += 1;
         let rect = layout.dimensions.content;
@@ -1502,7 +1590,7 @@ impl Walk<'_> {
             if let NodeType::Text(text) = &node.node_type {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
-                    self.text_box(node.node_id, rect, trimmed, ctx);
+                    self.text_box(node.node_id, rect, trimmed, ctx, matrix);
                 }
             } else if let NodeType::Element(element) = &node.node_type
                 && matches!(element.tag_name.as_str(), "style" | "script" | "template")
@@ -1545,15 +1633,38 @@ impl Walk<'_> {
         };
         self.path.push(box_label(layout));
         for child in &layout.children {
-            self.visit(child, &inner);
+            self.visit(child, &inner, matrix);
         }
         self.path.pop();
     }
 
-    fn text_box(&mut self, node: NodeId, rect: Rect, text: &str, ctx: &ClipContext) {
+    fn text_box(
+        &mut self,
+        node: NodeId,
+        rect: Rect,
+        text: &str,
+        ctx: &ClipContext,
+        matrix: Affine,
+    ) {
         let out = &mut *self.out;
         out.text_boxes += 1;
-        let visible = self.clips.visible_rect(node, rect);
+        // Under a rotation the clip table adds no clip of its own; compare
+        // the untransformed box (only clips from above the rotation apply).
+        let page_rect = if matrix.is_identity() {
+            rect
+        } else if matrix.is_axis_aligned() {
+            let (x0, y0) = matrix.apply_point(rect.x, rect.y);
+            let (x1, y1) = matrix.apply_point(rect.x + rect.width, rect.y + rect.height);
+            Rect {
+                x: x0.min(x1),
+                y: y0.min(y1),
+                width: (x1 - x0).abs(),
+                height: (y1 - y0).abs(),
+            }
+        } else {
+            rect
+        };
+        let visible = self.clips.visible_rect(node, page_rect);
         let sliver = text.chars().count() > 2 && rect.width / (text.chars().count() as f32) < 3.0;
         if sliver {
             out.slivers_in_clip += usize::from(ctx.nearest.is_some());
@@ -1580,28 +1691,42 @@ impl Walk<'_> {
                     .unwrap_or_else(|| "none".into())
             ));
         }
-        if area(rect) <= 0.0 {
+        if area(page_rect) <= 0.0 {
             return;
         }
+        let off_page = page_rect.x >= out.page_width || page_rect.x + page_rect.width <= 0.0;
         match visible {
             None if ctx.sr.is_some() => out.text_hidden_sr += 1,
-            None => out.text_hidden_other.push(format!(
-                "{:.0}x{:.0} at ({:.0},{:.0})  {:?}  in {}  clip={}  clip rect={}",
-                rect.width,
-                rect.height,
-                rect.x,
-                rect.y,
-                clip(text, 40),
-                ancestry(self.document, node, 3),
-                ctx.nearest
-                    .as_deref()
-                    .unwrap_or("- (positioned ancestor rule)"),
-                self.clips
-                    .clip_of(node)
-                    .map(|c| format!("{:.0}x{:.0} at ({:.0},{:.0})", c.width, c.height, c.x, c.y))
-                    .unwrap_or_default()
-            )),
-            Some(v) if area(v) < area(rect) => out.text_cut += 1,
+            None if off_page => out.text_hidden_offpage += 1,
+            None => {
+                *out.text_hidden_other_by_clip
+                    .entry(
+                        ctx.nearest
+                            .clone()
+                            .unwrap_or_else(|| "- (positioned ancestor rule)".into()),
+                    )
+                    .or_default() += 1;
+                out.text_hidden_other.push(format!(
+                    "{:.0}x{:.0} at ({:.0},{:.0})  {:?}  in {}  clip={}  clip rect={}",
+                    rect.width,
+                    rect.height,
+                    rect.x,
+                    rect.y,
+                    clip(text, 40),
+                    ancestry(self.document, node, 3),
+                    ctx.nearest
+                        .as_deref()
+                        .unwrap_or("- (positioned ancestor rule)"),
+                    self.clips
+                        .clip_of(node)
+                        .map(|c| format!(
+                            "{:.0}x{:.0} at ({:.0},{:.0})",
+                            c.width, c.height, c.x, c.y
+                        ))
+                        .unwrap_or_default()
+                ));
+            }
+            Some(v) if area(v) < area(page_rect) => out.text_cut += 1,
             Some(_) => {}
         }
     }

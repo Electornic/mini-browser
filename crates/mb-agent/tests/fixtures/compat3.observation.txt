@@ -1,5 +1,5 @@
 # browser (trusted)
-url: http://localhost:8000/compat3   scroll_y: 0   page_height: 475   viewport: 800x600
+url: http://localhost:8000/compat3   scroll_y: 0   page_height: 318   viewport: 800x600
 elements: 8 shown / 8 in viewport / 8 total   next_cursor: -
 
 # page content (untrusted, origin=http://localhost:8000)

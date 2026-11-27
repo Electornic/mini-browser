@@ -19,6 +19,9 @@ pub struct LinkTarget {
     pub href: String,
     pub rect: layout::Rect,
     pub underline: bool,
+    /// The box's effective overflow clip (`layout::ClipTable`, step 3);
+    /// the underline paints inside it. `None` = unclipped.
+    pub clip: Option<layout::Rect>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +32,9 @@ pub struct DocumentView {
     pub commands: Vec<render::DisplayCommand>,
     pub links: Vec<LinkTarget>,
     pub layout_root: layout::LayoutBox,
+    /// Each box's effective overflow clip (compat round 3 step 3) — the one
+    /// table paint, hit testing and the agent's click target read.
+    pub clips: layout::ClipTable,
     /// The layout resolved the root's percentage `height`/`min-height`/
     /// `max-height` against the viewport height (step 1p) — so, unlike the
     /// rest of the view, it changes with a height-only resize.
@@ -92,15 +98,16 @@ pub fn build_document_view(
         base_url: current_url,
         images,
     };
+    let clips = profile::time_block("view::compute_clips", || layout::compute_clips(&layout));
     let mut commands = profile::time_block("view::build_display_list", || {
-        render::build_display_list(&layout, &paint_ctx)
+        render::build_display_list_with_clips(&layout, &paint_ctx, &clips)
     });
     profile::time_block("view::collect_image_commands", || {
-        commands.extend(collect_image_commands(&layout, current_url, images));
+        collect_image_commands_into(&layout, current_url, images, &clips, &mut commands);
     });
     // Measured before the canvas fill goes in (it spans the viewport).
     let scroll_height = margin_box_bottom(&layout)
-        .max(layout_overflow_bottom(&layout))
+        .max(layout_overflow_bottom(&layout, &clips))
         .max(document_height(&commands));
     if let Some(color) = canvas_background(&layout) {
         // Cover the viewport and the whole document, under everything.
@@ -114,7 +121,16 @@ pub fn build_document_view(
         commands.insert(0, render::DisplayCommand::SolidRect(color, canvas));
     }
     let links = profile::time_block("view::collect_link_targets", || {
-        collect_link_targets(&layout, None, false, render::Affine::IDENTITY)
+        let mut links = Vec::new();
+        collect_link_targets_into(
+            &layout,
+            None,
+            false,
+            render::Affine::IDENTITY,
+            &clips,
+            &mut links,
+        );
+        links
     });
     // Only a percentage on the root can reach the initial containing
     // block's height; anything below it chains through the root.
@@ -128,6 +144,7 @@ pub fn build_document_view(
         commands,
         links,
         layout_root: layout,
+        clips,
         reads_viewport_height,
         document_height: scroll_height,
     })
@@ -157,15 +174,36 @@ fn canvas_background(layout: &layout::LayoutBox) -> Option<css::Color> {
 
 /// The lowest border-box bottom in the layout tree — Chrome's scrollable
 /// overflow counts boxes, not just what they paint (an empty 3,000px box
-/// still scrolls). Overflow clipping isn't modelled (compat round 3 step 3),
-/// so a clipped subtree still counts. Iterative: layout trees are as deep as
-/// the DOM.
-fn layout_overflow_bottom(root: &layout::LayoutBox) -> f32 {
+/// still scrolls). A box counts only as far as its overflow clip lets it
+/// (compat round 3 step 3 — content cut by `overflow: hidden` doesn't
+/// scroll), and not at all when the clip hides it. Iterative: layout trees
+/// are as deep as the DOM.
+fn layout_overflow_bottom(root: &layout::LayoutBox, clips: &layout::ClipTable) -> f32 {
     let mut bottom = 0.0_f32;
     let mut stack = vec![root];
     while let Some(layout_box) = stack.pop() {
         let d = &layout_box.dimensions;
-        bottom = bottom.max(d.content.y + d.content.height + d.padding.bottom + d.border.bottom);
+        let border = layout::Rect {
+            x: d.content.x - d.padding.left - d.border.left,
+            y: d.content.y - d.padding.top - d.border.top,
+            width: d.content.width
+                + d.padding.left
+                + d.padding.right
+                + d.border.left
+                + d.border.right,
+            height: d.content.height
+                + d.padding.top
+                + d.padding.bottom
+                + d.border.top
+                + d.border.bottom,
+        };
+        let visible = match node_id_for_layout_box(layout_box) {
+            Some(id) => clips.visible_rect(id, border),
+            None => Some(border),
+        };
+        if let Some(visible) = visible {
+            bottom = bottom.max(visible.y + visible.height);
+        }
         stack.extend(layout_box.children.iter());
     }
     bottom
@@ -192,6 +230,11 @@ fn command_bottom(command: &render::DisplayCommand) -> f32 {
         render::DisplayCommand::Image(image) => image.y + image.height,
         render::DisplayCommand::Gradient(gradient) => gradient.rect.y + gradient.rect.height,
         render::DisplayCommand::BoxShadow(shadow) => shadow.rect.y + shadow.rect.height,
+        render::DisplayCommand::ClipGroup(clip, inner) => inner
+            .iter()
+            .map(command_bottom)
+            .fold(0.0_f32, f32::max)
+            .min(clip.y + clip.height),
         render::DisplayCommand::TransformGroup(transform, inner) => {
             // Logical bottom is the max-y of inner commands; map every
             // inner command's logical bbox through the matrix and take the
@@ -227,8 +270,10 @@ fn projected_command_bottom(command: &render::DisplayCommand, transform: render:
         },
         render::DisplayCommand::Gradient(gradient) => gradient.rect,
         render::DisplayCommand::BoxShadow(shadow) => shadow.rect,
-        // Inner TransformGroups should never appear in practice; treat as 0.
-        render::DisplayCommand::TransformGroup(_, _) => return 0.0,
+        // Inner groups should never appear in practice; treat as 0.
+        render::DisplayCommand::TransformGroup(_, _) | render::DisplayCommand::ClipGroup(_, _) => {
+            return 0.0;
+        }
     };
     let corners = [
         transform.apply_point(bounds.x, bounds.y),
@@ -248,6 +293,26 @@ pub fn collect_link_targets(
     inherited_no_underline: bool,
     inherited_transform: render::Affine,
 ) -> Vec<LinkTarget> {
+    let mut targets = Vec::new();
+    collect_link_targets_into(
+        layout_box,
+        inherited_href,
+        inherited_no_underline,
+        inherited_transform,
+        &layout::ClipTable::default(),
+        &mut targets,
+    );
+    targets
+}
+
+fn collect_link_targets_into(
+    layout_box: &layout::LayoutBox,
+    inherited_href: Option<&str>,
+    inherited_no_underline: bool,
+    inherited_transform: render::Affine,
+    clips: &layout::ClipTable,
+    targets: &mut Vec<LinkTarget>,
+) {
     let own_href = href_for_layout_box(layout_box);
     let current_href = own_href.or(inherited_href);
     // text-decoration: none on any ancestor (typically the <a> itself) suppresses
@@ -258,7 +323,6 @@ pub fn collect_link_targets(
     // click hit-testing and underline drawing can stay axis-aligned for the
     // translate-only support shipping in this commit.
     let effective_transform = inherited_transform.compose(render::transform_for(layout_box));
-    let mut targets = Vec::new();
 
     // Link targets are collected separately from display commands because clicking needs rectangles,
     // not just painted pixels.
@@ -274,19 +338,20 @@ pub fn collect_link_targets(
                 height: content.height,
             },
             underline: own_href.is_none() && !no_underline,
+            clip: node_id_for_layout_box(layout_box).and_then(|id| clips.clip_of(id)),
         });
     }
 
     for child in &layout_box.children {
-        targets.extend(collect_link_targets(
+        collect_link_targets_into(
             child,
             current_href,
             no_underline,
             effective_transform,
-        ));
+            clips,
+            targets,
+        );
     }
-
-    targets
 }
 
 fn has_text_decoration_none(layout_box: &layout::LayoutBox) -> bool {
@@ -308,16 +373,38 @@ pub fn collect_image_commands(
     images: &HashMap<String, resource::LoadedImage>,
 ) -> Vec<render::DisplayCommand> {
     let mut commands = Vec::new();
+    collect_image_commands_into(
+        layout_box,
+        base_url,
+        images,
+        &layout::ClipTable::default(),
+        &mut commands,
+    );
+    commands
+}
 
+/// `<img>` commands under each image's overflow clip (a `ClipGroup` of one;
+/// nothing when the clip hides it).
+fn collect_image_commands_into(
+    layout_box: &layout::LayoutBox,
+    base_url: Option<&url::Url>,
+    images: &HashMap<String, resource::LoadedImage>,
+    clips: &layout::ClipTable,
+    commands: &mut Vec<render::DisplayCommand>,
+) {
     if let Some(command) = image_command_for_layout_box(layout_box, base_url, images) {
-        commands.push(command);
+        match node_id_for_layout_box(layout_box).and_then(|id| clips.clip_of(id)) {
+            None => commands.push(command),
+            Some(clip) if clip.width > 0.0 && clip.height > 0.0 => {
+                commands.push(render::DisplayCommand::ClipGroup(clip, vec![command]))
+            }
+            Some(_) => {}
+        }
     }
 
     for child in &layout_box.children {
-        commands.extend(collect_image_commands(child, base_url, images));
+        collect_image_commands_into(child, base_url, images, clips, commands);
     }
-
-    commands
 }
 
 fn should_collect_link_target(layout_box: &layout::LayoutBox, own_href: Option<&str>) -> bool {
@@ -625,6 +712,8 @@ pub fn link_decoration_commands(
     links
         .iter()
         .filter(|link| link.underline)
+        // A clip that hides the link hides its underline too.
+        .filter(|link| link.clip.is_none_or(|c| c.width > 0.0 && c.height > 0.0))
         .map(|link| {
             let color = if hovered_href == Some(link.href.as_str()) {
                 css::Color {
@@ -642,7 +731,7 @@ pub fn link_decoration_commands(
                 }
             };
 
-            render::DisplayCommand::SolidRect(
+            let underline = render::DisplayCommand::SolidRect(
                 color,
                 layout::Rect {
                     x: link.rect.x,
@@ -650,7 +739,11 @@ pub fn link_decoration_commands(
                     width: link.rect.width.max(1.0),
                     height: 1.0,
                 },
-            )
+            );
+            match link.clip {
+                Some(clip) => render::DisplayCommand::ClipGroup(clip, vec![underline]),
+                None => underline,
+            }
         })
         .collect()
 }

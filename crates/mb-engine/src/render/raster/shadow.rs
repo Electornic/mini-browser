@@ -13,9 +13,15 @@ use crate::css::Color;
 use crate::layout::Rect;
 
 use super::super::{Affine, ShadowCommand};
+use super::Scissor;
 use super::blend::{blend_pixel_bytes, paint_through};
 
-pub(super) fn fill_box_shadow(pixmap: &mut Pixmap, shadow: &ShadowCommand, transform: Affine) {
+pub(super) fn fill_box_shadow(
+    pixmap: &mut Pixmap,
+    shadow: &ShadowCommand,
+    transform: Affine,
+    scissor: Scissor,
+) {
     if shadow.color.a == 0 {
         return;
     }
@@ -25,7 +31,7 @@ pub(super) fn fill_box_shadow(pixmap: &mut Pixmap, shadow: &ShadowCommand, trans
     let blur = shadow.blur_radius.max(0.0);
 
     if transform.is_identity() {
-        fill_box_shadow_aligned(pixmap, shadow, blur);
+        fill_box_shadow_aligned(pixmap, shadow, blur, scissor);
     } else {
         // The blur falloff lives outside the rect, so the logical bounds
         // expand by `blur` on every side before we walk screen-space.
@@ -38,7 +44,7 @@ pub(super) fn fill_box_shadow(pixmap: &mut Pixmap, shadow: &ShadowCommand, trans
         let color = shadow.color;
         let rect = shadow.rect;
         let inverse = transform.inverse();
-        paint_through(pixmap, bounds, transform, inverse, |lx, ly| {
+        paint_through(pixmap, bounds, transform, inverse, scissor, |lx, ly| {
             let coverage = shadow_coverage(lx, ly, rect, blur);
             if coverage <= 0.0 {
                 return None;
@@ -54,15 +60,24 @@ pub(super) fn fill_box_shadow(pixmap: &mut Pixmap, shadow: &ShadowCommand, trans
     }
 }
 
-fn fill_box_shadow_aligned(pixmap: &mut Pixmap, shadow: &ShadowCommand, blur: f32) {
+fn fill_box_shadow_aligned(
+    pixmap: &mut Pixmap,
+    shadow: &ShadowCommand,
+    blur: f32,
+    scissor: Scissor,
+) {
     let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
     // Affected region = shadow rect inflated by `blur` on every side. Anything
     // farther than `blur` from the rect edge has zero coverage.
-    let x_start = (shadow.rect.x - blur).max(0.0).floor() as usize;
-    let y_start = (shadow.rect.y - blur).max(0.0).floor() as usize;
-    let x_end = (((shadow.rect.x + shadow.rect.width + blur).ceil()).max(0.0) as usize).min(width);
-    let y_end =
-        (((shadow.rect.y + shadow.rect.height + blur).ceil()).max(0.0) as usize).min(height);
+    // The scissor lies inside the pixmap, so its bounds are non-negative.
+    let x_start = ((shadow.rect.x - blur).max(0.0).floor() as usize).max(scissor.x0 as usize);
+    let y_start = ((shadow.rect.y - blur).max(0.0).floor() as usize).max(scissor.y0 as usize);
+    let x_end = (((shadow.rect.x + shadow.rect.width + blur).ceil()).max(0.0) as usize)
+        .min(width)
+        .min(scissor.x1 as usize);
+    let y_end = (((shadow.rect.y + shadow.rect.height + blur).ceil()).max(0.0) as usize)
+        .min(height)
+        .min(scissor.y1 as usize);
 
     let left = shadow.rect.x;
     let top = shadow.rect.y;

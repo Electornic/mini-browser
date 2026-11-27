@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1050 (workspace 합계, 2026-11-28 호환성 3차 3단계 P 클립 표 API +1; F3b 둥근 테두리 작업량 상한은 1049, F4 셀렉터 규칙 색인은 1048). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1081 (workspace 합계, 2026-11-28 호환성 3차 3a 클리핑 +31 — 클립 표 19·페인트/래스터 11·overlay 1; 3단계 P 는 1050, F3b 는 1049). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -249,8 +249,13 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - 캐스케이드는 노드마다 `Stylesheet::index`(`css/rule_index.rs`)가 주는 후보 셀렉터만 시험한다 — 오른쪽 끝 복합의 id/클래스/태그 버킷 + 범용 목록. 키는 `dom_select` 의 매칭 규칙과 같아야 한다(id·클래스 대소문자 구분, 클래스는 `split_whitespace`, 태그는 ASCII 대소문자 무시): **`dom_select` 의 `has_id`/`has_class`/`has_local_name` 을 바꾸면 색인 키도 같이**. 파싱 뒤 `rules` 를 고치면 `reindex()`. 동등성은 `with_flat_index()`(전부 범용) 와 비교하는 테스트·퍼저(`IndexMismatch`)가 지킨다.
 
 ### 둥근 테두리 (호환성 3차 후속 F3)
-- 모서리 반지름이 있는 상자의 테두리는 `DisplayCommand::RoundedBorder` 하나(고리 — 바깥 둥근 사각형 − 안쪽, 변별 색은 대각선 사다리꼴 마스크), 없으면 네 `SolidRect` 띠. 새 `DisplayCommand` 를 더하면 `display_list::translate`·`bake_axis_aligned`·`scale_display_list`·`view::command_bottom`/`projected_command_bottom`·래스터·퍼저 `check_commands` 를 모두 고칠 것(일부는 `_` 갈래가 없어 컴파일러가 알려 준다).
+- 모서리 반지름이 있는 상자의 테두리는 `DisplayCommand::RoundedBorder` 하나(고리 — 바깥 둥근 사각형 − 안쪽, 변별 색은 대각선 사다리꼴 마스크), 없으면 네 `SolidRect` 띠. 새 `DisplayCommand` 를 더하면 `display_list::translate`·`bake_axis_aligned`·`scale_display_list`·`view::command_bottom`/`projected_command_bottom`·래스터(`rasterize_command`·`command_bounds`)·퍼저 `check_commands` 를 모두 고칠 것(일부는 `_` 갈래가 없어 컴파일러가 알려 준다) — 그리고 `_ =>` 와일드카드로 평평하게 훑는 곳(mb-mcp `overlay::text_obstacles` 같은)은 컴파일러가 못 잡으니 grep.
 - 래스터의 스크래치 버퍼(마스크·레이어)는 **명령의 장치 경계 상자 ∩ 픽스맵** 크기로(`shapes.rs` `device_bounds`, F3b) — tiny-skia 마스크는 칠하는 픽스맵과 크기가 같아야 하니 작은 레이어에 칠해 한 번 합성한다. 명령마다 픽스맵 전체 크기를 할당하면 페이지가 명령 수 × 페이지 넓이의 작업을 고를 수 있다.
+
+### overflow 클리핑 = 공용 클립 표 (호환성 3차 3단계)
+- 상자마다의 유효 클립은 `layout::compute_clips` 가 레이아웃 뒤 한 번 만드는 `ClipTable`(`DocumentView::clips`) 하나다 — 페인트·`<img>`·링크 밑줄·스크롤 높이·(3b) 히트 테스트·에이전트 클릭이 모두 이 표를 본다. 클립 규칙을 다른 곳에 따로 만들지 말 것. 좌표는 **페이지 공간, 축 정렬 transform 적용 후**(페인터가 굽는 좌표·히트 테스트가 비교하는 좌표) — 레이아웃 사각형과 비교하려면 그 상자까지의 transform 을 먼저 적용할 것(probe 의 `Walk::visit` 참고). 회전 아래에서는 새 클립을 만들지 않는다.
+- 포함 블록 규칙은 레이아웃과 같아야 한다: "positioned" = relative/absolute/fixed(`reposition_absolutes`·페인터 z-레이어와 같은 집합). 레이아웃이 transform·sticky 를 포함 블록으로 삼게 되면 `clip.rs` 의 `visit` 도 같이 바꿀 것.
+- 페이지 명령은 `DisplayCommand::ClipGroup(rect, inner)` 안에 있을 수 있다(빈 그룹·면적 0 그룹은 없다 — 숨은 상자는 명령을 내지 않는다). 명령 종류를 찾을 땐 `render::walk_commands` 로 — 평평한 `iter()` 는 그룹 안을 놓친다. 래스터는 `Scissor` 를 원시 함수에 내려보낸다: 바이트 루프(글자·그림자·`paint_through`)는 범위를 자르고, 단색 사각형은 교집합, 그 밖의 tiny-skia 도형은 (도형 ∩ 가위) 크기 스크래치 픽스맵(`raster::crop`). 바이트 루프를 새로 쓰면 `scissor` 범위를 지킬 것.
 
 ### 논리 속성과 인라인 SVG (호환성 3차 후속 F1)
 - `inline-size`·`margin-inline(-start/-end)`·`padding-block`·`inset-inline`·`border-inline(-*)`·`border-start-end-radius` 등은 **파싱 때 물리 속성으로 바뀐다**(`css/logical.rs` — 가로 쓰기·ltr 고정, 이름 바꾸기 / 한두 값을 시작·끝으로 / 같은 값을 양쪽으로). 캐스케이드·레이아웃·페인트는 물리 이름만 본다 — 소비자 코드에서 논리 이름을 찾지 말 것. 새 논리 속성은 `logical::logical` 표에(`longhands_of` 가 같은 표로 `var()` 경로도 펼친다).
@@ -314,7 +319,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
 ## Tooling Notes
 
-- 퍼저 ([compat-round3.md 0.3](docs/compat-round3.md#03-퍼징), `crates/mb-engine/tests/fuzz_layout.rs`): 기본 `cargo test` 에 시드 200(레이아웃)·500(CSS 토큰 — `@media` 프렐류드·`@supports` 조건 수프·`@layer` 이름·상한 넘는 중첩 포함)·300(이미지 바이트)·깊이 10,000 한 케이스·`@media`·`@layer`·`@supports` 극단 한 케이스(`media_extremes_stay_bounded`)가 들어 있다. 긴 실행은 `MB_FUZZ_CASES=100000 cargo test --release -p mb-engine --test fuzz_layout -- --ignored --nocapture --test-threads=1`(`MB_FUZZ_SEED` 시작 시드, `MB_FUZZ_FONTS=1` 실제 셰이핑, `MB_FUZZ_DUMP=1` 이미지 입력을 미리 찍기 — abort 추적용). 실패하면 시드와 **축소된** HTML/CSS 가 찍힌다 → 손으로 정리해 해당 모듈에 증상 이름의 단위 테스트로(시드를 테스트로 쓰지 말 것). 생성기·판정을 바꾸면 `fuzz_generator_covers_its_spec` 가 아직 깊이·값 풀을 다 내는지 본다.
+- 퍼저 ([compat-round3.md 0.3](docs/compat-round3.md#03-퍼징), `crates/mb-engine/tests/fuzz_layout.rs`): 기본 `cargo test` 에 시드 200(레이아웃)·500(CSS 토큰 — `@media` 프렐류드·`@supports` 조건 수프·`@layer` 이름·상한 넘는 중첩 포함)·300(이미지 바이트)·깊이 10,000 한 케이스·`@media`·`@layer`·`@supports` 극단 한 케이스(`media_extremes_stay_bounded`)가 들어 있다. 긴 실행은 `MB_FUZZ_CASES=100000 cargo test --release -p mb-engine --test fuzz_layout -- --ignored --nocapture --test-threads=1`(`MB_FUZZ_SEED` 시작 시드, `MB_FUZZ_FONTS=1` 실제 셰이핑, `MB_FUZZ_DUMP=1` 이미지 입력을 미리 찍기 — abort 추적용). 실패하면 시드와 **축소된** HTML/CSS 가 찍힌다 → 손으로 정리해 해당 모듈에 증상 이름의 단위 테스트로(시드를 테스트로 쓰지 말 것). 생성기·판정을 바꾸면 `fuzz_generator_covers_its_spec` 가 아직 깊이·값 풀을 다 내는지 본다. 레이아웃 판정은 표시 목록도 래스터한다(¼ 배율 — 클립 가위·crop 경로, 3a).
 - `crates/mb-dom/examples/css_diag.rs` — CSS 파서 진단 (`cargo run -p mb-dom --example css_diag -- <file.css>`).
 - 실사이트 호환성 조사 ([docs/compat-survey.md](docs/compat-survey.md)): `MB_NET_CACHE=DIR` 이면 모든 fetch 가 디스크 캐시를 거친다 (첫 실행만 네트워크, `MB_NET_CACHE_OFFLINE=1` 은 재생 전용). `crates/mb-agent/examples/compat_probe.rs URL OUT_DIR` 가 관찰·CSS 버림(`css::parse_with_report`)·레이아웃 이상을 덤프. 캐시와 출력은 반드시 git-ignored `compat-cache/` 에 — 실사이트 HTML/CSS/이미지/스크린샷은 커밋 금지(저작권, 공개 저장소). 테스트는 손으로 쓴 작은 페이지로.
 - 3차 코퍼스(~25곳, [compat-round3.md 0.2](docs/compat-round3.md#02-코퍼스-점검)): `scripts/compat-sites.tsv`(이름·URL·기대 컨트롤, 커밋됨) + `scripts/compat-corpus.sh record|run [라벨]|diff A B`. 녹화는 이미 끝났고 캐시 `compat-cache/net/` 는 **3차 동안 동결** — 단계 전후 측정은 `MB_NET_CACHE=$PWD/compat-cache/net scripts/compat-corpus.sh run <라벨>`(항상 오프라인, release) → `compat-cache/corpus/<라벨>/corpus-report.tsv`. `record` 는 녹화된 사이트를 다시 방문하지 않는다(보충은 `--supplement`, 규칙은 문서). 캐시가 켜져 있으면 GET 이 아닌 요청은 보내지 않는다(`net/cache.rs`). 버림 사유·ours/browser-too 분류는 `css/report.rs` `DropReason` + `css/properties.rs`(Chrome 이 아는 속성 표) — 동결된 표는 문서 "0b 분류표".

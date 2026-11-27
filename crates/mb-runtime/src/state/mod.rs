@@ -1124,6 +1124,7 @@ impl BrowserState {
                         dimensions: layout::Dimensions::default(),
                         children: Vec::new(),
                     },
+                    clips: layout::ClipTable::default(),
                     reads_viewport_height: false,
                     document_height: 0.0,
                 })

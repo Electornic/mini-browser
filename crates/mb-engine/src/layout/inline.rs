@@ -385,7 +385,7 @@ pub(super) fn layout_inline_run(
     layout_inline_children(run, x, y, width, align)
 }
 
-fn is_inline_node(node: &StyledNode) -> bool {
+pub(super) fn is_inline_node(node: &StyledNode) -> bool {
     match node.value("display") {
         Some(Value::Keyword(keyword)) if keyword == "block" => return false,
         // inline-block participates in inline flow (sits on a line) but is sized

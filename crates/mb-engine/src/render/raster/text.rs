@@ -23,6 +23,7 @@ use crate::css::Color;
 use crate::layout::Rect;
 
 use super::super::{Affine, TextCommand};
+use super::Scissor;
 use super::blend::{blend_pixel_bytes, paint_through};
 use super::shapes::fill_solid_rect;
 
@@ -226,33 +227,38 @@ fn measure_with_cosmic(
 /// (window, screenshot) even at 2× device scale, so it is skipped.
 const MAX_RASTER_FONT_SIZE: f32 = 2048.0;
 
-pub(super) fn draw_text(pixmap: &mut Pixmap, text: &TextCommand, transform: Affine) {
+pub(super) fn draw_text(
+    pixmap: &mut Pixmap,
+    text: &TextCommand,
+    transform: Affine,
+    scissor: Scissor,
+) {
     if !(text.font_size.is_finite() && text.font_size <= MAX_RASTER_FONT_SIZE) {
         return;
     }
     if transform.is_identity() {
-        draw_text_aligned(pixmap, text);
+        draw_text_aligned(pixmap, text, scissor);
     } else {
-        draw_text_through(pixmap, text, transform);
+        draw_text_through(pixmap, text, transform, scissor);
     }
 }
 
-fn draw_text_aligned(pixmap: &mut Pixmap, text: &TextCommand) {
+fn draw_text_aligned(pixmap: &mut Pixmap, text: &TextCommand, scissor: Scissor) {
     // When no shared FontSystem is installed (tests, or before
     // `state::install_fonts` has run), `shape_and_images` returns `None` and
     // we hand off to the 7x7 bitmap fallback so the test surface stays
     // deterministic without loading any host font.
     let Some(physicals_and_images) = shape_and_images(text) else {
-        draw_text_bitmap(pixmap, text);
+        draw_text_bitmap(pixmap, text, scissor);
         return;
     };
     for (physical, image) in &physicals_and_images {
         match image.content {
             SwashContent::Mask => {
-                blit_swash_mask(pixmap, image, physical, text.color);
+                blit_swash_mask(pixmap, image, physical, text.color, scissor);
             }
             SwashContent::Color => {
-                blit_swash_color(pixmap, image, physical);
+                blit_swash_color(pixmap, image, physical, scissor);
             }
             // Subpixel masks would need a different per-channel coverage
             // blend; cosmic-text's default Metrics shaping pipeline does
@@ -262,7 +268,7 @@ fn draw_text_aligned(pixmap: &mut Pixmap, text: &TextCommand) {
     }
 }
 
-fn draw_text_through(pixmap: &mut Pixmap, text: &TextCommand, transform: Affine) {
+fn draw_text_through(pixmap: &mut Pixmap, text: &TextCommand, transform: Affine, scissor: Scissor) {
     // Per-glyph: get the swash alpha image (laid out in its own local
     // coordinates), then for every pixel in the screen-space bbox of the
     // glyph quad, inverse-map back to glyph-local and sample the bitmap.
@@ -295,27 +301,34 @@ fn draw_text_through(pixmap: &mut Pixmap, text: &TextCommand, transform: Affine)
         };
         let color = text.color;
         let data = &image.data;
-        paint_through(pixmap, glyph_bounds, transform, inverse, |lx, ly| {
-            let gx = (lx - dx0).floor() as i32;
-            let gy = (ly - dy0).floor() as i32;
-            if gx < 0 || gy < 0 || gx as usize >= img_w || gy as usize >= img_h {
-                return None;
-            }
-            let alpha = data[gy as usize * img_w + gx as usize];
-            if alpha == 0 {
-                return None;
-            }
-            let coverage = (alpha as u32 * color.a as u32) / 255;
-            if coverage == 0 {
-                return None;
-            }
-            Some(Color {
-                r: color.r,
-                g: color.g,
-                b: color.b,
-                a: coverage as u8,
-            })
-        });
+        paint_through(
+            pixmap,
+            glyph_bounds,
+            transform,
+            inverse,
+            scissor,
+            |lx, ly| {
+                let gx = (lx - dx0).floor() as i32;
+                let gy = (ly - dy0).floor() as i32;
+                if gx < 0 || gy < 0 || gx as usize >= img_w || gy as usize >= img_h {
+                    return None;
+                }
+                let alpha = data[gy as usize * img_w + gx as usize];
+                if alpha == 0 {
+                    return None;
+                }
+                let coverage = (alpha as u32 * color.a as u32) / 255;
+                if coverage == 0 {
+                    return None;
+                }
+                Some(Color {
+                    r: color.r,
+                    g: color.g,
+                    b: color.b,
+                    a: coverage as u8,
+                })
+            },
+        );
     }
 }
 
@@ -379,8 +392,8 @@ fn blit_swash_mask(
     image: &cosmic_text::SwashImage,
     physical: &PhysicalGlyph,
     color: Color,
+    scissor: Scissor,
 ) {
-    let (width, height) = (pixmap.width() as i32, pixmap.height() as i32);
     let img_w = image.placement.width as usize;
     let img_h = image.placement.height as usize;
     // `placement.left` is the bearing from the glyph origin to the image's
@@ -399,7 +412,7 @@ fn blit_swash_mask(
             }
             let px = dx0 + col as i32;
             let py = dy0 + row as i32;
-            if px < 0 || py < 0 || px >= width || py >= height {
+            if px < scissor.x0 || py < scissor.y0 || px >= scissor.x1 || py >= scissor.y1 {
                 continue;
             }
             // Compose glyph coverage with text color's alpha so opacity (or
@@ -430,8 +443,8 @@ fn blit_swash_color(
     pixmap: &mut Pixmap,
     image: &cosmic_text::SwashImage,
     physical: &PhysicalGlyph,
+    scissor: Scissor,
 ) {
-    let (width, height) = (pixmap.width() as i32, pixmap.height() as i32);
     let img_w = image.placement.width as usize;
     let img_h = image.placement.height as usize;
     let dx0 = physical.x + image.placement.left;
@@ -451,7 +464,7 @@ fn blit_swash_color(
             }
             let px = dx0 + col as i32;
             let py = dy0 + row as i32;
-            if px < 0 || py < 0 || px >= width || py >= height {
+            if px < scissor.x0 || py < scissor.y0 || px >= scissor.x1 || py >= scissor.y1 {
                 continue;
             }
             let off = (py as usize * stride + px as usize) * 4;
@@ -477,17 +490,33 @@ fn blit_swash_color(
     }
 }
 
-fn draw_text_bitmap(pixmap: &mut Pixmap, text: &TextCommand) {
+fn draw_text_bitmap(pixmap: &mut Pixmap, text: &TextCommand, scissor: Scissor) {
     let mut cursor_x = text.x;
 
     for ch in text.text.chars() {
-        draw_bitmap_char(pixmap, ch, cursor_x, text.y, text.color, text.font_size);
+        draw_bitmap_char(
+            pixmap,
+            ch,
+            cursor_x,
+            text.y,
+            text.color,
+            text.font_size,
+            scissor,
+        );
         let scale = (text.font_size / 8.0).max(1.0).round();
         cursor_x += if ch == ' ' { 4.0 * scale } else { 6.0 * scale };
     }
 }
 
-fn draw_bitmap_char(pixmap: &mut Pixmap, ch: char, x: f32, y: f32, color: Color, font_size: f32) {
+fn draw_bitmap_char(
+    pixmap: &mut Pixmap,
+    ch: char,
+    x: f32,
+    y: f32,
+    color: Color,
+    font_size: f32,
+    scissor: Scissor,
+) {
     // f32 throughout: a far-off position (`text-shadow: 1e30px …`)
     // saturates `as i32` and then overflowed the additions below. The rect
     // fill clips to the canvas anyway.
@@ -517,6 +546,7 @@ fn draw_bitmap_char(pixmap: &mut Pixmap, ch: char, x: f32, y: f32, color: Color,
                     height: scale,
                 },
                 Affine::IDENTITY,
+                scissor,
             );
         }
     }

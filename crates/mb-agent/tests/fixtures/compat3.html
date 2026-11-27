@@ -11,8 +11,8 @@
   the golden diff against this list (what Chrome shows at 800px):
 
   1. "Skip to content" — sr-only (1px, overflow:hidden, clip): listed as a
-     link, but its text paints nowhere. Today: overflow isn't clipped, so
-     the 1px box spills its text (step 3, clipping).
+     link, but its text paints nowhere. Matches Chrome since step 3a (the
+     clip table hides the box's text; still observed — a11y inclusion).
   2. Search form (.hide-sm) — visible at 800px: its `display:none
      !important` sits in a max-width:600px @media. Matches Chrome: step 1a
      keeps !important and step 2.1 (@media evaluation) keeps that block off
@@ -24,7 +24,11 @@
      `:checked ~ .menu` opens the list (Docs, Contact). Today the
      `:checked` rule is dropped whole, so the menu never opens (step 4).
   5. Carousel — 300px window with overflow:hidden: only slide one is
-     visible; slides two and three are clipped out (step 3).
+     visible; slides two and three are clipped out. Since step 3a they
+     are (painted nowhere, no longer extend page_height — 475 → 318), but
+     still observed with their links (a11y inclusion; clicking them is
+     step 3b's "clipped out of view" error). Our slides stack vertically
+     (nowrap inline-blocks wrap — a layout gap), Chrome lays them in a row.
 
   eval/scenarios/compat3-menu.json drives item 4 ("open the menu, go to
   Docs"); it fails today by design.

@@ -11,6 +11,7 @@ use crate::css::Color;
 use crate::layout::Rect;
 
 use super::super::Affine;
+use super::Scissor;
 
 /// Walk the screen-space bounding box of `logical_bounds` under
 /// `transform`, sample the caller's closure in logical coordinates via
@@ -22,6 +23,7 @@ pub(super) fn paint_through<F>(
     logical_bounds: Rect,
     transform: Affine,
     inverse: Affine,
+    scissor: Scissor,
     sample: F,
 ) where
     F: Fn(f32, f32) -> Option<Color>,
@@ -53,10 +55,15 @@ pub(super) fn paint_through<F>(
         min_y = min_y.min(cy);
         max_y = max_y.max(cy);
     }
-    let x_start = min_x.max(0.0).floor() as usize;
-    let y_start = min_y.max(0.0).floor() as usize;
-    let x_end = (max_x.ceil().max(0.0) as usize).min(width);
-    let y_end = (max_y.ceil().max(0.0) as usize).min(height);
+    // The scissor lies inside the pixmap, so its bounds are non-negative.
+    let x_start = (min_x.max(0.0).floor() as usize).max(scissor.x0 as usize);
+    let y_start = (min_y.max(0.0).floor() as usize).max(scissor.y0 as usize);
+    let x_end = (max_x.ceil().max(0.0) as usize)
+        .min(width)
+        .min(scissor.x1 as usize);
+    let y_end = (max_y.ceil().max(0.0) as usize)
+        .min(height)
+        .min(scissor.y1 as usize);
 
     let data = pixmap.data_mut();
     for y in y_start..y_end {

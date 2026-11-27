@@ -666,18 +666,19 @@ fn inset(r: Rect, by: f32) -> Rect {
 /// page text inside `page`: one box per text run, cut to the glyphs' ink
 /// band (a line box has leading above and below), so a badge may sit in
 /// the gap between two lines.
+///
+/// Text inside `ClipGroup`s counts only where its clip lets it show (step
+/// 3); text inside a `TransformGroup` is in that group's logical space and
+/// isn't an obstacle (rotated text is rare and was never counted).
 pub fn text_obstacles(commands: &[DisplayCommand], page: Rect) -> Vec<Rect> {
-    commands
-        .iter()
-        .filter_map(|c| match c {
-            DisplayCommand::Text(t) => Some(t),
-            _ => None,
-        })
-        .filter(|t| !t.text.trim().is_empty())
+    let mut runs: Vec<(&mb_runtime::render::TextCommand, Option<Rect>)> = Vec::new();
+    collect_text_runs(commands, None, &mut runs);
+    runs.into_iter()
+        .filter(|(t, _)| !t.text.trim().is_empty())
         // Measuring is the cost (a frame carries every run of the document,
         // most off screen): drop runs that can't reach the page first.
-        .filter(|t| could_reach(t, &page))
-        .filter_map(|t| {
+        .filter(|(t, _)| could_reach(t, &page))
+        .filter_map(|(t, clip)| {
             let (width, lines) = mb_runtime::render::measure_text_wrap_with_family(
                 &t.text,
                 t.font_size,
@@ -693,9 +694,38 @@ pub fn text_obstacles(commands: &[DisplayCommand], page: Rect) -> Vec<Rect> {
                 width,
                 height: line * lines as f32 - t.font_size * 0.25,
             };
+            let r = match clip {
+                Some(clip) => mb_runtime::layout::clip::intersect(r, clip)?,
+                None => r,
+            };
             (overlap(&r, &page) > 0.0).then_some(r)
         })
         .collect()
+}
+
+/// Page-space text runs with the clip each paints under (`None` =
+/// unclipped); skips `TransformGroup` contents (see `text_obstacles`).
+fn collect_text_runs<'a>(
+    commands: &'a [DisplayCommand],
+    clip: Option<Rect>,
+    out: &mut Vec<(&'a mb_runtime::render::TextCommand, Option<Rect>)>,
+) {
+    for command in commands {
+        match command {
+            DisplayCommand::Text(t) => out.push((t, clip)),
+            DisplayCommand::ClipGroup(rect, inner) => {
+                let inner_clip = match clip {
+                    None => Some(*rect),
+                    Some(outer) => match mb_runtime::layout::clip::intersect(outer, *rect) {
+                        Some(both) => Some(both),
+                        None => continue,
+                    },
+                };
+                collect_text_runs(inner, inner_clip, out);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Whether text run `t` might paint inside `page`, without measuring it:
@@ -4276,6 +4306,47 @@ mod tests {
         // Inside the 19.2 px line box, off its top and bottom edges.
         assert!(ink[0].y > 300.0 && ink[0].y + ink[0].height < 300.0 + 19.2);
         assert!(ink[0].width > 0.0 && ink[0].width <= 400.0);
+    }
+
+    #[test]
+    fn text_obstacles_see_grouped_text_only_where_its_clip_shows_it() {
+        // Step 3: page text arrives inside `ClipGroup`s; a flat scan missed
+        // it (badges covered it), and clipped-away text must not repel.
+        let page = page();
+        let label = |s: &str, y: f32| {
+            DisplayCommand::Text(TextCommand {
+                text: s.into(),
+                x: 24.0,
+                y,
+                color: p::ink(),
+                font_size: 16.0,
+                wrap_width: Some(400.0),
+                font_family: None,
+                font_weight: 400,
+            })
+        };
+        let clip = |x: f32, y: f32, inner: DisplayCommand| {
+            DisplayCommand::ClipGroup(
+                Rect {
+                    x,
+                    y,
+                    width: 50.0,
+                    height: 30.0,
+                },
+                vec![inner],
+            )
+        };
+        let commands = [
+            clip(24.0, 300.0, label("grouped text", 300.0)),
+            // A clip far from its text: nothing of it shows.
+            clip(600.0, 500.0, label("hidden text", 400.0)),
+        ];
+        let ink = text_obstacles(&commands, page);
+        assert_eq!(ink.len(), 1, "{ink:?}");
+        assert!(
+            ink[0].x >= 24.0 && ink[0].x + ink[0].width <= 74.0,
+            "{ink:?}"
+        );
     }
 
     #[test]

@@ -203,6 +203,7 @@ mod tests {
                     height: 12.0,
                 },
                 underline: false,
+                clip: None,
             },
             LinkTarget {
                 href: "/a".into(),
@@ -213,6 +214,7 @@ mod tests {
                     height: 12.0,
                 },
                 underline: true,
+                clip: None,
             },
         ];
 

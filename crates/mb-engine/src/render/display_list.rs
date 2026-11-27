@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::{
     css::{Color, ColorStop, TransformOp, Unit, Value},
     dom::NodeType,
-    layout::{Dimensions, LayoutBox, Rect},
+    layout::{ClipTable, Dimensions, LayoutBox, Rect, compute_clips},
     resource::LoadedImage,
     url::Url,
 };
@@ -39,6 +39,21 @@ impl<'a> PaintContext<'a> {
 }
 
 pub fn build_display_list(layout_root: &LayoutBox, ctx: &PaintContext) -> Vec<DisplayCommand> {
+    let clips = compute_clips(layout_root);
+    build_display_list_with_clips(layout_root, ctx, &clips)
+}
+
+/// [`build_display_list`] with the frame's clip table already computed
+/// (`DocumentView` keeps one table for paint, hit testing and the agent).
+/// Each box's commands are wrapped in a `ClipGroup` of its effective clip;
+/// consecutive boxes under the same clip share one group, and a box whose
+/// clip is empty (sr-only text) emits nothing.
+pub fn build_display_list_with_clips(
+    layout_root: &LayoutBox,
+    paint: &PaintContext,
+    clips: &ClipTable,
+) -> Vec<DisplayCommand> {
+    let ctx = &Painter { paint, clips };
     let mut commands = Vec::new();
     // The root layout box is treated as the initial stacking context: every
     // positioned descendant ends up sorted into z-layers under it. The
@@ -48,6 +63,12 @@ pub fn build_display_list(layout_root: &LayoutBox, ctx: &PaintContext) -> Vec<Di
     // declaration on the way down.
     paint_stacking_context(layout_root, &mut commands, 1.0, Affine::IDENTITY, ctx);
     commands
+}
+
+/// What the paint walk reads besides the layout tree.
+struct Painter<'a> {
+    paint: &'a PaintContext<'a>,
+    clips: &'a ClipTable,
 }
 
 // Chrome UI and scrolling both reuse this helper to move already-built commands around.
@@ -92,6 +113,11 @@ pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<Dis
                 // the matrix so the result is `T(dx,dy) * matrix * logical`.
                 *transform = Affine::translate(dx, dy).compose(*transform);
             }
+            DisplayCommand::ClipGroup(clip, inner) => {
+                clip.x += dx;
+                clip.y += dy;
+                *inner = translate(std::mem::take(inner), dx, dy);
+            }
         }
     }
 
@@ -103,7 +129,7 @@ fn paint_stacking_context(
     commands: &mut Vec<DisplayCommand>,
     inherited_alpha: f32,
     inherited_transform: Affine,
-    ctx: &PaintContext,
+    ctx: &Painter,
 ) {
     let effective_alpha = inherited_alpha * opacity_of(layout_box);
     let effective_transform = inherited_transform.compose(transform_for(layout_box));
@@ -170,7 +196,7 @@ fn paint_non_positioned(
     commands: &mut Vec<DisplayCommand>,
     inherited_alpha: f32,
     inherited_transform: Affine,
-    ctx: &PaintContext,
+    ctx: &Painter,
 ) {
     // Stop at any positioned box — its painting belongs to its enclosing
     // stacking context, where z-order is decided.
@@ -196,7 +222,7 @@ fn paint_self(
     commands: &mut Vec<DisplayCommand>,
     alpha: f32,
     transform: Affine,
-    ctx: &PaintContext,
+    ctx: &Painter,
 ) {
     // Per-box paint order is shadow -> background-color -> background-image
     // (gradient) -> border -> text, matching CSS spec stacking within a
@@ -212,7 +238,7 @@ fn paint_self(
     if let Some(command) = gradient_command(layout_box, alpha) {
         commands.push(command);
     }
-    if let Some(command) = background_image_command(layout_box, ctx) {
+    if let Some(command) = background_image_command(layout_box, ctx.paint) {
         commands.push(command);
     }
     commands.extend(border_commands(layout_box, alpha));
@@ -235,6 +261,35 @@ fn paint_self(
     // The emitters work in logical (untransformed) coordinates; the affine
     // matrix is the only thing that maps logical → screen pixels.
     finalize_box_transform(commands, start, transform);
+    if let Some(node) = layout_box.styled_node() {
+        apply_box_clip(commands, start, ctx.clips.clip_of(node.node_id));
+    }
+}
+
+/// Put the commands a box just emitted (`commands[start..]`) under its
+/// effective clip: nothing when unclipped, dropped when the clip is empty,
+/// otherwise appended to the previous `ClipGroup` when it has the same rect
+/// (consecutive boxes in one overflow container — keeps the group count
+/// near the number of clip changes, not boxes), else a new group.
+fn apply_box_clip(commands: &mut Vec<DisplayCommand>, start: usize, clip: Option<Rect>) {
+    let Some(clip) = clip else {
+        return;
+    };
+    if start >= commands.len() {
+        return;
+    }
+    if clip.width <= 0.0 || clip.height <= 0.0 {
+        commands.truncate(start);
+        return;
+    }
+    let emitted: Vec<DisplayCommand> = commands.drain(start..).collect();
+    if let Some(DisplayCommand::ClipGroup(previous, inner)) = commands.last_mut()
+        && *previous == clip
+    {
+        inner.extend(emitted);
+        return;
+    }
+    commands.push(DisplayCommand::ClipGroup(clip, emitted));
 }
 
 fn collect_positioned_into<'a>(
@@ -379,6 +434,9 @@ fn bake_axis_aligned(commands: &mut [DisplayCommand], transform: Affine) {
             // Rotated children should not be present here because rotation
             // routes through the TransformGroup branch; ignore defensively.
             DisplayCommand::TransformGroup(_, _) => {}
+            // Clips are applied after a box's transform is baked (and are
+            // already in page space), so none reach here; ignore defensively.
+            DisplayCommand::ClipGroup(_, _) => {}
         }
     }
 }
@@ -1111,7 +1169,7 @@ impl LayoutBox {
 }
 
 impl Dimensions {
-    fn padding_box(&self) -> Rect {
+    pub(crate) fn padding_box(&self) -> Rect {
         Rect {
             x: self.content.x - self.padding.left,
             y: self.content.y - self.padding.top,
@@ -1120,7 +1178,7 @@ impl Dimensions {
         }
     }
 
-    fn border_box(&self) -> Rect {
+    pub(crate) fn border_box(&self) -> Rect {
         let padding_box = self.padding_box();
         Rect {
             x: padding_box.x - self.border.left,

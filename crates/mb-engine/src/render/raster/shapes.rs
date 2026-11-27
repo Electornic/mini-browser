@@ -12,11 +12,35 @@ use crate::css::Color;
 use crate::layout::Rect;
 
 use super::super::{Affine, CornerRadii, RoundedBorderCommand};
+use super::{Scissor, crop, device_rect};
 
-pub(super) fn fill_solid_rect(pixmap: &mut Pixmap, color: Color, rect: Rect, transform: Affine) {
+/// A solid rect, limited to `scissor`: axis-aligned rects are intersected
+/// with it exactly, rotated ones go through a cropped scratch pixmap.
+pub(super) fn fill_solid_rect(
+    pixmap: &mut Pixmap,
+    color: Color,
+    rect: Rect,
+    transform: Affine,
+    scissor: Scissor,
+) {
     if color.a == 0 {
         return;
     }
+    if scissor.is_full(pixmap) {
+        fill_solid_rect_unclipped(pixmap, color, rect, transform);
+    } else if transform.is_axis_aligned() {
+        let device = device_rect(rect, transform);
+        if let Some(visible) = crate::layout::clip::intersect(device, scissor.rect()) {
+            fill_solid_rect_unclipped(pixmap, color, visible, Affine::IDENTITY);
+        }
+    } else {
+        crop(pixmap, rect, transform, scissor, |sub, offset| {
+            fill_solid_rect_unclipped(sub, color, rect, offset)
+        });
+    }
+}
+
+fn fill_solid_rect_unclipped(pixmap: &mut Pixmap, color: Color, rect: Rect, transform: Affine) {
     let Some(ts_rect) = to_ts_rect(rect) else {
         return;
     };
@@ -51,7 +75,7 @@ pub(super) fn fill_rounded_rect(
     }
     if radii.tl == 0.0 && radii.tr == 0.0 && radii.br == 0.0 && radii.bl == 0.0 {
         // Pure rectangle: skip the path build and reuse the fast fill_rect path.
-        fill_solid_rect(pixmap, color, rect, transform);
+        fill_solid_rect_unclipped(pixmap, color, rect, transform);
         return;
     }
     let mut pb = PathBuilder::new();

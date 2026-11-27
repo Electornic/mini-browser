@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 
 use mb_dom::{css, html, style};
 use mb_engine::layout::{self, LayoutBox};
-use mb_engine::render::DisplayCommand;
+use mb_engine::render::{self, DisplayCommand};
 use mb_engine::view;
 
 // ---------------------------------------------------------------- rng ----
@@ -837,12 +837,57 @@ impl Gen {
                     .pick(&["row", "column", "dense", "column dense"])
                     .to_string(),
             ),
-            27 => (
-                *self.rng.pick(&["overflow", "overflow-x", "overflow-y"]),
-                self.rng
-                    .pick(&["visible", "hidden", "scroll", "auto", "clip"])
-                    .to_string(),
-            ),
+            // Step 3: clip shapes — nested overflow boxes come from the
+            // tree itself; `clip`/`clip-path` (zero-area, partial, `auto`
+            // edges, huge) and transforms the clip table maps or skips.
+            27 => match self.rng.below(5) {
+                0 | 1 => (
+                    *self.rng.pick(&["overflow", "overflow-x", "overflow-y"]),
+                    self.rng
+                        .pick(&["visible", "hidden", "scroll", "auto", "clip"])
+                        .to_string(),
+                ),
+                2 => (
+                    "clip",
+                    self.rng
+                        .pick(&[
+                            "rect(0 0 0 0)",
+                            "rect(1px, auto, 1px, auto)",
+                            "rect(0, 5px, 5px, 0)",
+                            "rect(-10px, 1e9px, 2px, auto)",
+                            "rect(5px, 1px, 1px, 5px)",
+                            "auto",
+                        ])
+                        .to_string(),
+                ),
+                3 => (
+                    "clip-path",
+                    self.rng
+                        .pick(&[
+                            "inset(50%)",
+                            "inset(10%)",
+                            "inset(2px 1e9px)",
+                            "inset(-5px)",
+                            "inset(0 1px round 1px)",
+                            "none",
+                        ])
+                        .to_string(),
+                ),
+                _ => (
+                    "transform",
+                    self.rng
+                        .pick(&[
+                            "translateX(-50px)",
+                            "translate(10px, 5px) scale(0.5)",
+                            "scale(2)",
+                            "scale(-1, 1)",
+                            "scale(0)",
+                            "rotate(10deg)",
+                            "translate(50%, -50%)",
+                        ])
+                        .to_string(),
+                ),
+            },
             28 => (
                 "white-space",
                 self.rng
@@ -1001,6 +1046,18 @@ fn judge(case: &Case) -> Result<(), Failure> {
     let check_width = !case.has_unbounded_values();
     check_box(&view.layout_root, check_width, &mut Vec::new())?;
     check_commands(&view.commands)?;
+    // Step 3: the scissor paths (byte-loop clamps, cropped scratch
+    // pixmaps) see every generated clip shape. A small surface keeps it
+    // cheap; scaling down keeps most of the page on it.
+    if let Err(payload) = quietly(|| {
+        let scaled = render::scale_display_list(&view.commands, 0.25);
+        render::rasterize(&scaled, 200, 160)
+    }) {
+        return Err(Failure {
+            kind: Kind::Panic,
+            detail: format!("raster: {}", panic_message(payload.as_ref())),
+        });
+    }
     let same = quietly(|| {
         let document = html::parse(&html_src).expect("html5ever never fails");
         let sheet = css::parse(&css_src).expect("css::parse recovers");
@@ -1113,6 +1170,21 @@ fn check_commands(commands: &[DisplayCommand]) -> Result<(), Failure> {
             DisplayCommand::TransformGroup(_, inner) => {
                 check_commands(inner)?;
                 None
+            }
+            // Step 3: a clip group is never empty nor zero-area (a hidden
+            // box emits nothing), and its rect is finite like any geometry.
+            DisplayCommand::ClipGroup(clip, inner) => {
+                if inner.is_empty() || clip.width <= 0.0 || clip.height <= 0.0 {
+                    return Err(Failure {
+                        kind: Kind::NonFinite,
+                        detail: format!(
+                            "clip group {clip:?} with {} commands (empty or zero-area)",
+                            inner.len()
+                        ),
+                    });
+                }
+                check_commands(inner)?;
+                Some(*clip)
             }
         };
         if let Some(r) = rect
@@ -2788,8 +2860,24 @@ fn fuzz_generator_covers_its_spec() {
     let mut root_rules = 0;
     let mut var_uses = 0;
     let mut korean = 0;
+    let mut clip_shapes = 0;
+    let mut clip_kinds = [0usize; 4];
     for seed in 1..=200 {
         let case = Gen::case(seed);
+        let css = case.css() + &case.html();
+        for (i, p) in ["overflow", "clip:", "clip-path:", "transform:"]
+            .iter()
+            .enumerate()
+        {
+            clip_kinds[i] += usize::from(css.contains(p));
+        }
+        if ["clip:", "clip-path:", "transform:"]
+            .iter()
+            .all(|p| css.contains(p))
+            && css.contains("overflow")
+        {
+            clip_shapes += 1;
+        }
         deepest = deepest.max(tree_depth(&case.body));
         if case.has_unbounded_values() {
             unbounded += 1;
@@ -2833,6 +2921,12 @@ fn fuzz_generator_covers_its_spec() {
         "{with_areas}/200 cases with grid-template-areas"
     );
     assert!(korean >= 20, "{korean}/200 cases with Korean text");
+    // Step 3: overflow / clip / clip-path / transform each in many cases,
+    // all four together in some (nested clips under a transform).
+    assert!(
+        clip_kinds.iter().all(|&n| n >= 40) && clip_shapes >= 5,
+        "clip shapes per 200 cases: overflow, clip, clip-path, transform = {clip_kinds:?}, all four {clip_shapes}"
+    );
     assert!(
         with_shorthand >= 10,
         "{with_shorthand}/200 cases with the grid-template shorthand"
