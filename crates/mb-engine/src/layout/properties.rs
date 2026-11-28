@@ -158,6 +158,75 @@ pub(crate) fn definite_height(node: &StyledNode) -> Option<f32> {
     height_value(node, "height").map(|height| clamp_height(node, height))
 }
 
+// ---- Horizontal sizes: box-sizing and min/max-width (CSS 2.1 §10.4,
+// CSS Box Sizing 3; compat round 3 step 5m) ------------------------------
+//
+// The legacy layout lays out every real page below `<body>` (step 5s), so
+// it must apply `min-width`/`max-width` itself — only the taffy bridge did.
+// Sizes are handled as content-box widths: with `box-sizing: border-box`
+// the declared value names the border box and the padding and borders
+// come off (never below 0).
+
+/// The box's horizontal padding + borders against `base`.
+fn horizontal_edges(node: &StyledNode, base: f32) -> f32 {
+    let padding = edge_sizes(node, "padding", base);
+    let border = edge_sizes(node, "border", base);
+    padding.left + padding.right + border.left + border.right
+}
+
+fn is_border_box(node: &StyledNode) -> bool {
+    matches!(node.value("box-sizing"), Some(Value::Keyword(k)) if k == "border-box")
+}
+
+/// A horizontal size property (`width`, `min-width`, `max-width`) as a
+/// content-box width in px: a length, or a percentage of `base`, less the
+/// padding and borders under `box-sizing: border-box`. `None` = `auto` /
+/// `none` / anything else.
+pub(crate) fn content_width_value(node: &StyledNode, name: &str, base: f32) -> Option<f32> {
+    let declared = length_value(node, name, base)?;
+    Some(if is_border_box(node) {
+        (declared - horizontal_edges(node, base)).max(0.0)
+    } else {
+        declared
+    })
+}
+
+/// A content width clamped by `max-width` then `min-width` (min wins,
+/// CSS 2.1 §10.4), never below 0. Inside an intrinsic-size probe a
+/// percentage limit is cyclic and ignored (like `%` padding, F1b): against
+/// the 0 / 1e6 proxy it would pin every min-content size to 0.
+pub(crate) fn clamp_width(node: &StyledNode, width: f32, base: f32) -> f32 {
+    let limit = |name: &str| {
+        let percent = matches!(node.value(name), Some(Value::Length(_, Unit::Percent)));
+        if percent && in_intrinsic_probe() {
+            return None;
+        }
+        content_width_value(node, name, base)
+    };
+    let mut width = width;
+    if let Some(max) = limit("max-width") {
+        width = width.min(max);
+    }
+    if let Some(min) = limit("min-width") {
+        width = width.max(min);
+    }
+    width.max(0.0)
+}
+
+/// Whether `min-width` or `max-width` can change this box's width.
+pub(crate) fn has_width_limits(node: &StyledNode) -> bool {
+    ["min-width", "max-width"]
+        .iter()
+        .any(|name| matches!(node.value(name), Some(Value::Length(..))))
+}
+
+/// Whether `min-height` or `max-height` can change this box's height.
+pub(crate) fn has_height_limits(node: &StyledNode) -> bool {
+    ["min-height", "max-height"]
+        .iter()
+        .any(|name| matches!(node.value(name), Some(Value::Length(..))))
+}
+
 /// The cascaded `font-family` as the one lowercased name the renderer acts
 /// on: `monospace` when the list (step 1b `FontFamilies`) names a
 /// monospace family — the generic, `ui-monospace`, or a font whose name says

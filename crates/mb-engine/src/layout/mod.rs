@@ -23,10 +23,11 @@ use block::layout_node;
 use flex::is_flex_container;
 use grid::is_grid_container;
 pub(super) use properties::{
-    apply_relative_offset, attribute_length, clamp_height, containing_block_height,
-    definite_height, edge_sizes, has_float, in_intrinsic_probe, is_auto, is_display_none,
-    is_float_left, is_float_right, is_layout_whitespace_text, is_out_of_flow, length_value,
-    shift_layout_subtree, with_containing_block_height, with_intrinsic_probe,
+    apply_relative_offset, attribute_length, clamp_height, clamp_width, containing_block_height,
+    content_width_value, definite_height, edge_sizes, has_float, has_height_limits,
+    has_width_limits, in_intrinsic_probe, is_auto, is_display_none, is_float_left, is_float_right,
+    is_layout_whitespace_text, is_out_of_flow, length_value, shift_layout_subtree,
+    with_containing_block_height, with_intrinsic_probe,
 };
 use table::is_table_container;
 
@@ -4236,5 +4237,126 @@ mod tests {
             let h = height_of(&layout, class);
             assert!(h < 60.0, "{class}: height {h}");
         }
+    }
+
+    // ---- 5m: min-width / max-width on the legacy path (CSS 2.1 §10.4,
+    // compat round 3 step 5m). Every case puts `LEGACY` first so the
+    // container is a boundary leaf (the shape of every real site's
+    // `<body>`, docs/compat-round3.md 5s). ----
+
+    fn legacy(body: &str, css: &str) -> LayoutBox {
+        page(&format!("{LEGACY}{body}"), css, (800.0, 600.0))
+    }
+
+    fn content(layout: &LayoutBox, class: &str) -> super::Rect {
+        by_class(layout, class).dimensions.content
+    }
+
+    #[test]
+    fn legacy_max_width_with_auto_margins_centres() {
+        let layout = legacy(
+            r#"<div class="wrap"><p>x</p></div><div class="text">only text</div>"#,
+            ".wrap, .text { max-width: 300px; margin: 0 auto; }",
+        );
+        for class in ["wrap", "text"] {
+            let c = content(&layout, class);
+            assert_eq!((c.width, c.x), (300.0, 250.0), "{class}");
+        }
+    }
+
+    #[test]
+    fn legacy_max_width_percent_and_min_wins() {
+        let layout = legacy(
+            r#"<div class="half">x</div><div class="both">x</div><div class="raise">x</div>"#,
+            ".half { max-width: 50%; }
+             .both { max-width: 100px; min-width: 200px; }
+             .raise { width: 100px; min-width: 150px; }",
+        );
+        assert_eq!(content(&layout, "half").width, 400.0);
+        assert_eq!(content(&layout, "both").width, 200.0);
+        assert_eq!(content(&layout, "raise").width, 150.0);
+    }
+
+    #[test]
+    fn legacy_sizes_respect_border_box() {
+        // box-sizing: border-box — `width`, `min-width` and `max-width` all
+        // name the border box; the content box is what's left after
+        // padding and borders.
+        let layout = legacy(
+            r#"<div class="w">x</div><div class="max">x</div><div class="min">x</div>"#,
+            "div { box-sizing: border-box; padding: 0 20px; border: 5px solid; }
+             .w { width: 300px; }
+             .max { max-width: 300px; }
+             .min { width: 10px; min-width: 100px; }",
+        );
+        assert_eq!(content(&layout, "w").width, 250.0);
+        assert_eq!(content(&layout, "max").width, 250.0);
+        assert_eq!(content(&layout, "min").width, 50.0);
+    }
+
+    #[test]
+    fn legacy_shrink_to_fit_boxes_are_clamped() {
+        // Floats, inline-blocks and absolutes size shrink-to-fit, then
+        // clamp: a long text stops at max-width, a short one grows to
+        // min-width.
+        let long = "word ".repeat(40);
+        let layout = legacy(
+            &format!(
+                r#"<div class="fl">{long}</div><div class="fs">x</div>
+                   <span class="ib">{long}</span><span class="is">x</span>
+                   <div class="ab">{long}</div>"#
+            ),
+            ".fl, .fs { float: left; }
+             .ib, .is { display: inline-block; }
+             .ab { position: absolute; }
+             .fl, .ib, .ab { max-width: 120px; }
+             .fs, .is { min-width: 150px; }",
+        );
+        for class in ["fl", "ib", "ab"] {
+            assert_eq!(content(&layout, class).width, 120.0, "{class}");
+        }
+        for class in ["fs", "is"] {
+            assert_eq!(content(&layout, class).width, 150.0, "{class}");
+        }
+    }
+
+    #[test]
+    fn legacy_flex_items_respect_min_and_max_width() {
+        // A capped item freezes at its max and the others share the rest
+        // (CSS Flexbox §9.7); a min-width item doesn't shrink below it.
+        let layout = legacy(
+            r#"<div class="row"><div class="a">x</div><div class="b">x</div><div class="c">x</div></div>
+               <div class="tight"><div class="m">x</div><div class="n">x</div></div>"#,
+            ".row, .tight { display: flex; width: 600px; }
+             .row > div { flex: 1; }
+             .a { max-width: 100px; }
+             .tight > div { width: 400px; }
+             .m { min-width: 350px; }",
+        );
+        assert_eq!(content(&layout, "a").width, 100.0);
+        assert_eq!(content(&layout, "b").width, 250.0);
+        assert_eq!(content(&layout, "c").width, 250.0);
+        assert_eq!(content(&layout, "m").width, 350.0);
+        assert_eq!(content(&layout, "n").width, 250.0);
+    }
+
+    #[test]
+    fn legacy_grid_item_stretch_stops_at_max_width() {
+        let layout = legacy(
+            r#"<div class="g"><div class="cap">x</div><div class="free">x</div></div>"#,
+            ".g { display: grid; grid-template-columns: 1fr 1fr; width: 600px; }
+             .cap { max-width: 120px; }",
+        );
+        assert_eq!(content(&layout, "cap").width, 120.0);
+        assert_eq!(content(&layout, "free").width, 300.0);
+    }
+
+    #[test]
+    fn legacy_table_width_is_clamped() {
+        let layout = legacy(
+            r#"<table class="t"><tr><td>x</td></tr></table>"#,
+            ".t { width: 100%; max-width: 200px; }",
+        );
+        assert_eq!(content(&layout, "t").width, 200.0);
     }
 }

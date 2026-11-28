@@ -8,8 +8,8 @@ use crate::{
 
 use super::inline::{layout_grid_item, layout_inline_block_node, layout_out_of_flow};
 use super::{
-    LayoutBox, containing_block_height, is_display_none, is_layout_whitespace_text, is_out_of_flow,
-    length_value, outer_rect, shift_layout_subtree,
+    LayoutBox, clamp_width, containing_block_height, is_display_none, is_layout_whitespace_text,
+    is_out_of_flow, length_value, outer_rect, shift_layout_subtree,
 };
 
 pub(super) fn is_grid_container(node: &StyledNode) -> bool {
@@ -164,7 +164,7 @@ pub(super) fn layout_grid_children<'a>(
                 }
                 if !matches!(child.value("width"), Some(Value::Length(_, _))) {
                     let edges = outer_rect(&item).width - item.dimensions.content.width;
-                    let target = (span_width - edges).max(0.0);
+                    let target = clamp_width(child, (span_width - edges).max(0.0), span_width);
                     if item.dimensions.content.width < target {
                         item.dimensions.content.width = target;
                     }

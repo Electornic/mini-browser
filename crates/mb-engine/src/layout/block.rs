@@ -12,9 +12,10 @@ use super::inline::{
 use super::table::{is_table_container, layout_table_children};
 use super::{
     Dimensions, EdgeSizes, LayoutBox, Rect, apply_relative_offset, child_height, clamp_height,
-    container_box_type, definite_height, edge_sizes, intrinsic_height, intrinsic_width, is_auto,
-    is_display_none, is_float_left, is_float_right, is_layout_whitespace_text, is_out_of_flow,
-    length_value, outer_rect, shift_layout_subtree, with_containing_block_height,
+    clamp_width, container_box_type, content_width_value, definite_height, edge_sizes,
+    intrinsic_height, intrinsic_width, is_auto, is_display_none, is_float_left, is_float_right,
+    is_layout_whitespace_text, is_out_of_flow, length_value, outer_rect, shift_layout_subtree,
+    with_containing_block_height,
 };
 
 pub(super) fn layout_node(
@@ -41,11 +42,23 @@ fn layout_node_sized(
     let border = edge_sizes(node, "border", parent_width);
 
     // CSS auto-margin centering only applies when a width is specified.
-    let explicit_width = used_width
-        .or_else(|| length_value(node, "width", parent_width))
+    let specified_width = used_width
+        .or_else(|| content_width_value(node, "width", parent_width))
         .or_else(|| intrinsic_width(node));
     let left_auto = used_width.is_none() && is_auto(node, "margin-left");
     let right_auto = used_width.is_none() && is_auto(node, "margin-right");
+    // min-/max-width (CSS 2.1 §10.4, step 5m): clamp the tentative width —
+    // the specified one, or what `auto` would fill (auto margins as 0). A
+    // clamped `auto` width is then used as if specified, so auto margins
+    // share what's left: `max-width: 1200px; margin: 0 auto` centres.
+    let tentative = specified_width.unwrap_or_else(|| {
+        let margins = if left_auto { 0.0 } else { raw_margin.left }
+            + if right_auto { 0.0 } else { raw_margin.right };
+        (parent_width - margins - padding.left - padding.right - border.left - border.right)
+            .max(0.0)
+    });
+    let clamped = clamp_width(node, tentative, parent_width);
+    let explicit_width = (specified_width.is_some() || clamped != tentative).then_some(clamped);
 
     let (content_width, margin_left, margin_right) = if let Some(width) = explicit_width {
         let used = padding.left + padding.right + border.left + border.right + width;
@@ -314,7 +327,9 @@ fn collapse_margins(prev: f32, next: f32) -> f32 {
 /// so floated `dt`/`dd` pairs marched off to the right one container-width
 /// apart.
 fn float_width(node: &StyledNode, containing_width: f32) -> Option<f32> {
-    if length_value(node, "width", containing_width).is_some() || intrinsic_width(node).is_some() {
+    if content_width_value(node, "width", containing_width).is_some()
+        || intrinsic_width(node).is_some()
+    {
         return None;
     }
     let margin = edge_sizes(node, "margin", containing_width);
@@ -328,7 +343,11 @@ fn float_width(node: &StyledNode, containing_width: f32) -> Option<f32> {
         - border.left
         - border.right)
         .max(0.0);
-    Some(inline_block_shrink_to_fit_width(node, available))
+    Some(clamp_width(
+        node,
+        inline_block_shrink_to_fit_width(node, available),
+        containing_width,
+    ))
 }
 
 fn clear_target_y(node: &StyledNode, float_bottom_left: f32, float_bottom_right: f32) -> f32 {

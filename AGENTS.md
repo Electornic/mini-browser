@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1121 (workspace 합계, 2026-11-28 호환성 3차 5단계 P probe(`css::value_features`·`StyleReport::reparsed_text`) +2; 4b 상태 의사 클래스 는 1119(+12) — 4단계 완료; 4a `:is()`/`:where()`·의사 요소·결합자 중첩 상한 은 1107(+14); 4단계 P 셀렉터 블로커 probe 는 1093, 3d float shrink-to-fit 은 1092 — 3단계 완료, 3c 는 1089, 3b 는 1087, 3a 는 1081). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1128 (workspace 합계, 2026-11-28 호환성 3차 5m 레거시 `min/max-width`·`box-sizing` +7; 5단계 P probe(`css::value_features`·`StyleReport::reparsed_text`) 는 1121(+2); 4b 상태 의사 클래스 는 1119(+12) — 4단계 완료; 4a `:is()`/`:where()`·의사 요소·결합자 중첩 상한 은 1107(+14); 4단계 P 셀렉터 블로커 probe 는 1093, 3d float shrink-to-fit 은 1092 — 3단계 완료, 3c 는 1089, 3b 는 1087, 3a 는 1081). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -155,6 +155,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - 레이아웃이 뷰포트 높이를 읽는 건 루트에 % 높이가 있을 때뿐이고, 그때만 뷰 캐시가 높이를 비교한다(`DocumentView::reads_viewport_height`). 다른 경로로 높이를 읽게 되면 이 플래그를 같이 고칠 것.
 - taffy 의 크기 탐색(MaxContent/MinContent)은 legacy 경계 잎을 대리 폭(1e6/0)으로 배치한다 — 그동안은 `with_intrinsic_probe` 범위라 `edge_sizes` 의 `%` 패딩·여백이 0 이다(순환 퍼센트, 후속 F1b; 대리 폭의 82% 가 열 폭이 되던 증폭). 탐색 중에 `%` 를 대리 폭에 대해 푸는 새 경로를 만들지 말 것 — `in_intrinsic_probe()` 를 볼 것. 인라인 크기 메모 키에 탐색 여부가 들어 있다.
 - 단위 없는 `0` 은 길이 속성에서 파싱 때 `Length(0, Px)` 가 된다(1q, `css::unitless_zero_as_length` — `var()` 치환 뒤에도). 레이아웃·taffy 브릿지는 `Number` 를 길이로 읽지 않으니, 새 길이 속성을 전용 파서로 읽게 되면 같은 승격을 거칠 것(`line-height` 처럼 숫자가 뜻을 갖는 속성은 제외).
+- 실사이트의 `<body>` 는 거의 늘 **경계 잎**이다(절대 위치 자식 하나면 `is_native_block` 이 거짓 — 호환성 3차 5s): 페이지 대부분은 taffy 가 아니라 레거시 block/inline/flex/grid/table 이 배치한다. taffy 브릿지만 고치면 실사이트엔 안 보인다. 레거시에서 가로 크기는 `content_width_value`(`box-sizing` 반영 내용 폭)·`clamp_width`(`max-width` 다음 `min-width`, 크기 탐색 중 `%` 한계 무시)로 읽는다(5m) — 폭을 새로 정하는 레거시 경로를 만들면 이 둘을 지날 것(`length_value(node, "width", …)` 를 직접 쓰지 말 것). 클램프된 `auto` 블록 폭은 지정 폭처럼 auto 여백을 나눈다. flex 는 주축 한계가 있는 줄만 §9.7 동결 루프(`resolve_limited_flex`)로 간다.
 - 페이지 높이는 `DocumentView::document_height` 하나다(1q — 넘친 내용 포함, 캔버스 제외). 스크롤 상한·관찰 `page_height` 가 이것을 쓴다; 루트 상자 높이(`layout_root`)나 `view::document_height(commands)` 를 따로 쓰지 말 것.
 
 ### `element.rs` 에 NUL 바이트

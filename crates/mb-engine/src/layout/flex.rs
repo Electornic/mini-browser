@@ -7,8 +7,9 @@ use crate::{
 
 use super::inline::{layout_inline_block_node, layout_out_of_flow};
 use super::{
-    LayoutBox, containing_block_height, is_display_none, is_layout_whitespace_text, is_out_of_flow,
-    outer_rect, shift_layout_subtree,
+    LayoutBox, clamp_height, clamp_width, containing_block_height, has_height_limits,
+    has_width_limits, is_display_none, is_layout_whitespace_text, is_out_of_flow, outer_rect,
+    shift_layout_subtree,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +126,21 @@ pub(super) fn layout_flex_children(
     // items absorb more shrinkage). Items with zero weight are skipped on
     // their respective passes.
     let free = container_main_size - total_basis;
-    if free > 0.0 {
+    let limited = in_flow.iter().any(|&(_, child)| match direction {
+        FlexDirection::Row => has_width_limits(child),
+        FlexDirection::Column => has_height_limits(child),
+    });
+    if limited {
+        // Step 5m: an item's min-/max- main size takes part in flexing.
+        // Unlimited rows keep the single distribution below unchanged.
+        resolve_limited_flex(
+            &mut boxes,
+            &in_flow,
+            direction,
+            container_main_size,
+            content_width,
+        );
+    } else if free > 0.0 {
         let total_grow: f32 = in_flow.iter().map(|&(_, child)| flex_grow(child)).sum();
         if total_grow > 0.0 {
             for &(i, child) in &in_flow {
@@ -229,6 +244,106 @@ pub(super) fn layout_flex_children(
         FlexDirection::Column => cursor,
     };
     (boxes, auto_content_height)
+}
+
+/// Resolve flexible lengths with min/max constraints (CSS Flexbox §9.7):
+/// distribute the free space, clamp each item, freeze the items whose
+/// clamp moved them the way the total violation points (or all of them
+/// when it is 0), and distribute again among the rest. At most one round
+/// per item. Weights are the same as the unlimited path (grow factor;
+/// shrink factor × outer base size).
+fn resolve_limited_flex(
+    boxes: &mut [LayoutBox],
+    in_flow: &[(usize, &StyledNode)],
+    direction: FlexDirection,
+    container_main: f32,
+    content_width: f32,
+) {
+    let clamp = |child: &StyledNode, size: f32| match direction {
+        FlexDirection::Row => clamp_width(child, size, content_width),
+        FlexDirection::Column => clamp_height(child, size),
+    };
+    let content_main = |b: &LayoutBox| match direction {
+        FlexDirection::Row => b.dimensions.content.width,
+        FlexDirection::Column => b.dimensions.content.height,
+    };
+    let items: Vec<(f32, f32)> = in_flow
+        .iter()
+        .map(|&(i, _)| {
+            let base = content_main(&boxes[i]);
+            (base, main_axis_outer(&boxes[i], direction) - base)
+        })
+        .collect();
+    let hypothetical: f32 = in_flow
+        .iter()
+        .zip(&items)
+        .map(|(&(_, child), &(base, edges))| clamp(child, base) + edges)
+        .sum();
+    let growing = container_main > hypothetical;
+    let factor = |child: &StyledNode| {
+        if growing {
+            flex_grow(child)
+        } else {
+            flex_shrink(child)
+        }
+    };
+    // Inflexible items sit at their hypothetical size from the start.
+    let mut target: Vec<f32> = Vec::with_capacity(items.len());
+    let mut frozen: Vec<bool> = Vec::with_capacity(items.len());
+    for (&(_, child), &(base, _)) in in_flow.iter().zip(&items) {
+        let hypothetical = clamp(child, base);
+        let inflexible = factor(child) <= 0.0
+            || (growing && base > hypothetical)
+            || (!growing && base < hypothetical);
+        target.push(if inflexible { hypothetical } else { base });
+        frozen.push(inflexible);
+    }
+    for _ in 0..=items.len() {
+        if frozen.iter().all(|&f| f) {
+            break;
+        }
+        let used: f32 = items
+            .iter()
+            .zip(&target)
+            .zip(&frozen)
+            .map(|((&(base, edges), &t), &f)| if f { t } else { base } + edges)
+            .sum();
+        let free = container_main - used;
+        let weight = |k: usize, child: &StyledNode| {
+            if growing {
+                flex_grow(child)
+            } else {
+                flex_shrink(child) * (items[k].0 + items[k].1)
+            }
+        };
+        let total_weight: f32 = (0..items.len())
+            .filter(|&k| !frozen[k])
+            .map(|k| weight(k, in_flow[k].1))
+            .sum();
+        let mut violation = 0.0;
+        let mut clamped = vec![0.0_f32; items.len()];
+        for k in (0..items.len()).filter(|&k| !frozen[k]) {
+            let child = in_flow[k].1;
+            let share = if total_weight > 0.0 {
+                free * weight(k, child) / total_weight
+            } else {
+                0.0
+            };
+            let unclamped = (items[k].0 + share).max(0.0);
+            target[k] = clamp(child, unclamped);
+            clamped[k] = target[k] - unclamped;
+            violation += clamped[k];
+        }
+        for k in 0..items.len() {
+            frozen[k] = frozen[k]
+                || violation == 0.0
+                || (violation > 0.0 && clamped[k] > 0.0)
+                || (violation < 0.0 && clamped[k] < 0.0);
+        }
+    }
+    for (&(i, _), &t) in in_flow.iter().zip(&target) {
+        force_item_content_main(&mut boxes[i], t, direction);
+    }
 }
 
 fn stretch_item_to_cross(

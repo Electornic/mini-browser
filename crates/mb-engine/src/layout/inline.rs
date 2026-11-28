@@ -13,9 +13,10 @@ use super::flex::{is_flex_container, layout_flex_children};
 use super::grid::{is_grid_container, layout_grid_children};
 use super::{
     BoxType, Dimensions, LayoutBox, Rect, apply_relative_offset, child_height, clamp_height,
-    collapsed_text, container_box_type, containing_block_height, definite_height, edge_sizes,
-    has_float, in_intrinsic_probe, intrinsic_height, intrinsic_width, is_display_none,
-    is_float_right, is_out_of_flow, length_value, outer_rect, with_containing_block_height,
+    clamp_width, collapsed_text, container_box_type, containing_block_height, content_width_value,
+    definite_height, edge_sizes, has_float, in_intrinsic_probe, intrinsic_height, intrinsic_width,
+    is_display_none, is_float_right, is_out_of_flow, length_value, outer_rect,
+    with_containing_block_height,
 };
 
 pub(super) fn layout_inline_children(
@@ -593,10 +594,14 @@ fn inline_block_outer_size(node: &StyledNode, available_width: f32) -> Rect {
     }
 }
 
+/// The content width of an inline-block (also an out-of-flow box or a
+/// flex item before flexing): its own width or shrink-to-fit, clamped by
+/// min-/max-width (step 5m).
 fn inline_block_resolved_width(node: &StyledNode, available_width: f32) -> f32 {
-    length_value(node, "width", available_width)
+    let width = content_width_value(node, "width", available_width)
         .or_else(|| intrinsic_width(node))
-        .unwrap_or_else(|| inline_block_shrink_to_fit_width(node, available_width))
+        .unwrap_or_else(|| inline_block_shrink_to_fit_width(node, available_width));
+    clamp_width(node, width, available_width)
 }
 
 pub(super) fn inline_block_shrink_to_fit_width(node: &StyledNode, available_width: f32) -> f32 {
@@ -655,14 +660,15 @@ fn layout_inline_block_node_as(
         && length_value(node, "width", available_width).is_none()
         && intrinsic_width(node).is_none())
     .then(|| {
-        (available_width
+        let fill = (available_width
             - margin.left
             - margin.right
             - border.left
             - border.right
             - padding.left
             - padding.right)
-            .max(0.0)
+            .max(0.0);
+        clamp_width(node, fill, available_width)
     });
     let content_width =
         stretched.unwrap_or_else(|| inline_block_resolved_width(node, available_width));
