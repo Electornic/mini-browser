@@ -24,9 +24,9 @@ use flex::is_flex_container;
 use grid::is_grid_container;
 pub(super) use properties::{
     apply_relative_offset, attribute_length, clamp_height, clamp_width, containing_block_height,
-    content_width_value, definite_height, edge_sizes, has_float, has_height_limits,
+    content_width_value, definite_height, edge_sizes, has_float, has_height_limits, has_percent,
     has_width_limits, in_intrinsic_probe, is_auto, is_display_none, is_float_left, is_float_right,
-    is_layout_whitespace_text, is_out_of_flow, length_value, shift_layout_subtree,
+    is_layout_whitespace_text, is_out_of_flow, length_like, length_value, shift_layout_subtree,
     with_containing_block_height, with_intrinsic_probe,
 };
 use table::is_table_container;
@@ -4358,5 +4358,139 @@ mod tests {
             ".t { width: 100%; max-width: 200px; }",
         );
         assert_eq!(content(&layout, "t").width, 200.0);
+    }
+
+    // ---- 5a: calc() in layout (compat round 3 step 5a). Each case runs on
+    // the taffy path (no `LEGACY`) and the legacy path; option (b) of the
+    // 5s spike sends a `%` calc box (and its parent) to the legacy path,
+    // so both must agree. ----
+
+    fn both(body: &str, css: &str, viewport: f32, check: impl Fn(&LayoutBox, &str)) {
+        for (label, prefix) in [("taffy", ""), ("legacy", LEGACY)] {
+            let layout = page(&format!("{prefix}{body}"), css, (viewport, 600.0));
+            check(&layout, label);
+        }
+    }
+
+    #[test]
+    fn width_calc_percent_minus_px() {
+        both(
+            r#"<div class="box"><div class="c">x</div><div class="d"><p>y</p></div></div>"#,
+            ".box { width: 200px } .c, .d { width: calc(100% - 16px) }",
+            800.0,
+            |layout, label| {
+                assert_eq!(content(layout, "c").width, 184.0, "{label}");
+                assert_eq!(content(layout, "d").width, 184.0, "{label}");
+            },
+        );
+    }
+
+    #[test]
+    fn margin_calc_of_vars() {
+        both(
+            r#"<div class="box"><div class="c"><p>x</p></div></div>"#,
+            ".box { width: 200px; --g: 8px } .c { margin-left: calc(var(--g) * 2 + 10%) }",
+            800.0,
+            |layout, label| {
+                let c = content(layout, "c");
+                let x0 = content(layout, "box").x;
+                assert_eq!((c.x - x0, c.width), (36.0, 164.0), "{label}");
+            },
+        );
+    }
+
+    #[test]
+    fn clamp_respects_bounds() {
+        both(
+            r#"<div class="s"><div class="c a">x</div></div><div class="m"><div class="c b">x</div></div><div class="l"><div class="c z">x</div></div>"#,
+            ".s { width: 100px } .m { width: 400px } .l { width: 1000px }
+             .c { width: clamp(150px, 50%, 300px) }",
+            1280.0,
+            |layout, label| {
+                assert_eq!(content(layout, "a").width, 150.0, "{label}");
+                assert_eq!(content(layout, "b").width, 200.0, "{label}");
+                assert_eq!(content(layout, "z").width, 300.0, "{label}");
+            },
+        );
+    }
+
+    #[test]
+    fn flex_basis_percent_uses_main_axis() {
+        both(
+            r#"<div class="row"><div class="r">x</div><div>y</div></div><div class="col"><div class="k">x</div><div>y</div></div>"#,
+            ".row { display: flex; width: 600px } .r { flex: 0 0 calc(50% - 10px) }
+             .col { display: flex; flex-direction: column; height: 400px; width: 100px }
+             .k { flex: 0 0 calc(50% + 10px) }",
+            800.0,
+            |layout, label| {
+                assert_eq!(content(layout, "r").width, 290.0, "{label}");
+                assert_eq!(content(layout, "k").height, 210.0, "{label}");
+            },
+        );
+    }
+
+    #[test]
+    fn calc_width_on_flex_container_resolves() {
+        // The 5s reference case: on the taffy path the container (it has a
+        // `%` calc) goes to the legacy path, which resolves it.
+        for (viewport, width, x) in [(1280.0, 1200.0, 40.0), (768.0, 736.0, 16.0)] {
+            for grid in [false, true] {
+                let display = if grid {
+                    "display: grid; grid-template-columns: 1fr 1fr"
+                } else {
+                    "display: flex"
+                };
+                both(
+                    r#"<div class="f"><div class="i">a</div><div class="j">b</div></div>"#,
+                    &format!(
+                        ".f {{ {display}; width: min(100% - 32px, 1200px); margin: 0 auto }}
+                         .f > div {{ flex: 1 }}"
+                    ),
+                    viewport,
+                    |layout, label| {
+                        let f = content(layout, "f");
+                        assert_eq!((f.width, f.x), (width, x), "{label} grid={grid} {viewport}");
+                        assert_eq!(
+                            content(layout, "i").width,
+                            width / 2.0,
+                            "{label} grid={grid}"
+                        );
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_width_check_accepts_calc() {
+        // A grid item with a calc width is not stretched to its area, and a
+        // flex column item with one is not stretched across: "has a width"
+        // must not be `matches!(Value::Length)` (which reads a calc as auto).
+        both(
+            r#"<div class="g"><div class="gi">x</div><div>y</div></div><div class="col"><div class="ci">x</div></div>"#,
+            ".g { display: grid; grid-template-columns: 1fr 1fr; width: 600px }
+             .gi { width: calc(50% - 10px) }
+             .col { display: flex; flex-direction: column; width: 400px }
+             .ci { width: calc(25% + 4px) }",
+            800.0,
+            |layout, label| {
+                assert_eq!(content(layout, "gi").width, 140.0, "{label}");
+                assert_eq!(content(layout, "ci").width, 104.0, "{label}");
+            },
+        );
+    }
+
+    #[test]
+    fn viewport_units_lay_out() {
+        both(
+            r#"<div class="v">x</div>"#,
+            // `page` styles at the default 1280×800 viewport.
+            ".v { width: 50vw; height: calc(50vh - 10px) }",
+            1280.0,
+            |layout, label| {
+                let v = content(layout, "v");
+                assert_eq!((v.width, v.height), (640.0, 390.0), "{label}");
+            },
+        );
     }
 }

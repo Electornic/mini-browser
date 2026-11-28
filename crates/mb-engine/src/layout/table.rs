@@ -22,8 +22,8 @@ use super::block::layout_node;
 use super::inline::layout_inline_block_node;
 use super::{
     Dimensions, LayoutBox, Rect, clamp_height, container_box_type, definite_height, edge_sizes,
-    intrinsic_height, is_display_none, is_layout_whitespace_text, length_value, outer_rect,
-    with_containing_block_height,
+    intrinsic_height, is_display_none, is_layout_whitespace_text, length_like, length_value,
+    outer_rect, with_containing_block_height,
 };
 
 // Per-table call counters/accumulators. thread_local because layout is
@@ -130,7 +130,7 @@ pub(super) fn layout_table_children(
     let _bs_for_shortcut = length_value(container, "border-spacing", content_width).unwrap_or(0.0);
     let _gap_for_shortcut = (column_count as f32 + 1.0) * _bs_for_shortcut;
     let _available_for_shortcut = (content_width - _gap_for_shortcut).max(0.0);
-    let table_has_explicit_width = matches!(container.value("width"), Some(Value::Length(..)));
+    let table_has_explicit_width = length_like(container, "width").is_some();
     // Pass C shortcut: a 1-column table with an explicit `width` always
     // resolves its single column to `available_for_cells` via Pass D's
     // `must_shrink || want_grow` branch — the natural max-content from
@@ -200,7 +200,7 @@ pub(super) fn layout_table_children(
     let total_gap = (column_count as f32 + 1.0) * border_spacing;
     let available_for_cells = (content_width - total_gap).max(0.0);
     let total_natural: f32 = col_widths.iter().sum();
-    let table_has_explicit_width = matches!(container.value("width"), Some(Value::Length(..)));
+    let table_has_explicit_width = length_like(container, "width").is_some();
     if total_natural > 0.0 {
         let must_shrink = total_natural > available_for_cells;
         let want_grow = table_has_explicit_width && total_natural < available_for_cells;

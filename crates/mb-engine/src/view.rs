@@ -39,6 +39,9 @@ pub struct DocumentView {
     /// `max-height` against the viewport height (step 1p) — so, unlike the
     /// rest of the view, it changes with a height-only resize.
     pub reads_viewport_height: bool,
+    /// The style pass resolved a `vh`/`vmin`/`vmax` length (step 5a): the
+    /// styled tree itself changes with a height-only resize.
+    pub style_reads_viewport_height: bool,
     /// The scrollable height (step 1q), like Chrome's `scrollHeight` minus
     /// its viewport floor: the furthest of the root's margin-box bottom, any
     /// box's border-box bottom and any painted content — content can
@@ -84,8 +87,8 @@ pub fn build_document_view(
         .ok_or_else(|| "document did not produce a root node".to_string())?;
     // `@media` sees the page viewport (CSS px, chrome excluded).
     let media = css::media::MediaContext::new(viewport_width as f32, viewport_height as f32);
-    let styled = profile::time_block("view::style_tree", || {
-        style::style_tree_with_state(parsed_document, root, stylesheets, interaction, &media)
+    let (styled, style_reads_viewport_height) = profile::time_block("view::style_tree", || {
+        style::style_tree_reading_viewport(parsed_document, root, stylesheets, interaction, &media)
     });
     let layout = profile::time_block("view::layout_tree", || {
         layout::layout_tree_with_viewport(
@@ -134,18 +137,21 @@ pub fn build_document_view(
     });
     // Only a percentage on the root can reach the initial containing
     // block's height; anything below it chains through the root.
-    let reads_viewport_height = ["height", "min-height", "max-height"].iter().any(|name| {
-        matches!(
-            styled.value(name),
-            Some(css::Value::Length(_, css::Unit::Percent))
-        )
-    });
+    let reads_viewport_height =
+        ["height", "min-height", "max-height"]
+            .iter()
+            .any(|name| match styled.value(name) {
+                Some(css::Value::Length(_, css::Unit::Percent)) => true,
+                Some(css::Value::Calc(calc)) => calc.has_percent(),
+                _ => false,
+            });
     Ok(DocumentView {
         commands,
         links,
         layout_root: layout,
         clips,
         reads_viewport_height,
+        style_reads_viewport_height,
         document_height: scroll_height,
     })
 }

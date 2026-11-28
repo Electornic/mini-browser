@@ -269,7 +269,7 @@ struct CachedView {
     // a query boundary (docs/compat-round3.md 2.1).
     media_results: Vec<u64>,
     // The viewport height when the style pass resolved a `vh`/`vmin`/`vmax`
-    // length, else 0. Always 0 until step 5 resolves viewport units.
+    // length (`DocumentView::style_reads_viewport_height`, step 5a), else 0.
     vh_height: usize,
     // The page height the view was laid out at — compared only when the
     // layout read it (`DocumentView::reads_viewport_height`: a percentage
@@ -1050,8 +1050,15 @@ impl BrowserState {
         let revision = self.parsed_document.borrow().revision();
         let page_height = (viewport_height as f32 - CHROME_HEIGHT).max(0.0) as usize;
         let media = css::media::MediaContext::new(viewport_width as f32, page_height as f32);
-        // No viewport unit reaches the style pass before step 5.
-        let vh_height = 0;
+        // What the height would key a view that read it: compared against
+        // the cached view's own `vh_height` (0 when its style didn't).
+        let vh_height_for = |view: &DocumentView| {
+            if view.style_reads_viewport_height {
+                page_height
+            } else {
+                0
+            }
+        };
         if let Some(cached) = self.cached_view.as_ref()
             && cached.revision == revision
             && cached.viewport_width == viewport_width
@@ -1059,7 +1066,7 @@ impl BrowserState {
             && cached.hover_path == self.hovered_dom_path
             && cached.focus_path == self.focused_dom_path
             && cached.focus_from_keyboard == self.focus_from_keyboard
-            && cached.vh_height == vh_height
+            && cached.vh_height == vh_height_for(&cached.view)
             && (!cached.view.reads_viewport_height || cached.page_height == page_height)
             // Last: the only part that costs something (one comparison per
             // `@media` block), and only worth it when the rest matched.
@@ -1127,7 +1134,7 @@ impl BrowserState {
                     revision,
                     viewport_width,
                     media_results,
-                    vh_height,
+                    vh_height: vh_height_for(&shared),
                     page_height,
                     hover_path: self.hovered_dom_path.clone(),
                     focus_path: self.focused_dom_path.clone(),
@@ -1154,6 +1161,7 @@ impl BrowserState {
                     },
                     clips: layout::ClipTable::default(),
                     reads_viewport_height: false,
+                    style_reads_viewport_height: false,
                     document_height: 0.0,
                 })
             }
@@ -2354,6 +2362,50 @@ mod tests {
             !has_solid_rect_rgb(&short, 13, 14, 15),
             "min-height flipped"
         );
+    }
+
+    #[test]
+    fn height_resize_restyles_only_with_vh() {
+        // Step 5a: a `vh` length makes the style depend on the page height
+        // — the cache keys on it (`vh_height`); a page without one still
+        // reuses its view across a height-only resize.
+        let chrome = CHROME_HEIGHT as usize;
+        let input = input::WindowInput::default();
+        let height_of = |state: &BrowserState| {
+            fn find(b: &crate::layout::LayoutBox) -> Option<f32> {
+                use crate::layout::BoxType;
+                let node = match &b.box_type {
+                    BoxType::BlockNode(n)
+                    | BoxType::FlexNode(n)
+                    | BoxType::GridNode(n)
+                    | BoxType::TableNode(n) => Some(n),
+                    BoxType::AnonymousBlock => None,
+                };
+                let id = matches!(node,
+                    Some(n) if matches!(&n.node_type, crate::dom::NodeType::Element(e)
+                        if e.attributes.get("id").is_some_and(|i| i == "v")));
+                if id {
+                    return Some(b.dimensions.content.height);
+                }
+                b.children.iter().find_map(find)
+            }
+            find(&state.cached_view.as_ref().unwrap().view.layout_root).unwrap()
+        };
+        let mut state = make_state(
+            "<div><style>#v { height: calc(50vh - 10px) }</style><div id=\"v\">x</div></div>",
+        );
+        let _ = state.display_list(800, 700 + chrome, &input);
+        assert_eq!(height_of(&state), 340.0);
+        let _ = state.display_list(800, 400 + chrome, &input);
+        assert_eq!(height_of(&state), 190.0, "restyled at the new height");
+
+        let mut plain =
+            make_state("<div><style>#v { height: 50vw }</style><div id=\"v\">x</div></div>");
+        let _ = plain.display_list(800, 700 + chrome, &input);
+        let first = Rc::clone(&plain.cached_view.as_ref().unwrap().view);
+        let _ = plain.display_list(800, 400 + chrome, &input);
+        let second = Rc::clone(&plain.cached_view.as_ref().unwrap().view);
+        assert!(Rc::ptr_eq(&first, &second), "no vh: reuse the view");
     }
 
     #[test]

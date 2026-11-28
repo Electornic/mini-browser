@@ -7,11 +7,9 @@
 // `ContainingBlock` lives here because the only callers that build one
 // are the entry shim in mod.rs and this module itself.
 
-use crate::css::{Unit, Value};
-
 use super::{
     LayoutBox, Rect, box_is_absolute, box_is_fixed, box_is_positioned, box_styled_node,
-    clamp_height, definite_height, length_value, outer_rect, shift_layout_subtree,
+    clamp_height, definite_height, has_percent, length_value, outer_rect, shift_layout_subtree,
     with_containing_block_height,
 };
 
@@ -67,7 +65,7 @@ fn resolve_percent_height(layout_box: &mut LayoutBox, cb: ContainingBlock) {
     let Some(node) = box_styled_node(layout_box) else {
         return;
     };
-    let percent = |name: &str| matches!(node.value(name), Some(Value::Length(_, Unit::Percent)));
+    let percent = |name: &str| has_percent(node, name);
     if !(percent("height") || percent("min-height") || percent("max-height")) {
         return;
     }

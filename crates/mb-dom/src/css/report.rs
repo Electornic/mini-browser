@@ -828,7 +828,7 @@ mod tests {
             DropReason::MultiToken
         );
         assert_eq!(
-            reason("width: calc(100% - 2px) ! important"),
+            reason("width: calc(1px * 2px) ! important"),
             DropReason::InvalidValue
         );
         assert_eq!(

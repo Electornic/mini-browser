@@ -7,7 +7,7 @@ use cascade::specified_values;
 use variables::{CustomScope, VarMemo, resolve_var_references};
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
 };
@@ -15,6 +15,7 @@ use std::{
 use crate::{
     css::{
         Stylesheet, TrackBreadth, TrackSize, Unit, Value,
+        calc::{Calc, Units},
         media::{self, MediaContext},
     },
     dom::{Document, NodeId, NodeType},
@@ -115,6 +116,19 @@ pub fn style_tree_with_state(
     state: InteractionState<'_>,
     media: &MediaContext,
 ) -> StyledNode {
+    style_pass(document, root, stylesheets, state, media, None).0
+}
+
+/// [`style_tree_with_state`] plus whether the pass read the viewport
+/// height (a `vh`/`vmin`/`vmax` length, step 5a) — the browser's view
+/// cache then keys on the height (`@media` covers the rest).
+pub fn style_tree_reading_viewport(
+    document: &Document,
+    root: NodeId,
+    stylesheets: &[Stylesheet],
+    state: InteractionState<'_>,
+    media: &MediaContext,
+) -> (StyledNode, bool) {
     style_pass(document, root, stylesheets, state, media, None)
 }
 
@@ -170,7 +184,7 @@ pub fn style_tree_with_report(
     media: &MediaContext,
 ) -> (StyledNode, StyleReport) {
     let report = RefCell::new(StyleReport::default());
-    let styled = style_pass(document, root, stylesheets, state, media, Some(&report));
+    let (styled, _) = style_pass(document, root, stylesheets, state, media, Some(&report));
     (styled, report.into_inner())
 }
 
@@ -181,7 +195,7 @@ fn style_pass(
     state: InteractionState<'_>,
     media: &MediaContext,
     report: Option<&RefCell<StyleReport>>,
-) -> StyledNode {
+) -> (StyledNode, bool) {
     let media_results: Vec<Vec<bool>> = stylesheets
         .iter()
         .map(|sheet| media::evaluate_blocks(&sheet.media, media))
@@ -196,6 +210,11 @@ fn style_pass(
         layer_ranks: &layer_ranks,
         report,
         var_memo: &var_memo,
+        viewport: Viewport {
+            vw: media.viewport_width / 100.0,
+            vh: media.viewport_height / 100.0,
+            read_height: Cell::new(false),
+        },
     };
     // Resolve the user-supplied paths into NodeIds once. The matching layer
     // walks parent links from these NodeIds to compute :hover / :focus /
@@ -226,8 +245,9 @@ fn style_pass(
         raw_root.get("font-size"),
         DEFAULT_FONT_SIZE,
         DEFAULT_FONT_SIZE,
+        &cascade.viewport,
     );
-    style_tree_inner(
+    let styled = style_tree_inner(
         document,
         root,
         &cascade,
@@ -235,7 +255,50 @@ fn style_pass(
         &Rc::new(CustomScope::default()),
         root_font_size,
         &matching_state,
-    )
+    );
+    (styled, cascade.viewport.read_height.get())
+}
+
+/// 1vw / 1vh of the page viewport in px, and whether the pass used the
+/// height (step 5a).
+pub(super) struct Viewport {
+    vw: f32,
+    vh: f32,
+    read_height: Cell<bool>,
+}
+
+impl Viewport {
+    /// A viewport-unit length in px (`None` for other units).
+    fn px(&self, value: f32, unit: Unit) -> Option<f32> {
+        let px = match unit {
+            Unit::Vw => value * self.vw,
+            Unit::Vh => value * self.vh,
+            Unit::Vmin => value * self.vw.min(self.vh),
+            Unit::Vmax => value * self.vw.max(self.vh),
+            _ => return None,
+        };
+        if unit != Unit::Vw {
+            self.read_height.set(true);
+        }
+        Some(px)
+    }
+
+    fn units(&self, em: f32, rem: f32) -> Units {
+        Units {
+            em,
+            rem,
+            vw: self.vw,
+            vh: self.vh,
+        }
+    }
+
+    /// `calc` with its font and viewport units folded (`em` = `em`).
+    fn resolve(&self, calc: &Calc, em: f32, rem: f32) -> Calc {
+        if calc.uses_viewport_height() {
+            self.read_height.set(true);
+        }
+        calc.resolve(&self.units(em, rem))
+    }
 }
 
 /// The author sheets of one style pass plus which of their `@media` blocks
@@ -249,6 +312,8 @@ pub(super) struct Cascade<'a> {
     pub report: Option<&'a RefCell<StyleReport>>,
     /// `var()` re-parse results for this pass (step 1c).
     pub var_memo: &'a RefCell<VarMemo>,
+    /// What viewport units resolve against (step 5a).
+    pub viewport: Viewport,
 }
 
 /// Walk a `Vec<usize>` child-index path starting from `root` (rather than
@@ -349,7 +414,19 @@ fn style_tree_inner(
         specified_values.get("font-size"),
         parent_font_size,
         root_font_size,
+        &cascade.viewport,
     ));
+    // `line-height` (step 5a): a length calc is folded to px against the
+    // element's own font — `%` included — so no `Calc` leaves the style
+    // pass here; a unitless calc was already a `Number` (a factor that
+    // inherits as such).
+    if let Some(Value::Calc(calc)) = specified_values.get("line-height") {
+        let px = cascade
+            .viewport
+            .resolve(calc, own_font_size, root_font_size)
+            .eval(own_font_size);
+        specified_values.insert("line-height".into(), Value::Length(saturate(px), Unit::Px));
+    }
 
     // Replace own font-size with the resolved Px value so descendants see the cascaded
     // value, then resolve every other em/rem/ch to Px in place. Percent stays
@@ -371,6 +448,22 @@ fn style_tree_inner(
             Value::Length(v, Unit::Rem) => *value = Value::Length(*v * root_font_size, Unit::Px),
             Value::Length(v, Unit::Ch) => *value = Value::Length(*v * ch_unit, Unit::Px),
             Value::Length(v, Unit::Pt) => *value = Value::Length(*v * PT_TO_PX, Unit::Px),
+            Value::Length(v, unit @ (Unit::Vw | Unit::Vh | Unit::Vmin | Unit::Vmax)) => {
+                let px = cascade.viewport.px(*v, *unit).unwrap_or(0.0);
+                *value = Value::Length(px, Unit::Px);
+            }
+            // Step 5a: font and viewport units folded; what is left is
+            // `px + %` for layout, or a plain px length without a `%`.
+            Value::Calc(calc) => {
+                let resolved = cascade
+                    .viewport
+                    .resolve(calc, own_font_size, root_font_size);
+                *value = if resolved.has_percent() {
+                    Value::Calc(Box::new(resolved))
+                } else {
+                    Value::Length(saturate(resolved.eval(0.0)), Unit::Px)
+                };
+            }
             // Track lists (grid-template-columns/rows) can mix length tracks
             // with fr tracks; resolve em/rem/ch/pt inside Length tracks the same
             // way we resolve top-level lengths so layout only ever sees Px / %.
@@ -383,7 +476,7 @@ fn style_tree_inner(
                             Unit::Rem => Some(*v * root_font_size),
                             Unit::Ch => Some(*v * ch_unit),
                             Unit::Pt => Some(*v * PT_TO_PX),
-                            _ => None,
+                            other => cascade.viewport.px(*v, *other),
                         };
                         if let Some(px) = px {
                             *axis = crate::css::SizeAxis::Length(saturate(px), Unit::Px);
@@ -392,12 +485,16 @@ fn style_tree_inner(
                 }
             }
             Value::TrackList(tracks) => {
+                let viewport = &cascade.viewport;
                 let to_px = |v: f32, unit: Unit| match unit {
                     Unit::Em => (v * own_font_size, Unit::Px),
                     Unit::Rem => (v * root_font_size, Unit::Px),
                     Unit::Ch => (v * ch_unit, Unit::Px),
                     Unit::Pt => (v * PT_TO_PX, Unit::Px),
-                    other => (v, other),
+                    other => match viewport.px(v, other) {
+                        Some(px) => (px, Unit::Px),
+                        None => (v, other),
+                    },
                 };
                 let breadth_to_px = |breadth: &mut TrackBreadth| {
                     if let TrackBreadth::Length(v, unit) = *breadth {
@@ -582,8 +679,21 @@ fn saturate_value(value: &mut Value) {
     }
 }
 
-fn resolve_font_size(raw: Option<&Value>, parent_font_size: f32, root_font_size: f32) -> f32 {
+fn resolve_font_size(
+    raw: Option<&Value>,
+    parent_font_size: f32,
+    root_font_size: f32,
+    viewport: &Viewport,
+) -> f32 {
     match raw {
+        // Step 5a: `em` and `%` are the parent's font size; folded to px
+        // here — the font size is every descendant's `em` basis.
+        Some(Value::Calc(calc)) => viewport
+            .resolve(calc, parent_font_size, root_font_size)
+            .eval(parent_font_size),
+        Some(Value::Length(v, unit @ (Unit::Vw | Unit::Vh | Unit::Vmin | Unit::Vmax))) => {
+            viewport.px(*v, *unit).unwrap_or(parent_font_size)
+        }
         Some(Value::Length(v, Unit::Px)) => *v,
         Some(Value::Length(v, Unit::Em)) => *v * parent_font_size,
         Some(Value::Length(v, Unit::Rem)) => *v * root_font_size,
@@ -2976,8 +3086,8 @@ mod tests {
 
     #[test]
     fn style_report_counts_substituted_keyword_the_property_rejects() {
-        // `100vw` is a single-token Keyword today; `width` doesn't take it.
-        let css = ":root { --w: 100vw; --c: red; } p { width: var(--w); color: var(--c); }";
+        // `wide` is a single-token Keyword; `width` doesn't take it.
+        let css = ":root { --w: wide; --c: red; } p { width: var(--w); color: var(--c); }";
         let report = report_for("<div><p>x</p></div>", css);
         assert!(
             report
@@ -3465,5 +3575,108 @@ mod tests {
             return Some(node);
         }
         node.children.iter().find_map(|child| find_tag(child, tag))
+    }
+
+    // ---- step 5a: calc() and viewport units at style time ----
+
+    /// The `<p>` inside `<div>` styled at a 1000×500 viewport.
+    fn child_values(css: &str) -> (style::StyledNode, style::StyledNode) {
+        let (document, root) = parse_html(r#"<div class="p"><p class="c">x</p></div>"#);
+        let styled = style::style_tree_with_state(
+            &document,
+            root,
+            &[parse_css(css)],
+            style::InteractionState::default(),
+            &crate::css::media::MediaContext::new(1000.0, 500.0),
+        );
+        let child = styled.children[0].clone();
+        (styled, child)
+    }
+
+    #[test]
+    fn font_size_calc_percent_uses_parent_font() {
+        let (_, p) = child_values(".p { font-size: 20px } .c { font-size: calc(50% + 2px) }");
+        assert_eq!(p.value("font-size"), Some(&Value::Length(12.0, Unit::Px)));
+        let (_, p) = child_values(".p { font-size: 20px } .c { font-size: calc(1em + 1vw) }");
+        assert_eq!(p.value("font-size"), Some(&Value::Length(30.0, Unit::Px)));
+        let (_, p) = child_values(".p { font-size: 20px } .c { font-size: min(50%, 1rem) }");
+        assert_eq!(p.value("font-size"), Some(&Value::Length(10.0, Unit::Px)));
+    }
+
+    #[test]
+    fn line_height_calc_resolves_at_style_time() {
+        let (_, p) = child_values(".c { font-size: 10px; line-height: calc(1em + 4px) }");
+        assert_eq!(p.value("line-height"), Some(&Value::Length(14.0, Unit::Px)));
+        // A percentage of the element's own font size.
+        let (_, p) = child_values(".c { font-size: 10px; line-height: calc(150% + 2px) }");
+        assert_eq!(p.value("line-height"), Some(&Value::Length(17.0, Unit::Px)));
+    }
+
+    #[test]
+    fn line_height_unitless_calc_inherits_as_factor() {
+        let (div, p) = child_values(
+            ".p { font-size: 10px; line-height: calc(1 + .5) } .c { font-size: 20px }",
+        );
+        assert_eq!(div.value("line-height"), Some(&Value::Number(1.5)));
+        assert_eq!(p.value("line-height"), Some(&Value::Number(1.5)));
+    }
+
+    #[test]
+    fn viewport_units_and_calc_resolve_at_style_time() {
+        let (div, p) = child_values(
+            ".p { width: 50vw; height: calc(100vh - 100px); min-height: 10vmin; max-width: 10vmax }
+             .c { font-size: 10px; width: calc(100% - 2em); margin-left: clamp(1px, 1vw, 5px) }",
+        );
+        assert_eq!(div.value("width"), Some(&Value::Length(500.0, Unit::Px)));
+        assert_eq!(div.value("height"), Some(&Value::Length(400.0, Unit::Px)));
+        assert_eq!(
+            div.value("min-height"),
+            Some(&Value::Length(50.0, Unit::Px))
+        );
+        assert_eq!(
+            div.value("max-width"),
+            Some(&Value::Length(100.0, Unit::Px))
+        );
+        // `%` waits for layout; the em is folded.
+        match p.value("width") {
+            Some(Value::Calc(calc)) => {
+                assert!(calc.has_percent());
+                assert_eq!(calc.eval(200.0), 180.0);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(p.value("margin-left"), Some(&Value::Length(5.0, Unit::Px)));
+    }
+
+    #[test]
+    fn calc_of_var_times_minus_one() {
+        let (_, p) = child_values(
+            ".p { --a: 4px; --b: calc(var(--a) + 1rem) }
+             .c { margin-top: calc(var(--a) * -1); padding-left: var(--b) }",
+        );
+        assert_eq!(p.value("margin-top"), Some(&Value::Length(-4.0, Unit::Px)));
+        assert_eq!(
+            p.value("padding-left"),
+            Some(&Value::Length(20.0, Unit::Px))
+        );
+    }
+
+    #[test]
+    fn style_pass_reports_viewport_height_use() {
+        let (document, root) = parse_html(r#"<div class="p"><p class="c">x</p></div>"#);
+        let reads = |css: &str| {
+            style::style_tree_reading_viewport(
+                &document,
+                root,
+                &[parse_css(css)],
+                style::InteractionState::default(),
+                &crate::css::media::MediaContext::new(1000.0, 500.0),
+            )
+            .1
+        };
+        assert!(!reads(".c { width: 50vw; height: calc(100% - 1em) }"));
+        assert!(reads(".c { height: 100vh }"));
+        assert!(reads(".c { width: calc(10vmin + 1px) }"));
+        assert!(reads(".c { margin-top: min(1px, 10vmax) }"));
     }
 }

@@ -7,7 +7,9 @@
 use cssparser::{Parser as CssParser, Token};
 
 use super::error::convert_basic_error_at;
-use super::parse::{length_with_unit, parse_length_or_number, parse_value, peek_starts_length};
+use super::parse::{
+    length_with_unit, parse_length_or_number, parse_value, peek_math_function, peek_starts_length,
+};
 use super::{BackgroundSize, Declaration, ParseError, SizeAxis, Unit, Value};
 
 // -----------------------------------------------------------------------------
@@ -241,7 +243,9 @@ pub(super) fn parse_flex_shorthand<'i>(
             }
             Value::Number(n) if shrink.is_none() && after_grow => shrink = Some(n),
             Value::Number(0.0) if basis.is_none() => basis = Some(Value::Length(0.0, Unit::Px)),
-            length @ Value::Length(_, _) if basis.is_none() => basis = Some(length),
+            length @ (Value::Length(_, _) | Value::Calc(_)) if basis.is_none() => {
+                basis = Some(length)
+            }
             _ => return error(input, "too many values"),
         }
         after_grow = false;
@@ -677,7 +681,7 @@ pub(super) fn parse_inset_shorthand<'i>(
         }
         values.push(match parse_length_or_number(input)? {
             Value::Number(0.0) => Value::Length(0.0, Unit::Px),
-            length @ Value::Length(_, _) => length,
+            length @ (Value::Length(_, _) | Value::Calc(_)) => length,
             _ => {
                 return Err(ParseError::new(
                     input.position().byte_index(),
@@ -723,9 +727,20 @@ fn parse_border_style<'i>(input: &mut CssParser<'i>) -> Result<String, ParseErro
 }
 
 /// A border width: a non-negative length, a bare `0`, or `thin` /
-/// `medium` / `thick` (1 / 3 / 5px, as Chrome).
+/// `medium` / `thick` (1 / 3 / 5px, as Chrome) — or a math function
+/// (step 5a; GitHub's `max(1px, .0625rem)`).
 fn parse_border_width<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
     input.skip_whitespace();
+    if peek_math_function(input) {
+        return match parse_length_or_number(input)? {
+            Value::Number(0.0) => Ok(Value::Length(0.0, Unit::Px)),
+            length @ (Value::Length(_, _) | Value::Calc(_)) => Ok(length),
+            _ => Err(ParseError::new(
+                input.position().byte_index(),
+                "border width: expected a length",
+            )),
+        };
+    }
     let position = input.position().byte_index();
     let token = input
         .next()

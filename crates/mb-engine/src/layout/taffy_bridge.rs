@@ -51,7 +51,7 @@ use super::table::is_table_container;
 use super::{
     BoxType, Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, has_float,
     intrinsic_height, intrinsic_width, is_display_none, is_layout_whitespace_text, is_out_of_flow,
-    length_value, outer_rect, shift_layout_subtree, with_containing_block_height,
+    length_like, length_value, outer_rect, shift_layout_subtree, with_containing_block_height,
     with_intrinsic_probe,
 };
 
@@ -679,7 +679,7 @@ fn probe_sizes_to_lines(content: &BoundaryContent) -> bool {
     match content {
         BoundaryContent::InlineRun { .. } => true,
         BoundaryContent::Node(node) => {
-            uses_inline_flow(node) && !matches!(node.value("width"), Some(Value::Length(_, _)))
+            uses_inline_flow(node) && length_like(node, "width").is_none()
         }
     }
 }
@@ -807,6 +807,7 @@ fn is_native_block(node: &StyledNode) -> bool {
         || has_clear(node)
         || has_percent_inset_or_padding(node)
         || uses_grid_template_areas(node)
+        || has_calc_box_property(node)
     {
         return false;
     }
@@ -817,10 +818,47 @@ fn is_native_block(node: &StyledNode) -> bool {
     // Inline-flow / flex / grid / table CHILDREN are fine — they each become
     // their own boundary leaf, and taffy stacks those opaque rectangles in
     // a perfectly ordinary block flow on our behalf.
+    // A child with a calc box property (step 5a, below) is placed by its
+    // parent's algorithm — the legacy one, so the parent goes too.
     !node
         .children
         .iter()
-        .any(|c| has_float(c) || has_clear(c) || is_out_of_flow(c))
+        .any(|c| has_float(c) || has_clear(c) || is_out_of_flow(c) || has_calc_box_property(c))
+}
+
+/// Step 5a, option (b) of the 5s spike (docs/compat-round3.md): taffy's
+/// `TaffyTree` resolves `calc()` to 0, so a box whose size, margin,
+/// padding, inset, flex basis or gap is still a `Calc` after the style
+/// pass (it has a `%` — anything else is px by then) is laid out by the
+/// legacy path, which resolves it against the right basis. The bridge
+/// never builds a `Dimension::calc`.
+fn has_calc_box_property(node: &StyledNode) -> bool {
+    const BOX: &[&str] = &[
+        "width",
+        "height",
+        "min-width",
+        "min-height",
+        "max-width",
+        "max-height",
+        "margin-top",
+        "margin-right",
+        "margin-bottom",
+        "margin-left",
+        "padding-top",
+        "padding-right",
+        "padding-bottom",
+        "padding-left",
+        "top",
+        "right",
+        "bottom",
+        "left",
+        "flex-basis",
+        "gap",
+        "row-gap",
+        "column-gap",
+    ];
+    BOX.iter()
+        .any(|name| matches!(node.value(name), Some(Value::Calc(_))))
 }
 
 fn has_clear(node: &StyledNode) -> bool {

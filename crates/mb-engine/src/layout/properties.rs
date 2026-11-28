@@ -11,7 +11,7 @@
 // path.
 
 use crate::{
-    css::{Unit, Value},
+    css::{Unit, Value, calc::Calc},
     dom::{ElementData, NodeType},
     style::StyledNode,
 };
@@ -26,10 +26,9 @@ pub(crate) fn edge_sizes(node: &StyledNode, prefix: &str, base: f32) -> EdgeSize
     // of it is cyclic: it contributes 0 (see [`with_intrinsic_probe`]).
     let side = |side: &str| {
         let name = format!("{prefix}-{side}");
-        if in_intrinsic_probe()
-            && matches!(node.value(&name), Some(Value::Length(_, Unit::Percent)))
-        {
-            return 0.0;
+        if in_intrinsic_probe() && has_percent(node, &name) {
+            // A calc's own px part still counts (`calc(10% + 4px)` → 4).
+            return length_value(node, &name, 0.0).unwrap_or(0.0);
         }
         length_value(node, &name, base).unwrap_or(0.0)
     };
@@ -78,11 +77,53 @@ pub(crate) fn length_value(node: &StyledNode, name: &str, base: f32) -> Option<f
     // `base` is the containing-block dimension a Percent length resolves against. For
     // properties that should never see a percent (font-size after style resolution, etc.)
     // callers can safely pass any value.
-    match node.value(name) {
-        Some(Value::Length(value, Unit::Px)) => Some(*value),
-        Some(Value::Length(value, Unit::Percent)) => Some(*value / 100.0 * base),
+    length_like(node, name).map(|length| length.resolve(base))
+}
+
+/// A length-valued property as layout sees it after the style pass: px,
+/// a percentage, or a `calc()` of the two (step 5a — font and viewport
+/// units are already px). `None` = `auto` / `none` / a keyword. "Does the
+/// box have a width?" is `length_like(…).is_some()`: matching only
+/// `Value::Length` read a calc width as auto.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LengthLike<'a> {
+    Px(f32),
+    Percent(f32),
+    Calc(&'a Calc),
+}
+
+impl LengthLike<'_> {
+    /// In px, a percentage of `base`; never non-finite, within the
+    /// engine's length range.
+    pub(crate) fn resolve(self, base: f32) -> f32 {
+        match self {
+            LengthLike::Px(v) => v,
+            LengthLike::Percent(v) => v / 100.0 * base,
+            LengthLike::Calc(calc) => calc.eval(base).clamp(-MAX_CSS_LENGTH, MAX_CSS_LENGTH),
+        }
+    }
+
+    pub(crate) fn has_percent(self) -> bool {
+        match self {
+            LengthLike::Px(_) => false,
+            LengthLike::Percent(_) => true,
+            LengthLike::Calc(calc) => calc.has_percent(),
+        }
+    }
+}
+
+pub(crate) fn length_like<'a>(node: &'a StyledNode, name: &str) -> Option<LengthLike<'a>> {
+    match node.value(name)? {
+        Value::Length(value, Unit::Px) => Some(LengthLike::Px(*value)),
+        Value::Length(value, Unit::Percent) => Some(LengthLike::Percent(*value)),
+        Value::Calc(calc) => Some(LengthLike::Calc(calc)),
         _ => None,
     }
+}
+
+/// Whether the property holds a percentage (or a calc with one).
+pub(crate) fn has_percent(node: &StyledNode, name: &str) -> bool {
+    length_like(node, name).is_some_and(LengthLike::has_percent)
 }
 
 // ---- Percentage heights (CSS 2.1 §10.5; compat round 3 step 1p) --------
@@ -129,12 +170,11 @@ pub(crate) fn with_containing_block_height<R>(
 /// a length, or a percentage of the definite containing-block height.
 /// `None` = auto / none / a percentage against an indefinite height.
 pub(crate) fn height_value(node: &StyledNode, name: &str) -> Option<f32> {
-    match node.value(name) {
-        Some(Value::Length(value, Unit::Px)) => Some(*value),
-        Some(Value::Length(value, Unit::Percent)) => {
-            containing_block_height().map(|base| *value / 100.0 * base)
-        }
-        _ => None,
+    let length = length_like(node, name)?;
+    if length.has_percent() {
+        containing_block_height().map(|base| length.resolve(base))
+    } else {
+        Some(length.resolve(0.0))
     }
 }
 
@@ -197,8 +237,7 @@ pub(crate) fn content_width_value(node: &StyledNode, name: &str, base: f32) -> O
 /// the 0 / 1e6 proxy it would pin every min-content size to 0.
 pub(crate) fn clamp_width(node: &StyledNode, width: f32, base: f32) -> f32 {
     let limit = |name: &str| {
-        let percent = matches!(node.value(name), Some(Value::Length(_, Unit::Percent)));
-        if percent && in_intrinsic_probe() {
+        if has_percent(node, name) && in_intrinsic_probe() {
             return None;
         }
         content_width_value(node, name, base)
@@ -217,14 +256,14 @@ pub(crate) fn clamp_width(node: &StyledNode, width: f32, base: f32) -> f32 {
 pub(crate) fn has_width_limits(node: &StyledNode) -> bool {
     ["min-width", "max-width"]
         .iter()
-        .any(|name| matches!(node.value(name), Some(Value::Length(..))))
+        .any(|name| length_like(node, name).is_some())
 }
 
 /// Whether `min-height` or `max-height` can change this box's height.
 pub(crate) fn has_height_limits(node: &StyledNode) -> bool {
     ["min-height", "max-height"]
         .iter()
-        .any(|name| matches!(node.value(name), Some(Value::Length(..))))
+        .any(|name| length_like(node, name).is_some())
 }
 
 /// The cascaded `font-family` as the one lowercased name the renderer acts
@@ -322,9 +361,9 @@ pub(crate) fn relative_offset(node: &StyledNode, base: f32) -> Option<(f32, f32)
     }
     let left = length_value(node, "left", base);
     let right = length_value(node, "right", base);
-    let vertical = |name: &str| match node.value(name) {
-        Some(Value::Length(value, Unit::Percent)) => {
-            containing_block_height().map(|height| value / 100.0 * height)
+    let vertical = |name: &str| match length_like(node, name) {
+        Some(length) if length.has_percent() => {
+            containing_block_height().map(|height| length.resolve(height))
         }
         _ => length_value(node, name, base),
     };

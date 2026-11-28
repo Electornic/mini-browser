@@ -179,8 +179,6 @@ pub(super) fn resolve_var_references(
                     reparse(memo, parse_as, text, name)
                 })
             }
-            // Never produced by the parser any more (step 1c): invalid.
-            Value::Var { .. } => None,
             _ => continue,
         };
         let declared = value.clone();

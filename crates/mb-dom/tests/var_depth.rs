@@ -118,7 +118,25 @@ fn run_child() {
     assert_eq!(p.value("width"), None);
     assert_eq!(p.value("height"), Some(&px(2.0)));
 
-    // 5. Within the cap everything still works.
+    // 5. Step 5a: math functions nest by themselves — `calc(calc(…))`,
+    //    parentheses, and a deep calc reached through `var()`.
+    let css = format!(
+        "p {{ width: {}1px{}; min-width: calc({}1px{}); --c: {}2px{}; \
+         max-width: var(--c); height: 2px; }}",
+        "calc(".repeat(DEEP),
+        ")".repeat(DEEP),
+        "(".repeat(DEEP),
+        ")".repeat(DEEP),
+        "min(".repeat(DEEP),
+        ")".repeat(DEEP)
+    );
+    let p = style_p(&css);
+    assert_eq!(p.value("width"), None);
+    assert_eq!(p.value("min-width"), None);
+    assert_eq!(p.value("max-width"), None);
+    assert_eq!(p.value("height"), Some(&px(2.0)));
+
+    // 6. Within the cap everything still works.
     let mut css = String::from(":root {");
     for i in 0..20 {
         css.push_str(&format!(" --b{i}: var(--b{});", i + 1));
@@ -131,4 +149,10 @@ fn run_child() {
     let p = style_p(&css);
     assert_eq!(p.value("width"), Some(&px(6.0)));
     assert_eq!(p.value("height"), Some(&px(7.0)));
+    let p = style_p(&format!(
+        "p {{ width: {}3px{}; }}",
+        "calc(".repeat(20),
+        ")".repeat(20)
+    ));
+    assert_eq!(p.value("width"), Some(&px(3.0)));
 }

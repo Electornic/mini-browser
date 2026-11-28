@@ -270,6 +270,9 @@ const UNBOUNDED_MARKERS: &[&str] = &[
 
 struct Gen {
     rng: Rng,
+    /// A second stream for the step 5a math-function lengths, so adding
+    /// them didn't reshuffle every other choice (and coverage) per seed.
+    calc_rng: Rng,
     values: Values,
     budget: usize,
     max_depth: usize,
@@ -291,6 +294,7 @@ impl Gen {
         let max_depth = rng.range(0, 40);
         let mut generator = Gen {
             rng,
+            calc_rng: Rng::new(seed ^ 0x5CA1_C0DE),
             values,
             budget,
             max_depth,
@@ -528,6 +532,44 @@ impl Gen {
     // ------------------------------------------------------- values ----
 
     fn length(&mut self) -> String {
+        // Step 5a: math functions and viewport units. The unbounded pool
+        // holds the hostile ones — division by zero, overflow, nesting past
+        // the cap, huge viewport multiples.
+        if self.calc_rng.chance(8) {
+            if self.values == Values::Unbounded && self.calc_rng.chance(50) {
+                let deep = format!("{}1px{}", "calc(".repeat(40), ")".repeat(40));
+                return self
+                    .calc_rng
+                    .pick(&[
+                        "calc(1px / 0)",
+                        "calc(1e30px * 1e30)",
+                        "calc(3e38px + 3e38px)",
+                        "calc(100% * 1e9)",
+                        "min(1e39px, 1e39%)",
+                        "100000vw",
+                        "clamp(1e30px, 1%, -1e30px)",
+                        "calc(1px * 2px)",
+                        deep.as_str(),
+                    ])
+                    .to_string();
+            }
+            return self
+                .calc_rng
+                .pick(&[
+                    "calc(100% - 16px)",
+                    "min(100% - 2rem, 300px)",
+                    "clamp(10px, 50%, 200px)",
+                    "calc(50vw - 10px)",
+                    "max(1px, .5em)",
+                    "10vh",
+                    "calc((100% - 2 * 8px) / 3)",
+                    "calc(10px + 2 * max(1em, 5%))",
+                    "-webkit-calc(1% + 1px)",
+                    "20dvh",
+                    "5vmin",
+                ])
+                .to_string();
+        }
         if self.values == Values::Unbounded && self.rng.chance(30) {
             return self
                 .rng
@@ -1711,6 +1753,18 @@ const CSS_TOKENS: &[&str] = &[
     "calc(1px + )",
     "min(",
     "max(1px,",
+    "clamp(",
+    "-webkit-calc(",
+    "calc(1px / 0)",
+    "calc(1px * 2px)",
+    "calc(100%-1px)",
+    "calc(((((1px)))))",
+    "min(100% - 2rem, 1200px)",
+    "clamp(1rem, 2.5vw, 2rem)",
+    "calc(var(--x) * -1)",
+    "1vw",
+    "100dvh",
+    "1e39vmax",
     "rgb(",
     "rgba(1,2,3,4,5)",
     "hsl(",
@@ -2295,7 +2349,16 @@ fn soup_value(rng: &mut Rng, property: &str) -> String {
             "inherit",
         ]),
         "--b" => *rng.pick(&["var(--a, 1px)", "1px 2px", "var(--b)", "solid red"]),
-        _ => *rng.pick(&["1px", "1px 2px 3px 4px", "1%", "1em", "1", "red"]),
+        _ => *rng.pick(&[
+            "1px",
+            "1px 2px 3px 4px",
+            "1%",
+            "1em",
+            "1",
+            "red",
+            "calc(1% - 1px)",
+            "min(1px, 2%) max(1vw, 1px)",
+        ]),
     };
     const NUMBERS: &[&str] = &[
         "0",
@@ -2957,6 +3020,7 @@ fn fuzz_generator_covers_its_spec() {
     let mut with_areas = 0;
     let mut with_shorthand = 0;
     let mut with_minmax = 0;
+    let mut with_calc = 0;
     let mut important_rules = 0;
     let mut important_inline = 0;
     let mut root_rules = 0;
@@ -2992,6 +3056,12 @@ fn fuzz_generator_covers_its_spec() {
         }
         if case.css().contains("minmax(") {
             with_minmax += 1;
+        }
+        if ["calc(", "min(", "clamp(", "vw", "vh"]
+            .iter()
+            .any(|f| case.css().contains(f) || case.html().contains(f))
+        {
+            with_calc += 1;
         }
         if case.css().contains("!important") {
             important_rules += 1;
@@ -3034,6 +3104,10 @@ fn fuzz_generator_covers_its_spec() {
         "{with_shorthand}/200 cases with the grid-template shorthand"
     );
     assert!(with_minmax >= 10, "{with_minmax}/200 cases with minmax()");
+    assert!(
+        with_calc >= 20,
+        "{with_calc}/200 cases with calc()/min()/clamp() or viewport units"
+    );
     assert!(
         important_rules >= 50,
         "{important_rules}/200 cases with an !important rule declaration"

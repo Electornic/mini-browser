@@ -9,7 +9,7 @@ use crate::{
 use super::inline::{layout_grid_item, layout_inline_block_node, layout_out_of_flow};
 use super::{
     LayoutBox, clamp_width, containing_block_height, is_display_none, is_layout_whitespace_text,
-    is_out_of_flow, length_value, outer_rect, shift_layout_subtree,
+    is_out_of_flow, length_like, length_value, outer_rect, shift_layout_subtree,
 };
 
 pub(super) fn is_grid_container(node: &StyledNode) -> bool {
@@ -162,7 +162,7 @@ pub(super) fn layout_grid_children<'a>(
                 if dx != 0.0 {
                     shift_layout_subtree(&mut item, dx, 0.0);
                 }
-                if !matches!(child.value("width"), Some(Value::Length(_, _))) {
+                if length_like(child, "width").is_none() {
                     let edges = outer_rect(&item).width - item.dimensions.content.width;
                     let target = clamp_width(child, (span_width - edges).max(0.0), span_width);
                     if item.dimensions.content.width < target {
@@ -223,7 +223,7 @@ pub(super) fn layout_grid_children<'a>(
         // a multi-row span). Items with explicit height keep their declared
         // size — this matches the column-track post-hoc fill on the main
         // axis.
-        if !matches!(child.value("height"), Some(Value::Length(_, _))) {
+        if length_like(child, "height").is_none() {
             let span_height = span_size(&row_heights, row_gap, area.row_start, area.row_end);
             let edges = outer_rect(item).height - item.dimensions.content.height;
             let target = (span_height - edges).max(0.0);

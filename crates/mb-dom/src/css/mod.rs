@@ -4,6 +4,7 @@
 // `selectors::SelectorList<MiniBrowserSelectorImpl>` so callers can hold
 // owned, parsed selector lists without dragging the generic parameter
 // through every file.
+pub mod calc;
 mod color;
 mod error;
 mod gradient;
@@ -175,17 +176,11 @@ pub enum Value {
         shorthand: Option<String>,
         raw: String,
     },
-    // Removal candidate: the parser no longer produces it (step 1c routes
-    // every `var(` through `Unparsed`).
-    // `var(--name)` / `var(--name, fallback)` reference. Survives parse time
-    // unresolved; the cascade in `style.rs` walks every value at style time
-    // and substitutes the looked-up `--*` declaration in scope (custom
-    // properties inherit per spec). Unresolved references — name not in
-    // scope and no fallback — fall through as `Keyword("initial")`.
-    Var {
-        name: String,
-        fallback: Option<Box<Value>>,
-    },
+    // `calc()` / `min()` / `max()` / `clamp()` that still needs a basis or
+    // a unit resolved (step 5a, `css::calc`). After the style pass only
+    // `px` + `%` remain — and only when there is a percentage (otherwise
+    // it is a plain `Length`).
+    Calc(Box<calc::Calc>),
 }
 
 /// `background-size`: a keyword, or a width and height (`auto` keeps the
@@ -369,6 +364,14 @@ pub enum Unit {
     // Percent is containing-block-relative; resolution happens at layout time once
     // the parent's content box is known.
     Percent,
+    // Viewport units (step 5a): 1% of the page viewport's width / height /
+    // smaller / larger side, resolved to Px by the style pass like em.
+    // `dvh`/`svh`/`lvh`, `vi`/`vb` … parse to these (a desktop viewport
+    // has no dynamic toolbar).
+    Vw,
+    Vh,
+    Vmin,
+    Vmax,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -987,6 +990,19 @@ fn parse_declaration_value<'i>(
     }
 
     let value = unitless_zero_as_length(name, parse_value(input)?);
+    // A math function is a length only where a length goes (step 5a):
+    // `color: calc(1px)` drops, as in Chrome.
+    if matches!(value, Value::Calc(_))
+        && !matches!(
+            properties::lookup(name),
+            Some(properties::ValueKind::Length(_))
+        )
+    {
+        return Err(ParseError::new(
+            input.position().byte_index(),
+            "a length calc() where no length goes",
+        ));
+    }
     // Flexbox: negative flex factors are invalid (the declaration drops, as
     // in Chrome). A negative shrink weight would grow overflowing items.
     if matches!(name, "flex-grow" | "flex-shrink") && matches!(value, Value::Number(n) if n < 0.0) {
@@ -1024,8 +1040,23 @@ fn parse_logical<'i>(
             loop {
                 input.skip_whitespace();
                 let from = input.position();
-                if input.next().is_err() {
-                    break;
+                let opens_block = match input.next() {
+                    Err(_) => break,
+                    Ok(token) => matches!(
+                        token,
+                        cssparser::Token::Function(_)
+                            | cssparser::Token::ParenthesisBlock
+                            | cssparser::Token::SquareBracketBlock
+                            | cssparser::Token::CurlyBracketBlock
+                    ),
+                };
+                // A function is one component: take its block too, or the
+                // slice stops at `calc(` (step 5a).
+                if opens_block {
+                    let _ = input.parse_nested_block(|block| {
+                        while block.next_including_whitespace_and_comments().is_ok() {}
+                        Ok::<(), cssparser::ParseError<()>>(())
+                    });
                 }
                 parts.push(input.slice_from(from));
             }
@@ -3396,5 +3427,61 @@ mod tests {
         assert_eq!(d["width"], unparsed(None, "calc(var(--a) + 1px)"));
         // A broken `var()` (not a custom name) drops the declaration.
         assert!(decls("color: var(accent)").is_empty());
+    }
+
+    #[test]
+    fn calc_declarations_parse_where_lengths_go() {
+        let d = decls(
+            "width: calc(100% - 16px); margin: 0 calc(50% - 10px); \
+             border-width: max(1px, .0625rem); flex: 1 1 min(50%, 200px); \
+             height: 100vh; line-height: calc(1 + .5); padding-top: calc(2 * 8px); \
+             inset: calc(10% + 1px) 0",
+        );
+        let is_calc = |name: &str| matches!(d.get(name), Some(Value::Calc(_)));
+        for name in [
+            "width",
+            "margin-right",
+            "margin-left",
+            "border-top",
+            "flex-basis",
+            "top",
+        ] {
+            assert!(is_calc(name), "{name}: {:?}", d.get(name));
+        }
+        assert_eq!(d.get("margin-top"), Some(&px(0.0)));
+        assert_eq!(d.get("height"), Some(&Value::Length(100.0, Unit::Vh)));
+        assert_eq!(d.get("line-height"), Some(&Value::Number(1.5)));
+        assert_eq!(d.get("padding-top"), Some(&px(16.0)));
+        assert_eq!(d.get("left"), Some(&px(0.0)));
+    }
+
+    #[test]
+    fn calc_is_dropped_where_no_length_goes() {
+        let d = decls("color: calc(1px + 1%); display: min(1px, 1%); width: calc(1px * 2px)");
+        assert!(d.is_empty(), "{d:?}");
+        // A shadow reads its lengths as px: viewport units stay invalid.
+        assert!(decls("box-shadow: 0 0 1vw red").is_empty());
+    }
+
+    #[test]
+    fn logical_pairs_take_functions() {
+        // A two-value logical shorthand splits at top-level components; a
+        // function is one component (it was cut at `calc(` — step 5a).
+        let d = decls(
+            "padding-inline: calc(1px + 2px) min(1px, 1%); margin-block: calc(-1 * 4px); \
+             padding-block: max(1rem, calc(50vw - 720px + 1rem))",
+        );
+        assert_eq!(d.get("padding-left"), Some(&px(3.0)));
+        assert!(
+            matches!(d.get("padding-right"), Some(Value::Calc(_))),
+            "{d:?}"
+        );
+        assert_eq!(d.get("margin-top"), Some(&px(-4.0)));
+        assert_eq!(d.get("margin-bottom"), Some(&px(-4.0)));
+        assert!(
+            matches!(d.get("padding-top"), Some(Value::Calc(_))),
+            "{d:?}"
+        );
+        assert_eq!(d.get("padding-top"), d.get("padding-bottom"));
     }
 }

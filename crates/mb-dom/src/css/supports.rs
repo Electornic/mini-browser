@@ -246,7 +246,8 @@ fn is_unrendered(name: &str, value: &str) -> bool {
 /// generic parser's `Keyword` fallback, not unparsed text.
 fn value_fits(kind: ValueKind, value: &Value) -> bool {
     match value {
-        Value::Unparsed { .. } | Value::Var { .. } => false,
+        Value::Unparsed { .. } => false,
+        Value::Calc(_) => matches!(kind, ValueKind::Length(_) | ValueKind::Dedicated),
         Value::Keyword(keyword) => kind == ValueKind::Dedicated || kind.accepts_keyword(keyword),
         Value::Length(..) => matches!(kind, ValueKind::Length(_) | ValueKind::Dedicated),
         Value::Number(_) => matches!(kind, ValueKind::Number(_) | ValueKind::Dedicated),
@@ -309,11 +310,15 @@ mod tests {
 
     #[test]
     fn supports_keyword_fallback_value_false() {
-        // `100vw` is kept by the generic parser as a `Keyword` the length
-        // property doesn't accept — not a value we render (step 5 later).
-        assert_eq!(supports("(width: 100vw)"), Some(false));
-        assert_eq!(supports("(height: 100dvh)"), Some(false));
+        // An unknown unit is kept by the generic parser as a `Keyword` the
+        // length property doesn't accept — not a value we render.
+        assert_eq!(supports("(width: 100zz)"), Some(false));
         assert_eq!(supports("(width: round(1.5px, 1px))"), Some(false));
+        // Viewport units and math functions are lengths since step 5a.
+        assert_eq!(supports("(width: 100vw)"), Some(true));
+        assert_eq!(supports("(height: 100dvh)"), Some(true));
+        assert_eq!(supports("(width: calc(100% - 1px))"), Some(true));
+        assert_eq!(supports("(color: calc(1px))"), Some(false));
         assert_eq!(supports("(width: 5)"), Some(false));
         assert_eq!(supports("(color: 12px)"), Some(false));
         // `var()` is judged false (conservative), unlike `--x` itself.

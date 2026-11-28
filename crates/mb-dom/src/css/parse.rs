@@ -51,15 +51,11 @@ pub(super) fn parse_value<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseE
 }
 
 pub(super) fn length_with_unit(value: f32, unit: &str) -> Value {
-    match unit {
-        "px" => Value::Length(value, Unit::Px),
-        "em" => Value::Length(value, Unit::Em),
-        "rem" => Value::Length(value, Unit::Rem),
-        "ch" => Value::Length(value, Unit::Ch),
-        "pt" => Value::Length(value, Unit::Pt),
+    match super::calc::length_unit(unit) {
+        Some(unit) => Value::Length(value, unit),
         // Unsupported dimensions fall back to a keyword that mirrors the original
         // tokens so callers can still distinguish them at the cascade layer.
-        other => Value::Keyword(format!("{value}{other}")),
+        None => Value::Keyword(format!("{value}{unit}")),
     }
 }
 
@@ -131,6 +127,19 @@ fn parse_function<'i>(name: &str, input: &mut CssParser<'i>) -> Result<Value, Pa
         ));
     }
     let lower = name.to_ascii_lowercase();
+    if super::calc::is_math_function(&lower) {
+        // Step 5a. Same depth cap: the calc parser counts its own levels.
+        return input
+            .parse_nested_block(|inner| {
+                super::calc::parse_math_function(&lower, inner).ok_or_else(|| {
+                    cssparser::ParseError::custom(ParseError::new(
+                        inner.position().byte_index(),
+                        "invalid math function",
+                    ))
+                })
+            })
+            .map_err(convert_error);
+    }
     input
         .parse_nested_block(|inner| {
             let result: Result<Value, ParseError> = match lower.as_str() {
@@ -139,7 +148,6 @@ fn parse_function<'i>(name: &str, input: &mut CssParser<'i>) -> Result<Value, Pa
                 "linear-gradient" => parse_linear_gradient(inner),
                 "radial-gradient" => parse_radial_gradient(inner),
                 "url" => parse_url_function(inner),
-                "var" => parse_var_function(inner),
                 "light-dark" => parse_light_dark(inner),
                 other => Err(ParseError::new(
                     inner.position().byte_index(),
@@ -370,46 +378,6 @@ fn parse_url_function<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError
     Ok(Value::ImageUrl(url))
 }
 
-/// Inside the nested block opened by `Function("var")`. cssparser tokenises
-/// `--name` as a regular `Token::Ident` (CSS Syntax L3 allows leading `--`),
-/// so the first token is always the property name. A trailing fallback after
-/// the comma is parsed by reusing the generic `parse_value`, which means the
-/// fallback inherits whatever value shapes that helper accepts (colors,
-/// lengths, keywords, even a nested `var()`). The value returned here is
-/// substituted later in `style::resolve_var` once cascade has gathered the
-/// `--*` declarations in scope.
-fn parse_var_function<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
-    input.skip_whitespace();
-    let pos = input.position().byte_index();
-    let token = input
-        .next()
-        .map_err(|err| convert_basic_error_at(pos, err))?
-        .clone();
-    let name = match token {
-        Token::Ident(ident) if ident.starts_with("--") => ident.to_string(),
-        other => {
-            return Err(token_error(
-                input,
-                &other,
-                "var() expects a custom-property name starting with '--'",
-            ));
-        }
-    };
-    input.skip_whitespace();
-
-    // Optional fallback after a comma. `try_parse` only commits on success so
-    // we either consume the comma + parse the fallback, or leave the parser
-    // positioned at the closing `)`.
-    let fallback = if input.try_parse(|p| p.expect_comma()).is_ok() {
-        Some(Box::new(parse_value(input)?))
-    } else {
-        None
-    };
-    input.skip_whitespace();
-
-    Ok(Value::Var { name, fallback })
-}
-
 /// Parse a single number-or-length token where a leading sign is allowed. Used
 /// by transform / shadow / flex / border-radius — anywhere we want to accept
 /// `-10px` or `1.5` without the generic `parse_value` machinery.
@@ -426,12 +394,23 @@ pub(super) fn parse_length_or_number<'i>(input: &mut CssParser<'i>) -> Result<Va
             Ok(Value::Length(unit_value * 100.0, Unit::Percent))
         }
         Token::Dimension { value, unit, .. } => Ok(length_with_unit(value, unit.as_ref())),
+        // `calc()`/`min()`/`max()`/`clamp()` (step 5a): a number, a length
+        // or a `Calc`.
+        Token::Function(name) if super::calc::is_math_function(&name) => {
+            parse_function(name.as_ref(), input)
+        }
         other => Err(token_error(input, &other, "expected a length or number")),
     }
 }
 
 pub(super) fn parse_length_token<'i>(input: &mut CssParser<'i>) -> Result<f32, ParseError> {
     match parse_length_or_number(input)? {
+        // Read as px (shadows): a viewport unit or a `Calc` would be wrong
+        // here, so they stay invalid as before step 5a.
+        Value::Length(_, Unit::Vw | Unit::Vh | Unit::Vmin | Unit::Vmax) => Err(ParseError::new(
+            input.position().byte_index(),
+            "viewport units are not read here",
+        )),
         Value::Length(v, _) => Ok(v),
         Value::Number(v) => Ok(v),
         other => Err(ParseError::new(
@@ -441,15 +420,27 @@ pub(super) fn parse_length_token<'i>(input: &mut CssParser<'i>) -> Result<f32, P
     }
 }
 
+/// `true` if the next token opens `calc()`/`min()`/`max()`/`clamp()`.
+pub(super) fn peek_math_function<'i>(input: &mut CssParser<'i>) -> bool {
+    let saved = input.state();
+    let result =
+        matches!(input.next(), Ok(Token::Function(name)) if super::calc::is_math_function(name));
+    input.reset(&saved);
+    result
+}
+
 /// `true` if the next token can begin a numeric value (number, dimension,
 /// percentage). Used by shadow / flex parsers that greedily consume a variable
 /// number of leading lengths.
 pub(super) fn peek_starts_length<'i>(input: &mut CssParser<'i>) -> bool {
     let saved = input.state();
-    let result = matches!(
-        input.next(),
-        Ok(Token::Number { .. }) | Ok(Token::Dimension { .. }) | Ok(Token::Percentage { .. })
-    );
+    let result = match input.next() {
+        Ok(Token::Number { .. }) | Ok(Token::Dimension { .. }) | Ok(Token::Percentage { .. }) => {
+            true
+        }
+        Ok(Token::Function(name)) => super::calc::is_math_function(name),
+        _ => false,
+    };
     input.reset(&saved);
     result
 }

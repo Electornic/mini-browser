@@ -1,15 +1,12 @@
 // CSS Flexbox layout — single-axis grow/shrink, justify-content, align-items.
 
-use crate::{
-    css::{Unit, Value},
-    style::StyledNode,
-};
+use crate::{css::Value, style::StyledNode};
 
 use super::inline::{layout_inline_block_node, layout_out_of_flow};
 use super::{
     LayoutBox, clamp_height, clamp_width, containing_block_height, has_height_limits,
-    has_width_limits, is_display_none, is_layout_whitespace_text, is_out_of_flow, outer_rect,
-    shift_layout_subtree,
+    has_width_limits, is_display_none, is_layout_whitespace_text, is_out_of_flow, length_like,
+    outer_rect, shift_layout_subtree,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,7 +385,7 @@ fn has_explicit_cross_size(node: &StyledNode, direction: FlexDirection) -> bool 
         FlexDirection::Row => "height",
         FlexDirection::Column => "width",
     };
-    matches!(node.value(prop), Some(Value::Length(_, _)))
+    length_like(node, prop).is_some()
 }
 
 fn flex_grow(node: &StyledNode) -> f32 {
@@ -411,10 +408,11 @@ fn flex_basis_content_main(node: &StyledNode, main_size: Option<f32>) -> Option<
     // A length or a resolvable percentage drives the content-axis
     // override; `auto` / `content` leave layout_flex_item's width /
     // shrink-to-fit logic in charge.
-    match node.value("flex-basis") {
-        Some(Value::Length(value, Unit::Px)) => Some(*value),
-        Some(Value::Length(value, Unit::Percent)) => main_size.map(|size| *value / 100.0 * size),
-        _ => None,
+    // A percentage (or a calc with one) is of the main size, and is `auto`
+    // when that is indefinite.
+    match length_like(node, "flex-basis")? {
+        length if length.has_percent() => main_size.map(|size| length.resolve(size)),
+        length => Some(length.resolve(0.0)),
     }
 }
 
