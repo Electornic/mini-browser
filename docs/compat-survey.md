@@ -372,6 +372,12 @@ MB_NET_CACHE_OFFLINE=1 ./target/debug/mb-mcp --start-url https://news.ycombinato
 
 **5r / 3차 끝** (2026-11-28, 라벨 `final`, `fixes` 대비 — 계산값 시점 재분류·`box-shadow`/`text-shadow: none`, [compat-round3.md 5r](compat-round3.md#5r--재분류box-shadow-none3차-최종-목표-2026-11-28-사용자-결정-95-는-5단계를-넓히지-않고-조정) · [3차 최종 목표](compat-round3.md#3차-최종-목표-재진술-2026-11-28)): 요소 목록·결과·기대 컨트롤 25곳 동일, `[mb-budget]` 0. 20곳 합산(옛 정의) 1,993 → **1,794**(버그 수정 몫), 그중 Chrome 도 버리는 것 438(`display:-ms-flexbox` 230 · 정의 없는 `var()` 191 …)을 뺀 **합산 ours 1,356** — 0b 기준선 14,112 대비 −90.4%(2차 5곳 464, −93.7%; 파서 버림만으로는 5곳 369 = 원래 −95% 목표와 같음). 원래 −95% 는 조정(사용자 결정), 조정된 목표 −90% 충족. 남은 상위: `content` 148 · `outline` 112 · 두 값 `gap` 93 · 그라디언트 92 · `filter` 56 → 4차 후보.
 
+**4차 0단계 / 4차 기준선** (2026-11-28, 라벨 `r4-base` — [compat-round4.md 0단계](compat-round4.md#0단계--측정견고성-정비)): probe 새 열(도달 판정 `obs_*`·JS 판정 `js_*`·`misses.tsv`)을 넣었고, K5(문서 `Accept`), 보충 ①(crates.io 문서 200 저장 · kowiki 스킨 시트는 다시 429 — kowiki 는 CSS 지표에서 뺌), d2 기대 컨트롤 철자(`link:hello world`)를 반영했다. 결과는 ok 12 + ok\* 9 · **nav-fail 0**(crates.io `ok*` — 앱 껍데기, 측정 20곳 밖) · blocked 2 · robots skip 2 · `[mb-budget]` 0이다. 20곳 기준:
+- 기대 컨트롤 누락 **6/20**(naver·daum·hani·korea-kr·velog·google).
+- 닿지 않는 관찰 요소 ours **796 / 4,423 (18.0%)** — hidden 359 · clipped 73 · offscreen_x 94 · intercepted 270.
+- 클래식 스크립트 완주 179/272, `Uncaught` 83줄(중복 제거). 첫 에러가 없는 API 인 곳 10 · 어떤 줄이든 14.
+- 합산 버린 선언 ours 1,356(3차 끝과 같음).
+
 ## 호환성 3차 제안 순서
 
 > **확정판은 [compat-round3.md](compat-round3.md)** (2026-11-26): 아래 제안에서 0단계(견고성 점검 + 스크립트 에러 위치)를 앞에 추가하고, 1~5단계(값 파서 → `@media`/`@layer`/`@supports` → 클리핑 → 셀렉터 → `calc`/트랙; 실행은 `@media` 평가를 값 파서보다 먼저)만 3차 범위로, 이미지·JS 소소·ES 모듈·`::before` 는 4차 이후로 뺐다. 아래 목록은 조사 당시 제안으로 남겨 둔다.

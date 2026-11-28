@@ -46,7 +46,7 @@
 |---|---|---:|---|
 | 견고성 | panic/timeout/nav-fail(blocked·robots 제외, crates.io 포함 — N1: 문서 보충으로 nav-fail 이 아니게) · `[mb-budget]` | 0/0/1 · 0 | 0/0/0 · 0 |
 | ① 기대 컨트롤 누락 사이트 | 분모 20(N1-나: crates.io 제외) | 7(D6 철자를 고치면 6) | **≤3** |
-| ② `obs_unreachable` | 요소마다 범주 하나인 **합집합**(0단계 P2), ours 몫만. **단위 = 관찰 요소당 비율**(절대 수도 같이 적음). **기준 `r4-base` → 판정 `r4-final`**, 단계별 값은 참고 | 미측정 | 구성 요소마다 **`r4-base` 에서 한 번만 정하는 창**(아래 "목표 창"), 구성 요소마다 맡는 단계가 있다 |
+| ② `obs_unreachable` | 요소마다 범주 하나인 **합집합**(0단계 P2), ours 몫만. **단위 = 관찰 요소당 비율**(절대 수도 같이 적음). **기준 `r4-base` → 판정 `r4-final`**, 단계별 값은 참고 | 미측정 → `r4-base` **0.1800 (796)** | 구성 요소마다 **`r4-base` 에서 한 번만 정하는 창**(아래 "목표 창"), 구성 요소마다 맡는 단계가 있다. **결정(2026-11-28)**: 구성 요소는 절대 수 — `hidden` 0 · `intercepted` ours ≤135 · `offscreen_x` ours ≤28 · `clipped` 목표 없음 |
 | ③ `Uncaught` 줄 | 메시지 + 위치로 **중복 제거**한 줄 수. 따로 `js_scripts_completed/total`(끝까지 돈 클래식 스크립트 비율)도 본다 | 83(중복 포함 96) | 줄 수 판정 대신 **완주 비율 상승 + 아래 ④** |
 | ④ API 판정 | 첫 에러가 `missing-api` 인 사이트(10) + 어떤 줄이든 `missing-api` 가 있는 사이트(14). 기준선은 **사이트별 수동 판정표**(부록 B, 동결), 이후 라벨의 새 줄은 아래 "④ 판정 규칙". ①과 같이 판정한다 | 10 / 14 | **첫 에러 ≤3 · 어떤 줄이든 ≤6**(절대값) |
 | 보조: 합산 버린 선언 ours | `decl_drop_total_ours` | 1,356 | **−50%**. 기준 라벨은 `r4-base-sup`(D1 보충 ② 뒤 옛 엔진), 판정 라벨은 `r4-final`(5단계 끝) |
@@ -61,6 +61,7 @@
   | `offscreen_x`(ours) | −80% | 3(1c 는 거절로 알릴 뿐 수를 줄이지 않음) |
   | `clipped` | **목표 없음 — 참고만** | 없음. `hidden` 이 우선이라 숨은 드롭다운은 이미 그쪽에 들고, 남는 것은 대부분 Chrome 에서도 못 누르는 것(캐러셀 다른 슬라이드·sr-only) |
 
+  - **목표 창 결정(2026-11-28, 사용자) — 이후 조정 없음, 못 맞추면 "못 맞춤"**: 구성 요소 목표는 **절대 수**(총합은 비율 + 절대 수로 적음). `hidden` **0** · `intercepted`(ours) **≤135**(`r4-base` 270 의 −50%) · `offscreen_x`(ours) **≤28**(94 의 −70%, kowiki 포함) · `clipped` **목표 없음(참고)**. 판정은 `r4-final`. 근거는 [0단계 ⑥ "② 목표 창"](#-목표-창-r4-base-2026-11-28--결정).
 - **④ 판정 규칙**(2차 리뷰 반영 — 숫자 맞추기 방지):
   - 기준선(`r4-base`) 뒤 라벨의 **새 줄은 P4 자동 규칙**으로 판정한다. 수동 판정은 양파 기록의 "판정 근거" 열에 이유를 적은 경우에만 쓴다.
   - 우리 새 심이 돌려준 값 위에서 던진 page-bug 모양 에러(예: 새 `matchMedia` 가 준 객체의 빠진 메서드)는 **missing-api** 로 센다.
@@ -389,7 +390,7 @@ enwiki·kowiki 의 첫 스크립트가 `document.cookie.match(…)` 에서 죽�
 
 **G — 추적 골든·eval 만들기**: `compat4.html` + 골든, `eval/scenarios/compat4-menu.json`, 대응 테스트 `compat4_menu_opens_through_its_script_and_leads_to_docs`(오늘의 틀린 상태를 단언 — [부록 E](#부록-e--골든eval-단계별-기대표)).
 
-**T — D6 철자**: 이 문서 표 → `scripts/compat-sites.tsv` 의 d2 셋째 열을 `link:hello world` 로.
+**T — D6 철자**: 이 문서 표 → `scripts/compat-sites.tsv` 의 d2 셋째 열을 `link:hello world` 로. (⑥에서 했다 — `r4-k5` 가 `r4-p0` 와 빈 diff 여야 해서 K5·보충 ① 뒤, `r4-base` 바로 전.)
 
 **S — 보충 도구 `--refetch` 와 보충 ①**(리뷰 반영):
 - `compat-corpus.sh record --refetch <미스목록파일>`. 파일 한 줄 = 사이트 이름·URL·종류.
@@ -492,6 +493,38 @@ enwiki·kowiki 의 첫 스크립트가 `document.cookie.match(…)` 에서 죽�
 - `eval/scenarios/compat4-menu.json`("메뉴를 열어 Docs 로 가서 내용을 말하라", 성공 = `/compat4-docs.html`). 페이지는 `examples/agent-demo/compat4.html`(골든 픽스처의 심볼릭 링크)과 `compat4-docs.html`. mb-mcp `every_committed_scenario_parses` 가 `compat4-menu` 도 요구하게 했다. **LLM eval 은 돌리지 않았다** — 사용자 터미널 몫(`scripts/eval-run.sh eval/scenarios/compat4-menu.json 3`, 0단계 기대 3/3 — 틀린 이유로).
 - 대응 테스트 `compat4_menu_opens_through_its_script_and_leads_to_docs`(actions.rs, LLM 없음): 오늘의 틀린 상태를 단언한다. 스크립트가 첫 줄에서 죽고, "Docs" 가 처음부터 관찰되며, "Menu" 를 눌러도 `+0 / -0` 이고, Docs 를 누르면 이동한다. 1·2단계에서 단언을 다시 쓴다(주석에 적음).
 - 테스트 1201(+2).
+
+**⑥ T + `r4-base` + N2 목표 창(커밋 대기 — 목표 창 결정됨 2026-11-28)**:
+- T: 부록 C 의 d2 줄 → `scripts/compat-sites.tsv` d2 셋째 열 `link:hello world`.
+- **`r4-base`**(오프라인·release, P + K5 + P2b 세로 행 + S + 보충 ① + T): 확인 라벨 `r4-sup1` 과 다른 것은 d2 의 `controls_found` 0/1 → 1/1 하나뿐이다(T 의 몫).
+  - 견고성: ok 12 + ok\* 9(crates.io 포함) · nav-fail **0** · panic 0 · timeout 0 · blocked 2 · robots skip 2 · `[mb-budget]` 0.
+  - ① 기대 컨트롤 누락: **6/20**(naver·daum·hani·korea-kr·velog·google).
+  - ② `obs_unreachable` ours: **0.1800(796 / 4,423)**. 첫 P2b 표로는 0.1836(812). 구성: hidden 359 · clipped 73 · offscreen_x ours 94 · intercepted ours 270(z-order 60 · pointer-none 덮개 1 · other 209). browser-too 36(덮개 20 · 페이지 위 16).
+  - ③ `Uncaught` 중복 제거 83(중복 포함 96) · 클래식 스크립트 완주 **179/272(65.8%)**. ④ 첫 에러 missing-api 10 · 어떤 줄이든 14.
+  - 보조: 합산 버린 선언 ours 1,356(kowiki 10 을 빼면 1,346 — ④ 규칙대로 보조 합계에서 뺄 몫) · 버린 규칙 ours 1,506(참고). 보조 지표의 기준은 여전히 `r4-base-sup` 이다.
+- **N2 목표 창(②)**: 아래 "② 목표 창" — 사용자가 제안대로 결정(2026-11-28).
+
+#### ② 목표 창 (`r4-base`, 2026-11-28 — 결정)
+
+**결정(2026-11-28, 사용자) — 이후 조정 없음, 못 맞추면 "못 맞춤"**: 아래 제안을 그대로 받았다. ① 구성 요소 목표는 절대 수, 총합 ②는 관찰 요소당 비율과 절대 수를 같이 적는다. ② `hidden` 0. ③ `intercepted`(ours) ≤135(−50%). ④ `offscreen_x`(ours) ≤28(−70%, kowiki 포함). ⑤ `clipped` 목표 없음(참고). 판정 라벨은 `r4-final`, 단계별 값은 참고다.
+
+(아래는 결정 전에 쓴 제안과 근거 — 기록으로 남긴다.)
+
+**단위 제안**: 구성 요소의 목표는 **절대 수**로 잡는다. 총합 ②는 지금처럼 관찰 요소당 비율로 적되, 절대 수를 같이 적는다. 비율로 잡지 않는 이유는 분모가 단계마다 구조적으로 움직이기 때문이다.
+- 1a 가 숨은 요소 359 를 관찰에서 빼면 분모가 4,423 → 약 4,064 로 줄어, 다른 구성 요소의 비율이 저절로 9% 오른다.
+- 2단계는 JS 가 그린 요소를 더해 분모를 키운다.
+
+| 구성 요소 | `r4-base` 절대(요소당) | 사이트별(큰 순) | 맡는 단계 | N2 출발점 | **제안 목표** | 근거 |
+|---|---:|---|---|---|---|---|
+| `hidden` | 359 (0.081) | enwiki 169 · bbc 68 · github 48 · kakaocorp 37 · korea-kr 33 · apple 3 · d2 1 | 1a | −100% | **0**(−100%) | 정의상 — 1a 뒤 관찰에서 빠진다 |
+| `intercepted`(ours) | 270 (0.061) | mdn 79 · yna 45(z 24) · apple 37(z 20) · microsoft 26 · enwiki 17 · hani 12 · korea-kr 11 · kowiki 10 · docsrs 7(z 5) · d2 6 · velog 5(z 5) … | 1b(+3) | −60% (≤108) | **−50% (≤135)** | 1b 의 코드 수정이 직접 없애는 것은 z-order 60 + pointer-none 1 = 61(23%)뿐이다. 나머지 209 "other" 는 표본으로 보면 거의 다 **레이아웃 겹침**이다: mdn 사이드바 `li`/`ol`/`details` 가 링크 위에 놓임, microsoft 내비 묶음 제목이 링크를 덮음, enwiki 바닥 링크가 위로 겹침, hani 이미지·광고 상자. 이것들은 3단계(3a `display: contents` — mdn 본문 폭이 부록 A.3 대상, 3c 넓은 상자) 몫이다. −50% = 1b 의 61 + mdn 79 의 대부분. −60% 는 그 위에 22개를 더 없애야 한다 |
+| `offscreen_x`(ours) | 94 (0.021) | github 24 · microsoft 24 · enwiki 20 · kowiki 14 · hani 8 · google 4 | 3 | −80% (≤19) | **−70% (≤28)** | 가장 넓은 상자: microsoft 5,117 · google 3,350 · kowiki 2,528 · enwiki 2,338(인용 `span`) · github·hani 1,280(뷰포트 폭 — 안쪽 줄바꿈 문제)이다. 3c 가 겨냥한다. **kowiki 14 는 4차에 안 움직인다** — 스킨 시트 429(보충 ①)라 Chrome 이 받는 CSS 가 없다. −80% 는 kowiki 를 뺀 80 을 거의 다(≥75) 없애야 한다. kowiki 를 ② 에서도 빼자는 안(그러면 80 → ≤16)은 택하지 않았다 — 스킨 없는 화면이 우리가 실제로 관찰하는 화면이다(④ 메모) |
+| `clipped` | 73 (0.017) | hani 48 · mdn 11 · yna 5 · d2 3 · github 3 · korea-kr 2 · enwiki 1 | — | 목표 없음 | **목표 없음(참고)** | N2 그대로. 클립 거절 276 중 203 은 `hidden` 이 먼저 잡았다. 1a 뒤 그 203 이 관찰에서 빠지므로 이 수는 거의 그대로일 것이다 |
+
+- 제안대로면 `r4-final` 의 ② ours ≈ 0 + 135 + 28 + 73 = **236 이하**다. 1a·2단계 뒤 분모를 약 4,064 로 보면 0.058 이하(`r4-base` 0.180)가 된다. 이 값은 참고이고, 판정은 구성 요소별 절대 수로 한다.
+- browser-too 36(덮개 20 · 페이지 위 16)은 목표 밖이다.
+- **정한 것(사용자, 2026-11-28)**: ① 단위(구성 요소 = 절대 수, 총합 = 비율 + 절대 수), ② `intercepted` −50%(N2 출발점 −60% 대신), ③ `offscreen_x` −70%(출발점 −80% 대신, kowiki 포함), ④ `hidden` 0 · `clipped` 목표 없음 — 모두 제안대로(위 "결정" 줄). 그 뒤로는 조정하지 않는다(N2).
+- **F — 퍼저 긴 실행**: 계획은 `cef51c5` 에서였으나 **`e034ae2`(+ 커밋 전 ⑥ 문서)로 바꿔 돌렸다**(부모 세션 결정 2026-11-28). 0단계의 엔진 쪽 변경은 동작을 바꾸지 않는 리팩터링(페인터 걸음 `walk_paint_order`·`clamped_scroll`·`RequestKind` 배관)과 K5 의 `Accept` 헤더(퍼저가 닿지 않는 네트워크 경로)뿐이라, 지금 HEAD 가 같은 것을 재고 페인터 리팩터링까지 덮는다. 결과: 2026-11-28 11:22 UTC, `MB_FUZZ_CASES=30000 cargo test --release -p mb-engine --test fuzz_layout -- --ignored --nocapture --test-threads=1`(시드 1부터, 시스템 글꼴 없음). 셋 다 실패 0 — 레이아웃 30,000 사례 81.8초(2.73 ms/사례, 가장 느림 157ms · 시드 17421 — 1초 상한 안, 무한 값 사례 8,228, 가장 큰 트리 769노드, 실패 서명 0) · CSS 토큰 30,000 입력 11.6초(살아남은 선언 239,804, 패닉 지점 0) · 이미지 바이트 30,000 입력 13.6초(디코드 4,524 — 가장 큰 4096×4096, 가장 느림 53ms, 실패 0). 0단계는 이것으로 끝났다.
 
 ### 설계 결정
 
@@ -917,12 +950,12 @@ M (3~4일).
 
 ## 진행 표
 
-4차 기준선은 `r4-base`(0단계 끝)와 `r4-base-sup`(2단계 보충 ② 뒤)다. 0행은 `final` 잠정값이고 0단계 끝에 바꾼다. 목표는 [N2](#n2-d4-목표-고쳐-쓰기-d4-를-다시-정함)(사용자 결정 2026-11-28 — D4 를 대체).
+4차 기준선은 `r4-base`(0단계 끝)와 `r4-base-sup`(2단계 보충 ② 뒤)다. 0행은 `r4-base` 값이다(2026-11-28). 목표는 [N2](#n2-d4-목표-고쳐-쓰기-d4-를-다시-정함)(사용자 결정 2026-11-28 — D4 를 대체).
 
 | 단계 | 상태 | 커밋 | 테스트 수 | 코퍼스 fail/panic/timeout | 기대 컨트롤 누락 | `obs_unreachable`(ours) 관찰 요소당 비율(절대 수) · 구성 hidden/clipped/offscreen_x/intercepted(참고) | `Uncaught`(중복 제거) / 스크립트 완주 / missing-api 첫·어느 줄 | 합산 ours / 버린 규칙 ours(참고) | 메모 |
 |---|---|---|---|---|---|---|---|---|---|
 | 3차 끝(`final`) | ✅ | `cef51c5` | 1173 | ok 12 + ok* 8 · nav-fail 1(crates.io) · panic 0 · timeout 0 · blocked 2 · robots skip 2 · `[mb-budget]` 0 | 7/20 (naver·daum·hani·korea-kr·velog·d2·google) | 미측정(클립 거절 276) | 83(중복 포함 96) / 미측정 / 10 · 14 | 1,356 / 1,506 | `r4-check` 재생이 `final` 과 같음([부록 D](#부록-d--측정-재현과-명령)) |
-| 0 측정 정비 | 진행 중 — ① P ✅ · ② K5 ✅ · P2b 세로 행 ✅ · ③ S ✅ · ④ 보충 ① ✅(kowiki 429 다시 — CSS 지표 제외, crates.io 200) · ⑤ G ✅(커밋 대기) | `4f46de3`(P) · `68498f3`(K5·P2b 세로) · `d263093`(S) | 1190 (P) → 1194 (K5·P2b 세로) → 1199 (S) → 1201 (G) | nav-fail **0**(`r4-sup1`: crates.io `ok*` — N1-나) | (D6 철자 수정 뒤 6/20) | 첫 측정(`r4-p0`, 참고): 0.180(796; 첫 P2b 표로 0.184·812) · 359/73/94/270 | 83 / `js_scripts` 열 / 10 · 14(`classify final` 재현) | 그대로 | `r4-p0` ✅(기존 77열 = `final`, 요소 diff 0) → `r4-k5` ✅(빈 diff, 102열 동일) → `r4-base` |
+| 0 측정 정비 | ✅ 완료 — ② 목표 창 결정(2026-11-28) · F ✅(`e034ae2`, 각 3만·실패 0) | `4f46de3`(P) · `68498f3`(K5·P2b 세로) · `d263093`(S) · `6e62671`(보충 ①) · `e034ae2`(G) · (T·`r4-base` 커밋 대기) | 1201 | `r4-base`: ok 12 + ok\* 9 · nav-fail **0** · panic 0 · timeout 0 · blocked 2 · robots skip 2 · `[mb-budget]` 0 | **6/20** (naver·daum·hani·korea-kr·velog·google) | **0.1800 (796)** · 359/73/94/270 (첫 P2b 표 0.1836·812) | 83(96) / **179/272 (65.8%)** / 10 · 14 | 1,356(kowiki 제외 1,346) / 1,506 | `r4-p0` → `r4-k5`(빈 diff) → `r4-sup1`(확인) → **`r4-base`**. **목표 창 결정**: hidden 0 · intercepted ours ≤135 · offscreen_x ours ≤28 · clipped 목표 없음(절대 수) |
 | 1 에이전트 정합성 | 설계 | | | | | | | | |
 | 2 작은 JS | 설계 | | | | | | | | 겹마다 `r4-js-1`… → 보충 ② → `r4-js-sup`(후) / `r4-base-sup`(③④·보조의 기준) |
 | 3 레이아웃 | 설계 | | | | | | | | |
@@ -1082,7 +1115,7 @@ M (3~4일).
 | hani | `link:경제` | 서버 HTML 에 없음(메타 설명에만) | 클라이언트 렌더 + Next 예외 → 2a(`getElementsByTagName`) |
 | korea-kr | `textbox:검색` | 입력칸 id 는 스크립트에만, 마크업엔 열기 버튼(sr-only "검색")만 | jQuery 3.7.1 이 만드는 검색창으로 추정 → 2a(`document.implementation` — 추정) + 2b(쿠키). `getElementsByTagName` 에러는 인라인 스크립트·wcslog 쪽이라 jQuery 와 무관 |
 | velog | `button:로그인` | 서버 HTML 에 없음 | 클라이언트 렌더 → 2b(`matchMedia`·`TextEncoder`) |
-| d2 | `link:helloworld` | 있음 — 관찰에도 "Hello world" | **철자**(D6) |
+| d2 | `link:helloworld` → **`link:hello world`**(T, 0단계 ⑥) | 있음 — 관찰에도 "Hello world" | **철자**(D6) — `r4-base` 부터 고친 철자로 잰다 |
 | google | `link:gmail` | 있음(`header` 안 링크). 인라인 시트에 감싼 상자 클래스의 `display:none` | 원인 미확인 — 다른 시트(외부·스크립트 주입)가 펼치는 것으로 추정. P5 로 다시 보고 1~2단계 뒤 재판정 |
 | (crates.io) | `textbox:search`·`link:browse all crates` | 404 빈 본문 | K5 + 문서 보충(N1-나) — ① 분모 밖 |
 
