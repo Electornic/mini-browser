@@ -2406,6 +2406,47 @@ mod tests {
             .map(|(_, fragment)| fragment.to_string())
     }
 
+    /// The Vector 2022 language dropdown (compat round 3 4b finding, round 4
+    /// step 1d): a checkbox hack whose closed list is `height: 0; overflow:
+    /// hidden auto; visibility: hidden`, opened by `:checked ~`.
+    const CLOSED_DROPDOWN_HTML: &str = r##"<div class="dd"><input type="checkbox" id="cb" class="dd-cb"><label for="cb" class="dd-label">145 languages</label><div class="dd-content"><a href="#afrikaans">Afrikaans</a></div></div>"##;
+    const CLOSED_DROPDOWN_CSS: &str = "body { margin: 0 } .dd { position: relative } \
+        .dd-cb { position: absolute; left: 0; top: 0; width: 120px; height: 30px; margin: 0; opacity: 0 } \
+        .dd-label { display: block; width: 120px; height: 30px } \
+        .dd-content { position: absolute; top: 30px; left: 0; width: 200px; height: 0; overflow: hidden auto; visibility: hidden } \
+        .dd-content a { display: block; height: 20px } \
+        .dd-cb:checked ~ .dd-content { height: auto; visibility: visible }";
+
+    #[test]
+    fn closed_dropdown_link_does_not_navigate_until_the_label_opens_it() {
+        // Round 3 saw a click on the closed list's link do nothing silently
+        // (and the link was observed). Now it isn't hit at all; once the
+        // toggle opens the list the same point follows the link.
+        let mut browser = browser_with_html_and_css(CLOSED_DROPDOWN_HTML, CLOSED_DROPDOWN_CSS);
+        browser.current_url = Some(mb_runtime::net::Url::parse("http://t/p").unwrap());
+        click_at(&mut browser, 10.0, 40.0);
+        assert_eq!(
+            browser
+                .current_url
+                .as_ref()
+                .map(|u| u.to_string())
+                .as_deref(),
+            Some("http://t/p"),
+            "closed: the link under the toggle isn't followed"
+        );
+        click_at(&mut browser, 10.0, 10.0);
+        click_at(&mut browser, 10.0, 40.0);
+        assert_eq!(
+            browser
+                .current_url
+                .as_ref()
+                .map(|u| u.to_string())
+                .as_deref(),
+            Some("http://t/p#afrikaans"),
+            "open: the same point follows the link"
+        );
+    }
+
     #[test]
     fn pointer_events_none_link_does_not_navigate() {
         // Compat round 4 step 1b: the click goes through the link to the box

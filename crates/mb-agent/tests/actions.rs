@@ -161,6 +161,7 @@ fn route(
         ("GET", "/covered") => ("200 OK", String::new(), COVERED_PAGE.into()),
         ("GET", "/wide") => ("200 OK", String::new(), WIDE_PAGE.into()),
         ("GET", "/labels") => ("200 OK", String::new(), LABELS_PAGE.into()),
+        ("GET", "/dropdown") => ("200 OK", String::new(), DROPDOWN_PAGE.into()),
         // A real site over a real network: the document (plus its
         // subresources) takes longer than settle's frame budget lasts.
         ("GET", "/slow") => {
@@ -372,6 +373,21 @@ label { display: block; width: 200px; height: 30px; }
 <input type="radio" name="plan" id="pb" class="off"><label for="pb">Plan B</label>
 <input type="checkbox" class="off" aria-label="Orphan">
 <div style="position: relative"><input type="checkbox" id="cov" class="off"><label for="cov">Covered label</label><div style="position: absolute; left: 0; top: 0; width: 200px; height: 30px"></div></div>
+</body></html>"#;
+
+/// The Vector 2022 language dropdown, reduced (compat round 4 step 1d): a
+/// checkbox hack whose closed list is `height: 0; overflow: hidden auto;
+/// visibility: hidden`, opened by `:checked ~`.
+const DROPDOWN_PAGE: &str = r#"<html><head><title>Dropdown</title><style>
+body { margin: 0; }
+.dd { position: relative; }
+.dd-cb { position: absolute; left: 0; top: 0; width: 120px; height: 30px; margin: 0; opacity: 0; }
+.dd-label { display: block; width: 120px; height: 30px; }
+.dd-content { position: absolute; top: 30px; left: 0; width: 200px; height: 0; overflow: hidden auto; visibility: hidden; }
+.dd-content a { display: block; height: 20px; }
+.dd-cb:checked ~ .dd-content { height: auto; visibility: visible; }
+</style></head><body>
+<div class="dd"><input type="checkbox" id="cb" class="dd-cb" role="button" aria-label="145 languages"><label for="cb" class="dd-label">145 languages</label><div class="dd-content"><a href="/welcome">Afrikaans</a></div></div>
 </body></html>"#;
 
 fn demo_file(name: &str) -> (&'static str, String, String) {
@@ -686,6 +702,35 @@ fn compat3_menu_opens_through_its_label_and_leads_to_docs() {
             .is_some_and(|u| u.ends_with("/demo/compat3-docs.html")),
         "{}",
         docs_page.to_text()
+    );
+}
+
+#[test]
+fn closed_dropdown_links_are_not_observed_until_the_toggle_opens_them() {
+    // Step 1d (round 3 4b finding): the closed list's link was observed and
+    // a click on it did nothing silently. Now the closed list isn't in the
+    // observation (1a); the toggle opens it and the link leads on.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/dropdown")).unwrap();
+    assert!(
+        !page.elements.iter().any(|e| e.name == "Afrikaans"),
+        "{}",
+        page.to_text()
+    );
+    let toggle = page
+        .elements
+        .iter()
+        .find(|e| e.name == "145 languages")
+        .map(|e| e.id)
+        .expect("the toggle is observed");
+    let open = b.click(toggle).unwrap();
+    let link = find(&open, Role::Link, "Afrikaans");
+    let next = b.click(link).unwrap();
+    assert!(
+        next.url.as_deref().is_some_and(|u| u.ends_with("/welcome")),
+        "{}",
+        next.to_text()
     );
 }
 
