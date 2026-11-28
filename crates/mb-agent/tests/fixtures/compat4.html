@@ -31,10 +31,10 @@
      the a11y tree; round 4 keeps it on purpose (N4, revisit in round 5).
      Stays.
   6. `<noscript><style>` hiding the "Search as you type" button (a
-     no-JS fallback rule) — today the parser has scripting off, so the
-     style is a real element and applies: the button is not observed.
-     Chrome runs scripts, so `<noscript>` holds raw text and the button
-     shows. Step 1e: "Search as you type" appears.
+     no-JS fallback rule) — before step 1e the parser had scripting off,
+     so the style was a real element and applied: the button was not
+     observed. Chrome runs scripts, so `<noscript>` holds raw text and the
+     button shows. Step 1e (scripting on): "Search as you type" appears.
   7. Closed popover (`[popover]`) "Popover tip" — Chrome's UA sheet hides
      it until shown. Step 4 (`:popover-open` + UA rule): gone.
   8. Icon button whose only text is `::before { content: "Close" }` —

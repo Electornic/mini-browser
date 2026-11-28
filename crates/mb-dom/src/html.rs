@@ -119,10 +119,9 @@ pub fn parse_fragment_at(
         return Ok(Vec::new());
     }
     let context = QualName::new(None, ns!(html), LocalName::from("body"));
-    // Last arg = scripting_enabled. We run scripts ourselves on top of the
-    // arena (`BrowserState::run_scripts`), so the parser must leave inline
-    // <script> textContent intact rather than swallowing it the way it would
-    // for a host that runs scripts itself.
+    // Last arg = `context_element_allows_scripting` (the fragment's context
+    // is `<body>`, so it doesn't matter here). Scripting itself is on in
+    // `parser_opts` — see there.
     let dom = h5e_fragment(RcDom::default(), parser_opts(), context, Vec::new(), false).one(source);
 
     // `parse_fragment` builds:
@@ -135,10 +134,15 @@ pub fn parse_fragment_at(
     Ok(build_nodes(document, &top_level, depth))
 }
 
+/// Scripting is on (compat round 4 step 1e): we run page scripts
+/// (`BrowserState::run_scripts`), so `<noscript>` content is raw text, as in
+/// Chrome — its `<style>`/`<link>` don't apply and its `<img>` doesn't load.
+/// html5ever reads the flag only for `<noscript>`; inline `<script>` text
+/// is kept either way.
 fn parser_opts() -> ParseOpts {
     ParseOpts {
         tree_builder: TreeBuilderOpts {
-            scripting_enabled: false,
+            scripting_enabled: true,
             drop_doctype: true,
             ..TreeBuilderOpts::default()
         },
@@ -439,6 +443,100 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    // Every element tag under `id`, in document order.
+    fn element_tags(document: &Document, id: NodeId) -> Vec<String> {
+        let mut tags = Vec::new();
+        let mut stack = vec![id];
+        while let Some(id) = stack.pop() {
+            let node = document.get(id).unwrap();
+            if let NodeType::Element(e) = &node.node_type {
+                tags.push(e.tag_name.clone());
+            }
+            stack.extend(node.children.iter().rev());
+        }
+        tags
+    }
+
+    fn noscripts(document: &Document, root: NodeId) -> Vec<NodeId> {
+        let mut found = Vec::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            let node = document.get(id).unwrap();
+            if matches!(&node.node_type, NodeType::Element(e) if e.tag_name == "noscript") {
+                found.push(id);
+            }
+            stack.extend(node.children.iter().rev());
+        }
+        found
+    }
+
+    #[test]
+    fn noscript_is_raw_text_when_scripting_is_enabled() {
+        // Compat round 4 step 1e: we run scripts, so `<noscript>` content is
+        // raw text (HTML §13.2.6.4.4 — "in head noscript" and the body rule
+        // apply only with scripting off): no `<style>`/`<link>` applies, no
+        // tracking `<img>` loads, the DOM shows text — as in Chrome.
+        let document = parse(
+            r#"<html><head><noscript><style>.js-search { display: none; }</style><link rel="stylesheet" href="/nojs.css"></noscript></head><body><noscript><img src="/t.gif"><a href="/">Plain site</a></noscript><p>after</p></body></html>"#,
+        )
+        .unwrap();
+        let html = document.document_element().unwrap();
+        let found = noscripts(&document, html);
+        assert_eq!(found.len(), 2);
+        for (&noscript, raw) in found.iter().zip([
+            r#"<style>.js-search { display: none; }</style><link rel="stylesheet" href="/nojs.css">"#,
+            r#"<img src="/t.gif"><a href="/">Plain site</a>"#,
+        ]) {
+            assert_eq!(element_tags(&document, noscript), ["noscript"]);
+            assert_eq!(shape(&document, noscript).2, raw);
+        }
+        let tags = element_tags(&document, html);
+        for absent in ["style", "link", "img", "a"] {
+            assert!(!tags.iter().any(|t| t == absent), "{absent}: {tags:?}");
+        }
+        assert!(tags.iter().any(|t| t == "p"), "{tags:?}");
+
+        // innerHTML parses the same way.
+        let mut fragment = Document::new();
+        let tops =
+            parse_fragment(r#"<noscript><a href="/">x</a></noscript>"#, &mut fragment).unwrap();
+        assert_eq!(element_tags(&fragment, tops[0]), ["noscript"]);
+        assert_eq!(shape(&fragment, tops[0]).2, r#"<a href="/">x</a>"#);
+    }
+
+    #[test]
+    fn inline_script_text_survives_scripting_enabled() {
+        // The old comment in `parse_fragment_at` said scripting on would
+        // swallow inline `<script>` bodies. It doesn't: html5ever reads the
+        // flag only for `<noscript>` (the fragment's `false` argument is
+        // `context_element_allows_scripting`).
+        let source = r#"var s = "<b>x</b>"; if (1 < 2) { done(); }"#;
+        let document = parse(&format!(
+            "<html><head><script>{source}</script></head><body><script>{source}</script></body></html>"
+        ))
+        .unwrap();
+        let html = document.document_element().unwrap();
+        let scripts: Vec<NodeId> = {
+            let mut found = Vec::new();
+            let mut stack = vec![html];
+            while let Some(id) = stack.pop() {
+                let node = document.get(id).unwrap();
+                if matches!(&node.node_type, NodeType::Element(e) if e.tag_name == "script") {
+                    found.push(id);
+                }
+                stack.extend(node.children.iter().rev());
+            }
+            found
+        };
+        assert_eq!(scripts.len(), 2);
+        for script in scripts {
+            assert_eq!(shape(&document, script), (1, 1, source.to_string()));
+        }
+        let mut fragment = Document::new();
+        let tops = parse_fragment(&format!("<script>{source}</script>"), &mut fragment).unwrap();
+        assert_eq!(shape(&fragment, tops[0]), (1, 1, source.to_string()));
     }
 
     #[test]
