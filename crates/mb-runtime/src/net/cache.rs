@@ -31,7 +31,7 @@ use std::{
     sync::Mutex,
 };
 
-use super::{FetchResult, HttpResponse, NetworkError, Url};
+use super::{FetchResult, HttpResponse, NetworkError, RequestKind, Url};
 
 pub(super) struct Cache {
     dir: PathBuf,
@@ -45,12 +45,23 @@ pub struct SurveyCacheStats {
     /// `METHOD url` (query kept: the probe classifies by path) of each
     /// offline replay that had no entry.
     pub offline_misses: Vec<String>,
+    /// The same misses with what each request was for, in the same order
+    /// (compat round 4 P7: the re-fetch filter needs the kind).
+    pub misses: Vec<SurveyMiss>,
     /// Requests with a method other than `GET`, failed without sending.
     pub refused_non_get: usize,
 }
 
+/// One offline miss: the request's kind and URL (query kept).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurveyMiss {
+    pub kind: RequestKind,
+    pub url: Url,
+}
+
 static STATS: Mutex<SurveyCacheStats> = Mutex::new(SurveyCacheStats {
     offline_misses: Vec::new(),
+    misses: Vec::new(),
     refused_non_get: 0,
 });
 
@@ -77,6 +88,7 @@ impl Cache {
 
     pub(super) fn fetch(
         &self,
+        kind: RequestKind,
         key_parts: (&Url, &str, bool, &[u8]),
         fetch: impl FnOnce() -> Result<FetchResult, NetworkError>,
     ) -> Result<FetchResult, NetworkError> {
@@ -99,7 +111,13 @@ impl Cache {
             return Ok(hit);
         }
         if self.offline {
-            note(|stats| stats.offline_misses.push(format!("{method} {url}")));
+            note(|stats| {
+                stats.offline_misses.push(format!("{method} {url}"));
+                stats.misses.push(SurveyMiss {
+                    kind,
+                    url: url.clone(),
+                });
+            });
             return Err(NetworkError::Io(format!("not in MB_NET_CACHE: {url}")));
         }
         let result = fetch()?;
@@ -235,8 +253,8 @@ mod tests {
     use std::cell::Cell;
 
     use super::{
-        Cache, FetchResult, HttpResponse, NetworkError, Url, cache_key, identity_bytes,
-        normalize_method, survey_stats,
+        Cache, FetchResult, HttpResponse, NetworkError, RequestKind, SurveyMiss, Url, cache_key,
+        identity_bytes, normalize_method, survey_stats,
     };
 
     fn response(body: &str) -> Result<FetchResult, NetworkError> {
@@ -262,7 +280,7 @@ mod tests {
         let url = Url::parse("https://a.test/").unwrap();
         let cache = temp_cache("method", false);
         for method in ["GET\tx", "GET\nidentity", "PO ST", "", "GET\r"] {
-            let result = cache.fetch((&url, method, true, b""), || {
+            let result = cache.fetch(RequestKind::Other, (&url, method, true, b""), || {
                 panic!("an invalid method must never be fetched or cached")
             });
             assert!(result.is_err(), "{method:?} accepted");
@@ -279,7 +297,7 @@ mod tests {
         let cache = temp_cache("get-only", false);
         let refused_before = survey_stats().refused_non_get;
         for method in ["POST", "post", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"] {
-            let result = cache.fetch((&url, method, true, b"payload"), || {
+            let result = cache.fetch(RequestKind::Other, (&url, method, true, b"payload"), || {
                 panic!("{method} must not reach the network while recording")
             });
             assert!(result.is_err(), "{method} was sent");
@@ -289,7 +307,7 @@ mod tests {
         assert!(survey_stats().refused_non_get >= refused_before + 7);
 
         let fetched = Cell::new(false);
-        let result = cache.fetch((&url, "get", true, b""), || {
+        let result = cache.fetch(RequestKind::Other, (&url, "get", true, b""), || {
             fetched.set(true);
             response("ok")
         });
@@ -301,13 +319,28 @@ mod tests {
     fn offline_miss_is_counted_for_the_survey_report() {
         let url = Url::parse("https://a.test/never-recorded.css").unwrap();
         let cache = temp_cache("miss", true);
-        let result = cache.fetch((&url, "GET", true, b""), || panic!("offline never fetches"));
+        let result = cache.fetch(RequestKind::Other, (&url, "GET", true, b""), || {
+            panic!("offline never fetches")
+        });
         assert!(result.is_err());
         assert!(
             survey_stats()
                 .offline_misses
                 .contains(&"GET https://a.test/never-recorded.css".to_string())
         );
+    }
+
+    #[test]
+    fn offline_miss_records_the_request_kind() {
+        let url = Url::parse("https://a.test/never-recorded-kind.css").unwrap();
+        let cache = temp_cache("miss-kind", true);
+        let _ = cache.fetch(RequestKind::Css, (&url, "GET", true, b""), || {
+            panic!("offline never fetches")
+        });
+        assert!(survey_stats().misses.contains(&SurveyMiss {
+            kind: RequestKind::Css,
+            url,
+        }));
     }
 
     #[test]
@@ -329,7 +362,9 @@ mod tests {
 
         // Record `other`, then move its files to the name `url` hashes to —
         // what a hash collision (or a crafted request) would look like.
-        let _ = cache.fetch((&other, "GET", true, b""), || response("other's body"));
+        let _ = cache.fetch(RequestKind::Other, (&other, "GET", true, b""), || {
+            response("other's body")
+        });
         let other_key = cache_key(&other.to_string(), "GET", true, b"");
         let key = cache_key(&url.to_string(), "GET", true, b"");
         for ext in ["meta", "body"] {
@@ -342,7 +377,7 @@ mod tests {
 
         let fetched = Cell::new(false);
         let result = cache
-            .fetch((&url, "GET", true, b""), || {
+            .fetch(RequestKind::Other, (&url, "GET", true, b""), || {
                 fetched.set(true);
                 response("real body")
             })
@@ -352,7 +387,9 @@ mod tests {
 
         // Now recorded under its own identity: a hit, no fetch.
         let again = cache
-            .fetch((&url, "GET", true, b""), || panic!("should be cached"))
+            .fetch(RequestKind::Other, (&url, "GET", true, b""), || {
+                panic!("should be cached")
+            })
             .unwrap();
         assert_eq!(again.response.body, b"real body");
 
@@ -373,7 +410,7 @@ mod tests {
         };
         assert!(
             offline
-                .fetch((&third, "GET", true, b""), || panic!(
+                .fetch(RequestKind::Other, (&third, "GET", true, b""), || panic!(
                     "offline never fetches"
                 ))
                 .is_err()

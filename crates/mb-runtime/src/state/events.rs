@@ -240,9 +240,7 @@ impl BrowserState {
     }
 
     pub(super) fn clamp_scroll(&mut self, viewport_height: usize, document_height: f32) {
-        let visible_height = (viewport_height as f32 - CHROME_HEIGHT).max(0.0);
-        let max_scroll = (document_height - visible_height).max(0.0);
-        self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll);
+        self.scroll_offset = clamped_scroll(self.scroll_offset, viewport_height, document_height);
     }
 
     pub(super) fn clicked_link<'a>(
@@ -305,4 +303,14 @@ impl BrowserState {
 
         None
     }
+}
+
+/// Where a scroll `offset` ends up after the frame's clamp: between the top
+/// and the last page-full of `document_height`. `viewport_height` is the
+/// window's (chrome included), as `display_list` gets it. The agent's reach
+/// check (`mb_agent::reach`) uses this to predict where a click scrolls.
+pub fn clamped_scroll(offset: f32, viewport_height: usize, document_height: f32) -> f32 {
+    let visible_height = (viewport_height as f32 - CHROME_HEIGHT).max(0.0);
+    let max_scroll = (document_height - visible_height).max(0.0);
+    offset.clamp(0.0, max_scroll)
 }

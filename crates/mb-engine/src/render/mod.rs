@@ -17,7 +17,7 @@ mod raster;
 
 pub use display_list::{
     PaintContext, build_display_list, build_display_list_with_clips, field_display_value,
-    transform_for, translate,
+    paint_order, transform_for, translate,
 };
 pub use raster::{
     clear_measure_cache, measure_text_width, measure_text_wrap, measure_text_wrap_with_family,

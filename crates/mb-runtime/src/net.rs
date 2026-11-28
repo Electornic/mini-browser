@@ -19,7 +19,42 @@ use ureq::{
 pub use mb_dom::url::{NetworkError, Url};
 
 mod cache;
-pub use cache::{SurveyCacheStats, survey_stats};
+pub use cache::{SurveyCacheStats, SurveyMiss, survey_stats};
+
+/// What a request is for. The survey cache records it with each offline
+/// miss (`compat_probe`'s `misses.tsv`, compat round 4 P7), so a targeted
+/// re-fetch can tell a stylesheet from a page API call or a beacon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RequestKind {
+    /// A navigation (the document itself, and each redirect hop).
+    Document,
+    Css,
+    Script,
+    Image,
+    Font,
+    /// `fetch()` from a page script.
+    Fetch,
+    /// `XMLHttpRequest` from a page script.
+    Xhr,
+    /// Anything else (`net::fetch` / `http_get` callers).
+    Other,
+}
+
+impl RequestKind {
+    /// The kind's name in survey reports (`misses.tsv`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Document => "document",
+            Self::Css => "css",
+            Self::Script => "js",
+            Self::Image => "img",
+            Self::Font => "font",
+            Self::Fetch => "fetch",
+            Self::Xhr => "xhr",
+            Self::Other => "other",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpResponse {
@@ -74,7 +109,7 @@ pub fn load_html_document(url: &Url) -> Result<(String, Url), NetworkError> {
 }
 
 pub fn load_css(url: &Url) -> Result<String, NetworkError> {
-    let response = fetch(url)?.response;
+    let response = fetch_as(RequestKind::Css, url, "GET", &[], &[])?.response;
 
     if response.status_code != 200 {
         return Err(NetworkError::HttpStatus(
@@ -100,7 +135,7 @@ pub fn load_css(url: &Url) -> Result<String, NetworkError> {
 // label JS files inconsistently — enforcing a whitelist here would silently
 // break otherwise-working pages.
 pub fn load_script(url: &Url) -> Result<String, NetworkError> {
-    let response = fetch(url)?.response;
+    let response = fetch_as(RequestKind::Script, url, "GET", &[], &[])?.response;
 
     if response.status_code != 200 {
         return Err(NetworkError::HttpStatus(
@@ -113,7 +148,7 @@ pub fn load_script(url: &Url) -> Result<String, NetworkError> {
 }
 
 pub fn load_image(url: &Url) -> Result<Vec<u8>, NetworkError> {
-    let response = fetch(url)?.response;
+    let response = fetch_as(RequestKind::Image, url, "GET", &[], &[])?.response;
 
     if response.status_code != 200 {
         return Err(NetworkError::HttpStatus(
@@ -158,7 +193,19 @@ pub fn fetch_with_request(
     extra_headers: &[(String, String)],
     body: &[u8],
 ) -> Result<FetchResult, NetworkError> {
-    cached_fetch(true, url, method, extra_headers, body)
+    fetch_as(RequestKind::Other, url, method, extra_headers, body)
+}
+
+/// `fetch_with_request` for a request of a known `kind` (redirects
+/// followed — every subresource).
+pub fn fetch_as(
+    kind: RequestKind,
+    url: &Url,
+    method: &str,
+    extra_headers: &[(String, String)],
+    body: &[u8],
+) -> Result<FetchResult, NetworkError> {
+    cached_fetch(kind, true, url, method, extra_headers, body)
 }
 
 /// Like `fetch_with_request`, but a 3xx comes back as the response instead
@@ -172,12 +219,20 @@ pub fn fetch_without_redirects(
     extra_headers: &[(String, String)],
     body: &[u8],
 ) -> Result<FetchResult, NetworkError> {
-    cached_fetch(false, url, method, extra_headers, body)
+    cached_fetch(
+        RequestKind::Document,
+        false,
+        url,
+        method,
+        extra_headers,
+        body,
+    )
 }
 
 /// Goes through the `MB_NET_CACHE` record/replay cache when it is set (real
 /// site surveys, see `cache.rs`), straight to the wire otherwise.
 fn cached_fetch(
+    kind: RequestKind,
     follows_redirects: bool,
     url: &Url,
     method: &str,
@@ -193,7 +248,7 @@ fn cached_fetch(
         fetch_with_agent(agent, url, method, extra_headers, body)
     };
     match cache::Cache::from_env() {
-        Some(cache) => cache.fetch((url, method, follows_redirects, body), fetch),
+        Some(cache) => cache.fetch(kind, (url, method, follows_redirects, body), fetch),
         None => fetch(),
     }
 }

@@ -546,6 +546,38 @@ pub fn compute_hovered_hit(
     best
 }
 
+/// The node under the pointer the way paint stacks boxes: the same
+/// per-box test as [`compute_hovered_hit`] (padding box under the box's
+/// transform, inside its clip), but the topmost box in paint order wins —
+/// z-index and positioned layers, as the screen shows them — instead of
+/// the last one in document order. Not used for input yet: the reach check
+/// (compat round 4 P2) compares the two to tell a z-order miss from other
+/// interceptions; the hit test switches to this order in step 1b-z.
+pub fn hit_node_in_paint_order(
+    input: &input::WindowInput,
+    layout_root: &layout::LayoutBox,
+    clips: &layout::ClipTable,
+    scroll_offset: f32,
+) -> Option<NodeId> {
+    let (mouse_x, mouse_y) = input.mouse_position?;
+    if mouse_y < CHROME_HEIGHT {
+        return None;
+    }
+    let doc_y = mouse_y - CHROME_HEIGHT + scroll_offset;
+    let mut best = None;
+    for (layout_box, transform) in render::paint_order(layout_root) {
+        let (logical_x, logical_y) = transform.inverse().apply_point(mouse_x, doc_y);
+        let node_id = node_id_for_layout_box(layout_box);
+        let clip = node_id.and_then(|id| clips.clip_of(id));
+        if point_in_rect(logical_x, logical_y, padding_box(layout_box))
+            && point_in_clip(mouse_x, doc_y, clip)
+        {
+            best = Some(node_id);
+        }
+    }
+    best.flatten()
+}
+
 /// Whether page point (`x`, `y`) is inside `clip` (`None` = unclipped; a
 /// zero-area clip contains nothing).
 pub fn point_in_clip(x: f32, y: f32, clip: Option<layout::Rect>) -> bool {
@@ -876,6 +908,32 @@ mod tests {
             )),
             id_of(compute_hovered_hit(&input, &layout_root, &clips, 0.0)),
         ]
+    }
+
+    #[test]
+    fn paint_order_hit_sees_a_higher_z_index_drawn_over_a_later_box() {
+        // #top comes first in the document but paints above #later
+        // (z-index): the DFS hit test picks #later, the paint-order one
+        // #top — the z_order case of compat round 4 P2.
+        let css = "#top { position: absolute; left: 0; top: 0; width: 100px; height: 50px; z-index: 5; } \
+                   #later { position: relative; width: 100px; height: 50px; }";
+        let html = "<div id=page><div id=top></div><div id=later></div></div>";
+        let document = html::parse(html).unwrap();
+        let root = document.roots()[0];
+        let sheet = css::parse(css).unwrap();
+        let styled = style::style_tree(&document, root, &[sheet]);
+        let layout_root = layout::layout_tree(&styled, 400.0);
+        let clips = layout::compute_clips(&layout_root);
+        let input = input::WindowInput {
+            mouse_position: Some((10.0, 10.0 + CHROME_HEIGHT)),
+            ..input::WindowInput::default()
+        };
+        let attr_id =
+            |id: Option<NodeId>| document.element_data(id?)?.attributes.get("id").cloned();
+        let dfs = compute_hovered_hit(&input, &layout_root, &clips, 0.0).and_then(|h| h.node_id);
+        assert_eq!(attr_id(dfs).as_deref(), Some("later"));
+        let painted = hit_node_in_paint_order(&input, &layout_root, &clips, 0.0);
+        assert_eq!(attr_id(painted).as_deref(), Some("top"));
     }
 
     #[test]

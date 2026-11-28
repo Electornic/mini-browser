@@ -322,9 +322,11 @@ pub fn load_fonts(css_sources: &[String], base_url: &Url) -> Vec<Vec<u8>> {
             }
         })
         .collect();
-    parallel_fetch(&urls, |url| match net::fetch(url) {
-        Ok(result) if result.response.status_code == 200 => Some(result.response.body),
-        _ => None,
+    parallel_fetch(&urls, |url| {
+        match net::fetch_as(net::RequestKind::Font, url, "GET", &[], &[]) {
+            Ok(result) if result.response.status_code == 200 => Some(result.response.body),
+            _ => None,
+        }
     })
 }
 

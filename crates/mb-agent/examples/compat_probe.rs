@@ -35,10 +35,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[allow(dead_code)] // shared with tests/compat_classify.rs
+#[path = "compat_support/classify.rs"]
+mod classify;
+
+use mb_agent::reach::{self, InterceptCause, Reach, ReachContext};
 use mb_agent::{AgentBrowser, AgentConfig, ClockMode, Observation};
 use mb_runtime::{
     css::{self, DropReason, Origin, Value, properties},
     dom::{Document, NodeId, NodeType},
+    js,
     layout::{self, BoxType, ClipTable, LayoutBox, Rect},
     net,
     render::{self, Affine},
@@ -54,6 +60,17 @@ fn main() {
         push_columns(&mut row, None);
         print!("{}", row.render().lines().next().unwrap_or_default());
         println!();
+        return;
+    }
+    if url == "--classify" {
+        // P4 post-processing of a saved run: `--classify DIR` prints the
+        // js columns (header + row) for DIR/console.txt.
+        let dir = PathBuf::from(args.next().expect("usage: compat_probe --classify DIR"));
+        let console = fs::read_to_string(dir.join("console.txt")).unwrap_or_default();
+        let verdict = classify::classify_console(&console, &api_list());
+        let mut row = Row::default();
+        push_js_columns(&mut row, Some(&verdict));
+        print!("{}", row.render());
         return;
     }
     let out = PathBuf::from(args.next().expect(usage));
@@ -180,6 +197,26 @@ fn main() {
     let page_width = browser.config().viewport_width as f32;
     write(&out, "layout.txt", &anomalies.render(page_width));
 
+    // Round 4 step 0: what the agent sees but can't click the Chrome way
+    // (P1/P2), keyed for label-to-label diffs.
+    let reach_ctx = ReachContext::new(
+        &document,
+        &view.layout_root,
+        &view.clips,
+        view.document_height,
+        reach::Viewport {
+            width: browser.config().viewport_width as f32,
+            height: browser.config().viewport_height as f32,
+        },
+        state.scroll_offset,
+    );
+    let media = css::media::MediaContext::new(media_ctx.0, media_ctx.1);
+    let reachability = reachability(&document, &whole, &reach_ctx, &|element, hider| {
+        revealed_by(&document, &state.parsed_stylesheets, &media, element, hider)
+    });
+    write(&out, "unreachable.txt", &reachability.unreachable);
+    write(&out, "element_keys.txt", &reachability.keys);
+
     let cache = net::survey_stats();
     let console_errors = viewport
         .console
@@ -192,6 +229,19 @@ fn main() {
         .filter(|m| m.text.starts_with("Uncaught"))
         .count();
     let (found, missing) = match_expected(&expected, &whole);
+    let js_verdict = classify::classify_console(&console, &api_list());
+    let scripts = js::script_survey_stats();
+    let mut misses = String::new();
+    for miss in &cache.misses {
+        let _ = writeln!(
+            misses,
+            "{}\t{}\t{}",
+            miss.kind.as_str(),
+            miss.url.host,
+            one_line(&miss.url.to_string())
+        );
+    }
+    write(&out, "misses.tsv", &misses);
     let result = match &load_error {
         Some(text) if is_blocked(text) => "blocked",
         Some(_) => "nav-fail",
@@ -262,6 +312,23 @@ fn main() {
             format!(", missing {}", missing.join(", "))
         }
     );
+    for label in &missing {
+        let _ = writeln!(
+            summary,
+            "  missing {label}: {}",
+            missing_reason(label, &document, &whole, &reach_ctx)
+        );
+    }
+    let _ = writeln!(
+        summary,
+        "scripts: {}/{} classic scripts completed; uncaught (deduplicated) {} — {}; first: {}",
+        scripts.completed,
+        scripts.run,
+        js_verdict.uncaught_dedup,
+        js_verdict.kinds(),
+        js_verdict.first_error.as_deref().unwrap_or("-")
+    );
+    let _ = write!(summary, "{}", reachability.summary);
     let _ = writeln!(
         summary,
         "survey cache: {} offline misses ({}), {} non-GET refused",
@@ -299,6 +366,11 @@ fn main() {
             .as_ref()
             .map(|u| without_query(&u.to_string()).to_string())
             .unwrap_or_else(|| "-".into()),
+        reach: &reachability,
+        slivers_lines: anomalies.slivers_lines,
+        js: &js_verdict,
+        scripts,
+        imports_cached: imports_cached(&css_report.counts.import_targets),
     };
     let mut row = Row::default();
     push_columns(&mut row, Some(&columns));
@@ -323,6 +395,11 @@ struct Columns<'a> {
     missing: &'a [String],
     css_bytes: usize,
     final_url: String,
+    reach: &'a Reachability,
+    slivers_lines: usize,
+    js: &'a classify::JsVerdict,
+    scripts: js::ScriptSurveyStats,
+    imports_cached: usize,
 }
 
 /// The `summary.tsv` columns, in order. `None` = header only (values "-"),
@@ -454,6 +531,481 @@ fn push_columns(row: &mut Row, columns: Option<&Columns>) {
         format!("{:.0}", c.whole.document_height)
     });
     col("final_url", &|c| c.final_url.clone());
+    // --- compat round 4 step 0 (docs/compat-round4.md 0단계) ---
+    // P1: observed elements `visibility`-hidden / `pointer-events: none` by
+    // their nearest declaration (the old engine inherits neither).
+    col("obs_hidden_visibility", &|c| {
+        c.reach.hidden_visibility.to_string()
+    });
+    col("obs_pointer_none", &|c| c.reach.pointer_none.to_string());
+    // P2: the frozen union (one category per element), P2b ours split.
+    col("obs_unreachable", &|c| c.reach.total.to_string());
+    col("obs_unreachable_ours", &|c| c.reach.ours.to_string());
+    col("obs_unreachable_rate", &|c| {
+        format!(
+            "{:.4}",
+            c.reach.ours as f64 / c.whole.total_elements.max(1) as f64
+        )
+    });
+    col("obs_u_hidden", &|c| c.reach.hidden.to_string());
+    col("obs_u_clipped", &|c| c.reach.clipped.to_string());
+    col("obs_u_offscreen_x", &|c| c.reach.offscreen_x.to_string());
+    col("obs_u_offscreen_x_ours", &|c| {
+        c.reach.offscreen_x_ours.to_string()
+    });
+    col("obs_u_intercepted", &|c| c.reach.intercepted.to_string());
+    col("obs_u_intercepted_ours", &|c| {
+        c.reach.intercepted_ours.to_string()
+    });
+    col("obs_u_i_pointer_none", &|c| {
+        c.reach.pointer_none_overlay.to_string()
+    });
+    col("obs_u_i_z_order", &|c| c.reach.z_order.to_string());
+    col("obs_u_i_other", &|c| c.reach.other.to_string());
+    col("obs_u_i_other_no_hit", &|c| {
+        c.reach.other_no_hit.to_string()
+    });
+    col("obs_u_i_other_ancestor", &|c| {
+        c.reach.other_ancestor.to_string()
+    });
+    // P3: slivers judged per line.
+    col("slivers_lines", &|c| c.slivers_lines.to_string());
+    // P4: script errors (`classify.rs`) and how far the classic scripts got.
+    col("js_scripts", &|c| {
+        format!("{}/{}", c.scripts.completed, c.scripts.run)
+    });
+    // P6: `@import` targets and how many the cache holds.
+    col("import_sheets", &|c| c.css.import_targets.len().to_string());
+    col("import_cached", &|c| c.imports_cached.to_string());
+    push_js_columns(row, columns.map(|c| c.js));
+}
+
+/// The P4 columns, shared by a run's row and `--classify`.
+fn push_js_columns(row: &mut Row, verdict: Option<&classify::JsVerdict>) {
+    let mut col = |name: &'static str, value: &dyn Fn(&classify::JsVerdict) -> String| {
+        row.push(name, &verdict.map(value).unwrap_or_default());
+    };
+    col("js_first_error", &|v| {
+        v.first_error.clone().unwrap_or_default()
+    });
+    col("js_missing_api", &|v| {
+        v.first_missing_api.clone().unwrap_or_default()
+    });
+    col("js_any_missing_api", &|v| v.any_missing_api.join(","));
+    col("js_error_kinds", &|v| v.kinds());
+    col("uncaught_dedup", &|v| v.uncaught_dedup.to_string());
+}
+
+/// The frozen P4 list (compiled in: a list change rebuilds the probe).
+fn api_list() -> classify::ApiList {
+    classify::ApiList::parse(include_str!("../../../scripts/compat-js-apis.tsv"))
+}
+
+/// Round 4 P1/P2 for one page.
+#[derive(Default)]
+struct Reachability {
+    hidden_visibility: usize,
+    pointer_none: usize,
+    total: usize,
+    ours: usize,
+    hidden: usize,
+    clipped: usize,
+    offscreen_x: usize,
+    offscreen_x_ours: usize,
+    intercepted: usize,
+    intercepted_ours: usize,
+    pointer_none_overlay: usize,
+    z_order: usize,
+    other: usize,
+    /// Diagnostic splits of `other` (not new categories): the point hits
+    /// no box at all (the element is above the page top — skip links at
+    /// `top: -100px`), or hits an ancestor of the element (the point falls
+    /// in a gap of its boxes: a wrapped inline's union, its border).
+    other_no_hit: usize,
+    other_ancestor: usize,
+    /// `key<TAB>category[:cause]<TAB>ours|browser-too` per unreachable
+    /// element (`unreachable.txt`).
+    unreachable: String,
+    /// The key of every observed element (`element_keys.txt`), so a diff can
+    /// tell "newly unreachable" from "new".
+    keys: String,
+    /// Lines for `summary.txt`.
+    summary: String,
+}
+
+/// `revealed(element, hider)`: the pseudo whose rule shows `element` when
+/// `hider` (the node whose `visibility` hides it) is hovered / focused.
+fn reachability(
+    document: &Document,
+    whole: &Observation,
+    ctx: &ReachContext,
+    revealed: &dyn Fn(NodeId, NodeId) -> Option<&'static str>,
+) -> Reachability {
+    let mut r = Reachability::default();
+    let mut hidden_samples = Vec::new();
+    let mut intercepted_samples = Vec::new();
+    let mut tested_hiders: BTreeMap<NodeId, Option<&'static str>> = BTreeMap::new();
+    for element in &whole.elements {
+        let key = element_key(document, element.id, element.role.as_str(), &element.name);
+        let _ = writeln!(r.keys, "{key}");
+        let hidden_visibility = ctx.visibility_hidden(element.id);
+        r.hidden_visibility += usize::from(hidden_visibility);
+        r.pointer_none += usize::from(ctx.pointer_events_none(element.id));
+        if hidden_visibility && hidden_samples.len() < 40 {
+            // Restyling is a whole style pass: only the samples' hiders,
+            // at most 20 of them.
+            let mark = match hider(document, ctx, element.id) {
+                None => String::new(),
+                Some(h) => {
+                    let tested = match tested_hiders.get(&h) {
+                        Some(&known) => Some(known),
+                        None if tested_hiders.len() < 20 => {
+                            let found = revealed(element.id, h);
+                            tested_hiders.insert(h, found);
+                            Some(found)
+                        }
+                        None => None,
+                    };
+                    match tested {
+                        Some(Some(pseudo)) => format!(" [{pseudo}]"),
+                        Some(None) => String::new(),
+                        None => " [?]".to_string(),
+                    }
+                }
+            };
+            hidden_samples.push(format!(
+                "    {} {:?}{mark}",
+                element.role.as_str(),
+                clip(&one_line(&element.name), 40)
+            ));
+        }
+        let verdict = ctx.classify(element.id);
+        let Some(category) = verdict.category() else {
+            continue;
+        };
+        let browser_too = verdict.browser_too();
+        r.total += 1;
+        r.ours += usize::from(!browser_too);
+        let label = match verdict {
+            Reach::Hidden => {
+                r.hidden += 1;
+                category.to_string()
+            }
+            Reach::Clipped => {
+                r.clipped += 1;
+                category.to_string()
+            }
+            Reach::OffscreenX { .. } => {
+                r.offscreen_x += 1;
+                r.offscreen_x_ours += usize::from(!browser_too);
+                category.to_string()
+            }
+            Reach::Intercepted(i) => {
+                r.intercepted += 1;
+                r.intercepted_ours += usize::from(!browser_too);
+                let cause = match i.cause {
+                    InterceptCause::PointerNoneOverlay => {
+                        r.pointer_none_overlay += 1;
+                        "pointer_none_overlay"
+                    }
+                    InterceptCause::ZOrder => {
+                        r.z_order += 1;
+                        "z_order"
+                    }
+                    InterceptCause::Other => {
+                        r.other += 1;
+                        match i.by {
+                            None => {
+                                r.other_no_hit += 1;
+                                "other(no_hit)"
+                            }
+                            Some(by) if is_ancestor(document, by, element.id) => {
+                                r.other_ancestor += 1;
+                                "other(ancestor)"
+                            }
+                            Some(_) => "other",
+                        }
+                    }
+                };
+                if intercepted_samples.len() < 20 {
+                    intercepted_samples.push(format!(
+                        "    {} {:?} ← {} ({cause}{})",
+                        element.role.as_str(),
+                        clip(&one_line(&element.name), 40),
+                        i.by.map_or_else(|| "-".into(), |by| ancestry(document, by, 1)),
+                        if browser_too { ", browser-too" } else { "" }
+                    ));
+                }
+                format!("{category}:{}", cause.split('(').next().unwrap_or(cause))
+            }
+            Reach::Reached | Reach::NoBox => unreachable!("no category"),
+        };
+        let _ = writeln!(
+            r.unreachable,
+            "{key}\t{label}\t{}",
+            if browser_too { "browser-too" } else { "ours" }
+        );
+    }
+    let _ = writeln!(
+        r.summary,
+        "reach: {} of {} observed elements unreachable ({} ours) — hidden {} · clipped {} · offscreen_x {} ({} ours) · intercepted {} ({} ours; pointer-none overlay {} · z-order {} · other {} [no hit {} · ancestor {}]); visibility-hidden {} · pointer-events:none {}",
+        r.total,
+        whole.elements.len(),
+        r.ours,
+        r.hidden,
+        r.clipped,
+        r.offscreen_x,
+        r.offscreen_x_ours,
+        r.intercepted,
+        r.intercepted_ours,
+        r.pointer_none_overlay,
+        r.z_order,
+        r.other,
+        r.other_no_hit,
+        r.other_ancestor,
+        r.hidden_visibility,
+        r.pointer_none
+    );
+    if !hidden_samples.is_empty() {
+        let _ = writeln!(
+            r.summary,
+            "  visibility-hidden sample (first 40; [:hover]/[:focus-within] = that rule on the hiding box shows it, [?] = not tested):"
+        );
+        for line in &hidden_samples {
+            let _ = writeln!(r.summary, "{line}");
+        }
+    }
+    if !intercepted_samples.is_empty() {
+        let _ = writeln!(
+            r.summary,
+            "  intercepted sample (first 20; ← what the hit test picks):"
+        );
+        for line in &intercepted_samples {
+            let _ = writeln!(r.summary, "{line}");
+        }
+    }
+    r
+}
+
+/// `ancestor` is a proper DOM ancestor of `id`.
+fn is_ancestor(document: &Document, ancestor: NodeId, id: NodeId) -> bool {
+    std::iter::successors(document.get(id).and_then(|n| n.parent), |&n| {
+        document.get(n)?.parent
+    })
+    .any(|n| n == ancestor)
+}
+
+/// The element whose own `visibility` declaration hides `id` (itself or
+/// the nearest ancestor that declares one — P1's walk).
+fn hider(document: &Document, ctx: &ReachContext, id: NodeId) -> Option<NodeId> {
+    let mut current = Some(id);
+    let mut last_hidden = None;
+    while let Some(node) = current {
+        if !ctx.visibility_hidden(node) {
+            break;
+        }
+        last_hidden = Some(node);
+        current = document.get(node)?.parent;
+    }
+    last_hidden
+}
+
+/// Does a `:hover` (or `:focus-within`) rule show `element` once `hider`
+/// is hovered (focused)? One extra style pass each.
+fn revealed_by(
+    document: &Document,
+    sheets: &[css::Stylesheet],
+    media: &css::media::MediaContext,
+    element: NodeId,
+    hider: NodeId,
+) -> Option<&'static str> {
+    let root = *document.roots().last()?;
+    let path = dom_path(document, root, hider)?;
+    let hover = style::InteractionState {
+        hover: Some(&path),
+        ..style::InteractionState::default()
+    };
+    let focus = style::InteractionState {
+        focus: Some(&path),
+        ..style::InteractionState::default()
+    };
+    [(":hover", hover), (":focus-within", focus)]
+        .into_iter()
+        .find(|(_, state)| {
+            let styled = style::style_tree_with_state(document, root, sheets, *state, media);
+            styled_hidden(&styled, element) == Some(false)
+        })
+        .map(|(pseudo, _)| pseudo)
+}
+
+/// `visibility` of `id` in a styled tree by the nearest declaration.
+fn styled_hidden(root: &style::StyledNode, id: NodeId) -> Option<bool> {
+    let mut stack = vec![(root, false)];
+    while let Some((node, inherited)) = stack.pop() {
+        let hidden = match node.value("visibility") {
+            Some(Value::Keyword(k)) if k == "hidden" || k == "collapse" => true,
+            Some(Value::Keyword(k)) if k == "visible" => false,
+            _ => inherited,
+        };
+        if node.node_id == id {
+            return Some(hidden);
+        }
+        stack.extend(node.children.iter().map(|child| (child, hidden)));
+    }
+    None
+}
+
+fn dom_path(document: &Document, root: NodeId, id: NodeId) -> Option<Vec<usize>> {
+    let mut path = Vec::new();
+    let mut current = id;
+    while current != root {
+        let parent = document.get(current)?.parent?;
+        path.push(
+            document
+                .get(parent)?
+                .children
+                .iter()
+                .position(|&c| c == current)?,
+        );
+        current = parent;
+    }
+    path.reverse();
+    Some(path)
+}
+
+/// The label-to-label key of an observed element: its path below the
+/// nearest ancestor with an `id` (`#nav/ul[1]/li[3]/a[1]` — element
+/// siblings of the same tag counted), role and name. Layout changes and
+/// inserted nodes elsewhere leave it alone.
+fn element_key(document: &Document, id: NodeId, role: &str, name: &str) -> String {
+    let mut parts = Vec::new();
+    let mut current = id;
+    let anchor = loop {
+        let Some(element) = document.element_data(current) else {
+            break String::new();
+        };
+        if let Some(id_attr) = element.attributes.get("id") {
+            break format!("#{}", one_line(id_attr));
+        }
+        let Some(parent) = document.get(current).and_then(|n| n.parent) else {
+            parts.push(format!("{}[1]", element.tag_name));
+            break String::new();
+        };
+        let nth = document
+            .get(parent)
+            .map(|p| {
+                p.children
+                    .iter()
+                    .take_while(|&&c| c != current)
+                    .filter(|&&c| {
+                        document
+                            .element_data(c)
+                            .is_some_and(|e| e.tag_name == element.tag_name)
+                    })
+                    .count()
+                    + 1
+            })
+            .unwrap_or(1);
+        parts.push(format!("{}[{nth}]", element.tag_name));
+        current = parent;
+    };
+    parts.reverse();
+    let path = std::iter::once(anchor)
+        .chain(parts)
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("{path}\t{role}\t{}", clip(&one_line(name), 120))
+}
+
+/// P5: why an expected control (`role:name`) isn't in the observation.
+fn missing_reason(
+    label: &str,
+    document: &Document,
+    whole: &Observation,
+    ctx: &ReachContext,
+) -> String {
+    let (role, name) = label.split_once(':').unwrap_or(("", label));
+    let alternatives: Vec<&str> = name.split('|').map(str::trim).collect();
+    let matches = |text: &str| {
+        let text = text.to_lowercase();
+        alternatives
+            .iter()
+            .any(|a| !a.is_empty() && text.contains(a))
+    };
+    // The same name observed under another role.
+    if let Some(e) = whole.elements.iter().find(|e| matches(&e.name)) {
+        return format!(
+            "observed as {} {:?}",
+            e.role.as_str(),
+            clip(&one_line(&e.name), 40)
+        );
+    }
+    // The deepest element whose text or label attributes carry the name.
+    let mut best: Option<(usize, NodeId)> = None;
+    let mut stack: Vec<(NodeId, usize)> = document.roots().iter().map(|&r| (r, 0)).collect();
+    while let Some((id, depth)) = stack.pop() {
+        let Some(node) = document.get(id) else {
+            continue;
+        };
+        if let NodeType::Element(element) = &node.node_type {
+            if matches!(
+                element.tag_name.as_str(),
+                "script" | "style" | "template" | "head"
+            ) {
+                continue;
+            }
+            let attrs = ["aria-label", "title", "alt", "value", "placeholder"]
+                .iter()
+                .filter_map(|a| element.attributes.get(*a))
+                .any(|v| matches(v));
+            if (attrs || matches(&dom_text_of(document, id)))
+                && best.is_none_or(|(d, _)| depth >= d)
+            {
+                best = Some((depth, id));
+            }
+        }
+        stack.extend(node.children.iter().map(|&c| (c, depth + 1)));
+    }
+    let Some((_, id)) = best else {
+        return format!("no {role} named like that in the DOM — a script should have made it");
+    };
+    let in_noscript = std::iter::successors(Some(id), |&n| document.get(n)?.parent).any(|n| {
+        document
+            .element_data(n)
+            .is_some_and(|e| e.tag_name == "noscript")
+    });
+    let why = if in_noscript {
+        "inside <noscript>".to_string()
+    } else if ctx.visibility_hidden(id) {
+        "visibility: hidden".to_string()
+    } else {
+        match ctx.classify(id) {
+            Reach::NoBox => "no box (display: none, or under one) or 0 size".to_string(),
+            _ => "rendered, but not indexed as that role (not interactive here)".to_string(),
+        }
+    };
+    format!("in the DOM as {} — {why}", ancestry(document, id, 2))
+}
+
+fn dom_text_of(document: &Document, id: NodeId) -> String {
+    let mut text = String::new();
+    let mut stack = vec![id];
+    while let Some(n) = stack.pop() {
+        match document.get(n).map(|d| &d.node_type) {
+            Some(NodeType::Text(t)) => text.push_str(t),
+            Some(NodeType::Element(e)) if matches!(e.tag_name.as_str(), "script" | "style") => {}
+            Some(NodeType::Element(_)) => {
+                if let Some(d) = document.get(n) {
+                    stack.extend(d.children.iter().rev());
+                }
+            }
+            None => {}
+        }
+        if text.len() > 2000 {
+            break;
+        }
+    }
+    text
 }
 
 /// One `summary.tsv` row with its header, column order = push order.
@@ -723,6 +1275,8 @@ struct CssCounts {
     /// property rejects (`StyleReport::var_keyword_fallback`).
     var_keyword_fallback: usize,
     imports: usize,
+    /// Round 4 P6: the distinct `@import` targets (URL as written).
+    import_targets: BTreeSet<String>,
     /// Nested rules inside blocks + top-level selectors with `&`; kept out
     /// of the declaration counts.
     nesting: usize,
@@ -821,6 +1375,44 @@ impl CssCounts {
     fn drop_total_ours(&self) -> usize {
         self.drop_total() - self.keyword_fallback_browser - self.iacvt_browser
     }
+}
+
+/// The URL an `@import` prelude names: `url(x)`, `url("x")` or `"x"`.
+fn import_target(prelude: &str) -> Option<String> {
+    let p = prelude.trim();
+    let inner = match p.strip_prefix("url(") {
+        Some(rest) => rest.split(')').next()?.trim(),
+        None => p,
+    };
+    let quoted = inner
+        .strip_prefix(['"', '\''])
+        .and_then(|rest| rest.split(['"', '\'']).next());
+    let target = quoted.unwrap_or_else(|| inner.split_whitespace().next().unwrap_or(""));
+    (!target.is_empty()).then(|| target.to_string())
+}
+
+/// How many `targets` the survey cache holds — by URL path suffix, since
+/// the sheet a relative `@import` sits in (its base) isn't kept once the
+/// sheets are joined. Reads the cache's own `index.tsv` (`status, type,
+/// bytes, url`).
+fn imports_cached(targets: &BTreeSet<String>) -> usize {
+    let Some(dir) = std::env::var_os("MB_NET_CACHE") else {
+        return 0;
+    };
+    let index = fs::read_to_string(Path::new(&dir).join("index.tsv")).unwrap_or_default();
+    let cached: Vec<&str> = index
+        .lines()
+        .filter_map(|line| line.rsplit('\t').next())
+        .map(without_query)
+        .collect();
+    targets
+        .iter()
+        .filter(|t| {
+            let path = without_query(t).trim_start_matches("./");
+            let path = path.rsplit("../").next().unwrap_or(path);
+            !path.is_empty() && cached.iter().any(|url| url.ends_with(path))
+        })
+        .count()
 }
 
 /// Every custom property name the DOM's `style` attributes declare (the
@@ -1070,6 +1662,9 @@ fn css_drops(
         for at_rule in &report.at_rules {
             if at_rule.name == "import" {
                 c.imports += 1;
+                if let Some(target) = import_target(&at_rule.prelude) {
+                    c.import_targets.insert(target);
+                }
             }
             match at_rule.drop_reason().map(DropReason::origin) {
                 Some(Origin::Ours) => c.at_ours += 1,
@@ -1569,6 +2164,9 @@ struct Anomalies {
     boxes: usize,
     /// Boxes holding text that came out narrower than ~one glyph.
     slivers: Vec<String>,
+    /// Round 4 P3: the same test per line — `width ÷ (chars ÷ lines) < 3px`
+    /// (a wrapped paragraph isn't a sliver; 3차 5b's bbc +29).
+    slivers_lines: usize,
     /// Large boxes (> 100×40) with no text and no element children painted
     /// inside, i.e. likely placeholders whose content went missing.
     offscreen: Vec<String>,
@@ -2019,6 +2617,15 @@ impl Walk<'_> {
             if let NodeType::Text(text) = &node.node_type {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
+                    let line_height = layout::line_height_px(node);
+                    let lines = if line_height > 0.0 {
+                        (rect.height / line_height).round().max(1.0)
+                    } else {
+                        1.0
+                    };
+                    let chars = trimmed.chars().count();
+                    self.out.slivers_lines +=
+                        usize::from(chars > 2 && rect.width / (chars as f32 / lines) < 3.0);
                     self.text_box(node.node_id, rect, trimmed, ctx, matrix);
                 }
             } else if let NodeType::Element(element) = &node.node_type

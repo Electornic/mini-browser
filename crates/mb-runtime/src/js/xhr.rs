@@ -52,7 +52,13 @@ pub(super) fn register_xhr(ctx: &Ctx<'_>) -> Result<()> {
                         }
                     })
                     .collect();
-                match net::fetch_with_request(&parsed_url, &method, &headers, body.as_bytes()) {
+                match net::fetch_as(
+                    net::RequestKind::Xhr,
+                    &parsed_url,
+                    &method,
+                    &headers,
+                    body.as_bytes(),
+                ) {
                     Ok(result) => {
                         let ok = (200..300).contains(&result.response.status_code);
                         let status_text = result.response.reason_phrase.clone();

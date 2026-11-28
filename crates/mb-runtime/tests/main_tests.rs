@@ -689,6 +689,23 @@ mod tests {
     }
 
     #[test]
+    fn script_survey_stats_count_classic_scripts_run_and_completed() {
+        // Probe-only, process-wide (compat round 4 P4): other tests run
+        // scripts in parallel, so only lower bounds hold.
+        let before = mb_runtime::js::script_survey_stats();
+        let _browser = browser_with_html(
+            "<div><script>var ok = 1;</script><script>document.nope()</script><script type=\"application/json\">{}</script></div>",
+        );
+        let after = mb_runtime::js::script_survey_stats();
+        assert!(after.run >= before.run + 2, "{before:?} → {after:?}");
+        assert!(after.completed > before.completed, "{before:?} → {after:?}");
+        assert!(
+            after.run - before.run > after.completed - before.completed,
+            "the throwing script did not complete: {before:?} → {after:?}"
+        );
+    }
+
+    #[test]
     fn listener_error_has_location() {
         // The listener is defined by the top-level run and throws later —
         // same locator, source found again by the script label.

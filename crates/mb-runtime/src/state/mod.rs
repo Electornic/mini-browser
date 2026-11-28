@@ -7,6 +7,7 @@
 
 mod budget;
 mod events;
+pub use events::clamped_scroll;
 mod history;
 mod lifecycle;
 pub mod policy;
@@ -486,7 +487,9 @@ impl BrowserState {
         };
         self.js.install_inline_handlers(&inline_handlers);
         for (source, url) in sources {
-            if let Err(err) = self.js.execute_with_url(&source, &url) {
+            let result = self.js.execute_with_url(&source, &url);
+            crate::js::note_script_run(result.is_ok());
+            if let Err(err) = result {
                 eprintln!("script error: {err}");
                 // Like a browser's "Uncaught …" line: the agent sees it in
                 // the page block's `console:` (never a trusted note — the

@@ -5,8 +5,10 @@
 #   MB_NET_CACHE=$PWD/compat-cache/net scripts/compat-corpus.sh record [NAME…]
 #   # replay as often as needed (always offline)
 #   MB_NET_CACHE=$PWD/compat-cache/net scripts/compat-corpus.sh run [LABEL]
-#   # what appeared / disappeared between two runs
+#   # what appeared / disappeared between two runs (+ newly unreachable)
 #   scripts/compat-corpus.sh diff LABEL_BEFORE LABEL_AFTER
+#   # script-error columns from a run's saved console.txt (round 4 P4)
+#   scripts/compat-corpus.sh classify LABEL
 #
 # Sites come from scripts/compat-sites.tsv. Outputs (all git-ignored):
 #   compat-cache/corpus/recorded.tsv        name, url, robots verdict, rule, http code, date — written by record
@@ -42,7 +44,7 @@ die() {
 }
 
 usage() {
-    sed -n '2,10p' "$0" >&2
+    sed -n '2,12p' "$0" >&2
     exit 2
 }
 
@@ -314,11 +316,66 @@ cmd_diff() {
         [[ -n $gone ]] && sed 's/^/- /' <<<"$gone"
         [[ -n $added ]] && sed 's/^/+ /' <<<"$added"
     done < <(sites)
+    diff_unreachable "$before" "$after"
+}
+
+# Round 4 agent-impact rule (docs/compat-round4.md 공통 규칙): elements in
+# both runs (key = path below the nearest id ancestor + role + name) that
+# the later run can no longer reach — must be 0. Then, for a person to
+# look at, the (role, name) multiset of unreachable elements whose key the
+# other run doesn't have (a path change the key couldn't pair up).
+diff_unreachable() { # before after
+    local before=$1 after=$2
+    while IFS=$'\t' read -r name _ _; do
+        local ka=$before/$name/element_keys.txt kb=$after/$name/element_keys.txt
+        local ua=$before/$name/unreachable.txt ub=$after/$name/unreachable.txt
+        [[ -f $ka && -f $kb && -f $ua && -f $ub ]] || continue
+        local newly unpaired_a unpaired_b
+        # keys present in both runs ∩ unreachable after − unreachable before
+        newly=$(comm -12 <(sort -u "$ka") <(sort -u "$kb") |
+            comm -12 - <(cut -f1-3 "$ub" | sort -u) |
+            comm -23 - <(cut -f1-3 "$ua" | sort -u))
+        unpaired_a=$(comm -23 <(cut -f1-3 "$ua" | sort -u) <(sort -u "$kb") | cut -f2,3 | sort)
+        unpaired_b=$(comm -23 <(cut -f1-3 "$ub" | sort -u) <(sort -u "$ka") | cut -f2,3 | sort)
+        local gone_rn new_rn
+        gone_rn=$(comm -23 <(printf '%s\n' "$unpaired_a" | grep .) <(printf '%s\n' "$unpaired_b" | grep .) || true)
+        new_rn=$(comm -13 <(printf '%s\n' "$unpaired_a" | grep .) <(printf '%s\n' "$unpaired_b" | grep .) || true)
+        [[ -z $newly && -z $gone_rn && -z $new_rn ]] && continue
+        echo "== $name: newly unreachable $(grep -c . <<<"$newly" || true) (in both runs)"
+        [[ -n $newly ]] && grep -F -f <(printf '%s\n' "$newly") "$ub" | sed 's/^/! /'
+        [[ -n $new_rn ]] && sed 's/^/~+ /' <<<"$new_rn"
+        [[ -n $gone_rn ]] && sed 's/^/~- /' <<<"$gone_rn"
+    done < <(sites)
+}
+
+# Round 4 P4 on a saved run: the js columns from each site's console.txt
+# with today's scripts/compat-js-apis.tsv (compiled into the probe).
+cmd_classify() {
+    (($# == 1)) || usage
+    local label=$1 out=$CORPUS/$1
+    [[ -d $out ]] || die "no such run: $out"
+    require_ignored "$out"
+    build_probe
+    local report=$out/js-classify.tsv first=1
+    : >"$report"
+    while IFS=$'\t' read -r name _ _; do
+        [[ -f $out/$name/console.txt ]] || continue
+        local rows
+        rows=$("$PROBE" --classify "$out/$name")
+        if ((first)); then
+            printf 'name\t%s\n' "$(sed -n 1p <<<"$rows")" >>"$report"
+            first=0
+        fi
+        printf '%s\t%s\n' "$name" "$(sed -n 2p <<<"$rows")" >>"$report"
+    done < <(sites)
+    column -t -s $'\t' "$report" | cut -c1-200
+    echo "report: $report" >&2
 }
 
 case ${1:-} in
     record) shift; cmd_record "$@" ;;
     run) shift; cmd_run "$@" ;;
     diff) shift; cmd_diff "$@" ;;
+    classify) shift; cmd_classify "$@" ;;
     *) usage ;;
 esac

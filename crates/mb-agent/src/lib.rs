@@ -19,6 +19,7 @@ mod browser;
 mod error;
 mod index;
 mod observation;
+pub mod reach;
 mod role;
 mod text;
 

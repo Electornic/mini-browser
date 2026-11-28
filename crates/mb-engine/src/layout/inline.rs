@@ -804,7 +804,9 @@ fn inline_font_size(node: &StyledNode) -> f32 {
 /// Phase 6 targets, without plumbing per-font metrics through cosmic-text.
 pub(crate) const NORMAL_LINE_HEIGHT_RATIO: f32 = 1.2;
 
-pub(crate) fn inline_line_height_px(node: &StyledNode) -> f32 {
+/// One line's height for `node`'s text (`line-height` against its own
+/// `font-size`). A text box is this times its line count tall.
+pub fn inline_line_height_px(node: &StyledNode) -> f32 {
     // CSS `line-height` resolves against the element's *own* font-size:
     // - <number>: bare multiplier (inherits as the number, applied per element)
     // - <length>: absolute (em/rem already converted to Px during style)

@@ -19,8 +19,9 @@ use mb_runtime::state::{BrowserState, install_fonts};
 
 use crate::error::AgentError;
 use crate::error::CLIPPED_OUT_OF_VIEW;
-use crate::index::{find_rect, find_visible_rect};
+use crate::index::find_rect;
 use crate::observation::{Changes, Observation, ObserveInput, ObserveOptions, Scope, observe};
+use crate::reach;
 
 /// Virtual-clock step per frame (≈60 fps).
 const FRAME_MS: u64 = 16;
@@ -1056,7 +1057,7 @@ impl AgentBrowser {
                 });
             }
         }
-        match find_visible_rect(&view.layout_root, id, &view.clips) {
+        match reach::visible_rect(&view.layout_root, id, &view.clips) {
             Some(Ok(rect)) => Ok(rect),
             Some(Err(())) => Err(AgentError::NotInteractable {
                 id,
@@ -1069,14 +1070,14 @@ impl AgentBrowser {
         }
     }
 
-    // Bring the element's box into the viewport, centred, via the wheel.
+    // Bring the element's box into the viewport, centred, via the wheel
+    // (the engine clamps the result — `reach::scroll_for_click` predicts it).
     fn scroll_into_view(&mut self, rect: Rect) {
-        let viewport = self.config.viewport_height as f32;
         let scroll = self.state.scroll_offset;
-        if rect.y >= scroll && rect.y + rect.height <= scroll + viewport {
+        let Some(target) = reach::scroll_target(rect, scroll, self.config.viewport_height as f32)
+        else {
             return;
-        }
-        let target = (rect.y + rect.height / 2.0 - viewport / 2.0).max(0.0);
+        };
         self.frame(WindowInput {
             scroll_y: -(target - scroll) / PX_PER_SCROLL_TICK,
             ..WindowInput::default()
@@ -1086,16 +1087,14 @@ impl AgentBrowser {
     // Window coordinates of the element's centre, clamped into the visible
     // part of the box for elements taller than the viewport.
     fn click_point(&self, rect: Rect) -> (f32, f32) {
-        let scroll = self.state.scroll_offset;
-        let viewport = self.config.viewport_height as f32;
-        let top = rect.y.max(scroll);
-        let bottom = (rect.y + rect.height).min(scroll + viewport);
-        let doc_y = if bottom > top {
-            (top + bottom) / 2.0
-        } else {
-            rect.y + rect.height / 2.0
-        };
-        (rect.x + rect.width / 2.0, doc_y - scroll + CHROME_HEIGHT)
+        reach::click_point(rect, self.state.scroll_offset, self.reach_viewport())
+    }
+
+    fn reach_viewport(&self) -> reach::Viewport {
+        reach::Viewport {
+            width: self.config.viewport_width as f32,
+            height: self.config.viewport_height as f32,
+        }
     }
 
     fn may_type_password(&self) -> bool {

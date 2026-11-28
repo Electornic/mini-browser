@@ -1,0 +1,99 @@
+# Script-error classification list (docs/compat-round4.md step 0 P4 — frozen
+# 2026-11-28, before any r4 label was classified). Read by
+# `compat_probe --classify` / `scripts/compat-corpus.sh classify`.
+#
+#   name<TAB>kind<TAB>note
+#
+# kind:
+#   api      a web-platform name the engine's JS has no definition of:
+#            `not a function (near "a.NAME")` or `NAME is not defined` → missing-api
+#   cascade  a global an earlier page script should have made (a library):
+#            `NAME is not defined` after a missing-api line in the same run → cascade
+#
+# Changing this file means changing the doc first, then re-classifying every
+# earlier label (the rule is post-processing of saved console.txt). Targets
+# stay absolute (N2: first error ≤3, any line ≤6).
+#
+# --- 2a lookup / mutation ---
+getElementsByTagName	api	document and Element
+getElementsByClassName	api	Element (document has a static one)
+getElementsByName	api	document
+insertAdjacentHTML	api	Element
+insertAdjacentElement	api	Element
+insertAdjacentText	api	Element
+append	api	ParentNode
+prepend	api	ParentNode
+before	api	ChildNode
+after	api	ChildNode
+replaceWith	api	ChildNode
+remove	api	ChildNode
+replaceChildren	api	ParentNode
+createTreeWalker	api	document
+createNodeIterator	api	document
+createEvent	api	document
+initEvent	api	Event
+createHTMLDocument	api	document.implementation
+createDocumentFragment	api	document
+createRange	api	document
+getSelection	api	window / document
+getClientRects	api	Element
+elementFromPoint	api	document
+scrollIntoView	api	Element
+scrollTo	api	window / Element
+scrollBy	api	window / Element
+attachShadow	api	Element (Shadow DOM — out of scope, listed to classify)
+toggleAttribute	api	Element
+getAttributeNames	api	Element
+# --- 2b platform objects ---
+matchMedia	api	window
+URL	api	global constructor
+URLSearchParams	api	global constructor
+TextEncoder	api	global constructor
+TextDecoder	api	global constructor
+structuredClone	api	global
+screen	api	window (bare `screen.width` → not defined)
+IntersectionObserver	api	global constructor
+ResizeObserver	api	global constructor
+PerformanceObserver	api	global constructor
+WebSocket	api	global constructor
+AbortController	api	global constructor
+Blob	api	global constructor
+FormData	api	global constructor
+DOMParser	api	global constructor
+requestIdleCallback	api	window
+cancelIdleCallback	api	window
+postMessage	api	window
+getComputedStyle	api	window
+atob	api	window
+btoa	api	window
+sendBeacon	api	navigator
+performance	api	window
+crypto	api	window
+getRandomValues	api	crypto
+randomUUID	api	crypto
+Intl	api	global
+WeakRef	api	global
+NodeFilter	api	global
+Image	api	global constructor
+Worker	api	global constructor
+BroadcastChannel	api	global constructor
+EventSource	api	global constructor
+Notification	api	global constructor
+indexedDB	api	window
+visualViewport	api	window
+# --- 2c ---
+customElements	api	window
+# --- cascade (library globals made by an earlier script) ---
+jQuery	cascade	jQuery
+$	cascade	jQuery alias
+wcs_do	cascade	naver wcslog
+wcs	cascade	naver wcslog
+firebase	cascade	Firebase SDK
+gtag	cascade	Google tag
+dataLayer	cascade	Google tag manager
+_	cascade	lodash / underscore
+React	cascade	React UMD
+ReactDOM	cascade	React UMD
+Vue	cascade	Vue UMD
+Swiper	cascade	Swiper
+Kakao	cascade	Kakao SDK

@@ -46,6 +46,7 @@ pub mod error_location;
 mod event;
 mod fetch;
 mod storage;
+mod survey;
 mod timers;
 mod util;
 mod window;
@@ -53,6 +54,8 @@ mod xhr;
 
 pub use console::ConsoleMessage;
 pub use dialogs::DialogRecord;
+pub(crate) use survey::note_script_run;
+pub use survey::{ScriptSurveyStats, script_survey_stats};
 use timers::ClockSource;
 pub use timers::FixedClock;
 

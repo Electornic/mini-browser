@@ -348,6 +348,17 @@ enwiki·kowiki 의 첫 스크립트가 `document.cookie.match(…)` 에서 죽�
 
 목표 ②는 ours 몫만 센다. 표를 바꾸려면 이 표를 먼저 고친다.
 
+**P2b 구현 규칙(2026-11-28, `r4-p0` 를 돌리기 전에 적음 — `mb_agent::reach`)**: 표의 말을 코드로 옮길 때 정한 것.
+- `offscreen_x` browser-too = 요소나 그 DOM 조상 가운데 하나의 상자가 (a) 자기 `transform` 의 x 이동이 음수(`render::transform_for(..).e < 0` — `translateX(-100%)`·`translate(-50%, …)` 포함) 이거나 (b) `left`·`right`·`margin-left` 가 px 로 `≤ −뷰포트 폭`. `%`·`calc()` 위치는 보지 않는다(ours 쪽으로 — 애매하면 ours).
+- `intercepted` browser-too = 원인이 `z_order` 가 아니고, 히트 노드에서 위로 대상과의 공통 조상 직전까지 올라가는 사이에 `position: fixed/sticky/absolute` 인 요소가 있고, 그 요소의 보이는 상자 ∩ 클릭 때의 뷰포트 넓이가 뷰포트 넓이의 30% 이상. (엔진은 `fixed` 를 스크롤과 함께 움직이는 `absolute` 처럼 배치한다 — 클릭 스크롤 위치의 뷰포트와 겹치는 넓이로 잰다.)
+- 원인 순서: 히트 노드가 `pointer-events: none`(가장 가까운 선언) → `pointer_none_overlay`; 아니면 `view::hit_node_in_paint_order`(페인터와 같은 `walk_paint_order` 를 공유하는 새 함수 — 아직 입력에는 안 씀)의 히트가 대상에 닿으면 → `z_order`; 나머지 → `other`.
+- "닿음" = 히트 노드가 대상 자신·DOM 자손이거나, 히트 노드의 조상 `<label>` 이 대상을 라벨함(`for` 가 대상 `id` 와 같음, 또는 `for` 없이 대상을 품음).
+- 클릭 점 = 1c 의 in-view centre: (보이는 상자 ∩ `[0, 폭)`) 의 가로 가운데, 세로는 오늘 `click_point` 그대로. 스크롤 = `reach::scroll_target`(오늘 `scroll_into_view` 의 목표) → `state::clamped_scroll`(엔진의 `clamp_scroll` 과 같은 함수).
+- P1 의 "가장 가까운 선언": 레이아웃 트리를 내려가며 `visibility`(`hidden`/`collapse` 는 숨김, `visible` 은 켬)·`pointer-events`(`none` 은 켬, 그 밖의 키워드는 끔) 선언을 물려준다. `inert` 는 DOM 조상 속성.
+- 관찰 요소는 모두 크기 있는 상자가 있어서(관찰 규칙) 상자 없음(`NoBox`)은 합집합 밖이다.
+- **P3**: 줄 수 = `round(텍스트 상자 높이 ÷ layout::line_height_px)`(최소 1) — 레이아웃이 텍스트 상자 높이를 `줄 높이 × 줄 수`로 잡는다. 옛 `slivers` 열은 그대로 두고 `slivers_lines` 를 나란히 낸다.
+- **P6**: `import_sheets` = 서로 다른 `@import` 대상 수, `import_cached` = 캐시 `index.tsv` 의 URL 가운데 그 경로(쿼리 제거)로 끝나는 것이 있는 대상 수 — 시트를 합친 뒤라 상대 `@import` 의 기준 URL 이 남지 않아 경로 끝 일치로 근사한다.
+
 **P3 — 슬리버 판정의 줄 수**(3차 5b 의 bbc +29 거짓 양성): 슬리버 = `폭 ÷ (글자 수 ÷ 줄 상자 수) < 3px`, 글자 3개 미만은 여전히 제외한다. probe 판정만 바뀌므로 같은 엔진으로 전후를 나란히 적는다.
 
 **P4 — 스크립트 에러 판정**(리뷰 반영: 저장된 `console.txt` 의 **후처리**로 — `compat-corpus.sh classify <라벨>`):
@@ -398,6 +409,18 @@ enwiki·kowiki 의 첫 스크립트가 `document.cookie.match(…)` 에서 죽�
 **기준선 둘**:
 - `r4-base`: 0단계 끝(P + T + 보충 ① + K5). 1단계의 "전", ②의 기준(N2 — 판정은 `r4-final`)·목표 창.
 - `r4-base-sup`: 2단계 끝 보충 ② 뒤, **`r4-base` 엔진을 새 캐시로 다시 돌린 것**. **③·④·보조 지표의 기준**이다. 3~5단계의 "전"은 앞 단계의 "후"(3단계는 `r4-js-sup` 뒤의 `r4-layout-p`)다.
+
+### 0단계 구현 메모 (2026-11-28)
+
+**① P — probe 와 동결 표**(옛 엔진, 커밋 대기):
+- 동결 순서: P2b 구현 규칙(위)과 `scripts/compat-js-apis.tsv`(api 65 · cascade 13)를 먼저 적은 뒤 `r4-p0` 를 돌렸다.
+- 라이브러리: `mb_agent::reach`(공개 모듈) — `visible_rect`(`index::find_visible_rect` 를 감쌈)·`scroll_target`·`scroll_for_click`·`click_point`·`in_view_centre`·`ReachContext::classify`. `AgentBrowser::click` 의 `scroll_into_view`·`click_point`·`target_rect` 가 같은 함수를 부른다(리팩터링만 — 골든·액션 테스트 그대로). 엔진 쪽 동작 무변경 추가 셋: `state::clamped_scroll`(`clamp_scroll` 의 식을 뽑은 자유 함수), `render::paint_order`(페인터의 쌓임 걸음을 방문자로 뽑은 `walk_paint_order` — 페인터도 그것을 씀), `view::hit_node_in_paint_order`(입력엔 아직 안 씀), `layout::line_height_px`(P3).
+- P7: `net::RequestKind`(document·css·js·img·font·fetch·xhr·other)를 요청 자리에서 넘기고(`net::fetch_as`, `fetch_without_redirects` = document), 캐시가 미스마다 `SurveyMiss { kind, url }` 를 남긴다. 비콘은 따로 종류가 없다 — 캐시가 GET 아닌 것을 이미 막고(`sendBeacon` 심 없음), GET 비콘은 N6 필터가 URL 흔적으로 거른다(S).
+- P4: `js::script_survey_stats`(클래식 스크립트 실행 수 / 최상위 예외 없이 끝난 수, `install_document` 의 실행 고리). 판정 코드는 `examples/compat_support/classify.rs` 하나를 probe 와 테스트(`tests/compat_classify.rs` 6개)가 같이 쓴다. `classify final` 이 부록 B 를 그대로 재현한다: 첫 에러 missing-api **10곳**, 어떤 줄이든 **14곳**, 중복 제거 줄 **83**.
+- **`r4-p0` 판정**: 기존 77열이 `final` 과 같다(시간 열 5개 제외 — 차이 0), `diff final r4-p0` 비어 있음. 새 열 23개가 25곳에 다 찍힌다(+ `unreachable.txt`·`element_keys.txt`·`misses.tsv`).
+- **첫 측정(20곳 합계, 참고 — 목표 창은 `r4-base` 에서)**: 관찰 요소 4,423 중 `obs_unreachable` 832(ours 812, 18.4%) = hidden 359 · clipped 73 · offscreen_x 94(전부 ours) · intercepted 306(ours 286; pointer-none 덮개 1 · z-order 60 · other 245). 클립 거절 276 중 203 은 `hidden` 이 먼저 잡았다(우선순위대로).
+- **진단으로 더한 하위 열(범주는 그대로)**: `obs_u_i_other_no_hit`(16 — 클릭 점에 상자가 아예 없음: `top:-…` 로 위로 치운 건너뛰기 링크, naver 8·mdn 2 …)와 `obs_u_i_other_ancestor`(0 — 점이 대상 상자들의 틈에 떨어져 조상이 맞음). `no_hit` 는 P2b 표에 없는 **세로** 작성자 오프셋이라 지금은 ours 로 센다 — 표를 바꿀지는 사용자 결정(아래 "열린 점").
+- **열린 점(사용자 결정 대상, 표는 안 고침)**: ① 위로 치운 요소(`no_hit` 16)를 `offscreen_x` 의 browser-too 처럼 볼지 — 고치면 P2b 표를 먼저 고치고 옛 정의를 나란히. ② T(D6 철자)는 `r4-k5` 가 `r4-p0` 와 빈 diff 여야 해서 K5 뒤·`r4-base` 전에 한다.
 
 ### 설계 결정
 
@@ -828,7 +851,7 @@ M (3~4일).
 | 단계 | 상태 | 커밋 | 테스트 수 | 코퍼스 fail/panic/timeout | 기대 컨트롤 누락 | `obs_unreachable`(ours) 관찰 요소당 비율(절대 수) · 구성 hidden/clipped/offscreen_x/intercepted(참고) | `Uncaught`(중복 제거) / 스크립트 완주 / missing-api 첫·어느 줄 | 합산 ours / 버린 규칙 ours(참고) | 메모 |
 |---|---|---|---|---|---|---|---|---|---|
 | 3차 끝(`final`) | ✅ | `cef51c5` | 1173 | ok 12 + ok* 8 · nav-fail 1(crates.io) · panic 0 · timeout 0 · blocked 2 · robots skip 2 · `[mb-budget]` 0 | 7/20 (naver·daum·hani·korea-kr·velog·d2·google) | 미측정(클립 거절 276) | 83(중복 포함 96) / 미측정 / 10 · 14 | 1,356 / 1,506 | `r4-check` 재생이 `final` 과 같음([부록 D](#부록-d--측정-재현과-명령)) |
-| 0 측정 정비 | 설계 | | | 목표 nav-fail 0(crates.io 문서 보충 — N1-나) | (D6 철자 수정 뒤 6/20) | 첫 측정 → N2 목표 창 | 첫 측정 | 그대로 | `r4-p0` → `r4-k5`(빈 diff) → `r4-base` |
+| 0 측정 정비 | 진행 중 — ① P ✅(커밋 대기) | | 1190 (P) | 목표 nav-fail 0(crates.io 문서 보충 — N1-나) | (D6 철자 수정 뒤 6/20) | 첫 측정(`r4-p0`, 참고): 0.184(812) · 359/73/94/286 | 83 / `js_scripts` 열 / 10 · 14(`classify final` 재현) | 그대로 | `r4-p0` ✅(기존 77열 = `final`, 요소 diff 0) → `r4-k5`(빈 diff) → `r4-base` |
 | 1 에이전트 정합성 | 설계 | | | | | | | | |
 | 2 작은 JS | 설계 | | | | | | | | 겹마다 `r4-js-1`… → 보충 ② → `r4-js-sup`(후) / `r4-base-sup`(③④·보조의 기준) |
 | 3 레이아웃 | 설계 | | | | | | | | |

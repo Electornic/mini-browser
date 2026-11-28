@@ -32,6 +32,7 @@ pub(super) use properties::{
 use table::is_table_container;
 
 pub use clip::{ClipTable, compute_clips};
+pub use inline::inline_line_height_px as line_height_px;
 
 pub(crate) use properties::font_family_name;
 

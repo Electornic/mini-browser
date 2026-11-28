@@ -61,8 +61,30 @@ pub fn build_display_list_with_clips(
     // multiplies into the alpha passed to descendants. The inherited
     // transform starts as identity and accumulates per `transform`
     // declaration on the way down.
-    paint_stacking_context(layout_root, &mut commands, 1.0, Affine::IDENTITY, ctx);
+    walk_paint_order(
+        layout_root,
+        1.0,
+        Affine::IDENTITY,
+        &mut |b, alpha, transform| paint_self(b, &mut commands, alpha, transform, ctx),
+    );
     commands
+}
+
+/// Every layout box in the order the painter paints it, each with the
+/// transform its commands are painted under (its ancestors' and its own —
+/// page coordinates). Last = topmost. The hit test reads this order to
+/// find what a click lands on the way paint shows it (compat round 4: the
+/// reach check today, the hit test itself from 1b-z) — one ordering rule,
+/// `walk_paint_order`, for both.
+pub fn paint_order(layout_root: &LayoutBox) -> Vec<(&LayoutBox, Affine)> {
+    let mut boxes = Vec::new();
+    walk_paint_order(
+        layout_root,
+        1.0,
+        Affine::IDENTITY,
+        &mut |b, _, transform| boxes.push((b, transform)),
+    );
+    boxes
 }
 
 /// What the paint walk reads besides the layout tree.
@@ -124,48 +146,43 @@ pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<Dis
     commands
 }
 
-fn paint_stacking_context(
-    layout_box: &LayoutBox,
-    commands: &mut Vec<DisplayCommand>,
+/// The stacking walk: `visit(box, alpha, transform)` once per box, in
+/// paint order (the box's own alpha and transform already applied).
+fn walk_paint_order<'a>(
+    layout_box: &'a LayoutBox,
     inherited_alpha: f32,
     inherited_transform: Affine,
-    ctx: &Painter,
+    visit: &mut dyn FnMut(&'a LayoutBox, f32, Affine),
 ) {
     let effective_alpha = inherited_alpha * opacity_of(layout_box);
     let effective_transform = inherited_transform.compose(transform_for(layout_box));
 
     // 1. Paint this stacking-context-creator's own bg/border/text.
-    paint_self(
-        layout_box,
-        commands,
-        effective_alpha,
-        effective_transform,
-        ctx,
-    );
+    visit(layout_box, effective_alpha, effective_transform);
 
     // Walk descendants and pluck out the positioned subtrees — each becomes
     // its own atomic z-layer. Non-positioned content is painted between the
     // negative and zero/positive z-layers, so we need both groups separately.
     // The alpha and transform stored alongside each entry are the *inherited*
     // values from the actual ancestor chain, before the positioned box's own
-    // opacity / own transform are applied — paint_stacking_context applies
+    // opacity / own transform are applied — walk_paint_order applies
     // those itself.
-    let mut positioned: Vec<(&LayoutBox, f32, Affine)> = Vec::new();
+    let mut positioned: Vec<(&'a LayoutBox, f32, Affine)> = Vec::new();
     for child in &layout_box.children {
         collect_positioned_into(child, &mut positioned, effective_alpha, effective_transform);
     }
 
-    let mut negative: Vec<(&LayoutBox, f32, Affine)> = positioned
+    let mut negative: Vec<(&'a LayoutBox, f32, Affine)> = positioned
         .iter()
         .copied()
         .filter(|(b, _, _)| z_index_of(b) < 0)
         .collect();
-    let zero_or_auto: Vec<(&LayoutBox, f32, Affine)> = positioned
+    let zero_or_auto: Vec<(&'a LayoutBox, f32, Affine)> = positioned
         .iter()
         .copied()
         .filter(|(b, _, _)| z_index_of(b) == 0)
         .collect();
-    let mut positive: Vec<(&LayoutBox, f32, Affine)> = positioned
+    let mut positive: Vec<(&'a LayoutBox, f32, Affine)> = positioned
         .iter()
         .copied()
         .filter(|(b, _, _)| z_index_of(b) > 0)
@@ -176,27 +193,26 @@ fn paint_stacking_context(
 
     // 2. Negative-z layers paint first → they sit BEHIND non-positioned content.
     for (child, alpha, transform) in &negative {
-        paint_stacking_context(child, commands, *alpha, *transform, ctx);
+        walk_paint_order(child, *alpha, *transform, visit);
     }
 
     // 3. Non-positioned descendants in tree order. Positioned subtrees are
     //    skipped here because they already belong to a z-layer.
     for child in &layout_box.children {
-        paint_non_positioned(child, commands, effective_alpha, effective_transform, ctx);
+        walk_non_positioned(child, effective_alpha, effective_transform, visit);
     }
 
     // 4 & 5. Zero/auto layers in tree order, then positive-z (sorted asc).
     for (child, alpha, transform) in zero_or_auto.iter().chain(positive.iter()) {
-        paint_stacking_context(child, commands, *alpha, *transform, ctx);
+        walk_paint_order(child, *alpha, *transform, visit);
     }
 }
 
-fn paint_non_positioned(
-    layout_box: &LayoutBox,
-    commands: &mut Vec<DisplayCommand>,
+fn walk_non_positioned<'a>(
+    layout_box: &'a LayoutBox,
     inherited_alpha: f32,
     inherited_transform: Affine,
-    ctx: &Painter,
+    visit: &mut dyn FnMut(&'a LayoutBox, f32, Affine),
 ) {
     // Stop at any positioned box — its painting belongs to its enclosing
     // stacking context, where z-order is decided.
@@ -205,15 +221,9 @@ fn paint_non_positioned(
     }
     let effective_alpha = inherited_alpha * opacity_of(layout_box);
     let effective_transform = inherited_transform.compose(transform_for(layout_box));
-    paint_self(
-        layout_box,
-        commands,
-        effective_alpha,
-        effective_transform,
-        ctx,
-    );
+    visit(layout_box, effective_alpha, effective_transform);
     for child in &layout_box.children {
-        paint_non_positioned(child, commands, effective_alpha, effective_transform, ctx);
+        walk_non_positioned(child, effective_alpha, effective_transform, visit);
     }
 }
 
@@ -300,7 +310,7 @@ fn collect_positioned_into<'a>(
 ) {
     if is_positioned_box(layout_box) {
         // Stash the *inherited* alpha and *inherited* transform (before this
-        // box's own opacity / own transform); the recipient paint_stacking_context
+        // box's own opacity / own transform); the recipient walk_paint_order
         // applies the box's own contributions itself.
         out.push((layout_box, inherited_alpha, inherited_transform));
         // Don't recurse: the positioned box's own descendants live inside its
