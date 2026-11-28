@@ -1080,6 +1080,41 @@ mod tests {
     }
 
     #[test]
+    fn percent_top_uses_height_basis() {
+        // Step 3c: a relative box's `top`/`bottom` percentage is of the
+        // containing block's *height* (here 200px), not its width (400px).
+        let styled = styled_root(
+            r#"<div id="root"><div class="top"></div><div class="bottom"></div></div>"#,
+            r#"
+                #root { width: 400px; height: 200px; }
+                .top { position: relative; top: 10%; height: 10px; }
+                .bottom { position: relative; bottom: 25%; height: 10px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        assert_eq!(layout.children[0].dimensions.content.y, 20.0);
+        // In flow at y = 10, moved up by 25% of 200.
+        assert_eq!(layout.children[1].dimensions.content.y, 10.0 - 50.0);
+    }
+
+    #[test]
+    fn percent_top_with_an_auto_height_parent_is_auto() {
+        // An indefinite containing-block height makes the percentage `auto`:
+        // no shift, or the other side takes over.
+        let styled = styled_root(
+            r#"<div id="root"><div class="top"></div><div class="both"></div></div>"#,
+            r#"
+                #root { width: 400px; }
+                .top { position: relative; top: 10%; height: 10px; }
+                .both { position: relative; top: 50%; bottom: 4px; height: 10px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        assert_eq!(layout.children[0].dimensions.content.y, 0.0);
+        assert_eq!(layout.children[1].dimensions.content.y, 10.0 - 4.0);
+    }
+
+    #[test]
     fn position_relative_propagates_offset_to_descendants() {
         // Children should visually shift by the same amount as the relative
         // ancestor: their on-screen rects are computed by translating the whole
@@ -1192,12 +1227,12 @@ mod tests {
 
     #[test]
     fn position_relative_resolves_percent_offsets_against_parent_width() {
-        // The toy uses parent_width as the base for both axes, matching the
-        // existing percent-on-margin/padding approximation.
+        // `left` % is of the containing block's width; `top` % of its height
+        // (step 3c — this test used to pin the old width-for-both shortcut).
         let styled = styled_root(
             r#"<div id="root"><div class="box"></div></div>"#,
             r#"
-                #root { width: 200px; }
+                #root { width: 200px; height: 100px; }
                 .box {
                     position: relative;
                     left: 25%;
@@ -1209,9 +1244,9 @@ mod tests {
         let layout = layout_tree(&styled, 800.0);
         let shifted = &layout.children[0];
 
-        // 25% of 200px = 50px, 10% of 200px = 20px.
+        // 25% of 200px = 50px, 10% of 100px = 10px.
         assert_eq!(shifted.dimensions.content.x, 50.0);
-        assert_eq!(shifted.dimensions.content.y, 20.0);
+        assert_eq!(shifted.dimensions.content.y, 10.0);
     }
 
     #[test]

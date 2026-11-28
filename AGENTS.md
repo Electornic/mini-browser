@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1087 (workspace 합계, 2026-11-28 호환성 3차 3b 히트 테스트·에이전트 클릭 +6; 3a 클리핑은 1081, 3단계 P 는 1050). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1089 (workspace 합계, 2026-11-28 호환성 3차 3c relative `top`/`bottom` % +2; 3b 히트 테스트·에이전트 클릭은 1087, 3a 클리핑은 1081). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -151,7 +151,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - 완전한 문서(원문에 `<html`)의 루트는 **`<html>` 하나**다 — `<head>`·`<body>` 는 그 자식(호환성 3차 1r 에서 고침; 전엔 `<html>` 을 버려 `:root` 가 `<head>` 에만 맞았다). `<body>`/`<head>` 는 인덱스가 아니라 `Document::body()`/`head()`/`document_element()` 로 찾을 것. `<html` 없이 `<head>`/`<body>` 만 쓴 원문은 옛 동작(쓴 래퍼가 루트, 문서 요소 없음) — 픽스처에서 `:root`·`html{}`·rem 을 시험하려면 `<html>` 을 쓸 것. 커스텀 속성(`--*`)은 `StyledNode` 의 맵에 없다(`style/variables.rs::CustomScope` 사슬로만 상속).
 
 ### 퍼센트 높이는 확정 포함 블록 높이 기준 (호환성 3차 1p)
-- 레이아웃 코드에서 `height`/`min-height`/`max-height` 를 `length_value(node, "height", <폭>)` 로 읽지 말 것 — `definite_height(node)`/`height_value`/`clamp_height`(`layout/properties.rs`)를 쓴다. 포함 블록 높이는 패스 범위 상태(`containing_block_height()`)로 내려온다: 상자가 자식을 배치하기 **전에** 자기 확정 높이를 `with_containing_block_height` 로 깔고, 그 안에서 컨테이너 알고리즘은 이 값을 "내 확정 높이"로 읽는다. 자식을 배치하는 새 경로를 만들면 같은 범위를 깔 것(안 깔면 % 가 바깥 상자 기준으로 풀린다). 루트의 기준은 뷰포트 높이(`layout_tree_with_viewport`), absolute 의 % 는 2패스(`reposition_absolutes`)가 포함 블록 패딩 상자로 다시 푼다. out-of-flow 자식은 `layout_out_of_flow`(블록화·shrink-to-fit)로 놓는다 — 인라인 상자로 놓지 말 것.
+- 레이아웃 코드에서 `height`/`min-height`/`max-height` 를 `length_value(node, "height", <폭>)` 로 읽지 말 것 — `definite_height(node)`/`height_value`/`clamp_height`(`layout/properties.rs`)를 쓴다. 포함 블록 높이는 패스 범위 상태(`containing_block_height()`)로 내려온다: 상자가 자식을 배치하기 **전에** 자기 확정 높이를 `with_containing_block_height` 로 깔고, 그 안에서 컨테이너 알고리즘은 이 값을 "내 확정 높이"로 읽는다. 자식을 배치하는 새 경로를 만들면 같은 범위를 깔 것(안 깔면 % 가 바깥 상자 기준으로 풀린다). 루트의 기준은 뷰포트 높이(`layout_tree_with_viewport`), absolute 의 % 는 2패스(`reposition_absolutes`)가 포함 블록 패딩 상자로 다시 푼다. out-of-flow 자식은 `layout_out_of_flow`(블록화·shrink-to-fit)로 놓는다 — 인라인 상자로 놓지 말 것. relative 상자의 `top`/`bottom` % 도 같은 범위 값(포함 블록 확정 높이, 없으면 auto)으로 푼다(3c, `relative_offset`) — `apply_relative_offset` 은 상자 자신의 범위가 끝난 **뒤**(부모 범위 안)에서 불러야 한다.
 - 레이아웃이 뷰포트 높이를 읽는 건 루트에 % 높이가 있을 때뿐이고, 그때만 뷰 캐시가 높이를 비교한다(`DocumentView::reads_viewport_height`). 다른 경로로 높이를 읽게 되면 이 플래그를 같이 고칠 것.
 - taffy 의 크기 탐색(MaxContent/MinContent)은 legacy 경계 잎을 대리 폭(1e6/0)으로 배치한다 — 그동안은 `with_intrinsic_probe` 범위라 `edge_sizes` 의 `%` 패딩·여백이 0 이다(순환 퍼센트, 후속 F1b; 대리 폭의 82% 가 열 폭이 되던 증폭). 탐색 중에 `%` 를 대리 폭에 대해 푸는 새 경로를 만들지 말 것 — `in_intrinsic_probe()` 를 볼 것. 인라인 크기 메모 키에 탐색 여부가 들어 있다.
 - 단위 없는 `0` 은 길이 속성에서 파싱 때 `Length(0, Px)` 가 된다(1q, `css::unitless_zero_as_length` — `var()` 치환 뒤에도). 레이아웃·taffy 브릿지는 `Number` 를 길이로 읽지 않으니, 새 길이 속성을 전용 파서로 읽게 되면 같은 승격을 거칠 것(`line-height` 처럼 숫자가 뜻을 갖는 속성은 제외).

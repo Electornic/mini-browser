@@ -242,17 +242,25 @@ pub(crate) fn is_layout_whitespace_text(node: &StyledNode) -> bool {
 }
 
 pub(crate) fn relative_offset(node: &StyledNode, base: f32) -> Option<(f32, f32)> {
-    // CSS spec: top/bottom percent resolves against the containing block's height
-    // and left/right against its width. The layout walk only carries width on hand,
-    // so percent offsets reuse `base` for both axes — same shortcut already taken
-    // for percent margin/padding.
+    // `left`/`right` percentages are of the containing block's width
+    // (`base`); `top`/`bottom` of its height — the definite height in scope
+    // (callers run in the parent's `with_containing_block_height`, i.e. this
+    // box's containing block), and `auto` when that height is indefinite
+    // (CSS Position 3 §3.1; compat round 3 step 3c — before, both axes used
+    // the width).
     if !is_position_relative(node) {
         return None;
     }
     let left = length_value(node, "left", base);
     let right = length_value(node, "right", base);
-    let top = length_value(node, "top", base);
-    let bottom = length_value(node, "bottom", base);
+    let vertical = |name: &str| match node.value(name) {
+        Some(Value::Length(value, Unit::Percent)) => {
+            containing_block_height().map(|height| value / 100.0 * height)
+        }
+        _ => length_value(node, name, base),
+    };
+    let top = vertical("top");
+    let bottom = vertical("bottom");
     // When both sides are set, the start side wins (LTR + top-down): `left` and
     // `top` take precedence and the opposite side is ignored.
     let dx = left.unwrap_or_else(|| -right.unwrap_or(0.0));

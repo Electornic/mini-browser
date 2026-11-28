@@ -343,6 +343,8 @@ MB_NET_CACHE_OFFLINE=1 ./target/debug/mb-mcp --start-url https://news.ycombinato
 
 **3b 재측정** (2026-11-28, 라벨 `clip-hit`, `clip` 대비 — 히트 테스트·에이전트 클릭 대상이 클립 표를 봄, [compat-round3.md 3b](compat-round3.md#3b--히트-테스트--에이전트-클릭-2026-11-28)): 결과·요소·텍스트·기대 컨트롤·문서 높이·클립 열 25곳 동일, `[mb-budget]` 0. 새 열 `elements_clipped_out`(관찰엔 있지만 클릭이 "clipped out of view" 로 거절될 요소) 20곳 332: enwiki 146 · yna 67 · hani 50 · bbc 45 · kakaocorp 7 · korea-kr 7 · d2 4 · github 3 · apple 3 — sr-only 건너뛰기 링크, 닫힌 드롭다운·플라이아웃, 화면 밖 캐러셀·넘침 항목.
 
+**3c 재측정** (2026-11-28, 라벨 `pct-top`, `clip-hit` 대비 — relative `top`/`bottom` % 를 높이 기준으로, [compat-round3.md 3c](compat-round3.md#3c--topbottom--기준-2026-11-28)): 시간 열 외 모든 열·요소 목록 25곳 동일, `[mb-budget]` 0.
+
 - `ms` = `navigate`(settle 포함) 벽시계, 이 맥에서. 두 실행 사이 차이는 대부분 ±10% 안, 가장 큰 것은 kowiki 256 → 197(−23%)·github 1,829 → 1,562(−15%) — 시간은 비교용이 아니라 timeout 판정용.
 - 기대 컨트롤 **누락 사이트 8곳**(naver·daum·hani·korea-kr·velog·d2·google·enwiki; 0b 때는 측정된 17곳 중 6곳). 원인 분류는 각 단계에서 — 지금 표는 기준선. naver 검색창은 ARIA `combobox` 다(역할 오기를 녹화 후 tsv 에서 고침).
 - **콘솔 에러**(`prompts.rs` "제3자 스크립트 콘솔 에러" 결정용 입력): 측정된 20곳 중 **16곳이 1건 이상**, 합 104건 중 98건이 `Uncaught in script`. 많은 곳 korea-kr 33·bbc 15·yna 13·daum 9·google 6·kakaocorp 6. 대부분 빠진 API(`getElementsByTagName` 류, [JS API 표면 프로브](#js-api-표면-프로브)). naver 광고 2건은 이번 스냅샷에서 `near "document.getElementsByTagName"` / `near "Na"`(gfp-core 의 축약 별칭 — 2차의 `console.debug` 가 이번 빌드에선 지역 변수로 줄여져 있음)로 읽힌다. 0a 권고(지금은 `prompts.rs` 를 안 바꿈)를 바꿀 근거는 아직 없다 — 다음은 제3자 에러가 있는 손으로 쓴 eval 페이지로 확인.

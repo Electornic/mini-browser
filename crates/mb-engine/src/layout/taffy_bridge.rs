@@ -845,9 +845,11 @@ fn uses_grid_template_areas(node: &StyledNode) -> bool {
 
 fn has_percent_inset_or_padding(node: &StyledNode) -> bool {
     let percent = |key: &str| matches!(node.value(key), Some(Value::Length(_, Unit::Percent)));
-    // Legacy resolves percent vertical padding/inset against parent_width;
-    // taffy follows the spec. Stay on legacy by treating any such node as a
-    // boundary leaf so the quirk is preserved.
+    // Percent vertical padding/inset stay on the legacy path (a boundary
+    // leaf): legacy resolves padding % against the width (as the spec says)
+    // and, since step 3c, relative `top`/`bottom` % against the definite
+    // containing-block height (`auto` when indefinite) — moving these nodes
+    // to taffy would change which layout path places them, not the answer.
     percent("padding-top") || percent("padding-bottom") || percent("top") || percent("bottom")
 }
 
