@@ -132,6 +132,11 @@ pub struct DroppedRule {
     /// Selector excerpt (the end is kept: that's where it usually fails).
     pub selector: String,
     pub reason: DropReason,
+    /// The pseudo-classes and pseudo-elements in the selector the engine
+    /// can't parse on their own, in source order without repeats
+    /// ([`selector_blockers`]). Empty = it failed on something else
+    /// (nesting `&`, a namespace, a syntax error).
+    pub blockers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -410,6 +415,125 @@ pub(super) fn dropped_rule(source: &str) -> DroppedRule {
         } else {
             DropReason::UnsupportedSelector
         },
+        blockers: selector_blockers(source.split('{').next().unwrap_or(source)),
+    }
+}
+
+/// How deep [`selector_blockers`] looks into nested functions (`:not(:is(…))`).
+const BLOCKER_DEPTH: usize = 32;
+
+/// The pseudo-classes and pseudo-elements in `selector` the engine can't
+/// parse on their own — what a dropped rule is blamed on. Each one is
+/// tried alone through the real selector parser (`*:name`, `*::name`,
+/// `*:name(args)`), so the answer follows the engine as it learns more.
+/// A function whose arguments hold a blocker is blamed only if it fails
+/// with a trivial argument too (`:not(:frob)` blames `:frob`, `:has(.a)`
+/// blames `:has()`). Labels: `:name`, `::name`, `:name()`; `::-webkit-*`,
+/// `::-moz-*` and the other vendor prefixes are one label each.
+pub fn selector_blockers(selector: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_blockers(&mut CssParser::new(selector), &mut out, 0);
+    out
+}
+
+/// Adds the blockers in `input` to `out`; whether it found any (repeats
+/// of ones already in `out` included).
+fn collect_blockers(input: &mut CssParser<'_>, out: &mut Vec<String>, depth: usize) -> bool {
+    use cssparser::Token;
+    let mut found = false;
+    loop {
+        let token = match input.next_including_whitespace() {
+            Ok(token) => token.clone(),
+            Err(_) => return found,
+        };
+        match token {
+            Token::Colon => {
+                let (double, next) = match input.next_including_whitespace() {
+                    Ok(Token::Colon) => (true, input.next_including_whitespace().cloned()),
+                    Ok(other) => (false, Ok(other.clone())),
+                    Err(_) => return found,
+                };
+                match next {
+                    Ok(Token::Ident(name)) => {
+                        let element = double || is_css2_pseudo_element(&name);
+                        if !pseudo_parses(element, &name, None) {
+                            found = true;
+                            push_blocker(out, out.len(), blocker_label(element, &name, false));
+                        }
+                    }
+                    Ok(Token::Function(name)) => {
+                        let element = double;
+                        let at = out.len();
+                        let mut inner_blamed = false;
+                        let args = input
+                            .parse_nested_block(|args| {
+                                let start = args.position();
+                                if depth < BLOCKER_DEPTH {
+                                    inner_blamed = collect_blockers(args, out, depth + 1);
+                                }
+                                while args.next().is_ok() {}
+                                Ok::<_, cssparser::ParseError<()>>(
+                                    args.slice_from(start).to_owned(),
+                                )
+                            })
+                            .unwrap_or_default();
+                        found |= inner_blamed;
+                        let fails = !pseudo_parses(element, &name, Some(&args))
+                            && (!inner_blamed || !pseudo_parses(element, &name, Some("*")));
+                        if fails {
+                            found = true;
+                            push_blocker(out, at, blocker_label(element, &name, true));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Token::Function(_) | Token::ParenthesisBlock if depth < BLOCKER_DEPTH => {
+                let _ = input.parse_nested_block(|inner| {
+                    found |= collect_blockers(inner, out, depth + 1);
+                    Ok::<_, cssparser::ParseError<()>>(())
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `:before`, `:after`, `:first-line`, `:first-letter` are pseudo-elements
+/// even with one colon (CSS 2.1).
+fn is_css2_pseudo_element(name: &str) -> bool {
+    ["before", "after", "first-line", "first-letter"]
+        .iter()
+        .any(|legacy| name.eq_ignore_ascii_case(legacy))
+}
+
+fn pseudo_parses(element: bool, name: &str, args: Option<&str>) -> bool {
+    let colons = if element { "::" } else { ":" };
+    let selector = match args {
+        Some(args) => format!("*{colons}{name}({args})"),
+        None => format!("*{colons}{name}"),
+    };
+    super::parse_selector(&selector).is_ok()
+}
+
+/// `:before` and `::before` are one label (`::before`): the same
+/// pseudo-element. `:-webkit-*` pseudo-classes keep their names (Chrome
+/// knows some, `:-webkit-autofill`); every other vendor prefix collapses.
+fn blocker_label(element: bool, name: &str, function: bool) -> String {
+    let name = name.to_ascii_lowercase();
+    let colons = if element { "::" } else { ":" };
+    for prefix in ["-webkit-", "-moz-", "-ms-", "-o-"] {
+        if name.starts_with(prefix) && (element || prefix != "-webkit-") {
+            return format!("{colons}{prefix}*");
+        }
+    }
+    let parens = if function { "()" } else { "" };
+    format!("{colons}{name}{parens}")
+}
+
+fn push_blocker(out: &mut Vec<String>, at: usize, label: String) {
+    if !out.contains(&label) {
+        out.insert(at.min(out.len()), label);
     }
 }
 
@@ -646,6 +770,31 @@ mod tests {
         let browser_too = [UnknownProperty, LegacyHack, ForeignSelector, ForeignAtRule];
         assert!(ours.iter().all(|r| r.origin() == Origin::Ours));
         assert!(browser_too.iter().all(|r| r.origin() == Origin::BrowserToo));
+    }
+
+    #[test]
+    fn dropped_rule_names_the_pseudos_that_block_it() {
+        let blockers = |source: &str| dropped_rule(source).blockers;
+        assert_eq!(
+            blockers(".a:frobnicate, .b::frob, .c:frobnicate {}"),
+            [":frobnicate", "::frob"]
+        );
+        // A supported pseudo is never blamed, nor a supported function
+        // whose argument is what fails.
+        assert_eq!(blockers(".a:hover:not(:target) {}"), [":target"]);
+        // ... also when the inner blocker was already seen.
+        assert_eq!(blockers(".a:target, .b:not(:target) {}"), [":target"]);
+        // An unsupported function is blamed before what's inside it.
+        assert_eq!(
+            blockers(":has(> img) p, .c:has(.d:frob) {}"),
+            [":has()", ":frob"]
+        );
+        assert_eq!(
+            blockers("a::-moz-selection, a::-moz-focus-inner {}"),
+            ["::-moz-*"]
+        );
+        // No pseudo at all: a namespace prefix.
+        assert!(blockers("svg|a {}").is_empty());
     }
 
     #[test]

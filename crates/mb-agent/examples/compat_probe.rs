@@ -122,6 +122,19 @@ fn main() {
         )
         .1
     });
+    // Step 4: the browser's own style pass (no report), min of five — the
+    // F4 measurement, now a column.
+    let style_ms = document.roots().last().map_or(0.0, |&root| {
+        min_ms(5, || {
+            style::style_tree_with_state(
+                &document,
+                root,
+                &state.parsed_stylesheets,
+                style::InteractionState::default(),
+                &css::media::MediaContext::new(media_ctx.0, media_ctx.1),
+            )
+        })
+    });
     let mut css_report = css_drops(
         &state.stylesheet,
         &inline_css,
@@ -129,6 +142,7 @@ fn main() {
         &style_report.unwrap_or_default(),
     );
     css_report.counts.media_attr_sheets = media_attr_sheets(&document);
+    css_report.counts.style_ms = style_ms;
     write(&out, "css.txt", &css_report.text);
 
     let view = state.current_view().expect("a laid-out view");
@@ -370,6 +384,14 @@ fn push_columns(row: &mut Row, columns: Option<&Columns>) {
     col("raster_unclipped_ms", &|c| {
         format!("{:.1}", c.clip.raster_unclipped_ms)
     });
+    // Step 4 (selectors): rules dropped over a pseudo, ours only.
+    col("rule_drop_step4", &|c| c.css.rule_step4.to_string());
+    col("rule_drop_pseudo_element", &|c| {
+        c.css.rule_pseudo_element.to_string()
+    });
+    col("rule_drop_no_pseudo", &|c| c.css.rule_no_pseudo.to_string());
+    col("rule_blockers", &|c| c.css.rule_blockers.clone());
+    col("style_ms", &|c| format!("{:.1}", c.css.style_ms));
     col("at_skipped_ours", &|c| c.css.at_ours.to_string());
     col("at_skipped_browser", &|c| c.css.at_browser.to_string());
     col("at_skipped_bytes", &|c| c.css.at_skipped_bytes.to_string());
@@ -712,7 +734,40 @@ struct CssCounts {
     supports_applied: usize,
     /// `code:count` of every declaration drop reason.
     decl_reasons: String,
+    /// Dropped rules (ours) blamed on a pseudo step 4 makes parse
+    /// ([`STEP4_BLOCKERS`]) / on any pseudo-element / on no pseudo at all
+    /// (nesting, namespaces, syntax).
+    rule_step4: usize,
+    rule_pseudo_element: usize,
+    rule_no_pseudo: usize,
+    /// `label:rules` over dropped rules (ours), most first — a rule counts
+    /// once under every pseudo that blocks it (`css::selector_blockers`).
+    rule_blockers: String,
+    /// The browser's style pass at the probe viewport, min of five (ms).
+    style_ms: f64,
 }
+
+/// The pseudos step 4 (docs/compat-round3.md 4단계) makes parse — once it
+/// is done, no rule (ours) is blamed on one of these.
+const STEP4_BLOCKERS: &[&str] = &[
+    ":is()",
+    ":where()",
+    ":focus-visible",
+    ":focus-within",
+    ":checked",
+    ":disabled",
+    ":enabled",
+    "::before",
+    "::after",
+    "::placeholder",
+    "::marker",
+    "::selection",
+    "::first-line",
+    "::first-letter",
+    "::backdrop",
+    "::file-selector-button",
+    "::-webkit-*",
+];
 
 impl CssCounts {
     /// The step-1 target metric (docs/compat-round3.md "측정 프로토콜"):
@@ -741,6 +796,8 @@ fn css_drops(
         BTreeMap::new();
     let mut decl_reasons: BTreeMap<DropReason, usize> = BTreeMap::new();
     let mut rule_causes: BTreeMap<(Origin, &'static str), (usize, String)> = BTreeMap::new();
+    // (origin, blocking pseudo) → (rules, sample)
+    let mut blocker_rules: BTreeMap<(Origin, String), (usize, String)> = BTreeMap::new();
     let mut at_rules: BTreeMap<String, (usize, bool, usize)> = BTreeMap::new();
     // kind → (blocks, rules, rules applied)
     let mut media_kinds: BTreeMap<&'static str, (usize, usize, usize)> = BTreeMap::new();
@@ -819,6 +876,33 @@ fn css_drops(
                 .entry((rule.reason.origin(), selector_cause(&rule.selector)))
                 .or_insert((0, rule.selector.clone()));
             entry.0 += 1;
+            let ours = rule.reason.origin() == Origin::Ours;
+            let fallback = [if rule.selector.contains('&') {
+                "(nesting &)".to_string()
+            } else {
+                "(no pseudo)".to_string()
+            }];
+            let labels = if rule.blockers.is_empty() {
+                &fallback[..]
+            } else {
+                &rule.blockers[..]
+            };
+            for label in labels {
+                let entry = blocker_rules
+                    .entry((rule.reason.origin(), label.clone()))
+                    .or_insert((0, rule.selector.clone()));
+                entry.0 += 1;
+            }
+            if ours {
+                c.rule_step4 += usize::from(
+                    rule.blockers
+                        .iter()
+                        .any(|b| STEP4_BLOCKERS.contains(&b.as_str())),
+                );
+                c.rule_pseudo_element +=
+                    usize::from(rule.blockers.iter().any(|b| b.starts_with("::")));
+                c.rule_no_pseudo += usize::from(rule.blockers.is_empty());
+            }
         }
         count_blocks(
             &report.at_rules,
@@ -930,6 +1014,36 @@ fn css_drops(
             clip(&sample, 80)
         );
     }
+
+    let _ = writeln!(
+        text,
+        "\n## dropped rules by blocking pseudo (rules, sample; a rule counts under each pseudo that blocks it)"
+    );
+    let mut blockers: Vec<_> = blocker_rules.into_iter().collect();
+    blockers.sort_by(|a, b| {
+        a.0.0
+            .cmp(&b.0.0)
+            .then(b.1.0.cmp(&a.1.0))
+            .then(a.0.1.cmp(&b.0.1))
+    });
+    let mut ours_blockers = Vec::new();
+    for ((origin, label), (count, sample)) in &blockers {
+        if *origin == Origin::Ours {
+            ours_blockers.push(format!("{label}:{count}"));
+        }
+        let step4 = if STEP4_BLOCKERS.contains(&label.as_str()) {
+            "step4"
+        } else {
+            "-"
+        };
+        let _ = writeln!(
+            text,
+            "{count:6}  {:11} {step4:5} {label:28} {}",
+            origin_code(*origin),
+            clip(sample, 80)
+        );
+    }
+    c.rule_blockers = ours_blockers.join(",");
 
     let _ = writeln!(text, "\n## at-rules (count, body kept?, skipped bytes)");
     for (name, (count, kept, bytes)) in &at_rules {
@@ -1544,6 +1658,17 @@ fn flatten_clips(commands: &[render::DisplayCommand]) -> Vec<render::DisplayComm
         }
     }
     out
+}
+
+/// Shortest wall time of `runs` runs of `f`, in ms (a measurement column).
+fn min_ms<T>(runs: usize, mut f: impl FnMut() -> T) -> f64 {
+    (0..runs)
+        .map(|_| {
+            let started = Instant::now();
+            std::hint::black_box(f());
+            started.elapsed().as_secs_f64() * 1000.0
+        })
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// Median wall time of three runs of `f`, in ms (a measurement column —
