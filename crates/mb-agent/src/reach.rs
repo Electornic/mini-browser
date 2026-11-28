@@ -98,6 +98,37 @@ pub fn in_view_centre(rect: Rect, scroll: f32, viewport: Viewport) -> Option<(f3
     Some(((left + right) / 2.0, y))
 }
 
+/// Why the page offers `id` to nobody at all (compat round 4 step 1a):
+/// nothing of it shows, or it sits in an `inert` subtree. The agent's
+/// click and `type` refuse these before pressing anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Concealment {
+    /// Computed `visibility: hidden`/`collapse` (D5).
+    Hidden,
+    /// Inside an `inert` subtree (N4).
+    Inert,
+}
+
+/// [`Concealment`] of `id` from its (first) layout box's computed style;
+/// `None` when it shows or has no box.
+pub fn concealment(layout_box: &LayoutBox, id: NodeId) -> Option<Concealment> {
+    if let Some(node) = styled(layout_box)
+        && node.node_id == id
+    {
+        return if node.visibility_hidden() {
+            Some(Concealment::Hidden)
+        } else if node.inert() {
+            Some(Concealment::Inert)
+        } else {
+            None
+        };
+    }
+    layout_box
+        .children
+        .iter()
+        .find_map(|child| concealment(child, id))
+}
+
 fn window_height(viewport: Viewport) -> usize {
     (viewport.height + CHROME_HEIGHT).max(0.0) as usize
 }
@@ -179,8 +210,10 @@ impl Reach {
 /// many elements doesn't rewalk the tree for styles.
 #[derive(Debug, Clone, Copy, Default)]
 struct BoxFacts {
-    /// Nearest `visibility` declaration on it or an ancestor is hidden /
-    /// collapse (the old engine doesn't inherit `visibility`, P1).
+    /// Computed `visibility` is hidden / collapse. (Step 0 read the
+    /// nearest declaration up the tree — the engine didn't inherit
+    /// `visibility` then; the inherited computed value is the same answer,
+    /// P1 → step 1a.)
     hidden: bool,
     /// The same for `pointer-events: none`.
     pointer_none: bool,
@@ -394,11 +427,7 @@ fn own_facts(
         Some(Value::Keyword(k)) => Some(k.as_str()),
         _ => None,
     };
-    let hidden = match keyword("visibility") {
-        Some("hidden" | "collapse") => true,
-        Some("visible") => false,
-        _ => inherited.hidden,
-    };
+    let hidden = node.visibility_hidden();
     let pointer_none = match keyword("pointer-events") {
         Some("none") => true,
         Some(_) => false,

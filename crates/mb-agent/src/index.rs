@@ -21,6 +21,10 @@ pub(crate) struct DomIndex<'a> {
     ids: BTreeMap<String, NodeId>,
     labels_for: BTreeMap<String, NodeId>,
     rects: BTreeMap<NodeId, Rect>,
+    /// Nodes whose computed `visibility` hides them (compat round 4 1a).
+    invisible: BTreeSet<NodeId>,
+    /// Nodes inside an `inert` subtree (computed — N4).
+    inert: BTreeSet<NodeId>,
     click_listeners: BTreeSet<NodeId>,
 }
 
@@ -36,6 +40,8 @@ impl<'a> DomIndex<'a> {
             ids: BTreeMap::new(),
             labels_for: BTreeMap::new(),
             rects: BTreeMap::new(),
+            invisible: BTreeSet::new(),
+            inert: BTreeSet::new(),
             click_listeners: click_listeners.iter().copied().collect(),
         };
         for &root in document.roots() {
@@ -96,6 +102,12 @@ impl<'a> DomIndex<'a> {
                 .entry(node.node_id)
                 .and_modify(|existing| *existing = union(*existing, rect))
                 .or_insert(rect);
+            if node.visibility_hidden() {
+                self.invisible.insert(node.node_id);
+            }
+            if node.inert() {
+                self.inert.insert(node.node_id);
+            }
         }
         for child in &layout_box.children {
             self.collect_rects(child);
@@ -133,6 +145,17 @@ impl<'a> DomIndex<'a> {
         self.rects.get(&id).copied()
     }
 
+    /// Computed `visibility: hidden`/`collapse` (its box exists and keeps
+    /// its space, but nothing of it shows).
+    pub(crate) fn is_invisible(&self, id: NodeId) -> bool {
+        self.invisible.contains(&id)
+    }
+
+    /// Inside an `inert` subtree.
+    pub(crate) fn is_inert(&self, id: NodeId) -> bool {
+        self.inert.contains(&id)
+    }
+
     /// Has a `click` listener registered from JS (addEventListener / on*).
     pub(crate) fn has_click_listener(&self, id: NodeId) -> bool {
         self.click_listeners.contains(&id)
@@ -160,7 +183,8 @@ impl<'a> DomIndex<'a> {
 
     /// Whitespace-collapsed text of every descendant text node. `skip`
     /// prunes subtrees whose text shouldn't count (e.g. the `<input>` inside
-    /// a `<label>`, or `<script>`).
+    /// a `<label>`, or `<script>`) and text nodes (`visibility: hidden`
+    /// text — it inherits the value, so a `visible` child still counts).
     pub(crate) fn text_content(&self, id: NodeId, skip: &dyn Fn(NodeId) -> bool) -> String {
         let mut raw = String::new();
         self.push_text(id, skip, &mut raw);
@@ -172,7 +196,11 @@ impl<'a> DomIndex<'a> {
             return;
         };
         match &node.node_type {
-            NodeType::Text(text) => push_text_piece(out, text),
+            NodeType::Text(text) => {
+                if !skip(id) {
+                    push_text_piece(out, text);
+                }
+            }
             NodeType::Element(element) => {
                 // Never-rendered content has no text to a reader; Google
                 // nests `<style>` in its buttons.

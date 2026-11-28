@@ -18,7 +18,7 @@ use mb_runtime::state::policy::{AgentPolicy, ApproveMode, GatedAction, GatedKind
 use mb_runtime::state::{BrowserState, install_fonts};
 
 use crate::error::AgentError;
-use crate::error::CLIPPED_OUT_OF_VIEW;
+use crate::error::{CLIPPED_OUT_OF_VIEW, HIDDEN, INERT};
 use crate::index::find_rect;
 use crate::observation::{Changes, Observation, ObserveInput, ObserveOptions, Scope, observe};
 use crate::reach;
@@ -393,7 +393,7 @@ impl AgentBrowser {
     }
 
     pub fn click(&mut self, id: NodeId) -> Result<Observation, AgentError> {
-        self.target_rect(id)?;
+        self.agent_target_rect(id)?;
         self.act(|browser| browser.click_raw(id))
     }
 
@@ -406,7 +406,7 @@ impl AgentBrowser {
         clear: bool,
         submit: bool,
     ) -> Result<Observation, AgentError> {
-        self.target_rect(id)?;
+        self.agent_target_rect(id)?;
         let (is_text_field, is_password) = {
             let document = self.state.parsed_document.borrow();
             let element = document.element_data(id);
@@ -960,9 +960,9 @@ impl AgentBrowser {
     /// *human* input (`from_agent = false`), so the policy and the
     /// password rule see exactly what they saw when it was recorded.
     pub fn fill_as_person(&mut self, id: NodeId, text: &str) -> Result<(), AgentError> {
-        let rect = self.target_rect(id)?;
+        let rect = self.target_rect(id, false)?;
         self.scroll_into_view(rect);
-        let rect = self.target_rect(id)?;
+        let rect = self.target_rect(id, false)?;
         let point = self.click_point(rect);
         let press = WindowInput {
             mouse_position: Some(point),
@@ -985,10 +985,10 @@ impl AgentBrowser {
     }
 
     fn click_raw(&mut self, id: NodeId) -> Result<(), AgentError> {
-        let rect = self.target_rect(id)?;
+        let rect = self.agent_target_rect(id)?;
         self.last_target = Some((self.state.document_generation(), id));
         self.scroll_into_view(rect);
-        let rect = self.target_rect(id)?;
+        let rect = self.agent_target_rect(id)?;
         let point = self.click_point(rect);
         // Move first so :hover lands, then press and release on their own
         // frames — the same edge/level sequence the window produces.
@@ -1018,7 +1018,15 @@ impl AgentBrowser {
         self.state.document_generation() == self.issued_generation && self.issued.contains(&id)
     }
 
-    fn target_rect(&mut self, id: NodeId) -> Result<Rect, AgentError> {
+    /// The agent's target: [`Self::target_rect`] with the refusals a
+    /// replayed person (`fill_as_person`) doesn't get.
+    fn agent_target_rect(&mut self, id: NodeId) -> Result<Rect, AgentError> {
+        self.target_rect(id, true)
+    }
+
+    /// `agent`: also refuse a hidden or inert element (compat round 4
+    /// step 1a) — checked before the clip, like the reach categories.
+    fn target_rect(&mut self, id: NodeId, agent: bool) -> Result<Rect, AgentError> {
         if !self.is_issued(id) {
             return Err(AgentError::StaleElement {
                 id,
@@ -1055,6 +1063,16 @@ impl AgentBrowser {
                     id,
                     reason: "it is not rendered",
                 });
+            }
+        }
+        if agent {
+            let reason = match reach::concealment(&view.layout_root, id) {
+                Some(reach::Concealment::Hidden) => Some(HIDDEN),
+                Some(reach::Concealment::Inert) => Some(INERT),
+                None => None,
+            };
+            if let Some(reason) = reason {
+                return Err(AgentError::NotInteractable { id, reason });
             }
         }
         match reach::visible_rect(&view.layout_root, id, &view.clips) {

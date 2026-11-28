@@ -53,8 +53,21 @@ pub fn build_display_list_with_clips(
     paint: &PaintContext,
     clips: &ClipTable,
 ) -> Vec<DisplayCommand> {
+    build_display_list_with_hidden(layout_root, paint, clips).0
+}
+
+/// [`build_display_list_with_clips`] plus, separately, the commands the
+/// `visibility: hidden` boxes would have painted (compat round 4 step 1a).
+/// Those are never drawn; the view measures them so the scrollable height
+/// still counts hidden content, as Chrome's scroll overflow does.
+pub fn build_display_list_with_hidden(
+    layout_root: &LayoutBox,
+    paint: &PaintContext,
+    clips: &ClipTable,
+) -> (Vec<DisplayCommand>, Vec<DisplayCommand>) {
     let ctx = &Painter { paint, clips };
     let mut commands = Vec::new();
+    let mut hidden = Vec::new();
     // The root layout box is treated as the initial stacking context: every
     // positioned descendant ends up sorted into z-layers under it. The
     // initial inherited alpha is 1.0 — every non-1 opacity in the tree
@@ -65,9 +78,24 @@ pub fn build_display_list_with_clips(
         layout_root,
         1.0,
         Affine::IDENTITY,
-        &mut |b, alpha, transform| paint_self(b, &mut commands, alpha, transform, ctx),
+        &mut |b, alpha, transform| {
+            // Descendants paint by their own value (`visible` shows again).
+            let sink = if is_visibility_hidden(b) {
+                &mut hidden
+            } else {
+                &mut commands
+            };
+            paint_self(b, sink, alpha, transform, ctx)
+        },
     );
-    commands
+    (commands, hidden)
+}
+
+/// The box's computed `visibility` hides it (step 1a).
+pub fn is_visibility_hidden(layout_box: &LayoutBox) -> bool {
+    layout_box
+        .styled_node()
+        .is_some_and(|node| node.visibility_hidden())
 }
 
 /// Every layout box in the order the painter paints it, each with the

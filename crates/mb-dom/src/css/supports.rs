@@ -298,7 +298,8 @@ mod tests {
         // Typed, parsed, but nothing reads it: unsupported.
         assert_eq!(supports("(overflow-wrap: anywhere)"), Some(false));
         assert_eq!(supports("(word-break: break-word)"), Some(false));
-        assert_eq!(supports("(visibility: hidden)"), Some(false));
+        // Read since compat round 4 step 1a.
+        assert_eq!(supports("(visibility: hidden)"), Some(true));
     }
 
     #[test]

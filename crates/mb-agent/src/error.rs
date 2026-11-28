@@ -12,6 +12,13 @@ use crate::Observation;
 /// of it (sr-only text, a slide outside its carousel window — step 3b).
 pub const CLIPPED_OUT_OF_VIEW: &str = "it is clipped out of view";
 
+/// `NotInteractable` reason for a `visibility: hidden` element (compat
+/// round 4 step 1a — a closed menu, dialog or panel).
+pub const HIDDEN: &str = "it is hidden";
+
+/// `NotInteractable` reason for an element in an `inert` subtree.
+pub const INERT: &str = "it is inert";
+
 #[derive(Debug, Clone)]
 pub enum AgentError {
     /// The element was removed from the page, or the id came from a page
@@ -149,6 +156,9 @@ impl AgentError {
             AgentError::StaleElement { .. } => "Call `observe` to get the current element ids.",
             AgentError::NotInteractable { reason, .. } if *reason == CLIPPED_OUT_OF_VIEW => {
                 "It is visually hidden (a screen-reader-only label or skip link, or content scrolled out of a box): its text is still in the observation as information. Click the visible element that does the same thing instead."
+            }
+            AgentError::NotInteractable { reason, .. } if *reason == HIDDEN || *reason == INERT => {
+                "It isn't shown (or is disabled) on the page right now, so a person couldn't use it either: open or enable it first with the control that does (a menu button, tab or dialog), then `observe` again."
             }
             AgentError::NotInteractable { .. } => {
                 "Call `observe`; the element may be hidden or not rendered yet."

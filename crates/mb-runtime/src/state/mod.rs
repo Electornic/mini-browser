@@ -1581,6 +1581,8 @@ fn collect_inline_handlers(
     }
 }
 
+/// Nodes with a box Tab may stop at: rendered, and neither
+/// `visibility: hidden` nor inert (compat round 4 step 1a).
 fn collect_box_node_ids(
     layout_box: &layout::LayoutBox,
     out: &mut std::collections::BTreeSet<NodeId>,
@@ -1590,7 +1592,9 @@ fn collect_box_node_ids(
         | layout::BoxType::FlexNode(node)
         | layout::BoxType::GridNode(node)
         | layout::BoxType::TableNode(node) => {
-            out.insert(node.node_id);
+            if !node.visibility_hidden() && !node.inert() {
+                out.insert(node.node_id);
+            }
         }
         layout::BoxType::AnonymousBlock => {}
     }

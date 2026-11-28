@@ -939,6 +939,7 @@ pub const RENDERED: &[&str] = &[
     "top",
     "transform",
     "vertical-align",
+    "visibility",
     "white-space",
     "width",
     "z-index",

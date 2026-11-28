@@ -143,7 +143,15 @@ fn aria_labelledby(index: &DomIndex<'_>, id: NodeId) -> Option<String> {
     let joined: Vec<String> = refs
         .split_whitespace()
         .filter_map(|r| index.by_id_attr(r))
-        .map(|target| index.text_content(target, &|_| false))
+        // accname 1.2 §2A: a hidden element referenced directly still
+        // names (all of it); a shown one leaves out its hidden parts.
+        .map(|target| {
+            if index.is_invisible(target) {
+                index.text_content(target, &|_| false)
+            } else {
+                index.text_content(target, &|n| index.is_invisible(n))
+            }
+        })
         .filter(|text| !text.is_empty())
         .collect();
     non_empty(&joined.join(" "))
@@ -178,7 +186,9 @@ fn role_specific_name(index: &DomIndex<'_>, id: NodeId, role: Role) -> Option<St
                 }
             }),
         Role::Link | Role::Button | Role::Clickable => {
-            non_empty(&index.text_content(id, &|_| false)).or_else(|| descendant_img_alt(index, id))
+            // Hidden descendants don't name it (accname 1.2 §2A).
+            non_empty(&index.text_content(id, &|n| index.is_invisible(n)))
+                .or_else(|| descendant_img_alt(index, id))
         }
     }
 }
@@ -190,7 +200,7 @@ fn label_text(index: &DomIndex<'_>, id: NodeId) -> Option<String> {
         matches!(
             index.tag(node),
             Some("input" | "select" | "textarea" | "button")
-        )
+        ) || index.is_invisible(node)
     };
     if let Some(label) = index
         .attr(id, "id")
@@ -206,6 +216,7 @@ fn label_text(index: &DomIndex<'_>, id: NodeId) -> Option<String> {
 fn descendant_img_alt(index: &DomIndex<'_>, id: NodeId) -> Option<String> {
     for &child in index.children(id) {
         if index.tag(child) == Some("img")
+            && !index.is_invisible(child)
             && let Some(alt) = non_empty(index.attr(child, "alt").unwrap_or(""))
         {
             return Some(alt);

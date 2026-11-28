@@ -2339,6 +2339,61 @@ mod tests {
         assert_eq!(frame_value(&browser, "b", "color"), Some(RING));
     }
 
+    /// The `id` attribute of the focused page element.
+    fn focused_id(browser: &BrowserState) -> Option<String> {
+        let id = browser.focused_element()?;
+        let document = browser.parsed_document.borrow();
+        document.element_data(id)?.attributes.get("id").cloned()
+    }
+
+    #[test]
+    fn hidden_and_inert_controls_are_skipped_by_tab() {
+        // Compat round 4 step 1a: Tab walks past `visibility: hidden` and
+        // `inert` controls (Chrome doesn't focus them); a `visible` child
+        // of a hidden box is still a stop.
+        let mut browser = browser_with_html_and_css(
+            r#"<div><button id="a">A</button><div class="menu"><a id="hid" href="/x">X</a><a id="on" href="/y">Y</a></div><div inert><button id="inert">I</button></div><button id="b">B</button></div>"#,
+            ".menu { visibility: hidden } #on { visibility: visible }",
+        );
+        frame(&mut browser);
+        let mut stops = Vec::new();
+        for _ in 0..4 {
+            press_tab(&mut browser);
+            stops.push(focused_id(&browser).unwrap_or_default());
+        }
+        assert_eq!(stops, ["a", "on", "b", "a"]);
+    }
+
+    #[test]
+    fn hidden_link_does_not_navigate() {
+        // A click over a `visibility: hidden` (or inert) link lands on what
+        // is under it — nothing follows the link. Navigating here would
+        // resolve "/next" against no URL and show an error page.
+        for (css, navigates) in [
+            ("", true),
+            ("#lnk { visibility: hidden }", false),
+            (
+                "#outer { visibility: hidden } #lnk { visibility: visible }",
+                true,
+            ),
+        ] {
+            let mut browser = browser_with_html_and_css(
+                r#"<div id="outer"><a id="lnk" href="/next">go</a></div>"#,
+                &format!("#outer {{ width: 200px; height: 100px; }} {css}"),
+            );
+            let original_html = browser.document_html.clone();
+            click_at(&mut browser, 5.0, 5.0);
+            assert_eq!(browser.document_html != original_html, navigates, "{css:?}");
+        }
+        let mut browser = browser_with_html_and_css(
+            r#"<div id="outer" inert><a id="lnk" href="/next">go</a></div>"#,
+            "#outer { width: 200px; height: 100px; }",
+        );
+        let original_html = browser.document_html.clone();
+        click_at(&mut browser, 5.0, 5.0);
+        assert_eq!(browser.document_html, original_html, "inert");
+    }
+
     #[test]
     fn radio_click_unchecks_group() {
         // `selecting_a_radio_clears_the_rest_of_its_group` pins the

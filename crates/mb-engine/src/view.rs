@@ -102,8 +102,8 @@ pub fn build_document_view(
         images,
     };
     let clips = profile::time_block("view::compute_clips", || layout::compute_clips(&layout));
-    let mut commands = profile::time_block("view::build_display_list", || {
-        render::build_display_list_with_clips(&layout, &paint_ctx, &clips)
+    let (mut commands, hidden_commands) = profile::time_block("view::build_display_list", || {
+        render::build_display_list_with_hidden(&layout, &paint_ctx, &clips)
     });
     profile::time_block("view::collect_image_commands", || {
         collect_image_commands_into(&layout, current_url, images, &clips, &mut commands);
@@ -111,7 +111,9 @@ pub fn build_document_view(
     // Measured before the canvas fill goes in (it spans the viewport).
     let scroll_height = margin_box_bottom(&layout)
         .max(layout_overflow_bottom(&layout, &clips))
-        .max(document_height(&commands));
+        .max(document_height(&commands))
+        // `visibility: hidden` content still scrolls (step 1a).
+        .max(document_height(&hidden_commands));
     if let Some(color) = canvas_background(&layout) {
         // Cover the viewport and the whole document, under everything.
         let height = (viewport_height as f32).max(scroll_height);
@@ -332,7 +334,11 @@ fn collect_link_targets_into(
 
     // Link targets are collected separately from display commands because clicking needs rectangles,
     // not just painted pixels.
-    if let Some(href) = current_href.filter(|_| should_collect_link_target(layout_box, own_href)) {
+    // A hidden or inert box is no link target (step 1a — it doesn't
+    // underline, hover or navigate); a `visible` child of a hidden link is.
+    if let Some(href) = current_href
+        .filter(|_| should_collect_link_target(layout_box, own_href) && hit_testable(layout_box))
+    {
         let content = layout_box.dimensions.content;
         let (x, y) = effective_transform.apply_point(content.x, content.y);
         targets.push(LinkTarget {
@@ -398,7 +404,9 @@ fn collect_image_commands_into(
     clips: &layout::ClipTable,
     commands: &mut Vec<render::DisplayCommand>,
 ) {
-    if let Some(command) = image_command_for_layout_box(layout_box, base_url, images) {
+    if let Some(command) = image_command_for_layout_box(layout_box, base_url, images)
+        .filter(|_| !render::is_visibility_hidden(layout_box))
+    {
         match node_id_for_layout_box(layout_box).and_then(|id| clips.clip_of(id)) {
             None => commands.push(command),
             Some(clip) if clip.width > 0.0 && clip.height > 0.0 => {
@@ -569,7 +577,8 @@ pub fn hit_node_in_paint_order(
         let (logical_x, logical_y) = transform.inverse().apply_point(mouse_x, doc_y);
         let node_id = node_id_for_layout_box(layout_box);
         let clip = node_id.and_then(|id| clips.clip_of(id));
-        if point_in_rect(logical_x, logical_y, padding_box(layout_box))
+        if hit_testable(layout_box)
+            && point_in_rect(logical_x, logical_y, padding_box(layout_box))
             && point_in_clip(mouse_x, doc_y, clip)
         {
             best = Some(node_id);
@@ -603,7 +612,10 @@ fn walk_for_hover(
     let node_id = node_id_for_layout_box(layout_box);
     // The clip is in page space — compared with the untransformed point.
     let clip = node_id.and_then(|id| clips.clip_of(id));
-    if point_in_rect(logical_x, logical_y, outer) && point_in_clip(mouse_x, doc_y, clip) {
+    if hit_testable(layout_box)
+        && point_in_rect(logical_x, logical_y, outer)
+        && point_in_clip(mouse_x, doc_y, clip)
+    {
         *best = Some(HoverHit {
             path: path.clone(),
             node_id,
@@ -621,6 +633,19 @@ fn walk_for_hover(
             best,
         );
         path.pop();
+    }
+}
+
+/// Whether the hit test may stop at this box (step 1a): not
+/// `visibility: hidden` (its descendants are still tested — a `visible`
+/// child shows) and not inert (the whole subtree is, by inheritance).
+fn hit_testable(layout_box: &layout::LayoutBox) -> bool {
+    match &layout_box.box_type {
+        layout::BoxType::BlockNode(node)
+        | layout::BoxType::FlexNode(node)
+        | layout::BoxType::GridNode(node)
+        | layout::BoxType::TableNode(node) => !node.visibility_hidden() && !node.inert(),
+        layout::BoxType::AnonymousBlock => true,
     }
 }
 
@@ -934,6 +959,149 @@ mod tests {
         assert_eq!(attr_id(dfs).as_deref(), Some("later"));
         let painted = hit_node_in_paint_order(&input, &layout_root, &clips, 0.0);
         assert_eq!(attr_id(painted).as_deref(), Some("top"));
+    }
+
+    fn texts(commands: &[DisplayCommand]) -> Vec<String> {
+        let mut out = Vec::new();
+        render::walk_commands(commands, &mut |c| {
+            if let DisplayCommand::Text(t) = c {
+                out.push(t.text.trim().to_string());
+            }
+        });
+        out
+    }
+
+    fn image_count(commands: &[DisplayCommand]) -> usize {
+        let mut n = 0;
+        render::walk_commands(commands, &mut |c| {
+            if matches!(c, DisplayCommand::Image(_)) {
+                n += 1;
+            }
+        });
+        n
+    }
+
+    /// A view with one 2×2 image at `http://t/a.png` (and its base URL).
+    fn view_with_image(html_source: &str, css_source: &str) -> DocumentView {
+        let document = html::parse(html_source).unwrap();
+        let sheet = css::parse(css_source).unwrap();
+        let base = url::Url::parse("http://t/").unwrap();
+        let image = resource::LoadedImage {
+            url: url::Url::parse("http://t/a.png").unwrap(),
+            width: 2,
+            height: 2,
+            pixels: vec![0xff00_00ff; 4],
+        };
+        let images = HashMap::from([("http://t/a.png".to_string(), image)]);
+        build_document_view(
+            &document,
+            std::slice::from_ref(&sheet),
+            400,
+            300,
+            Some(&base),
+            &images,
+            style::InteractionState::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn visibility_hidden_is_not_painted_hit_or_linked() {
+        // Compat round 4 step 1a (D5): the hidden menu's background, text,
+        // image and link are gone; its `visible` child still paints, is
+        // hit and links. The box keeps its space.
+        let html = "<html><body><div id=menu><a id=a href=/x>Hidden <img src=a.png></a>\
+                    <a id=b href=/y><span id=on>Shown</span></a></div></body></html>";
+        let css = "body { margin: 0; } #menu { visibility: hidden; background-color: #ff0000; height: 40px; } \
+                   #on { visibility: visible; } img { width: 10px; height: 10px; }";
+        let view = view_with_image(html, css);
+        assert_eq!(texts(&view.commands), vec!["Shown".to_string()]);
+        assert_eq!(image_count(&view.commands), 0, "the hidden link's image");
+        let red = css::Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let mut red_fill = false;
+        render::walk_commands(&view.commands, &mut |c| {
+            red_fill |= matches!(c, DisplayCommand::SolidRect(color, _) if *color == red);
+        });
+        assert!(!red_fill, "the hidden box's background");
+        let hrefs: Vec<&str> = view.links.iter().map(|l| l.href.as_str()).collect();
+        assert_eq!(
+            hrefs,
+            vec!["/y"],
+            "only the visible child links (and underlines)"
+        );
+        // Without `visibility` the same page paints all of it.
+        let shown = view_with_image(
+            html,
+            "body { margin: 0; } img { width: 10px; height: 10px; }",
+        );
+        assert_eq!(image_count(&shown.commands), 1);
+        assert!(shown.links.iter().any(|l| l.href == "/x"));
+    }
+
+    #[test]
+    fn hit_test_skips_a_hidden_box_but_not_its_visible_child() {
+        let css = "#menu { visibility: hidden; width: 200px; height: 40px; } \
+                   #on { visibility: visible; display: block; width: 50px; height: 20px; }";
+        let html = "<div id=page><div id=menu><div id=on></div></div></div>";
+        // Over the hidden box only: the page under it.
+        assert_eq!(
+            hit_with_clips(html, css, 150.0, 30.0)[1].as_deref(),
+            Some("page")
+        );
+        // Over its visible child: the child.
+        assert_eq!(
+            hit_with_clips(html, css, 10.0, 10.0)[1].as_deref(),
+            Some("on")
+        );
+    }
+
+    #[test]
+    fn inert_subtree_is_painted_but_not_hit_or_linked() {
+        // N4: Chrome paints `inert` content; hit testing passes through it
+        // (HTML §6.3, like `pointer-events: none`), so its link can't be
+        // followed or hovered.
+        let html = "<html><body><div id=page><div inert id=panel><a href=/x>Draft</a></div></div></body></html>";
+        let css = "body { margin: 0; } #panel { width: 200px; height: 40px; }";
+        let view = page_view(html, css);
+        assert_eq!(texts(&view.commands), vec!["Draft".to_string()]);
+        assert!(view.links.is_empty());
+        assert_eq!(
+            hit_with_clips(html, css, 10.0, 10.0)[1].as_deref(),
+            Some("page")
+        );
+    }
+
+    #[test]
+    fn visibility_hidden_keeps_layout_space_and_document_height() {
+        // Chrome counts hidden boxes in the scroll overflow: the page is as
+        // tall as with the box shown — even where only what it paints
+        // reaches that far (our height counts painted commands too: here a
+        // shadow 500px below the box).
+        let html = "<html><body><div id=menu>menu</div><p id=after>after</p></body></html>";
+        let base = "body { margin: 0; } #menu { height: 10px; box-shadow: 0 500px 0 0 #000000; } p { margin: 0; }";
+        let shown = page_view(html, base);
+        let hidden = page_view(html, &format!("{base} #menu {{ visibility: hidden; }}"));
+        assert!(shown.document_height > 500.0, "{}", shown.document_height);
+        assert_eq!(hidden.document_height, shown.document_height);
+        assert_eq!(texts(&hidden.commands), vec!["after".to_string()]);
+        // `after` sits where it did.
+        let after_y = |view: &DocumentView| {
+            let mut y = None;
+            render::walk_commands(&view.commands, &mut |c| {
+                if let DisplayCommand::Text(t) = c
+                    && t.text.trim() == "after"
+                {
+                    y = Some(t.y);
+                }
+            });
+            y
+        };
+        assert_eq!(after_y(&hidden), after_y(&shown));
     }
 
     #[test]

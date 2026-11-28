@@ -627,6 +627,51 @@ M (3.5일): `reach` 함수·테스트 1일, probe 열·P4 후처리·P7 0.75일,
 - `html.rs` 122행 주석("이 플래그를 켜면 인라인 `<script>` 본문을 삼킨다")은 **틀렸다**. 그 자리의 `false` 인자는 `context_element_allows_scripting` 이다. 주석을 고친다.
 - probe 는 엔진이 파싱한 문서를 걷고 골든은 `html::parse` 를 쓴다. 그래서 따로 맞출 파서 사본은 **없다**(1차 리뷰 A12 의 "사본 둘" 지적은 철회).
 
+### 1단계 구현 메모 (2026-11-28)
+
+**P — probe 변경 없음, "전" = `r4-base`**(부록 D "P 가 없는 단계(1·2)는 probe 를 바꾸지 않는다" 그대로 — `-p` 라벨을 더하지 않음):
+- 1단계가 재는 것은 모두 기존 열·파일로 나온다:
+  - `obs_u_hidden` 0, `obs_u_intercepted(_ours)` 와 원인 셋, `obs_u_offscreen_x(_ours)` — 0단계 열 그대로. `reach` 는 처음부터 Chrome 규칙(링크도 히트·in-view centre)으로 쟀으므로 1b·1c 뒤에도 정의가 같다.
+  - 1b-z 뒤에는 히트 테스트가 페인터 순서라 `z_order` 원인이 저절로 0 이 된다(`reach` 가 `compute_hovered_hit` 과 `hit_node_in_paint_order` 를 비교하므로 — 정의 변경 아님).
+  - P1 의 "가장 가까운 선언" 걸음은 1a·1b 가 `visibility`·`pointer-events` 를 상속하게 바꿔도 같은 답을 낸다(상속된 계산값 = 가장 가까운 선언). 1a 커밋에서 같은지 확인한다(0단계 P1 메모).
+  - 위험 절의 "1b-링크 때문에 이동이 막힌 관찰 링크 수"와 1b 거짓 거절 임계값의 "새로 거절하는 관찰 요소"는 `unreachable.txt`(키·역할·이름·범주·ours/browser-too)를 거르면 나온다. 1b 뒤 에이전트는 `intercepted` 를 전부 거절하므로(덮개 browser-too 포함) "새 거절" = `r4-vis` 의 `intercepted` 전부다.
+  - 거짓 거절 표본의 판정은 문서대로 미리보기 PNG(`compat-cache/previews/1b/`)로 한다. 가로챈 요소의 이름은 1b 뒤 에이전트의 거절 메시지가 알려 준다 — `unreachable.txt` 에 열을 더하지 않는다.
+- **확인 라벨 `r4-s1-check`**(`cc81b4a`, 오프라인·release — 부록 D 의 동결 라벨이 아니다): `r4-base` 와 112열이 같고(시간 열 제외 — 차이 0), `diff r4-base r4-s1-check` 가 비었고, 사이트마다 `unreachable.txt`·`element_keys.txt`·`console.txt` 가 바이트까지 같다. 그래서 1단계의 "전"은 `r4-base` 그대로다. 코퍼스 재생은 15초(probe 빌드가 있을 때).
+- **`r4-base` 에서 미리 본 1b 의 크기**(20곳, 판정은 `r4-vis` 에서):
+  - `intercepted` 306(ours 270 · browser-too 36) 중 **링크가 287**(ours 251 · browser-too 36 — browser-too 는 전부 링크). 오늘 이 링크들은 기하 `LinkTarget` 판정으로 이동한다. 1b-링크 뒤에는 히트가 대상에 닿지 않으면 이동하지 않는다(z-order 60 은 1b-z 가 대상에 닿게 고친다).
+  - 사이트별 `intercepted`(전부 / ours): mdn 81/79 · apple 54/37 · yna 45/45 · microsoft 26/26 · enwiki 17/17 · korea-kr 16/11 · hani 12/12 · bbc 10/9 · kowiki 10/10 · naver 9/1 · docsrs 8/7 · d2 6/6 · velog 5/5 · google 3/3 · github 2/2 · kakaocorp 2/0.
+  - **임계값 예상**: 1a 뒤 관찰 요소 ≈ 4,064 의 1% ≈ 41. 1b-z 가 z-order 60 을 없애도 ≈ 246 이 남고, 사이트 상한 20 을 mdn·apple·yna·microsoft 가 넘을 것이다. 그래서 1b 의 임계값은 **거의 확실히 걸린다** — 그러면 표본(미리보기 PNG)을 보고, 거짓이 절반 이상이면 거절을 positioned 덮개로 좁힌다([위험](#위험-1단계)). 0단계 ⑥ 표본 판독("other 209 는 거의 다 레이아웃 겹침")으로는 좁히는 쪽이 될 가능성이 크다.
+- 테스트 1201(변화 없음). clippy·fmt clean. 짧은 release 퍼저(각 3,000 — 레이아웃·CSS 토큰·이미지) 실패 0.
+
+**1a — `visibility: hidden/collapse` 와 `inert`(커밋 대기)**:
+- **계산값 두 개가 모든 소비자의 기준**이다(같은 규칙을 두 곳에 두지 않음):
+  - `StyledNode::visibility_hidden()` — `visibility` 를 `INHERITED_PROPERTIES` 와 `RENDERED` 에 넣었다. 그래서 글자 잎도 자기 값으로 답하고, `visible` 자손은 다시 보인다. `collapse` 는 `hidden` 과 같다(표 행·열도 — 근사). `<col>` 의 값은 셀에 가지 않는다(셀은 `<col>` 의 DOM 자식이 아님 — 코드 변경 없음). `@supports (visibility: hidden)` 이 참이 됐다.
+  - `StyledNode::inert()` — 스타일 패스가 `inert` 속성(자기 또는 부모의 플래그)으로 내부 키 `-internal-inert` 를 세운다(Blink 의 `ComputedStyle::IsInert` 와 같은 모양). 선언으로는 못 세우고(작성자 `-internal-inert` 는 버림), `INHERITED_PROPERTIES` 밖이라 `all`/`unset` 이 못 지운다.
+- **페인트**: 페인터가 숨은 상자의 명령을 따로 모은다(`render::build_display_list_with_hidden` — 그리지 않음). `<img>` 명령도 숨은 상자는 건너뛴다. 링크 밑줄은 `LinkTarget` 에서 빠지므로 저절로 없다. `inert` 는 그대로 그린다(N4).
+- **문서 높이**: 숨은 상자도 계속 센다 — 상자 범위는 원래 레이아웃 쪽(`layout_overflow_bottom`)이 세고, 그려진 명령으로만 닿는 범위(그림자 등)는 따로 모은 숨은 명령을 같은 `document_height(…)` 로 잰다. 테스트로 고정했다(`visibility_hidden_keeps_layout_space_and_document_height` — 그 줄을 빼면 실패함을 확인).
+- **히트 테스트**(`compute_hovered_hit`·`hit_node_in_paint_order` 둘 다): 숨은 상자는 그 상자 기록만 건너뛰고 자손은 계속 본다(3b 클립 규칙과 같은 모양). `inert` 는 상속된 플래그라 하위 트리 전체가 건너뛰어진다(`pointer-events:none` 처럼 — HTML §6.3). JS 클릭 대상·`:hover`·라벨 활성화가 이 히트를 따르므로 모두 같이 바뀐다.
+- **링크**: 숨은·`inert` 상자는 `LinkTarget` 이 되지 않는다(커서·밑줄·이동). 1b-링크 전이라 링크 이동은 아직 `LinkTarget` 기하 판정이지만, 목록에서 빠졌으므로 숨은 링크는 이동하지 않는다(`hidden_link_does_not_navigate` — 사람 클릭). 숨은 링크 안의 `visible` 자식은 여전히 링크다.
+- **Tab**: 후보를 "상자가 있고 숨지도 inert 도 아님"으로 거른다(`collect_box_node_ids`). JS `focus()` 는 지금 빈 메서드라 고칠 것이 없다.
+- **관찰**(`DomIndex` 가 레이아웃을 걸으며 두 플래그를 모음):
+  - 숨은·`inert` 요소는 요소 목록에서 뺀다(`visible` 자손은 남음).
+  - `text:` 블록은 숨은 글자만 뺀다. **`inert` 글자는 남긴다** — 화면에 그려지고 Chrome 접근성 트리에도 남는다(N4 는 "할 수 있는 일이 없다"를 이유로 요소를 뺀 것이라 읽기는 그대로 둠).
+  - accname(1.2 §2A/2B): 숨은 자손 글자(라벨·링크·버튼 이름, `<img alt>`)는 이름에서 빠진다. `aria-labelledby` 가 **직접 가리킨** 숨은 요소는 전부 들어간다. `text_content` 의 `skip` 이 글자 노드에도 적용되게 했다.
+- **행동**: `click`·`type` 은 클립 판정 **앞에서**(P2 우선순위처럼) `NotInteractable` 로 거절한다 — 사유 `"it is hidden"` / `"it is inert"`, 힌트 "보이지 않거나 비활성 — 여는 컨트롤을 먼저 쓰고 다시 `observe`"(`reach::concealment`, 클릭과 probe 가 같은 계산값을 봄). 1b 가 `error.rs` 를 열거형으로 바꿀 때 이 두 문자열 사유도 `Hidden`·`Inert` 로 옮긴다. `fill_as_person`(재생의 사람 경로)은 이 거절을 건너뛴다.
+- `reach` 의 `hidden` 사실은 이제 계산값을 읽는다(0단계 P1 메모 "1a 뒤에는 자기 계산값만"). `pointer-events` 는 1b 까지 가장 가까운 선언 그대로.
+- **테스트**(+14 → 1215): 스타일 2(`visibility_inherits_and_a_visible_descendant_turns_it_back_on`·`inert_flag_follows_the_attribute_down_and_cannot_be_authored`), 엔진 4(`visibility_hidden_is_not_painted_hit_or_linked`·`hit_test_skips_a_hidden_box_but_not_its_visible_child`·`inert_subtree_is_painted_but_not_hit_or_linked`·`visibility_hidden_keeps_layout_space_and_document_height`), 런타임 2(`hidden_and_inert_controls_are_skipped_by_tab`·`hidden_link_does_not_navigate`), 에이전트 6(`visibility_hidden_is_not_painted_hit_linked_or_observed`·`hidden_element_is_skipped_by_tab_and_refuses_type`·`aria_labelledby_reads_hidden_text`·`inert_subtree_is_not_observed_hit_or_navigated`·`opacity_zero_button_stays_observed_and_clickable`·`aria_hidden_is_ignored_by_the_observation`). 새 테스트는 구현 전에 실패를 확인했다. 단 `hidden_link_does_not_navigate` 는 엔진 쪽을 먼저 넣은 뒤에 써서 처음부터 통과했다(같은 증상은 엔진 테스트가 먼저 실패로 잡음). `hidden_element_is_skipped_by_tab_and_refuses_type` 은 처음에 틀린 이유("클릭해도 포커스가 안 감")로 통과해서 사유 단언을 더했다. 바꾼 기존 테스트 1개: `supports_typed_values` 의 `(visibility: hidden)` 거짓 → 참.
+- **골든·대응 테스트(부록 E 1행)**: `compat4` 골든은 "Chrome 이라면" ①·③ 그대로 움직였다 — Docs·Pricing·Download draft 가 두 관찰에서 빠지고(요소 9 → 6), `text:` 의 "Docs"·"Pricing" 이 빠지고, "Draft release notes" 는 남고, `page_height` 409 그대로. `compat3` 골든은 변화 없음. 대응 테스트 `compat4_menu_opens_through_its_script_and_leads_to_docs` 는 1단계 단언으로 다시 썼다(스크립트가 여전히 죽음 · Docs 가 불러온 직후에도 "Menu" 뒤에도 없음 · `+0 / -0` · 이동 없음). eval `compat4-menu` 는 이제 **실패가 정상**(0/3)이다 — 사용자 터미널 몫.
+- 퍼저의 `visibility`·`pointer-events`·`z-index` 값 풀(1단계 테스트 목록)은 "히트 = 페인트 순서" 단정이 1b-z 뒤에야 서므로 **1b 에서 넣는다**.
+
+**1a 코퍼스 — 확인 라벨 `r4-vis-1a`**(오프라인·release, 부록 D 의 동결 라벨이 아님 — `r4-vis` 는 1단계 끝):
+- 견고성 그대로(ok 12 + ok\* 9 · nav-fail 0 · panic 0 · timeout 0 · `[mb-budget]` 0).
+- **② (20곳, ours)**: **0.1078 (438 / 4,064)** ← 0.1800 (796 / 4,423). 구성 hidden **0**(목표 0 ✅) · clipped 73 · offscreen_x 94 · intercepted **271**(z-order 61 · pointer-none 1 · other 209 — apple 링크 하나가 "other·덮개 browser-too" 에서 "z-order·ours" 로 옮김: 숨은 상자가 더는 히트되지 않아 DFS 히트가 바뀜. 1b-z 몫). `obs_hidden_visibility` 359 → 0, 클립 거절 276 → 73.
+- **요소 diff**: 사라진 요소 360·생긴 요소 1, **새로 닿지 않게 된 요소 0**(`!` 없음). 사라진 359 는 `r4-base` 의 `hidden` 범주 키와 사이트마다 **정확히 같다**(kakaocorp 37 · korea-kr 33 · d2 1 · enwiki 169 · github 48 · bbc 68 · apple 3) — 0단계 P1 의 "가장 가까운 선언" 규칙과 1a 의 상속 계산값이 같은 답을 낸다는 확인이다. 나머지 1개는 이름 변화다: d2 로고 링크 `naver D2` → 이름 없음. 링크 글자가 `.blind{visibility:hidden}`(sr-only 가 아니라 진짜 숨김)이라 accname 상 Chrome 도 이름에 넣지 않는다 — **정상**(페이지 쪽 버그).
+- `text_blocks` 변화(kakaocorp·korea-kr·d2·google·enwiki·github·bbc)는 숨은 글자가 빠진 것, `parse_only` 변화(16곳)는 `visibility` 가 `RENDERED` 에 든 몫, `clip_groups` 변화는 숨은 명령이 그려지지 않은 몫이다.
+- **① 기대 컨트롤 누락: 6 → 8/20**(kakaocorp 3/3 → 0/3, enwiki 3/3 → 2/3) — [위험](#위험-1단계) 첫 항목("JS 가 여는 메뉴가 관찰에서 사라짐")이 실제로 났다. 둘 다 **지금 화면이 보여 주는 그대로**다:
+  - kakaocorp: 서버가 그린 문서가 `<div class="container-doc" style="visibility:hidden;">` 로 페이지 전체를 감싸고, Nuxt 하이드레이션 스크립트가 그것을 연다. 우리 스크립트는 첫 줄 `getElementsByTagName` 에서 죽는다(2단계 2a 대상). 스크린샷도 빈 화면이다. Chrome 은 스크립트가 돌아서 보인다 → **2단계에서 다시 본다**.
+  - enwiki `link:main page`: Vector 의 주 메뉴는 닫힌 드롭다운(`visibility`)이다. Chrome 은 JS 가 돌면 1280px 에서 사이드바에 고정해 보여 준다(우리 JS 는 `document.cookie` 에서 죽음 — D8, 2단계). 에이전트가 직접 여는 길("Main menu" 체크박스 해킹)은 `intercepted:z_order` 라 지금 클릭이 빗나간다(미리보기 `compat-cache/previews/1a/enwiki-main-menu.png`) — **1b-z 가 고칠 몫**이다.
+- 짧은 release 퍼저(각 3,000) 실패 0. 테스트 1215, clippy·fmt clean.
+
 ### 설계 결정
 
 - **`visibility` 는 레이아웃을 바꾸지 않는다**: 공간과 문서 높이는 그대로다. 페인트·히트·링크·관찰·행동만 바뀐다.
@@ -956,7 +1001,7 @@ M (3~4일).
 |---|---|---|---|---|---|---|---|---|---|
 | 3차 끝(`final`) | ✅ | `cef51c5` | 1173 | ok 12 + ok* 8 · nav-fail 1(crates.io) · panic 0 · timeout 0 · blocked 2 · robots skip 2 · `[mb-budget]` 0 | 7/20 (naver·daum·hani·korea-kr·velog·d2·google) | 미측정(클립 거절 276) | 83(중복 포함 96) / 미측정 / 10 · 14 | 1,356 / 1,506 | `r4-check` 재생이 `final` 과 같음([부록 D](#부록-d--측정-재현과-명령)) |
 | 0 측정 정비 | ✅ 완료 — ② 목표 창 결정(2026-11-28) · F ✅(`e034ae2`, 각 3만·실패 0) | `4f46de3`(P) · `68498f3`(K5·P2b 세로) · `d263093`(S) · `6e62671`(보충 ①) · `e034ae2`(G) · (T·`r4-base` 커밋 대기) | 1201 | `r4-base`: ok 12 + ok\* 9 · nav-fail **0** · panic 0 · timeout 0 · blocked 2 · robots skip 2 · `[mb-budget]` 0 | **6/20** (naver·daum·hani·korea-kr·velog·google) | **0.1800 (796)** · 359/73/94/270 (첫 P2b 표 0.1836·812) | 83(96) / **179/272 (65.8%)** / 10 · 14 | 1,356(kowiki 제외 1,346) / 1,506 | `r4-p0` → `r4-k5`(빈 diff) → `r4-sup1`(확인) → **`r4-base`**. **목표 창 결정**: hidden 0 · intercepted ours ≤135 · offscreen_x ours ≤28 · clipped 목표 없음(절대 수) |
-| 1 에이전트 정합성 | 설계 | | | | | | | | |
+| 1 에이전트 정합성 | 진행 중 — P ✅(probe 변경 없음, "전" = `r4-base`) · 1a ✅ | (P·1a: 커밋 대기) | 1215 | 1a(`r4-vis-1a`): 그대로 · nav-fail 0 | 1a: **8/20**(+kakaocorp·enwiki — 스크립트가 여는 화면, 2단계·1b-z 에서 다시 봄) | "전" `r4-base` 0.1800 (796) · 359/73/94/270 → 1a **0.1078 (438/4,064)** · 0/73/94/271 | | | P: 확인 라벨 `r4-s1-check` = `r4-base`(빈 diff). `intercepted` 306 중 링크 287 — 1b 임계값 걸림 예상. 1a: 사라진 359 = `r4-base` `hidden` 그대로, 새로 닿지 않음 0, d2 이름 변화 1(정상)([1단계 메모](#1단계-구현-메모-2026-11-28)) |
 | 2 작은 JS | 설계 | | | | | | | | 겹마다 `r4-js-1`… → 보충 ② → `r4-js-sup`(후) / `r4-base-sup`(③④·보조의 기준) |
 | 3 레이아웃 | 설계 | | | | | | | | |
 | 4 셀렉터 | 설계 | | | | | | | | |

@@ -55,7 +55,29 @@ impl StyledNode {
     pub fn value(&self, name: &str) -> Option<&Value> {
         self.specified_values.get(name)
     }
+
+    /// Computed `visibility` is `hidden` or `collapse` (compat round 4
+    /// step 1a — inherited, so a text leaf answers for itself). The box
+    /// keeps its space; paint, hit testing, links, Tab and the agent's
+    /// observation and actions skip it. `collapse` on table rows/columns is
+    /// approximated as `hidden`.
+    pub fn visibility_hidden(&self) -> bool {
+        matches!(self.value("visibility"), Some(Value::Keyword(k)) if k == "hidden" || k == "collapse")
+    }
+
+    /// Inside an `inert` subtree (HTML §6.3; Blink keeps this as a computed
+    /// style bit too). Painted as usual, but not hit-testable (as if
+    /// `pointer-events: none`), not focusable, and not offered to the agent.
+    pub fn inert(&self) -> bool {
+        self.specified_values.contains_key(INERT_FLAG)
+    }
 }
+
+/// The internal computed-value key behind [`StyledNode::inert`]. Set from
+/// the `inert` attribute and inherited by the style pass itself — never by
+/// a declaration (an author `-internal-inert` is dropped) and not in
+/// `INHERITED_PROPERTIES`, so `all`/`unset` can't clear it.
+const INERT_FLAG: &str = "-internal-inert";
 
 /// User-facing interaction state passed into `style_tree_with_state`. Each field is the
 /// DOM path (sequence of child indices from the root) of the corresponding node, or
@@ -546,6 +568,13 @@ fn style_tree_inner(
     let node_data = document
         .get(node_id)
         .expect("style_tree_inner called with invalid NodeId");
+    // `inert` (step 1a): from the attribute or the parent, nothing else.
+    specified_values.remove(INERT_FLAG);
+    let own_inert = matches!(&node_data.node_type,
+        NodeType::Element(element) if element.attributes.contains_key("inert"));
+    if own_inert || parent_values.is_some_and(|values| values.contains_key(INERT_FLAG)) {
+        specified_values.insert(INERT_FLAG.to_string(), Value::Keyword("inert".into()));
+    }
     // An inline `<svg>` is replaced content (follow-up F1): the engine
     // doesn't render SVG, and its `<title>`/`<text>`/shapes must not lay
     // out as page boxes — layout sizes the `<svg>` box from its attributes.
@@ -596,6 +625,10 @@ pub(super) const INHERITED_PROPERTIES: &[&str] = &[
     // Same for font-weight: `<b>`, `<strong>`, `<th>`, headings are bold in
     // the UA defaults, but the renderer shapes the *text* child.
     "font-weight",
+    // Compat round 4 step 1a: a `visibility: hidden` menu hides its links
+    // and text; a `visible` descendant shows again. (`<col>`'s value never
+    // reaches cells — they aren't its DOM children.)
+    "visibility",
 ];
 
 /// Replace `currentcolor` keywords with the computed `color` (see the call).
@@ -816,6 +849,48 @@ mod tests {
 
     fn rgb(r: u8, g: u8, b: u8) -> Option<Value> {
         Some(Value::Color(Color { r, g, b, a: 255 }))
+    }
+
+    #[test]
+    fn visibility_inherits_and_a_visible_descendant_turns_it_back_on() {
+        // Compat round 4 step 1a: `visibility` is inherited (CSS 2.1
+        // §11.2); a `visible` descendant of a hidden box is shown.
+        let (document, root) = parse_html(
+            r#"<div class="menu"><p>hidden text</p><p class="on">shown <b>bold</b></p></div>"#,
+        );
+        let sheet = parse_css(".menu { visibility: hidden } .on { visibility: visible }");
+        let styled = style::style_tree(&document, root, &[sheet]);
+        assert!(styled.visibility_hidden());
+        let hidden_p = &styled.children[0];
+        assert!(hidden_p.visibility_hidden());
+        assert!(
+            hidden_p.children[0].visibility_hidden(),
+            "the text leaf too"
+        );
+        let shown = &styled.children[1];
+        assert!(!shown.visibility_hidden());
+        assert!(!shown.children[1].children[0].visibility_hidden());
+        // `collapse` hides like `hidden`.
+        let (document, root) = parse_html("<div><p>x</p></div>");
+        let sheet = parse_css("div { visibility: collapse }");
+        let styled = style::style_tree(&document, root, &[sheet]);
+        assert!(styled.children[0].visibility_hidden());
+    }
+
+    #[test]
+    fn inert_flag_follows_the_attribute_down_and_cannot_be_authored() {
+        // `inert` (HTML §6.3) is a computed flag like Blink's
+        // `ComputedStyle::IsInert`: the attribute's subtree, text included.
+        let (document, root) =
+            parse_html(r#"<div><section inert><p>x</p></section><p class="t">y</p></div>"#);
+        let sheet = parse_css(".t { -internal-inert: inert } section { all: initial }");
+        let styled = style::style_tree(&document, root, &[sheet]);
+        assert!(!styled.inert());
+        let section = &styled.children[0];
+        assert!(section.inert(), "`all: initial` doesn't undo the attribute");
+        assert!(section.children[0].inert());
+        assert!(section.children[0].children[0].inert(), "the text leaf too");
+        assert!(!styled.children[1].inert(), "a page can't declare it");
     }
 
     #[test]

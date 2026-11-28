@@ -102,7 +102,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1201 (workspace 합계, 2026-11-28 호환성 4차 0단계 ⑤ G `compat4` 골든·대응 테스트 +2; ③ S 보충 도구 는 1199 — 캐시 키·200 만 저장 +2·N6 필터 +3; P2b 세로 작성자 오프셋 browser-too 는 1194(+1); ② K5 종류별 `Accept` 는 1193(+3); ① P 는 1190 — `mb_agent::reach` +8·P4 판정 +6·캐시 미스 종류·스크립트 카운터·페인터 순서 히트 +3; 3차 끝 5r 재분류·`box-shadow`/`text-shadow: none` 은 1173(+4) — 5단계·3차 완료; 5f 크기 탐색 대리 폭·경계 잎 `%` 폭 은 1169(+3); 5b 그리드 트랙 함수 는 1166(+12); 5a `calc()`·`min/max/clamp`·뷰포트 단위 는 1154(+26); 5m 레거시 `min/max-width`·`box-sizing` 은 1128(+7); 5단계 P probe(`css::value_features`·`StyleReport::reparsed_text`) 는 1121(+2); 4b 상태 의사 클래스 는 1119(+12) — 4단계 완료; 4a `:is()`/`:where()`·의사 요소·결합자 중첩 상한 은 1107(+14); 4단계 P 셀렉터 블로커 probe 는 1093, 3d float shrink-to-fit 은 1092 — 3단계 완료, 3c 는 1089, 3b 는 1087, 3a 는 1081). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1215 (workspace 합계, 2026-11-28 호환성 4차 1단계 1a `visibility`·`inert` +14 — 스타일 2·엔진 4·런타임 2·에이전트 6; 0단계 끝은 1201 — ⑤ G `compat4` 골든·대응 테스트 +2; ③ S 보충 도구 는 1199 — 캐시 키·200 만 저장 +2·N6 필터 +3; P2b 세로 작성자 오프셋 browser-too 는 1194(+1); ② K5 종류별 `Accept` 는 1193(+3); ① P 는 1190 — `mb_agent::reach` +8·P4 판정 +6·캐시 미스 종류·스크립트 카운터·페인터 순서 히트 +3; 3차 끝 5r 재분류·`box-shadow`/`text-shadow: none` 은 1173(+4) — 5단계·3차 완료; 5f 크기 탐색 대리 폭·경계 잎 `%` 폭 은 1169(+3); 5b 그리드 트랙 함수 는 1166(+12); 5a `calc()`·`min/max/clamp`·뷰포트 단위 는 1154(+26); 5m 레거시 `min/max-width`·`box-sizing` 은 1128(+7); 5단계 P probe(`css::value_features`·`StyleReport::reparsed_text`) 는 1121(+2); 4b 상태 의사 클래스 는 1119(+12) — 4단계 완료; 4a `:is()`/`:where()`·의사 요소·결합자 중첩 상한 은 1107(+14); 4단계 P 셀렉터 블로커 probe 는 1093, 3d float shrink-to-fit 은 1092 — 3단계 완료, 3c 는 1089, 3b 는 1087, 3a 는 1081). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -264,6 +264,9 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
 ### 셀렉터 결합자 중첩 상한 (호환성 3차 4a)
 - `:is()`/`:where()`/`:not()` 인자 안의 결합자가 바깥 결합자 안에 겹치면 매칭이 조상(형제) 걷기를 곱한다 — DOM 깊이^단계(200 깊이 사슬에서 4단계 20초). `css::MAX_COMBINATOR_NESTING` 2(`:is(.a .b) .c` 까지)를 넘는 셀렉터는 무효 = 규칙 통째로 버림(`parse_selector` 도 에러). 2 는 **사용자 결정**(코퍼스 실사이트 17규칙 포기) — 올리려면 먼저 `:is` 매칭 메모(후속). 상한은 파싱 **뒤** 검사라 관대한 목록 안이어도 인자 하나만 빼지 못한다(병적 입력만 해당). 블록 중첩은 cssparser 가 75 로 막는다. 규칙 색인은 의사 요소가 있는 셀렉터를 아예 버킷에 넣지 않는다(절대 안 맞음 — 평평한 색인과 결과 동일). `@supports selector()` 는 관대하지 않다(`Selector::has_forgiven_argument`). CSS 이미지 미리 받기(`resource::stylesheet_image_urls`)는 의사 요소로만 끝나는 규칙을 건너뛴다(`Selector::can_match_elements` — 그려지지 않으니).
+
+### 숨김은 계산값 두 개 (호환성 4차 1a)
+- `visibility: hidden/collapse` 는 상속되는 계산값이고(`StyledNode::visibility_hidden()` — 글자 잎도 자기 값, `visible` 자손은 다시 보임), `inert` 는 스타일 패스가 속성에서 세우는 내부 상속 플래그다(`StyledNode::inert()`, 키 `-internal-inert` — 선언으로는 못 세움, `all` 이 못 지움). 페인트(`build_display_list_with_hidden` 이 숨은 명령을 따로 모아 문서 높이만 잼)·`<img>`·`LinkTarget`·히트 테스트(`view::hit_testable` — 숨은 상자는 자기 기록만, inert 는 하위 트리 전체)·Tab(`collect_box_node_ids`)·관찰(`DomIndex::is_invisible/is_inert`)·에이전트 거절(`reach::concealment`)이 모두 이 둘만 본다. 새 소비자도 이 두 메서드를 쓸 것 — DOM 속성이나 선언을 따로 다시 읽지 말 것. `visibility` 는 레이아웃을 바꾸지 않는다(공간·`document_height` 그대로).
 
 ### 둥근 테두리 (호환성 3차 후속 F3)
 - 모서리 반지름이 있는 상자의 테두리는 `DisplayCommand::RoundedBorder` 하나(고리 — 바깥 둥근 사각형 − 안쪽, 변별 색은 대각선 사다리꼴 마스크), 없으면 네 `SolidRect` 띠. 새 `DisplayCommand` 를 더하면 `display_list::translate`·`bake_axis_aligned`·`scale_display_list`·`view::command_bottom`/`projected_command_bottom`·래스터(`rasterize_command`·`command_bounds`)·퍼저 `check_commands` 를 모두 고칠 것(일부는 `_` 갈래가 없어 컴파일러가 알려 준다) — 그리고 `_ =>` 와일드카드로 평평하게 훑는 곳(mb-mcp `overlay::text_obstacles` 같은)은 컴파일러가 못 잡으니 grep.

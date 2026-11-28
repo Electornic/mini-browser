@@ -157,6 +157,7 @@ fn route(
         ),
         ("GET", "/long") => ("200 OK", String::new(), long_page()),
         ("GET", "/clipped") => ("200 OK", String::new(), CLIPPED_PAGE.into()),
+        ("GET", "/concealed") => ("200 OK", String::new(), CONCEALED_PAGE.into()),
         // A real site over a real network: the document (plus its
         // subresources) takes longer than settle's frame budget lasts.
         ("GET", "/slow") => {
@@ -287,6 +288,30 @@ show();
 
 /// Serves `examples/agent-demo/<name>` as is — the demo pages double as
 /// capstone fixtures.
+/// `visibility` and `inert` (compat round 4 step 1a, D5 + N4): a menu the
+/// "Menu" button closes (`visibility: hidden`) with a `visible` link inside,
+/// hidden text named by `aria-labelledby`, an `inert` panel and one "Lock"
+/// makes inert, and the two cases N4 keeps (`opacity: 0`, `aria-hidden`).
+const CONCEALED_PAGE: &str = r#"<html><head><title>Concealed</title><style>
+body { margin: 0; }
+.menu { visibility: hidden; }
+.menu.open { visibility: visible; }
+.keep { visibility: visible; }
+.ghost { opacity: 0; }
+</style></head><body>
+<button id="toggle" onclick="var m = document.getElementById('m'); m.className = m.className == 'menu' ? 'menu open' : 'menu';">Menu</button>
+<div id="m" class="menu open"><a href="/welcome">Docs</a> <input id="q" aria-label="Find"> <span class="keep"><a href="/welcome">Always</a></span></div>
+<p id="hl" style="visibility: hidden">Secret label</p>
+<button aria-labelledby="hl">Named</button>
+<button>Save <span style="visibility: hidden">draft</span></button>
+<div inert><p>Draft notes</p><button>Download draft</button> <a href="/welcome">Inert link</a></div>
+<div id="form"><button onclick="document.getElementById('out').textContent = 'go pressed'">Go</button></div>
+<button onclick="document.getElementById('form').setAttribute('inert', '')">Lock</button>
+<button class="ghost" onclick="document.getElementById('out').textContent = 'ghost pressed'">Send feedback</button>
+<div aria-hidden="true"><a href="/welcome">Background link</a></div>
+<p id="out">nothing pressed</p>
+</body></html>"#;
+
 fn demo_file(name: &str) -> (&'static str, String, String) {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/agent-demo/");
     match std::fs::read_to_string(format!("{dir}{name}")) {
@@ -608,12 +633,11 @@ fn compat4_menu_opens_through_its_script_and_leads_to_docs() {
     // round4.md appendix E). The menu is closed by `visibility: hidden` and
     // opened by a script needing getElementsByTagName + matchMedia.
     //
-    // Step 0 — this test pins TODAY's wrong state: the script dies on its
-    // first line, nothing opens the menu, yet "Docs" is observed and
-    // clickable from the start (visibility is ignored), so the task
-    // "succeeds" without the menu. Step 1 flips it (Docs not observed,
-    // before or after "Menu"); step 2 makes it the Chrome path (Menu →
-    // Docs appears → navigate). Rewrite the assertions at each step.
+    // Step 1 (1a) — `visibility` now hides the closed menu, but the script
+    // still dies on its first line, so "Menu" opens nothing: "Docs" is
+    // observed neither on load nor after the click (the eval should fail
+    // now — that is the expected step-1 result). Step 2 makes it the
+    // Chrome path (Menu → Docs appears → navigate): rewrite then.
     let server = Server::start();
     let mut b = browser(ApproveMode::Deny);
     let page = b.navigate(&server.url("/demo/compat4.html")).unwrap();
@@ -621,11 +645,11 @@ fn compat4_menu_opens_through_its_script_and_leads_to_docs() {
         page.console
             .iter()
             .any(|m| m.text.contains("near \"document.getElementsByTagName\"")),
-        "the menu script dies on its first line today: {:?}",
+        "the menu script still dies on its first line: {:?}",
         page.console
     );
-    // Wrong today: visible before the menu is opened.
-    let docs_on_load = find(&page, Role::Link, "Docs");
+    let has_docs = |o: &Observation| o.elements.iter().any(|e| e.name == "Docs");
+    assert!(!has_docs(&page), "closed menu: {}", page.to_text());
     let menu = find(&page, Role::Button, "Menu");
     let after_menu = b.click(menu).unwrap();
     assert!(
@@ -633,16 +657,149 @@ fn compat4_menu_opens_through_its_script_and_leads_to_docs() {
         "the dead script opened nothing: {}",
         after_menu.to_text()
     );
-    assert_eq!(find(&after_menu, Role::Link, "Docs"), docs_on_load);
-    let docs_page = b.click(docs_on_load).unwrap();
+    assert!(!has_docs(&after_menu), "{}", after_menu.to_text());
+    assert_eq!(path_of(&after_menu), "/demo/compat4.html");
+}
+
+fn names(observation: &Observation) -> Vec<String> {
+    observation
+        .elements
+        .iter()
+        .map(|e| e.name.clone())
+        .collect()
+}
+
+#[test]
+fn visibility_hidden_is_not_painted_hit_linked_or_observed() {
+    // D5: a closed (`visibility: hidden`) menu leaves the observation —
+    // elements and text — but its `visible` child stays; an id observed
+    // while it was open is refused, not clicked through to what's under it.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let open = b.navigate(&server.url("/concealed")).unwrap();
+    let docs = find(&open, Role::Link, "Docs");
+    let field = find(&open, Role::Textbox, "Find");
+    assert!(open.text.iter().any(|t| t.contains("Docs")));
+    let closed = b.click(find(&open, Role::Button, "Menu")).unwrap();
+    let listed = names(&closed);
+    assert!(!listed.contains(&"Docs".to_string()), "{listed:?}");
+    assert!(!listed.contains(&"Find".to_string()), "{listed:?}");
     assert!(
-        docs_page
-            .url
-            .as_deref()
-            .is_some_and(|u| u.ends_with("/demo/compat4-docs.html")),
-        "{}",
-        docs_page.to_text()
+        listed.contains(&"Always".to_string()),
+        "visible child: {listed:?}"
     );
+    assert!(
+        !closed.text.iter().any(|t| t.contains("Docs")),
+        "{:?}",
+        closed.text
+    );
+    assert!(
+        !closed.text.iter().any(|t| t.contains("Secret label")),
+        "hidden paragraph: {:?}",
+        closed.text
+    );
+    for err in [
+        b.click(docs).unwrap_err(),
+        b.type_text(field, "x", false, false).unwrap_err(),
+    ] {
+        assert_eq!(err.code(), "not_interactable");
+        assert!(err.message().contains("it is hidden"), "{}", err.message());
+        assert!(err.hint().contains("open"), "{}", err.hint());
+    }
+    let after = b.observe(&ObserveOptions::default());
+    assert_eq!(path_of(&after), "/concealed", "nothing navigated");
+}
+
+#[test]
+fn hidden_element_is_skipped_by_tab_and_refuses_type() {
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let open = b.navigate(&server.url("/concealed")).unwrap();
+    let menu = find(&open, Role::Button, "Menu");
+    let docs = find(&open, Role::Link, "Docs");
+    let field = find(&open, Role::Textbox, "Find");
+    b.press("Tab").unwrap();
+    assert_eq!(b.state().focused_element(), Some(menu));
+    b.press("Tab").unwrap();
+    assert_eq!(b.state().focused_element(), Some(docs), "open: a Tab stop");
+    b.click(menu).unwrap();
+    b.press("Tab").unwrap();
+    let focused = b.state().focused_element();
+    assert!(
+        focused != Some(docs) && focused != Some(field),
+        "closed: Tab skips the menu ({focused:?})"
+    );
+    // Refused before any click: not "clicking it did not give it focus".
+    let err = b.type_text(field, "x", false, false).unwrap_err();
+    assert_eq!(err.code(), "not_interactable");
+    assert!(err.message().contains("it is hidden"), "{}", err.message());
+}
+
+#[test]
+fn aria_labelledby_reads_hidden_text() {
+    // accname 1.2 §2A/2B: hidden text doesn't name its ancestor, but a
+    // hidden element `aria-labelledby` points at directly still does.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/concealed")).unwrap();
+    find(&page, Role::Button, "Secret label");
+    find(&page, Role::Button, "Save");
+}
+
+#[test]
+fn inert_subtree_is_not_observed_hit_or_navigated() {
+    // N4: inert controls leave the element list (their text stays — it is
+    // painted and Chrome's a11y tree keeps it), and an id observed before
+    // the page made it inert is refused.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/concealed")).unwrap();
+    let listed = names(&page);
+    assert!(
+        !listed.contains(&"Download draft".to_string()),
+        "{listed:?}"
+    );
+    assert!(!listed.contains(&"Inert link".to_string()), "{listed:?}");
+    assert!(
+        page.text.iter().any(|t| t.contains("Draft notes")),
+        "{:?}",
+        page.text
+    );
+    let go = find(&page, Role::Button, "Go");
+    let locked = b.click(find(&page, Role::Button, "Lock")).unwrap();
+    assert!(!names(&locked).contains(&"Go".to_string()));
+    let err = b.click(go).unwrap_err();
+    assert_eq!(err.code(), "not_interactable");
+    assert!(err.message().contains("it is inert"), "{}", err.message());
+    let after = b.observe(&ObserveOptions::default());
+    assert!(
+        after.to_text().contains("nothing pressed"),
+        "{}",
+        after.to_text()
+    );
+}
+
+#[test]
+fn opacity_zero_button_stays_observed_and_clickable() {
+    // N4: a transparent button is still there for Chrome — and pressed.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/concealed")).unwrap();
+    let after = b.click(find(&page, Role::Button, "Send feedback")).unwrap();
+    assert!(
+        after.to_text().contains("ghost pressed"),
+        "{}",
+        after.to_text()
+    );
+}
+
+#[test]
+fn aria_hidden_is_ignored_by_the_observation() {
+    // N4: round 4 keeps `aria-hidden` content (revisit in round 5).
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/concealed")).unwrap();
+    find(&page, Role::Link, "Background link");
 }
 
 #[test]

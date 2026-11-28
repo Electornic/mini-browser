@@ -293,7 +293,9 @@ pub fn observe(input: &ObserveInput<'_>, options: &ObserveOptions) -> Observatio
         let Some(rect) = index.rect(id).filter(|r| r.width > 0.0 && r.height > 0.0) else {
             continue;
         };
-        if is_inside_hidden_or_inert(&index, id) {
+        // D5 / N4 (compat round 4 step 1a): nothing of a `visibility:
+        // hidden` element shows, and an inert one can't be acted on.
+        if is_inside_hidden_or_inert(&index, id) || index.is_invisible(id) || index.is_inert(id) {
             continue;
         }
         total += 1;
@@ -687,7 +689,9 @@ fn walk_text(
     };
     match &node.node_type {
         NodeType::Text(text) => {
-            if index.rect(id).is_some_and(in_scope) {
+            // Hidden text isn't read (D5); inert text is — it is painted,
+            // and Chrome's accessibility tree keeps it (N4).
+            if index.rect(id).is_some_and(in_scope) && !index.is_invisible(id) {
                 push_text_piece(&mut out.current, text);
             }
         }
