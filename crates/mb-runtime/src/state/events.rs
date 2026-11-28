@@ -112,7 +112,7 @@ impl BrowserState {
                     None => false,
                 };
                 if !prevented {
-                    self.set_focus_path(None);
+                    self.set_focus_path(None, super::FocusCause::Keyboard);
                 }
             }
         }

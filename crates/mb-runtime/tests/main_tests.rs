@@ -2183,6 +2183,195 @@ mod tests {
         assert_eq!(checked("other"), "true");
     }
 
+    // ---- compat round 3 step 4b: state pseudo-classes in the frame ----
+
+    /// The current frame's computed `prop` of the element with `id`
+    /// (`None` = no such styled element, or the property is unset).
+    fn frame_value(browser: &BrowserState, id: &str, prop: &str) -> Option<css::Value> {
+        fn find<'a>(node: &'a style::StyledNode, id: &str) -> Option<&'a style::StyledNode> {
+            if let mb_runtime::dom::NodeType::Element(e) = &node.node_type
+                && e.attributes.get("id").is_some_and(|v| v == id)
+            {
+                return Some(node);
+            }
+            node.children.iter().find_map(|c| find(c, id))
+        }
+        fn walk<'a>(b: &'a layout::LayoutBox, id: &str) -> Option<&'a style::StyledNode> {
+            let own = match &b.box_type {
+                layout::BoxType::BlockNode(n)
+                | layout::BoxType::FlexNode(n)
+                | layout::BoxType::GridNode(n)
+                | layout::BoxType::TableNode(n) => find(n, id),
+                layout::BoxType::AnonymousBlock => None,
+            };
+            own.or_else(|| b.children.iter().find_map(|c| walk(c, id)))
+        }
+        let view = browser.current_view()?;
+        walk(&view.layout_root, id).and_then(|n| n.value(prop).cloned())
+    }
+
+    fn frame(browser: &mut BrowserState) {
+        let _ = browser.display_list(800, 600, &input::WindowInput::default());
+    }
+
+    fn press_tab(browser: &mut BrowserState) {
+        let _ = browser.display_list(
+            800,
+            600,
+            &input::WindowInput {
+                tab_pressed: true,
+                ..input::WindowInput::default()
+            },
+        );
+        frame(browser);
+    }
+
+    const RING: css::Value = css::Value::Color(css::Color {
+        r: 0,
+        g: 0,
+        b: 1,
+        a: 255,
+    });
+
+    #[test]
+    fn focus_visible_true_for_text_input_click() {
+        let mut browser = browser_with_html_and_css(
+            r#"<div><input id="i"></div>"#,
+            "#i { display: block; margin: 0; width: 100px; height: 20px } #i:focus-visible { color: #000001 }",
+        );
+        click_at(&mut browser, 5.0, 5.0);
+        frame(&mut browser);
+        assert_eq!(frame_value(&browser, "i", "color"), Some(RING));
+    }
+
+    #[test]
+    fn focus_visible_false_for_button_click() {
+        // GitHub-style `:focus:not(:focus-visible) { outline: none }`: a
+        // clicked button is focused but shows no ring, as in Chrome.
+        let mut browser = browser_with_html_and_css(
+            r#"<div><button id="b">Go</button></div>"#,
+            "#b { display: block; margin: 0; width: 100px; height: 20px }
+             #b:focus { background-color: #000002 } #b:focus-visible { color: #000001 }",
+        );
+        click_at(&mut browser, 5.0, 5.0);
+        frame(&mut browser);
+        assert_eq!(
+            frame_value(&browser, "b", "background-color"),
+            Some(css::Value::Color(css::Color {
+                r: 0,
+                g: 0,
+                b: 2,
+                a: 255
+            })),
+            "focused"
+        );
+        assert_ne!(frame_value(&browser, "b", "color"), Some(RING));
+    }
+
+    #[test]
+    fn focus_visible_true_after_tab() {
+        let mut browser = browser_with_html_and_css(
+            r#"<div><button id="a">A</button><button id="b">B</button></div>"#,
+            "button { display: block; margin: 0; width: 100px; height: 20px }
+             button:focus-visible { color: #000001 }",
+        );
+        frame(&mut browser);
+        press_tab(&mut browser);
+        assert_eq!(frame_value(&browser, "a", "color"), Some(RING));
+        // A click afterwards moves focus by pointer: no ring on `b`, and
+        // `a` lost focus.
+        click_at(&mut browser, 5.0, 25.0);
+        frame(&mut browser);
+        assert_ne!(frame_value(&browser, "b", "color"), Some(RING));
+        assert_ne!(frame_value(&browser, "a", "color"), Some(RING));
+        // Tab again: keyboard again.
+        press_tab(&mut browser);
+        assert_eq!(frame_value(&browser, "a", "color"), Some(RING));
+    }
+
+    #[test]
+    fn focus_visible_restyles_when_only_the_cause_changes() {
+        // One focusable: click it (pointer, no ring), then Tab wraps onto
+        // the same element — same focus path, so the view cache must key
+        // on the cause too.
+        let mut browser = browser_with_html_and_css(
+            r#"<div><button id="b">B</button></div>"#,
+            "#b { display: block; margin: 0; width: 100px; height: 20px }
+             #b:focus-visible { color: #000001 }",
+        );
+        // The mouse stays over the button throughout, so nothing but the
+        // focus cause differs between frames.
+        let still = Some((5.0, CHROME_HEIGHT + 5.0));
+        click_at(&mut browser, 5.0, 5.0);
+        let rest = input::WindowInput {
+            mouse_position: still,
+            ..input::WindowInput::default()
+        };
+        let _ = browser.display_list(800, 600, &rest);
+        assert_ne!(frame_value(&browser, "b", "color"), Some(RING));
+        let _ = browser.display_list(
+            800,
+            600,
+            &input::WindowInput {
+                mouse_position: still,
+                tab_pressed: true,
+                ..input::WindowInput::default()
+            },
+        );
+        let _ = browser.display_list(800, 600, &rest);
+        assert_eq!(frame_value(&browser, "b", "color"), Some(RING));
+    }
+
+    #[test]
+    fn radio_click_unchecks_group() {
+        // `selecting_a_radio_clears_the_rest_of_its_group` pins the
+        // attributes; this pins the restyle that follows.
+        let mut browser = browser_with_html_and_css(
+            r#"<div><input id="a" type="radio" name="p" checked><input id="b" type="radio" name="p"></div>"#,
+            "input { display: block; margin: 0; } input:checked { color: #000001 }",
+        );
+        frame(&mut browser);
+        assert_eq!(frame_value(&browser, "a", "color"), Some(RING));
+        click_at(&mut browser, 5.0, 18.0);
+        frame(&mut browser);
+        assert_eq!(frame_value(&browser, "b", "color"), Some(RING));
+        assert_ne!(frame_value(&browser, "a", "color"), Some(RING));
+    }
+
+    #[test]
+    fn label_click_toggles_checked_style() {
+        // The wiki dropdown in miniature (docs/compat-round3.md step 4):
+        // the agent clicks the label; the label activates the hidden
+        // checkbox; the attribute changes; the next frame restyles
+        // `:checked ~ .m` and the menu shows.
+        let mut browser = browser_with_html_and_css(
+            r#"<div><input type="checkbox" id="t"><label id="l" for="t">Menu</label><div class="m" id="m">Docs</div></div>"#,
+            "#t { position: absolute; left: -9999px } #l { display: block; width: 200px; height: 30px; margin: 0 }
+             .m { display: none } #t:checked ~ .m { display: block }",
+        );
+        let none = css::Value::Keyword("none".into());
+        frame(&mut browser);
+        assert_eq!(
+            frame_value(&browser, "m", "display"),
+            Some(none.clone()),
+            "collapsed"
+        );
+        click_at(&mut browser, 20.0, 10.0);
+        frame(&mut browser);
+        assert_eq!(
+            frame_value(&browser, "m", "display"),
+            Some(css::Value::Keyword("block".into())),
+            "expanded"
+        );
+        click_at(&mut browser, 20.0, 10.0);
+        frame(&mut browser);
+        assert_eq!(
+            frame_value(&browser, "m", "display"),
+            Some(none),
+            "collapsed again"
+        );
+    }
+
     #[test]
     fn prevent_default_on_click_keeps_checkbox_unchanged() {
         let mut browser = browser_with_html_and_css(

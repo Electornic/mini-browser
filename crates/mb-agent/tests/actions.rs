@@ -570,15 +570,19 @@ fn top_level_script_errors_reach_only_the_page_console() {
 }
 
 #[test]
-fn compat3_menu_label_toggles_but_the_checked_menu_stays_closed() {
-    // Premise of eval/scenarios/compat3-menu.json: the agent CAN tick the
-    // hidden checkbox through its label — what's missing is CSS
-    // (`:checked ~ .menu` is dropped until round 3 step 4). When step 4
-    // lands this flips: "Docs" must then appear after the click.
+fn compat3_menu_opens_through_its_label_and_leads_to_docs() {
+    // eval/scenarios/compat3-menu.json, deterministically: the menu is a
+    // checkbox hack (`.menu-box:checked ~ .menu`, hidden checkbox moved
+    // off-screen). Before round 3 step 4 the `:checked` rule was dropped
+    // and the menu never opened; now the agent's click on "Menu" (the
+    // label) ticks the box, the next frame restyles, and "Docs" appears.
     let server = Server::start();
     let mut b = browser(ApproveMode::Deny);
     let page = b.navigate(&server.url("/demo/compat3.html")).unwrap();
-    assert!(!page.elements.iter().any(|e| e.name == "Docs"));
+    assert!(
+        !page.elements.iter().any(|e| e.name == "Docs"),
+        "collapsed at first"
+    );
     let menu = find(&page, Role::Checkbox, "Menu");
     let after = b.click(menu).unwrap();
     let text = after.to_text();
@@ -586,9 +590,15 @@ fn compat3_menu_label_toggles_but_the_checked_menu_stays_closed() {
         text.contains("checkbox  name=\"Menu\" checked=true"),
         "{text}"
     );
+    let docs = find(&after, Role::Link, "Docs");
+    let docs_page = b.click(docs).unwrap();
     assert!(
-        !after.elements.iter().any(|e| e.name == "Docs"),
-        "step 4 landed? update this tracker: {text}"
+        docs_page
+            .url
+            .as_deref()
+            .is_some_and(|u| u.ends_with("/demo/compat3-docs.html")),
+        "{}",
+        docs_page.to_text()
     );
 }
 

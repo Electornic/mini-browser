@@ -130,6 +130,11 @@ pub struct BrowserState {
     // spec, programmatic value assignments don't fire input/change.
     pub focused_input_dirty: bool,
 
+    // Whether the last focus move came from the keyboard (Tab) rather than
+    // the pointer — Chrome's `:focus-visible` heuristic (compat round 3
+    // step 4b). Deterministic: set only by `set_focus_path`'s caller.
+    pub focus_from_keyboard: bool,
+
     // JavaScript runtime. Globals (var bindings, declared functions) survive across
     // `<script>` tags within the same document but reset when the user navigates,
     // because `install_document` allocates a fresh runtime for the new page.
@@ -272,8 +277,17 @@ struct CachedView {
     page_height: usize,
     hover_path: Option<Vec<usize>>,
     focus_path: Option<Vec<usize>>,
+    focus_from_keyboard: bool,
     active: bool,
     view: Rc<DocumentView>,
+}
+
+/// What moved page focus — `:focus-visible` matches after a keyboard move
+/// (text entry matches either way).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FocusCause {
+    Pointer,
+    Keyboard,
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +359,7 @@ impl BrowserState {
             hovered_dom_path: None,
             focused_dom_path: None,
             focused_input_dirty: false,
+            focus_from_keyboard: false,
             js,
             external_scripts,
             cached_view: None,
@@ -663,7 +678,7 @@ impl BrowserState {
         };
         let path = dom_path_for_node(&self.parsed_document.borrow(), next);
         if path.is_some() {
-            self.set_focus_path(path);
+            self.set_focus_path(path, FocusCause::Keyboard);
         }
     }
 
@@ -881,12 +896,15 @@ impl BrowserState {
             Some((_, mouse_y)) if mouse_y >= CHROME_HEIGHT => self.hovered_dom_path.clone(),
             _ => None,
         };
-        self.set_focus_path(new_focus);
+        self.set_focus_path(new_focus, FocusCause::Pointer);
     }
 
     // Move page focus to `new_focus` (a DOM path), firing change/blur on
     // the old element and focus on the new one. Shared by click and Tab.
-    pub(super) fn set_focus_path(&mut self, new_focus: Option<Vec<usize>>) {
+    // `cause` is recorded even when the target doesn't change: Tab onto
+    // the element a click already focused shows the ring (Chrome does too).
+    pub(super) fn set_focus_path(&mut self, new_focus: Option<Vec<usize>>, cause: FocusCause) {
+        self.focus_from_keyboard = cause == FocusCause::Keyboard;
         if new_focus == self.focused_dom_path {
             return;
         }
@@ -1006,10 +1024,12 @@ impl BrowserState {
     //     chrome) reaches style only through `@media`, so the key holds the
     //     block results (`media_results`) and `vh_height` instead of the
     //     height — see `CachedView`.
-    //   - `hover_path` / `focus_path` / `active` snapshot the interaction
-    //     state that style_tree_with_state cascades into the styled tree;
-    //     a hover transition or a press flips one of them and forces a
-    //     rebuild on that frame only.
+    //   - `hover_path` / `focus_path` / `focus_from_keyboard` / `active`
+    //     snapshot the interaction state that style_tree_with_state
+    //     cascades into the styled tree; a hover transition, a press or a
+    //     focus move (or just its cause — `:focus-visible`) flips one of
+    //     them and forces a rebuild on that frame only. Checked / disabled
+    //     state is attributes, so a toggle bumps `revision` instead.
     //   - The external sheet (`parsed_stylesheets[0]`), `current_url`,
     //     `images`, and `font_data` all change exclusively at install time,
     //     so `cached_view = None` in `install_document` covers them
@@ -1038,6 +1058,7 @@ impl BrowserState {
             && cached.active == active
             && cached.hover_path == self.hovered_dom_path
             && cached.focus_path == self.focused_dom_path
+            && cached.focus_from_keyboard == self.focus_from_keyboard
             && cached.vh_height == vh_height
             && (!cached.view.reads_viewport_height || cached.page_height == page_height)
             // Last: the only part that costs something (one comparison per
@@ -1062,6 +1083,7 @@ impl BrowserState {
             } else {
                 None
             },
+            focus_visible: self.focus_from_keyboard,
         };
         // Borrow scope keeps the document Ref out of the way of the
         // `set_status` mutation below in the error branch, and out of the
@@ -1109,6 +1131,7 @@ impl BrowserState {
                     page_height,
                     hover_path: self.hovered_dom_path.clone(),
                     focus_path: self.focused_dom_path.clone(),
+                    focus_from_keyboard: self.focus_from_keyboard,
                     active,
                     view: Rc::clone(&shared),
                 });

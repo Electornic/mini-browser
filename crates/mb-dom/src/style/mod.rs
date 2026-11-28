@@ -64,6 +64,9 @@ pub struct InteractionState<'a> {
     pub hover: Option<&'a [usize]>,
     pub focus: Option<&'a [usize]>,
     pub active: Option<&'a [usize]>,
+    /// The focus got there by keyboard (`:focus-visible`, compat round 3
+    /// step 4b — `BrowserState` records the cause of each focus move).
+    pub focus_visible: bool,
 }
 
 pub fn style_tree(document: &Document, root: NodeId, stylesheets: &[Stylesheet]) -> StyledNode {
@@ -209,6 +212,7 @@ fn style_pass(
         active: state
             .active
             .and_then(|p| resolve_relative_path(document, root, p)),
+        focus_visible: state.focus_visible,
     };
     // The root font-size feeds rem resolution for every descendant. Compute it up front
     // by treating the root as if it lived inside the user-agent default font-size.
@@ -1028,6 +1032,189 @@ mod tests {
             ::-webkit-scrollbar-thumb:hover, .i { opacity: 0.5 } :where(*) { line-height: 2 }
             :is(span) { font-size: 11px } :is(.a .t, #nope) { border-top-width: 2px }";
         assert_index_matches_flat(html, css);
+    }
+
+    // ---- compat round 3 step 4b: state pseudo-classes ----
+
+    /// For every element child of the root, in order: 1 if its `color` is
+    /// `#000001`, 2 if `#000002`, else 0 (form controls have a UA colour).
+    fn child_marks(html: &str, css: &str, state: style::InteractionState<'_>) -> Vec<u8> {
+        let (document, root) = parse_html(html);
+        let styled = style::style_tree_with_state(
+            &document,
+            root,
+            &[parse_css(css)],
+            state,
+            &crate::css::media::MediaContext::default(),
+        );
+        styled
+            .children
+            .iter()
+            .filter(|c| matches!(c.node_type, crate::dom::NodeType::Element(_)))
+            .map(|c| mark(c.value("color").cloned()))
+            .collect()
+    }
+
+    fn mark(value: Option<Value>) -> u8 {
+        if value == rgb(0, 0, 1) {
+            1
+        } else if value == rgb(0, 0, 2) {
+            2
+        } else {
+            0
+        }
+    }
+
+    /// `mark` of the `color` of every element with an `id`, by id.
+    fn marks_by_id(html: &str, css: &str) -> std::collections::BTreeMap<String, u8> {
+        let (document, root) = parse_html(html);
+        let styled = style::style_tree(&document, root, &[parse_css(css)]);
+        fn walk(node: &style::StyledNode, out: &mut std::collections::BTreeMap<String, u8>) {
+            if let crate::dom::NodeType::Element(e) = &node.node_type
+                && let Some(id) = e.attributes.get("id")
+            {
+                out.insert(id.clone(), mark(node.value("color").cloned()));
+            }
+            node.children.iter().for_each(|c| walk(c, out));
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(&styled, &mut out);
+        out
+    }
+
+    #[test]
+    fn checked_matches_checkbox_attribute() {
+        let marks = child_marks(
+            r#"<div><input type="checkbox" checked><input type="checkbox"><input type="radio" checked><input type="text" checked><p checked></p><input type="CHECKBOX" checked></div>"#,
+            ":checked { color: #000001 }",
+            Default::default(),
+        );
+        assert_eq!(marks, [1, 0, 1, 0, 0, 1]);
+        // The checkbox hack: `:checked ~ .menu`.
+        let marks = child_marks(
+            r#"<div><input type="checkbox" id="t" checked><label for="t">Menu</label><ul class="menu"></ul></div>"#,
+            ".menu { color: #000002 } #t:checked ~ .menu { color: #000001 }",
+            Default::default(),
+        );
+        assert_eq!(marks[2], 1);
+    }
+
+    #[test]
+    fn select_without_selected_checks_first_option() {
+        let css = "option:checked { color: #000001 }";
+        let marks = |html: &str| -> Vec<u8> { marks_by_id(html, css).into_values().collect() };
+        // No `selected`: the first option is the selected one.
+        assert_eq!(
+            marks(
+                r#"<div><select><option id="a">a</option><option id="b">b</option></select></div>"#
+            ),
+            [1, 0]
+        );
+        // Inside an optgroup too.
+        assert_eq!(
+            marks(
+                r#"<div><select><optgroup><option id="a">a</option></optgroup><option id="b">b</option></select></div>"#
+            ),
+            [1, 0]
+        );
+        // `selected` wins.
+        assert_eq!(
+            marks(
+                r#"<div><select><option id="a">a</option><option id="b" selected>b</option></select></div>"#
+            ),
+            [0, 1]
+        );
+        // A multi-select has no default selection.
+        assert_eq!(
+            marks(
+                r#"<div><select multiple><option id="a">a</option><option id="b">b</option></select></div>"#
+            ),
+            [0, 0]
+        );
+    }
+
+    #[test]
+    fn disabled_and_enabled_on_controls() {
+        let marks = child_marks(
+            r##"<div><button disabled></button><button></button><input disabled><textarea></textarea><select disabled></select><p disabled></p><a href="#"></a><fieldset disabled></fieldset></div>"##,
+            ":disabled { color: #000001 } :enabled { color: #000002 }",
+            Default::default(),
+        );
+        // `<p>` and `<a>` are not form controls: neither.
+        assert_eq!(marks, [1, 2, 1, 2, 1, 0, 0, 1]);
+    }
+
+    #[test]
+    fn fieldset_disabled_disables_descendants() {
+        let marks = marks_by_id(
+            r#"<div><fieldset disabled><p><input id="a"></p><button id="b"></button><fieldset><select id="c"></select></fieldset></fieldset><input id="d"></div>"#,
+            ":disabled { color: #000001 } :enabled { color: #000002 }",
+        );
+        assert_eq!(marks["a"], 1);
+        assert_eq!(marks["b"], 1);
+        assert_eq!(marks["c"], 1, "nested fieldset inherits");
+        assert_eq!(marks["d"], 2, "outside the fieldset");
+    }
+
+    #[test]
+    fn focus_within_matches_ancestors() {
+        // Focus the link at [1, 0]: its section and the root div have it
+        // within; the sibling paragraph doesn't. (`background-color`:
+        // not inherited.)
+        let html = r##"<div class="r"><p class="s">x</p><section class="t"><a href="#">l</a></section></div>"##;
+        let css = ":focus-within { background-color: #000001 }";
+        let bg = |state: style::InteractionState<'_>| {
+            let (document, root) = parse_html(html);
+            let styled = style::style_tree_with_state(
+                &document,
+                root,
+                &[parse_css(css)],
+                state,
+                &crate::css::media::MediaContext::default(),
+            );
+            let of = |n: &style::StyledNode| mark(n.value("background-color").cloned());
+            [
+                of(&styled),
+                of(&styled.children[0]),
+                of(&styled.children[1]),
+                of(&styled.children[1].children[0]),
+            ]
+        };
+        let focused = bg(style::InteractionState {
+            focus: Some(&[1, 0]),
+            ..Default::default()
+        });
+        assert_eq!(focused, [1, 0, 1, 1], "root, p, section, the focused link");
+        assert_eq!(bg(Default::default()), [0, 0, 0, 0], "nothing focused");
+    }
+
+    #[test]
+    fn focus_visible_follows_the_keyboard_flag_except_for_text_entry() {
+        let html = r#"<div><button>b</button><input><input type="checkbox"><textarea></textarea><div contenteditable></div><div contenteditable="false"></div></div>"#;
+        let css = ":focus-visible { color: #000001 }";
+        let marks = |index: usize, keyboard: bool| {
+            let path = [index];
+            child_marks(
+                html,
+                css,
+                style::InteractionState {
+                    focus: Some(&path),
+                    focus_visible: keyboard,
+                    ..Default::default()
+                },
+            )
+        };
+        // Focus moved by the pointer: only text entry shows a ring.
+        let pointer: Vec<u8> = (0..6).map(|i| marks(i, false)[i]).collect();
+        assert_eq!(
+            pointer,
+            [0, 1, 0, 1, 1, 0],
+            "button, input, checkbox, textarea, editable, editable=false"
+        );
+        // From the keyboard: always — and only on the focused element.
+        let keyboard: Vec<u8> = (0..6).map(|i| marks(i, true)[i]).collect();
+        assert_eq!(keyboard, [1; 6]);
+        assert_eq!(marks(0, true), [1, 0, 0, 0, 0, 0]);
     }
 
     #[test]

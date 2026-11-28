@@ -83,9 +83,11 @@ impl ToCss for CssString {
 }
 
 /// Non-tree-structural pseudo-classes we recognise. `:hover`/`:focus`/`:active`
-/// pull live state from the `MatchingElement` impl in `style.rs`; `:link` /
-/// `:visited` are wired to "anchor with href" / "never matches" the same way
-/// the previous hand-rolled matcher did.
+/// /`:focus-visible`/`:focus-within` pull live state from `MatchingState`
+/// (`dom_select.rs`); `:link` / `:visited` are wired to "anchor with href" /
+/// "never matches" the same way the previous hand-rolled matcher did;
+/// `:checked`/`:disabled`/`:enabled` read attributes — in this engine an
+/// element's current state *is* its attributes (compat round 3 step 4b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NonTSPseudoClass {
     Hover,
@@ -93,6 +95,11 @@ pub enum NonTSPseudoClass {
     Active,
     Link,
     Visited,
+    FocusVisible,
+    FocusWithin,
+    Checked,
+    Disabled,
+    Enabled,
 }
 
 impl ToCss for NonTSPseudoClass {
@@ -106,6 +113,11 @@ impl ToCss for NonTSPseudoClass {
             NonTSPseudoClass::Active => ":active",
             NonTSPseudoClass::Link => ":link",
             NonTSPseudoClass::Visited => ":visited",
+            NonTSPseudoClass::FocusVisible => ":focus-visible",
+            NonTSPseudoClass::FocusWithin => ":focus-within",
+            NonTSPseudoClass::Checked => ":checked",
+            NonTSPseudoClass::Disabled => ":disabled",
+            NonTSPseudoClass::Enabled => ":enabled",
         })
     }
 }
@@ -118,7 +130,11 @@ impl selectors::parser::NonTSPseudoClass for NonTSPseudoClass {
     fn is_user_action_state(&self) -> bool {
         matches!(
             self,
-            NonTSPseudoClass::Hover | NonTSPseudoClass::Active | NonTSPseudoClass::Focus
+            NonTSPseudoClass::Hover
+                | NonTSPseudoClass::Active
+                | NonTSPseudoClass::Focus
+                | NonTSPseudoClass::FocusVisible
+                | NonTSPseudoClass::FocusWithin
         )
     }
 }
@@ -351,7 +367,7 @@ impl<'i> selectors::parser::Parser<'i> for SelectorParserImpl {
         &self,
         name: &str,
     ) -> Result<NonTSPseudoClass, CssParseError<Self::Error>> {
-        // Case-insensitive dispatch over the five non-tree-structural
+        // Case-insensitive dispatch over the non-tree-structural
         // pseudo-classes we wire through to `MatchingElement`. Anything
         // else parses to an unsupported-pseudo error which the surrounding
         // rule iterator (in `parse`) catches by skipping the rule.
@@ -362,6 +378,11 @@ impl<'i> selectors::parser::Parser<'i> for SelectorParserImpl {
             "active" => Ok(NonTSPseudoClass::Active),
             "link" => Ok(NonTSPseudoClass::Link),
             "visited" => Ok(NonTSPseudoClass::Visited),
+            "focus-visible" => Ok(NonTSPseudoClass::FocusVisible),
+            "focus-within" => Ok(NonTSPseudoClass::FocusWithin),
+            "checked" => Ok(NonTSPseudoClass::Checked),
+            "disabled" => Ok(NonTSPseudoClass::Disabled),
+            "enabled" => Ok(NonTSPseudoClass::Enabled),
             _ => Err(CssParseError::custom(
                 selectors::parser::SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
             )),

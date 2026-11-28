@@ -21,8 +21,11 @@
      navigation" hidden. Matches Chrome since step 2.1 (@media evaluated);
      before it every @media applied and the two were inverted.
   4. Checkbox-hack menu — "Menu" label toggles the hidden checkbox and
-     `:checked ~ .menu` opens the list (Docs, Contact). Today the
-     `:checked` rule is dropped whole, so the menu never opens (step 4).
+     `:checked ~ .menu` opens the list (Docs, Contact). Matches Chrome
+     since step 4b (`:checked` parsed and matched; before it the rule
+     was dropped whole and the menu never opened). The golden shows it
+     collapsed, as on load; mb-agent `compat3_menu_opens_through_its_label_and_leads_to_docs`
+     pins the click.
   5. Carousel — 300px window with overflow:hidden: only slide one is
      visible; slides two and three are clipped out. Since step 3a they
      are (painted nowhere, no longer extend page_height — 475 → 318), but
@@ -31,7 +34,8 @@
      (nowrap inline-blocks wrap — a layout gap), Chrome lays them in a row.
 
   eval/scenarios/compat3-menu.json drives item 4 ("open the menu, go to
-  Docs"); it fails today by design.
+  Docs"); it failed before step 4b by design; since 4b the path works
+  (the mb-agent test above runs it without an LLM).
 -->
 <style>
   body { margin: 0; font-size: 16px; }

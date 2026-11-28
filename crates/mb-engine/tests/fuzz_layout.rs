@@ -392,7 +392,15 @@ impl Gen {
                 if self.rng.chance(40) {
                     attrs.push(("value", self.text()));
                 }
+                // Step 4b: the state `:checked`/`:disabled` read.
+                if self.rng.chance(30) {
+                    attrs.push(("checked", String::new()));
+                }
+                if self.rng.chance(15) {
+                    attrs.push(("disabled", String::new()));
+                }
             }
+            "button" | "form" if self.rng.chance(15) => attrs.push(("disabled", String::new())),
             "a" if self.rng.chance(70) => attrs.push(("href", "#x".to_string())),
             _ => {}
         }
@@ -473,7 +481,7 @@ impl Gen {
         let a = simple(self);
         let b = simple(self);
         let c = simple(self);
-        match self.rng.below(10) {
+        match self.rng.below(14) {
             0 => format!(":is({a}, {b}) {c}"),
             1 => format!(":where({a}) > {b}"),
             2 => format!("{a}:is({b}, :frob, ::before)"),
@@ -484,7 +492,12 @@ impl Gen {
             7 => format!("{a}:not(:is({b} {c}))"),
             // Past the combinator cap: dropped whole.
             8 => format!(":is(:is({a} {b}) {c}) {a}"),
-            _ => format!("{a}:after, :where({b}):first-line, {c}::-moz-selection"),
+            9 => format!("{a}:after, :where({b}):first-line, {c}::-moz-selection"),
+            // Step 4b state pseudo-classes, the checkbox hack among them.
+            10 => format!("input:checked ~ {a}"),
+            11 => format!("{a}:focus-within {b}"),
+            12 => format!("{a}:focus-visible, {b}:disabled"),
+            _ => format!(":is(:enabled, :checked) {a}, {b}:not(:disabled)"),
         }
     }
 
@@ -1042,13 +1055,36 @@ const MAX_WIDTH: f32 = 1e7;
 
 /// Whether the rule index changes nothing: the styled tree with the
 /// sheet's real index equals the one with every selector tried everywhere.
-fn index_matches_flat(document: &mb_dom::dom::Document, sheet: &css::Stylesheet) -> bool {
+fn index_matches_flat(
+    document: &mb_dom::dom::Document,
+    sheet: &css::Stylesheet,
+    css_src: &str,
+) -> bool {
     let Some(&root) = document.roots().last() else {
         return true;
     };
     let flat = sheet.clone().with_flat_index();
-    style::style_tree(document, root, std::slice::from_ref(sheet))
-        == style::style_tree(document, root, &[flat])
+    let media = css::media::MediaContext::default();
+    let same = |state: style::InteractionState<'_>| {
+        style::style_tree_with_state(document, root, std::slice::from_ref(sheet), state, &media)
+            == style::style_tree_with_state(
+                document,
+                root,
+                std::slice::from_ref(&flat),
+                state,
+                &media,
+            )
+    };
+    // Step 4b: with focus too (`:focus-within` walks the ancestors of the
+    // focused node, `:focus-visible` reads the keyboard flag) — only when
+    // the sheet can tell the difference, to keep the fuzzer fast.
+    let path = [0, 0, 0];
+    let focused = style::InteractionState {
+        focus: Some(&path),
+        focus_visible: true,
+        ..Default::default()
+    };
+    same(style::InteractionState::default()) && (!css_src.contains(":focus") || same(focused))
 }
 
 fn index_mismatch(css_src: &str) -> Failure {
@@ -1090,7 +1126,7 @@ fn judge(case: &Case) -> Result<(), Failure> {
     let same = quietly(|| {
         let document = html::parse(&html_src).expect("html5ever never fails");
         let sheet = css::parse(&css_src).expect("css::parse recovers");
-        index_matches_flat(&document, &sheet)
+        index_matches_flat(&document, &sheet, &css_src)
     });
     match same {
         Ok(true) => Ok(()),
@@ -1730,6 +1766,11 @@ const CSS_TOKENS: &[&str] = &[
     ":is(a,",
     ":where(",
     ":where(:is(",
+    ":checked",
+    ":disabled",
+    ":enabled",
+    ":focus-visible",
+    ":focus-within",
     ":hover",
     ":not(",
     ":not(a)",
@@ -2037,6 +2078,10 @@ fn css_input(rng: &mut Rng) -> (String, String) {
         ":has(a), p",
         "p::before::marker",
         ":is(",
+        "input:checked ~ div",
+        ":focus-within > a, button:disabled",
+        "select:enabled option:checked",
+        "fieldset:disabled input:focus-visible",
     ];
     let mut sheet = String::new();
     let mut bodies = String::new();
@@ -2299,7 +2344,9 @@ fn soup_value(rng: &mut Rng, property: &str) -> String {
 /// whatever survives parsing also goes through cascade + layout + paint.
 const SOUP_PAGE: &str = "<!DOCTYPE html><html><body><div class=\"a\"><p>text 안녕</p><span>x</span>\
      <div style=\"display:grid\"><a href=\"#\">l</a><div>g</div></div><table><tr><td>c</td></tr></table>\
-     <ul><li>i</li></ul><input type=\"text\"><button>b</button><img alt=\"i\"></div></body></html>";
+     <ul><li>i</li></ul><input type=\"text\"><button>b</button><img alt=\"i\">\
+     <input type=\"checkbox\" checked><fieldset disabled><input></fieldset>\
+     <select><optgroup><option>o</option></optgroup><option>p</option></select></div></body></html>";
 
 /// One soup input through every parser entry point, then (if anything
 /// survived) cascade + layout + paint + rasterization on [`SOUP_PAGE`]. Ok = how many
@@ -2341,7 +2388,7 @@ fn css_soup_case(seed: u64) -> Result<usize, Failure> {
         let mut same = true;
         if !sheet.rules.is_empty() {
             let document = html::parse(SOUP_PAGE).expect("html5ever never fails");
-            same = index_matches_flat(&document, &sheet);
+            same = index_matches_flat(&document, &sheet, &source);
             let view = view::build_document_view(
                 &document,
                 &[sheet],
@@ -3011,6 +3058,18 @@ fn fuzz_generator_covers_its_spec() {
     assert!(
         step4 >= 20,
         "{step4}/200 cases with :is or :where and a pseudo-element"
+    );
+    let states = (1..=200)
+        .filter(|&seed| {
+            let case = Gen::case(seed);
+            let css = case.css();
+            (css.contains(":checked") || css.contains(":focus-within"))
+                && (case.html().contains(" checked") || case.html().contains(" disabled"))
+        })
+        .count();
+    assert!(
+        states >= 10,
+        "{states}/200 cases with state pseudo-classes and the attributes they read"
     );
     // The CSS soup wraps rules in `@media`/`@layer`, sometimes past the
     // nesting cap (one cap for both).

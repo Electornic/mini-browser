@@ -1042,6 +1042,40 @@ mod tests {
             ),
             "\"w\""
         );
+        // Step 4b: state pseudo-classes through the same parser.
+        let mut rt = rt_with_html(
+            r#"<form id="f"><input id="c" type="checkbox" checked><input id="d" type="checkbox"><button id="x" disabled>x</button><select><option id="o1">a</option><option id="o2">b</option></select></form>"#,
+        );
+        assert_eq!(
+            run(&mut rt, "document.querySelector(':checked').id"),
+            "\"c\""
+        );
+        assert_eq!(
+            run(
+                &mut rt,
+                "document.querySelectorAll('input:not(:checked)').length"
+            ),
+            "1"
+        );
+        assert_eq!(
+            run(&mut rt, "document.querySelector('option:checked').id"),
+            "\"o1\""
+        );
+        assert_eq!(
+            run(&mut rt, "document.querySelector(':disabled').id"),
+            "\"x\""
+        );
+        assert_eq!(
+            run(&mut rt, "document.querySelectorAll('#f :enabled').length"),
+            "5"
+        );
+        assert_eq!(
+            run(
+                &mut rt,
+                "document.getElementById('d').matches(':focus-visible, :focus-within')"
+            ),
+            "false"
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ use selectors::context::MatchingContext;
 use selectors::matching::ElementSelectorFlags;
 
 use crate::css::{CssString, MiniBrowserSelectorImpl, NonTSPseudoClass};
-use crate::dom::{Document, NodeId, NodeType};
+use crate::dom::{Document, ElementData, NodeId, NodeType};
 
 /// Pre-resolved engaged-element ids for a single styling pass. The cascade
 /// resolves the user-supplied `InteractionState` paths into NodeIds once,
@@ -35,6 +35,9 @@ pub struct MatchingState {
     /// NodeId of the deepest active element (mouse-pressed leaf). Same
     /// ancestor-propagation rule as `:hover`.
     pub active: Option<NodeId>,
+    /// The last focus move came from the keyboard (Tab) — Chrome's
+    /// `:focus-visible` heuristic; text entry shows it regardless.
+    pub focus_visible: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -222,6 +225,18 @@ impl<'a> selectors::Element for MatchingElement<'a> {
             }
             // Focus is tied to the focused element itself — no propagation.
             NonTSPseudoClass::Focus => self.state.focus == Some(self.id),
+            NonTSPseudoClass::FocusVisible => {
+                self.state.focus == Some(self.id)
+                    && (self.state.focus_visible || is_text_entry(elem))
+            }
+            // Self or an ancestor of the focused element. Nothing focused
+            // (the usual case) is one comparison.
+            NonTSPseudoClass::FocusWithin => {
+                Self::ancestor_chain_engaged(self.doc, self.state.focus, self.id)
+            }
+            NonTSPseudoClass::Checked => self.is_checked(elem),
+            NonTSPseudoClass::Disabled => is_form_control(elem) && self.is_disabled(elem),
+            NonTSPseudoClass::Enabled => is_form_control(elem) && !self.is_disabled(elem),
             // Without a visited set we treat every `<a href>` as unvisited
             // (the fresh-eyes default), which mirrors what the previous
             // hand-rolled matcher exposed.
@@ -323,7 +338,126 @@ impl<'a> selectors::Element for MatchingElement<'a> {
     }
 }
 
+/// Elements `:disabled`/`:enabled` apply to (the HTML form controls).
+fn is_form_control(elem: &ElementData) -> bool {
+    [
+        "button", "input", "select", "textarea", "optgroup", "option", "fieldset",
+    ]
+    .iter()
+    .any(|tag| elem.tag_name.eq_ignore_ascii_case(tag))
+}
+
+/// Focused, these always match `:focus-visible` in Chrome (a keyboard is
+/// how you use them): text-like inputs, `<textarea>`, contenteditable.
+fn is_text_entry(elem: &ElementData) -> bool {
+    if elem.tag_name.eq_ignore_ascii_case("textarea") {
+        return true;
+    }
+    if elem.tag_name.eq_ignore_ascii_case("input") {
+        let kind = elem
+            .attributes
+            .get("type")
+            .map(|t| t.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        return ![
+            "checkbox", "radio", "button", "submit", "reset", "image", "file", "color", "range",
+            "hidden",
+        ]
+        .contains(&kind.as_str());
+    }
+    elem.attributes
+        .get("contenteditable")
+        .is_some_and(|v| !v.trim().eq_ignore_ascii_case("false"))
+}
+
 impl MatchingElement<'_> {
+    /// `:checked` — the state is the attribute: a checkbox or radio with
+    /// `checked`, an `<option>` with `selected`, or the first option of a
+    /// single-select `<select>` none of whose options is `selected` (the
+    /// browser's default selection).
+    fn is_checked(&self, elem: &ElementData) -> bool {
+        if elem.tag_name.eq_ignore_ascii_case("input") {
+            let checkable = elem.attributes.get("type").is_some_and(|t| {
+                let t = t.trim();
+                t.eq_ignore_ascii_case("checkbox") || t.eq_ignore_ascii_case("radio")
+            });
+            return checkable && elem.attributes.contains_key("checked");
+        }
+        if !elem.tag_name.eq_ignore_ascii_case("option") {
+            return false;
+        }
+        if elem.attributes.contains_key("selected") {
+            return true;
+        }
+        let Some(select) = self.enclosing_select() else {
+            return false;
+        };
+        if self
+            .doc
+            .element_data(select)
+            .is_some_and(|s| s.attributes.contains_key("multiple"))
+        {
+            return false;
+        }
+        let mut options = Vec::new();
+        self.collect_options(select, 0, &mut options);
+        !options.iter().any(|&o| {
+            self.doc
+                .element_data(o)
+                .is_some_and(|e| e.attributes.contains_key("selected"))
+        }) && options.first() == Some(&self.id)
+    }
+
+    /// The `<select>` an option belongs to: its parent, or its
+    /// `<optgroup>` parent's parent.
+    fn enclosing_select(&self) -> Option<NodeId> {
+        let is = |id: NodeId, tag: &str| {
+            self.doc
+                .element_data(id)
+                .is_some_and(|e| e.tag_name.eq_ignore_ascii_case(tag))
+        };
+        let parent = self.parent_id()?;
+        if is(parent, "select") {
+            return Some(parent);
+        }
+        let grandparent = self.doc.get(parent)?.parent?;
+        (is(parent, "optgroup") && is(grandparent, "select")).then_some(grandparent)
+    }
+
+    /// The select's options in tree order (direct and in optgroups).
+    fn collect_options(&self, id: NodeId, depth: usize, out: &mut Vec<NodeId>) {
+        let Some(node) = self.doc.get(id) else { return };
+        for &child in &node.children {
+            let Some(e) = self.doc.element_data(child) else {
+                continue;
+            };
+            if e.tag_name.eq_ignore_ascii_case("option") {
+                out.push(child);
+            } else if depth == 0 && e.tag_name.eq_ignore_ascii_case("optgroup") {
+                self.collect_options(child, 1, out);
+            }
+        }
+    }
+
+    /// `disabled` on the control, or inside a `<fieldset disabled>` (the
+    /// spec's exception for the fieldset's first `<legend>` is not
+    /// modelled).
+    fn is_disabled(&self, elem: &ElementData) -> bool {
+        if elem.attributes.contains_key("disabled") {
+            return true;
+        }
+        let mut cur = self.parent_id();
+        while let Some(id) = cur {
+            if self.doc.element_data(id).is_some_and(|e| {
+                e.tag_name.eq_ignore_ascii_case("fieldset") && e.attributes.contains_key("disabled")
+            }) {
+                return true;
+            }
+            cur = self.doc.get(id).and_then(|n| n.parent);
+        }
+        false
+    }
+
     /// Mirrors `is_engaged` but as a free helper so it doesn't borrow `self`.
     fn ancestor_chain_engaged(doc: &Document, target: Option<NodeId>, candidate: NodeId) -> bool {
         let Some(target) = target else { return false };
