@@ -231,16 +231,22 @@ fn main() {
     let (found, missing) = match_expected(&expected, &whole);
     let js_verdict = classify::classify_console(&console, &api_list());
     let scripts = js::script_survey_stats();
-    let mut misses = String::new();
-    for miss in &cache.misses {
-        let _ = writeln!(
-            misses,
-            "{}\t{}\t{}",
-            miss.kind.as_str(),
-            miss.url.host,
-            one_line(&miss.url.to_string())
-        );
-    }
+    // Sorted: subresources are fetched in parallel, so the order of the
+    // misses changes run to run (two labels' files should diff cleanly).
+    let mut miss_lines: Vec<String> = cache
+        .misses
+        .iter()
+        .map(|miss| {
+            format!(
+                "{}\t{}\t{}\n",
+                miss.kind.as_str(),
+                miss.url.host,
+                one_line(&miss.url.to_string())
+            )
+        })
+        .collect();
+    miss_lines.sort();
+    let misses = miss_lines.concat();
     write(&out, "misses.tsv", &misses);
     let result = match &load_error {
         Some(text) if is_blocked(text) => "blocked",
@@ -557,6 +563,14 @@ fn push_columns(row: &mut Row, columns: Option<&Columns>) {
     col("obs_u_intercepted_ours", &|c| {
         c.reach.intercepted_ours.to_string()
     });
+    // The first frozen P2b table (before the vertical row), kept beside.
+    col("obs_unreachable_ours_p2b0", &|c| {
+        c.reach.ours_p2b0.to_string()
+    });
+    col("obs_u_intercepted_ours_p2b0", &|c| {
+        c.reach.intercepted_ours_p2b0.to_string()
+    });
+    col("obs_u_i_above_page", &|c| c.reach.above_page.to_string());
     col("obs_u_i_pointer_none", &|c| {
         c.reach.pointer_none_overlay.to_string()
     });
@@ -614,6 +628,12 @@ struct Reachability {
     offscreen_x_ours: usize,
     intercepted: usize,
     intercepted_ours: usize,
+    /// The same two under the first frozen P2b table (no vertical row —
+    /// kept beside the new definition, round-3 5r style).
+    ours_p2b0: usize,
+    intercepted_ours_p2b0: usize,
+    /// Intercepted elements wholly above the page top (the vertical row).
+    above_page: usize,
     pointer_none_overlay: usize,
     z_order: usize,
     other: usize,
@@ -684,6 +704,11 @@ fn reachability(
             continue;
         };
         let browser_too = verdict.browser_too();
+        let browser_too_p2b0 = match verdict {
+            Reach::Intercepted(i) => i.overlay,
+            other => other.browser_too(),
+        };
+        r.ours_p2b0 += usize::from(!browser_too_p2b0);
         r.total += 1;
         r.ours += usize::from(!browser_too);
         let label = match verdict {
@@ -703,6 +728,8 @@ fn reachability(
             Reach::Intercepted(i) => {
                 r.intercepted += 1;
                 r.intercepted_ours += usize::from(!browser_too);
+                r.intercepted_ours_p2b0 += usize::from(!i.overlay);
+                r.above_page += usize::from(i.above_page);
                 let cause = match i.cause {
                     InterceptCause::PointerNoneOverlay => {
                         r.pointer_none_overlay += 1;
@@ -748,10 +775,11 @@ fn reachability(
     }
     let _ = writeln!(
         r.summary,
-        "reach: {} of {} observed elements unreachable ({} ours) — hidden {} · clipped {} · offscreen_x {} ({} ours) · intercepted {} ({} ours; pointer-none overlay {} · z-order {} · other {} [no hit {} · ancestor {}]); visibility-hidden {} · pointer-events:none {}",
+        "reach: {} of {} observed elements unreachable ({} ours, {} under the first P2b table) — hidden {} · clipped {} · offscreen_x {} ({} ours) · intercepted {} ({} ours; pointer-none overlay {} · z-order {} · other {} [no hit {} · ancestor {}]; above the page top {}); visibility-hidden {} · pointer-events:none {}",
         r.total,
         whole.elements.len(),
         r.ours,
+        r.ours_p2b0,
         r.hidden,
         r.clipped,
         r.offscreen_x,
@@ -763,6 +791,7 @@ fn reachability(
         r.other,
         r.other_no_hit,
         r.other_ancestor,
+        r.above_page,
         r.hidden_visibility,
         r.pointer_none
     );

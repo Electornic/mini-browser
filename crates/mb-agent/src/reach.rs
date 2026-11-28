@@ -125,7 +125,20 @@ pub struct Interception {
     pub cause: InterceptCause,
     /// What the hit test picked.
     pub by: Option<NodeId>,
-    pub browser_too: bool,
+    /// P2b browser-too by a cover: a fixed / sticky / absolute box over
+    /// at least 30% of the viewport (the first frozen table).
+    pub overlay: bool,
+    /// P2b browser-too by a vertical author offset: the visible box lies
+    /// wholly above the page top (added after `r4-p0`, user decision
+    /// 2026-11-28).
+    pub above_page: bool,
+}
+
+impl Interception {
+    /// Chrome's click fails the same way (either browser-too row).
+    pub fn browser_too(self) -> bool {
+        self.overlay || self.above_page
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,7 +169,7 @@ impl Reach {
     pub fn browser_too(self) -> bool {
         match self {
             Self::OffscreenX { browser_too } => browser_too,
-            Self::Intercepted(i) => i.browser_too,
+            Self::Intercepted(i) => i.browser_too(),
             _ => false,
         }
     }
@@ -282,12 +295,13 @@ impl<'a> ReachContext<'a> {
         } else {
             InterceptCause::Other
         };
-        let browser_too = cause != InterceptCause::ZOrder
+        let overlay = cause != InterceptCause::ZOrder
             && hit.is_some_and(|hit| self.covering_overlay(hit, id, scroll));
         Reach::Intercepted(Interception {
             cause,
             by: hit,
-            browser_too,
+            overlay,
+            above_page: visible.y + visible.height <= 0.0,
         })
     }
 
@@ -569,7 +583,28 @@ mod tests {
         };
         assert_eq!(i.cause, InterceptCause::Other);
         assert_eq!(i.by, Some(page.by_id("cover")));
-        assert!(i.browser_too, "a fixed cover over the viewport: Chrome too");
+        assert!(i.overlay, "a fixed cover over the viewport: Chrome too");
+    }
+
+    #[test]
+    fn skip_link_above_the_page_top_is_browser_too() {
+        // Parked above the page (`top: -100px`): the click point has no box
+        // under it. Chrome can't show it either — browser-too since the
+        // P2b vertical row (user decision 2026-11-28); not an overlay.
+        let page = Page::new(
+            "<html><body><a id=skip href=#main>Skip</a><a id=partly href=#x>Partly</a><p>text</p></body></html>",
+            "body { margin: 0; } \
+             #skip { position: absolute; left: 0; top: -100px; } \
+             #partly { position: absolute; left: 100px; top: -5px; height: 20px; }",
+        );
+        let Reach::Intercepted(i) = page.reach("skip") else {
+            panic!("{:?}", page.reach("skip"))
+        };
+        assert_eq!((i.cause, i.by), (InterceptCause::Other, None));
+        assert!(i.above_page && !i.overlay);
+        assert!(page.reach("skip").browser_too());
+        // Partly above the top: the visible part is clicked.
+        assert_eq!(page.reach("partly"), Reach::Reached);
     }
 
     #[test]
@@ -583,7 +618,7 @@ mod tests {
             panic!("{:?}", page.reach("b"))
         };
         assert_eq!(i.cause, InterceptCause::Other);
-        assert!(!i.browser_too);
+        assert!(!i.browser_too());
         // The same cover with `pointer-events: none` would let the click
         // through in Chrome.
         let page = Page::new(
@@ -609,7 +644,7 @@ mod tests {
             panic!("{:?}", page.reach("b"))
         };
         assert_eq!(i.cause, InterceptCause::ZOrder);
-        assert!(!i.browser_too, "an engine gap: ours");
+        assert!(!i.browser_too(), "an engine gap: ours");
     }
 
     #[test]

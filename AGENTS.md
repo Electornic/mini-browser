@@ -102,7 +102,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1190 (workspace 합계, 2026-11-28 호환성 4차 0단계 ① P — `mb_agent::reach` +8·P4 판정 +6·캐시 미스 종류·스크립트 카운터·페인터 순서 히트 +3; 3차 끝 5r 재분류·`box-shadow`/`text-shadow: none` 은 1173(+4) — 5단계·3차 완료; 5f 크기 탐색 대리 폭·경계 잎 `%` 폭 은 1169(+3); 5b 그리드 트랙 함수 는 1166(+12); 5a `calc()`·`min/max/clamp`·뷰포트 단위 는 1154(+26); 5m 레거시 `min/max-width`·`box-sizing` 은 1128(+7); 5단계 P probe(`css::value_features`·`StyleReport::reparsed_text`) 는 1121(+2); 4b 상태 의사 클래스 는 1119(+12) — 4단계 완료; 4a `:is()`/`:where()`·의사 요소·결합자 중첩 상한 은 1107(+14); 4단계 P 셀렉터 블로커 probe 는 1093, 3d float shrink-to-fit 은 1092 — 3단계 완료, 3c 는 1089, 3b 는 1087, 3a 는 1081). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1194 (workspace 합계, 2026-11-28 호환성 4차 0단계 P2b 세로 작성자 오프셋 browser-too +1; ② K5 종류별 `Accept` 는 1193(+3); ① P 는 1190 — `mb_agent::reach` +8·P4 판정 +6·캐시 미스 종류·스크립트 카운터·페인터 순서 히트 +3; 3차 끝 5r 재분류·`box-shadow`/`text-shadow: none` 은 1173(+4) — 5단계·3차 완료; 5f 크기 탐색 대리 폭·경계 잎 `%` 폭 은 1169(+3); 5b 그리드 트랙 함수 는 1166(+12); 5a `calc()`·`min/max/clamp`·뷰포트 단위 는 1154(+26); 5m 레거시 `min/max-width`·`box-sizing` 은 1128(+7); 5단계 P probe(`css::value_features`·`StyleReport::reparsed_text`) 는 1121(+2); 4b 상태 의사 클래스 는 1119(+12) — 4단계 완료; 4a `:is()`/`:where()`·의사 요소·결합자 중첩 상한 은 1107(+14); 4단계 P 셀렉터 블로커 probe 는 1093, 3d float shrink-to-fit 은 1092 — 3단계 완료, 3c 는 1089, 3b 는 1087, 3a 는 1081). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 

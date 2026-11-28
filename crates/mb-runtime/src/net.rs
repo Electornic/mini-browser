@@ -54,6 +54,21 @@ impl RequestKind {
             Self::Other => "other",
         }
     }
+
+    /// The `Accept` Chrome sends for this kind of request (compat round 4
+    /// K5: some servers pick the response by it — crates.io answers a
+    /// document request without an HTML `Accept` with 404). Page scripts
+    /// can set their own (`fetch`/XHR headers win).
+    pub fn default_accept(self) -> &'static str {
+        match self {
+            Self::Document => {
+                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+            }
+            Self::Css => "text/css,*/*;q=0.1",
+            Self::Image => "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            Self::Script | Self::Font | Self::Fetch | Self::Xhr | Self::Other => "*/*",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,13 +254,23 @@ fn cached_fetch(
     extra_headers: &[(String, String)],
     body: &[u8],
 ) -> Result<FetchResult, NetworkError> {
+    // The `Accept` default rides on the wire request only: it is not part
+    // of the cache key (the frozen survey cache stays valid, K5).
     let fetch = || {
         let agent = if follows_redirects {
             agent()
         } else {
             agent_without_redirects()
         };
-        fetch_with_agent(agent, url, method, extra_headers, body)
+        let has_accept = extra_headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("accept"));
+        if has_accept {
+            return fetch_with_agent(agent, url, method, extra_headers, body);
+        }
+        let mut headers = extra_headers.to_vec();
+        headers.push(("accept".to_string(), kind.default_accept().to_string()));
+        fetch_with_agent(agent, url, method, &headers, body)
     };
     match cache::Cache::from_env() {
         Some(cache) => cache.fetch(kind, (url, method, follows_redirects, body), fetch),
@@ -383,8 +408,74 @@ mod tests {
     };
 
     use super::{
-        NetworkError, Url, fetch, http_get, load_css, load_html, load_html_document, load_image,
+        NetworkError, RequestKind, Url, fetch, fetch_as, fetch_without_redirects, http_get,
+        load_css, load_html, load_html_document, load_image, load_script,
     };
+
+    /// Serves one request with `content_type` and returns the request's
+    /// `accept` header lines (ureq sends names lower-cased).
+    fn accept_lines_of(content_type: &'static str, request: impl FnOnce(Url)) -> Vec<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 4096];
+            let read = stream.read(&mut buffer).unwrap();
+            let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            text
+        });
+        request(Url::parse(&format!("http://127.0.0.1:{port}/r")).unwrap());
+        let text = server.join().unwrap();
+        text.lines()
+            .filter(|line| line.to_ascii_lowercase().starts_with("accept:"))
+            .map(|line| line.to_ascii_lowercase())
+            .collect()
+    }
+
+    #[test]
+    fn document_requests_send_an_html_accept_header() {
+        // compat round 4 K5: crates.io answers a request without an HTML
+        // `Accept` with 404 and an empty body.
+        let lines = accept_lines_of("text/html", |url| {
+            fetch_without_redirects(&url, "GET", &[], &[]).unwrap();
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("accept: text/html,application/xhtml+xml"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn subresource_requests_send_a_kind_specific_accept() {
+        let css = accept_lines_of("text/css", |url| {
+            load_css(&url).unwrap();
+        });
+        assert_eq!(css, ["accept: text/css,*/*;q=0.1"]);
+        let image = accept_lines_of("image/png", |url| {
+            let _ = load_image(&url);
+        });
+        assert_eq!(image.len(), 1, "{image:?}");
+        assert!(image[0].starts_with("accept: image/"), "{image:?}");
+        let script = accept_lines_of("text/javascript", |url| {
+            load_script(&url).unwrap();
+        });
+        assert_eq!(script, ["accept: */*"]);
+    }
+
+    #[test]
+    fn a_page_supplied_accept_is_sent_alone() {
+        // fetch()/XHR may set their own `Accept`: it replaces the default.
+        let lines = accept_lines_of("application/json", |url| {
+            let headers = [("Accept".to_string(), "application/json".to_string())];
+            fetch_as(RequestKind::Fetch, &url, "GET", &headers, &[]).unwrap();
+        });
+        assert_eq!(lines, ["accept: application/json"]);
+    }
 
     #[test]
     fn parses_default_http_port_and_root_path() {

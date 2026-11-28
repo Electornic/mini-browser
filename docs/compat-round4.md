@@ -341,6 +341,7 @@ enwiki·kowiki 의 첫 스크립트가 `document.cookie.match(…)` 에서 죽�
 |---|---|---|
 | `offscreen_x` | 상자가 작성자 오프셋으로 화면 밖에 있음: 자기나 조상의 `transform: translateX(…)` 음수·`left`/`right`/`margin-left` 가 뷰포트 폭 이상 음수(`-9999px` 건너뛰기 링크), 오프캔버스 메뉴(`translateX(-100%)`) | browser-too |
 | `offscreen_x` | 그 밖(오른쪽으로 밀린 것 — 넓은 상자·줄바꿈 실패 등 레이아웃) | ours |
+| `intercepted` | **세로 작성자 오프셋**: 보이는 상자가 페이지 위쪽 밖에 통째로 있음(아래 끝 ≤ 0 — `top:-100px` 건너뛰기 링크). 클릭 점에 상자가 없다(`no_hit`). 가로의 `-9999px` 와 같은 경우 — **`r4-p0` 를 본 뒤 더함(사용자 결정 2026-11-28): 표가 세로 경우를 빠뜨렸다** | browser-too |
 | `intercepted` | 가로챈 요소가 `position: fixed/sticky`(또는 뷰포트를 덮는 `absolute`)이고 뷰포트 넓이의 30% 이상을 덮음(쿠키·모달 덮개) | browser-too |
 | `intercepted` | `z_order` 원인 | ours(엔진 갭 — 1b-z 가 고침, 목표 안) |
 | `intercepted` | 그 밖 | ours |
@@ -348,9 +349,12 @@ enwiki·kowiki 의 첫 스크립트가 `document.cookie.match(…)` 에서 죽�
 
 목표 ②는 ours 몫만 센다. 표를 바꾸려면 이 표를 먼저 고친다.
 
+**표 변경 기록**: 세로 작성자 오프셋 행은 `r4-p0` 결과를 본 뒤 더했다(사용자 결정 2026-11-28 — 3차 5r 방식). 옛 정의는 열로 남긴다: `obs_unreachable_ours_p2b0`·`obs_u_intercepted_ours_p2b0`(세로 행 없는 첫 동결 표). 새 정의가 `obs_unreachable_ours`·`obs_u_intercepted_ours`·`obs_unreachable_rate` 다. 범주는 그대로 `intercepted`(원인 `other`)이고 ours/browser-too 구분만 바뀐다. 상자를 0 위에 통째로 두는 것은 음수 오프셋(`top`·`margin-top`·`bottom`·`translateY`)뿐이라 레이아웃 몫을 따로 가르지 않는다.
+
 **P2b 구현 규칙(2026-11-28, `r4-p0` 를 돌리기 전에 적음 — `mb_agent::reach`)**: 표의 말을 코드로 옮길 때 정한 것.
 - `offscreen_x` browser-too = 요소나 그 DOM 조상 가운데 하나의 상자가 (a) 자기 `transform` 의 x 이동이 음수(`render::transform_for(..).e < 0` — `translateX(-100%)`·`translate(-50%, …)` 포함) 이거나 (b) `left`·`right`·`margin-left` 가 px 로 `≤ −뷰포트 폭`. `%`·`calc()` 위치는 보지 않는다(ours 쪽으로 — 애매하면 ours).
-- `intercepted` browser-too = 원인이 `z_order` 가 아니고, 히트 노드에서 위로 대상과의 공통 조상 직전까지 올라가는 사이에 `position: fixed/sticky/absolute` 인 요소가 있고, 그 요소의 보이는 상자 ∩ 클릭 때의 뷰포트 넓이가 뷰포트 넓이의 30% 이상. (엔진은 `fixed` 를 스크롤과 함께 움직이는 `absolute` 처럼 배치한다 — 클릭 스크롤 위치의 뷰포트와 겹치는 넓이로 잰다.)
+- `intercepted` browser-too(세로 — 표 변경 기록) = 보이는 상자의 `y + 높이 ≤ 0`. 덮개 규칙과 별개로 판정하고(`Interception::above_page`), 둘 중 하나면 browser-too.
+- `intercepted` browser-too(덮개) = 원인이 `z_order` 가 아니고, 히트 노드에서 위로 대상과의 공통 조상 직전까지 올라가는 사이에 `position: fixed/sticky/absolute` 인 요소가 있고, 그 요소의 보이는 상자 ∩ 클릭 때의 뷰포트 넓이가 뷰포트 넓이의 30% 이상. (엔진은 `fixed` 를 스크롤과 함께 움직이는 `absolute` 처럼 배치한다 — 클릭 스크롤 위치의 뷰포트와 겹치는 넓이로 잰다.)
 - 원인 순서: 히트 노드가 `pointer-events: none`(가장 가까운 선언) → `pointer_none_overlay`; 아니면 `view::hit_node_in_paint_order`(페인터와 같은 `walk_paint_order` 를 공유하는 새 함수 — 아직 입력에는 안 씀)의 히트가 대상에 닿으면 → `z_order`; 나머지 → `other`.
 - "닿음" = 히트 노드가 대상 자신·DOM 자손이거나, 히트 노드의 조상 `<label>` 이 대상을 라벨함(`for` 가 대상 `id` 와 같음, 또는 `for` 없이 대상을 품음).
 - 클릭 점 = 1c 의 in-view centre: (보이는 상자 ∩ `[0, 폭)`) 의 가로 가운데, 세로는 오늘 `click_point` 그대로. 스크롤 = `reach::scroll_target`(오늘 `scroll_into_view` 의 목표) → `state::clamped_scroll`(엔진의 `clamp_scroll` 과 같은 함수).
@@ -420,7 +424,25 @@ enwiki·kowiki 의 첫 스크립트가 `document.cookie.match(…)` 에서 죽�
 - **`r4-p0` 판정**: 기존 77열이 `final` 과 같다(시간 열 5개 제외 — 차이 0), `diff final r4-p0` 비어 있음. 새 열 23개가 25곳에 다 찍힌다(+ `unreachable.txt`·`element_keys.txt`·`misses.tsv`).
 - **첫 측정(20곳 합계, 참고 — 목표 창은 `r4-base` 에서)**: 관찰 요소 4,423 중 `obs_unreachable` 832(ours 812, 18.4%) = hidden 359 · clipped 73 · offscreen_x 94(전부 ours) · intercepted 306(ours 286; pointer-none 덮개 1 · z-order 60 · other 245). 클립 거절 276 중 203 은 `hidden` 이 먼저 잡았다(우선순위대로).
 - **진단으로 더한 하위 열(범주는 그대로)**: `obs_u_i_other_no_hit`(16 — 클릭 점에 상자가 아예 없음: `top:-…` 로 위로 치운 건너뛰기 링크, naver 8·mdn 2 …)와 `obs_u_i_other_ancestor`(0 — 점이 대상 상자들의 틈에 떨어져 조상이 맞음). `no_hit` 는 P2b 표에 없는 **세로** 작성자 오프셋이라 지금은 ours 로 센다 — 표를 바꿀지는 사용자 결정(아래 "열린 점").
-- **열린 점(사용자 결정 대상, 표는 안 고침)**: ① 위로 치운 요소(`no_hit` 16)를 `offscreen_x` 의 browser-too 처럼 볼지 — 고치면 P2b 표를 먼저 고치고 옛 정의를 나란히. ② T(D6 철자)는 `r4-k5` 가 `r4-p0` 와 빈 diff 여야 해서 K5 뒤·`r4-base` 전에 한다.
+**② K5 — `Accept`**(커밋 대기):
+- `net::RequestKind::default_accept` 가 종류별 Chrome 값을 준다: document `text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8`, css `text/css,*/*;q=0.1`, img `image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8`, 그 밖(js·font·fetch·xhr·other) `*/*`.
+- `cached_fetch` 의 **네트워크 클로저 안에서만** 붙인다 — 캐시 키(URL·메서드·`follows_redirects`·본문)는 그대로라 동결 캐시가 그대로 맞는다. 요청이 이미 `Accept` 를 가지면(페이지 `fetch`/XHR 헤더, 대소문자 무시) 붙이지 않는다. ureq 는 기본 `accept: */*` 를 보내지만 우리가 준 `accept` 가 있으면 그것 하나만 보낸다(테스트로 확인 — 중복 줄 없음).
+- 테스트(실패 먼저 확인): `document_requests_send_an_html_accept_header`·`subresource_requests_send_a_kind_specific_accept`·`a_page_supplied_accept_is_sent_alone`(`net.rs`, 실제 소켓으로 받은 헤더 줄).
+- 정책 게이트·리다이렉트 경로는 손대지 않았다(문서 요청은 여전히 `fetch_without_redirects` 로 hop 마다 게이트).
+- **`r4-k5` 판정**: `r4-p0` 와 102열 전부 같고(시간 열 제외 — 차이 0), `diff r4-p0 r4-k5` 비어 있음(요소·닿지 않는 요소 모두). `unreachable.txt`·`element_keys.txt`·`console.txt` 도 바이트까지 같다. `misses.tsv` 는 github·yna 에서 **줄 순서만** 달랐다(하위 리소스를 병렬로 받음 — 집합은 같음) → probe 가 이 파일을 정렬해 쓰게 했다.
+- 테스트 1193(+3).
+
+- **열린 점**: ① 위로 치운 요소(`no_hit` 16) → **사용자 결정(2026-11-28): browser-too**. 아래 "P2b 세로 행" 참고. ② T(D6 철자)는 `r4-k5` 가 `r4-p0` 와 빈 diff 여야 해서 K5 뒤·`r4-base` 전에 한다.
+
+**P2b 세로 행(사용자 결정 2026-11-28, 3차 5r 방식 — 커밋 대기)**:
+- 순서: P2b 표에 행과 "표 변경 기록"을 먼저 적고 → 코드(`reach::Interception` 이 `overlay`·`above_page` 둘을 따로 들고 `browser_too()` = 둘 중 하나, 테스트 `skip_link_above_the_page_top_is_browser_too`) → 옛 정의 열(`obs_unreachable_ours_p2b0`·`obs_u_intercepted_ours_p2b0`)과 `obs_u_i_above_page` 를 새 열 옆에.
+- `r4-p0` 다시 분류(오프라인 재생 — 트리에는 커밋 전 K5 가 있지만 `r4-k5` 가 빈 diff 라 같은 재생): 다른 열은 모두 그대로이고 바뀐 것은 정의가 바뀐 세 열(`obs_unreachable_ours`·`_rate`·`obs_u_intercepted_ours`)뿐이다. `obs_unreachable_ours_p2b0` 는 고치기 전 값(812)을 그대로 재현한다.
+
+  | 20곳 합계 | 첫 표(`_p2b0`) | 새 표 |
+  |---|---:|---:|
+  | `obs_unreachable_ours` | 812 (0.1836) | **796 (0.1800)** |
+  | `obs_u_intercepted_ours` | 286 | **270** |
+  | 옮긴 몫(`obs_u_i_above_page`) | — | 16 = `no_hit` 16 전부 (naver 8 · kakaocorp 2 · korea-kr 2 · mdn 2 · docsrs 1 · bbc 1) |
 
 ### 설계 결정
 
@@ -851,7 +873,7 @@ M (3~4일).
 | 단계 | 상태 | 커밋 | 테스트 수 | 코퍼스 fail/panic/timeout | 기대 컨트롤 누락 | `obs_unreachable`(ours) 관찰 요소당 비율(절대 수) · 구성 hidden/clipped/offscreen_x/intercepted(참고) | `Uncaught`(중복 제거) / 스크립트 완주 / missing-api 첫·어느 줄 | 합산 ours / 버린 규칙 ours(참고) | 메모 |
 |---|---|---|---|---|---|---|---|---|---|
 | 3차 끝(`final`) | ✅ | `cef51c5` | 1173 | ok 12 + ok* 8 · nav-fail 1(crates.io) · panic 0 · timeout 0 · blocked 2 · robots skip 2 · `[mb-budget]` 0 | 7/20 (naver·daum·hani·korea-kr·velog·d2·google) | 미측정(클립 거절 276) | 83(중복 포함 96) / 미측정 / 10 · 14 | 1,356 / 1,506 | `r4-check` 재생이 `final` 과 같음([부록 D](#부록-d--측정-재현과-명령)) |
-| 0 측정 정비 | 진행 중 — ① P ✅(커밋 대기) | | 1190 (P) | 목표 nav-fail 0(crates.io 문서 보충 — N1-나) | (D6 철자 수정 뒤 6/20) | 첫 측정(`r4-p0`, 참고): 0.184(812) · 359/73/94/286 | 83 / `js_scripts` 열 / 10 · 14(`classify final` 재현) | 그대로 | `r4-p0` ✅(기존 77열 = `final`, 요소 diff 0) → `r4-k5`(빈 diff) → `r4-base` |
+| 0 측정 정비 | 진행 중 — ① P ✅ · ② K5 ✅ · P2b 세로 행 ✅(커밋 대기) | `4f46de3`(P) | 1190 (P) → 1193 (K5) → 1194 (P2b 세로) | 목표 nav-fail 0(crates.io 문서 보충 — N1-나) | (D6 철자 수정 뒤 6/20) | 첫 측정(`r4-p0`, 참고): 0.180(796; 첫 P2b 표로 0.184·812) · 359/73/94/270 | 83 / `js_scripts` 열 / 10 · 14(`classify final` 재현) | 그대로 | `r4-p0` ✅(기존 77열 = `final`, 요소 diff 0) → `r4-k5` ✅(빈 diff, 102열 동일) → `r4-base` |
 | 1 에이전트 정합성 | 설계 | | | | | | | | |
 | 2 작은 JS | 설계 | | | | | | | | 겹마다 `r4-js-1`… → 보충 ② → `r4-js-sup`(후) / `r4-base-sup`(③④·보조의 기준) |
 | 3 레이아웃 | 설계 | | | | | | | | |
