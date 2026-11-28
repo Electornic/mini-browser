@@ -465,6 +465,25 @@ enwiki·kowiki 의 첫 스크립트가 `document.cookie.match(…)` 에서 죽�
   - 전체 오프라인 `run`(임시 라벨)은 `r4-p0` 와 105열 같고 diff 가 비었다. 새 두 열은 `-` 다.
 - 테스트 1199(+5).
 
+**④ 보충 ① — 실사이트 방문(2026-11-28 11:10 UTC, D1-B·N1-나, 사용자 승인)**:
+- 목록 파일 `compat-cache/corpus/supplement-1.tsv`(손으로 씀, ignored): 두 줄뿐이다.
+  - 동결 캐시 `index.tsv` 의 kowiki 429 항목은 둘이었다. 그중 스킨 시트 `https://ko.wikipedia.org/w/load.php?lang=ko&modules=…&only=styles&skin=vector-2022`(css — 기존 항목이 CSS 키로 있음을 `survey_cache key` 로 확인) 하나만 넣었다. 다른 하나(`/wiki/Special:CentralAutoLogin/start?…type=1x1…`, 1×1 로그인 추적 이미지)는 넣지 않았다.
+  - crates.io 는 `https://crates.io/`(document, 기존 항목 404 · 빈 본문) 하나다.
+- **보낸 요청 = 4개**(순차, 2초 간격, GET, 3차 UA, 재시도 없음):
+
+  | 순서 | 요청 | 결과 |
+  |---|---|---|
+  | 1 | `https://ko.wikipedia.org/robots.txt` | 200 — `*` 그룹 `Allow: /w/load.php?` → 허용 |
+  | 2 | kowiki `load.php?…only=styles&skin=vector-2022` | **429 다시** → 재시도 없이 멈춤, 캐시 안 바꿈(옛 항목 바이트 그대로) |
+  | 3 | `https://crates.io/robots.txt` | 200 — 맞는 규칙 없음 → 허용 |
+  | 4 | `https://crates.io/`(K5 의 문서 `Accept`) | **200** `text/html`, 5,500바이트 → 저장(옛 404 항목을 덮음) |
+
+- 기록: `refetched.tsv` 두 줄, robots 원문 `robots/refetch-20261128T111015Z/`. 새 파일은 모두 `git check-ignore` 로 무시 대상임을 확인했고, 저장소에 추적되는 `compat-cache/` 파일은 0개, 작업 트리는 깨끗했다.
+- **오프라인 확인 라벨 `r4-sup1`**(부록 D 의 동결 라벨이 아니다 — 보충 효과만 보는 확인용. `r4-base` 는 T 뒤 ⑥):
+  - `r4-p0` 와 다른 사이트는 crates.io 하나다. kowiki 는 모든 열이 같다(`supp_status` 429:1).
+  - crates.io: `nav-fail` → **`ok*`**(최종 URL 생김, 앱 껍데기 — 미스 6: css 5 · img 1, 받지 않음). 요소 0, 클래식 스크립트 1/2 완주, `Uncaught` 1줄(page-bug 모양). N1-나대로 견고성 지표에만 들고 ①·②·③·④·보조 합계에서는 뺀다.
+- **kowiki 는 CSS 지표에서 뺀다**(0단계 S 규칙 "429 가 다시 오면"): 스킨 시트가 4차 내내 없으므로 kowiki 의 `decl_drop_*`·`rule_drop_*`·합산 버린 선언은 보조 지표 합계(`r4-base-sup`·`r4-final`)에서 빼고 따로 적는다. 에이전트 지표(①·②)에는 그대로 든다 — 스킨 없이 보이는 화면이 우리가 실제로 관찰하는 화면이다. 보충 ②는 이 시트를 저절로 다시 요청하지 않는다 — 캐시에 429 항목이 있어 오프라인 미스가 아니므로 `misses.tsv` 에 안 나온다.
+
 ### 설계 결정
 
 - **합집합과 우선순위**: `hidden` 을 맨 앞에 둔다. 1단계가 그것을 관찰에서 빼면 그 요소는 관찰 요소 자체에서 사라지므로, 다른 범주로 옮겨 가 이중으로 줄어든 것처럼 보이지 않는다.
@@ -894,7 +913,7 @@ M (3~4일).
 | 단계 | 상태 | 커밋 | 테스트 수 | 코퍼스 fail/panic/timeout | 기대 컨트롤 누락 | `obs_unreachable`(ours) 관찰 요소당 비율(절대 수) · 구성 hidden/clipped/offscreen_x/intercepted(참고) | `Uncaught`(중복 제거) / 스크립트 완주 / missing-api 첫·어느 줄 | 합산 ours / 버린 규칙 ours(참고) | 메모 |
 |---|---|---|---|---|---|---|---|---|---|
 | 3차 끝(`final`) | ✅ | `cef51c5` | 1173 | ok 12 + ok* 8 · nav-fail 1(crates.io) · panic 0 · timeout 0 · blocked 2 · robots skip 2 · `[mb-budget]` 0 | 7/20 (naver·daum·hani·korea-kr·velog·d2·google) | 미측정(클립 거절 276) | 83(중복 포함 96) / 미측정 / 10 · 14 | 1,356 / 1,506 | `r4-check` 재생이 `final` 과 같음([부록 D](#부록-d--측정-재현과-명령)) |
-| 0 측정 정비 | 진행 중 — ① P ✅ · ② K5 ✅ · P2b 세로 행 ✅ · ③ S ✅(커밋 대기) | `4f46de3`(P) · `68498f3`(K5·P2b 세로) | 1190 (P) → 1194 (K5·P2b 세로) → 1199 (S) | 목표 nav-fail 0(crates.io 문서 보충 — N1-나) | (D6 철자 수정 뒤 6/20) | 첫 측정(`r4-p0`, 참고): 0.180(796; 첫 P2b 표로 0.184·812) · 359/73/94/270 | 83 / `js_scripts` 열 / 10 · 14(`classify final` 재현) | 그대로 | `r4-p0` ✅(기존 77열 = `final`, 요소 diff 0) → `r4-k5` ✅(빈 diff, 102열 동일) → `r4-base` |
+| 0 측정 정비 | 진행 중 — ① P ✅ · ② K5 ✅ · P2b 세로 행 ✅ · ③ S ✅ · ④ 보충 ① ✅(kowiki 429 다시 — CSS 지표 제외, crates.io 200) | `4f46de3`(P) · `68498f3`(K5·P2b 세로) · `d263093`(S) | 1190 (P) → 1194 (K5·P2b 세로) → 1199 (S) | nav-fail **0**(`r4-sup1`: crates.io `ok*` — N1-나) | (D6 철자 수정 뒤 6/20) | 첫 측정(`r4-p0`, 참고): 0.180(796; 첫 P2b 표로 0.184·812) · 359/73/94/270 | 83 / `js_scripts` 열 / 10 · 14(`classify final` 재현) | 그대로 | `r4-p0` ✅(기존 77열 = `final`, 요소 diff 0) → `r4-k5` ✅(빈 diff, 102열 동일) → `r4-base` |
 | 1 에이전트 정합성 | 설계 | | | | | | | | |
 | 2 작은 JS | 설계 | | | | | | | | 겹마다 `r4-js-1`… → 보충 ② → `r4-js-sup`(후) / `r4-base-sup`(③④·보조의 기준) |
 | 3 레이아웃 | 설계 | | | | | | | | |
