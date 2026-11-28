@@ -284,6 +284,7 @@ fn main() {
         viewport: &viewport,
         css: &css_report.counts,
         slivers: anomalies.slivers.len(),
+        widest: anomalies.widest,
         clip: anomalies.clip_counts(),
         script_errors,
         console_errors,
@@ -311,6 +312,7 @@ struct Columns<'a> {
     viewport: &'a Observation,
     css: &'a CssCounts,
     slivers: usize,
+    widest: f32,
     clip: ClipCounts,
     script_errors: usize,
     console_errors: usize,
@@ -392,6 +394,19 @@ fn push_columns(row: &mut Row, columns: Option<&Columns>) {
     col("rule_drop_no_pseudo", &|c| c.css.rule_no_pseudo.to_string());
     col("rule_blockers", &|c| c.css.rule_blockers.clone());
     col("style_ms", &|c| format!("{:.1}", c.css.style_ms));
+    // Step 5 (calc / viewport units / grid track functions): drops in
+    // `decl_drop_total` whose value has a step-5 feature
+    // (`css::value_features`), by kind, and `feature:drops` over all kinds.
+    col("drop_step5", &|c| {
+        c.css.step5.iter().sum::<usize>().to_string()
+    });
+    col("drop_step5_ours", &|c| c.css.step5[0].to_string());
+    col("drop_step5_iacvt", &|c| c.css.step5[1].to_string());
+    col("drop_step5_keyword", &|c| {
+        (c.css.step5[2] + c.css.step5[3]).to_string()
+    });
+    col("drop_step5_causes", &|c| c.css.step5_causes.clone());
+    col("widest_box", &|c| format!("{:.0}", c.widest));
     col("at_skipped_ours", &|c| c.css.at_ours.to_string());
     col("at_skipped_browser", &|c| c.css.at_browser.to_string());
     col("at_skipped_bytes", &|c| c.css.at_skipped_bytes.to_string());
@@ -745,6 +760,14 @@ struct CssCounts {
     rule_blockers: String,
     /// The browser's style pass at the probe viewport, min of five (ms).
     style_ms: f64,
+    /// Drops in [`CssCounts::drop_total`] with a step-5 feature
+    /// (`css::STEP5_FEATURES`): parser drops (ours) / IACVT / keyword
+    /// fallback / var keyword fallback.
+    step5: [usize; 4],
+    /// `feature:drops` over every drop in the total, most first — a drop
+    /// counts once under each feature in its value (non-step-5 `math()` /
+    /// `env()` included).
+    step5_causes: String,
 }
 
 /// The pseudos step 4 (docs/compat-round3.md 4단계) makes parse — once it
@@ -805,6 +828,27 @@ fn css_drops(
     let mut supports_conditions: BTreeMap<String, (usize, bool, usize, usize)> = BTreeMap::new();
     // layer name → (blocks, statements, rules)
     let mut layer_names: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
+    // (feature, kind, property) → (drops, sample), and feature → drops
+    let mut features: BTreeMap<(&'static str, &'static str, String), (usize, String)> =
+        BTreeMap::new();
+    let mut feature_drops: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut record_features =
+        |c: &mut CssCounts, kind: usize, property: &str, found: &[&'static str], sample: &str| {
+            const KINDS: [&str; 4] = ["ours", "iacvt", "keyword", "var-keyword"];
+            if found.iter().any(|f| css::STEP5_FEATURES.contains(f)) {
+                c.step5[kind] += 1;
+            }
+            let labels: &[&'static str] = if found.is_empty() { &["(none)"] } else { found };
+            for &label in labels {
+                if label != "(none)" {
+                    *feature_drops.entry(label).or_default() += 1;
+                }
+                let entry = features
+                    .entry((label, KINDS[kind], property.to_string()))
+                    .or_insert((0, sample.to_string()));
+                entry.0 += 1;
+            }
+        };
 
     for source in [external, inline] {
         let (sheet, report) = css::parse_with_report(source);
@@ -819,13 +863,22 @@ fn css_drops(
                 if first_in_rule {
                     let failed = if computed.iacvt.contains(&key) {
                         c.iacvt += 1;
-                        Some(&mut iacvt_props)
+                        Some((1, &mut iacvt_props))
                     } else if computed.var_keyword_fallback.contains(&key) {
                         c.var_keyword_fallback += 1;
-                        Some(&mut var_fallback_props)
+                        Some((3, &mut var_fallback_props))
                     } else {
                         None
                     };
+                    let failed = failed.map(|(kind, props)| {
+                        // What the re-parse saw; none = `var()` itself failed.
+                        let text = computed.reparsed_text.get(&key);
+                        let found = text
+                            .map_or_else(Vec::new, |text| css::value_features(&decl.name, text));
+                        let sample = text.map_or_else(|| key.clone(), |t| format!("{key} → {t}"));
+                        record_features(&mut c, kind, &decl.name, &found, &sample);
+                        props
+                    });
                     if let Some(props) = failed {
                         let entry = props.entry(decl.name.clone()).or_insert((0, key.clone()));
                         entry.0 += 1;
@@ -843,6 +896,14 @@ fn css_drops(
                     && !kind.accepts_keyword(keyword)
                 {
                     c.keyword_fallback += 1;
+                    let found = css::value_features(&decl.name, keyword);
+                    record_features(
+                        &mut c,
+                        2,
+                        &decl.name,
+                        &found,
+                        &format!("{}: {keyword}", decl.name),
+                    );
                     let entry = fallbacks
                         .entry(decl.name.clone())
                         .or_insert((0, keyword.clone()));
@@ -856,6 +917,7 @@ fn css_drops(
                 c.nesting += 1;
             } else if decl.reason.origin() == Origin::Ours {
                 c.decl_ours += 1;
+                record_features(&mut c, 0, &decl.property, &decl.features, &decl.text);
             } else {
                 c.decl_browser += 1;
             }
@@ -933,6 +995,13 @@ fn css_drops(
             entry.2 += at_rule.skipped_bytes;
         }
     }
+    let mut by_drops: Vec<_> = feature_drops.into_iter().collect();
+    by_drops.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    c.step5_causes = by_drops
+        .iter()
+        .map(|(label, n)| format!("{label}:{n}"))
+        .collect::<Vec<_>>()
+        .join(",");
     c.decl_reasons = decl_reasons
         .iter()
         .map(|(reason, count)| format!("{}:{count}", reason.code()))
@@ -1046,6 +1115,26 @@ fn css_drops(
         );
     }
     c.rule_blockers = ours_blockers.join(",");
+
+    let _ = writeln!(
+        text,
+        "\n## step 5: dropped declarations (the drop total) by value feature / kind / property (drops, sample; a drop counts under each feature; (none) = no feature — for iacvt, var() itself failed)"
+    );
+    let mut rows: Vec<_> = features.into_iter().collect();
+    rows.sort_by(|a, b| {
+        let step5 = |f: &str| !css::STEP5_FEATURES.contains(&f);
+        step5(a.0.0)
+            .cmp(&step5(b.0.0))
+            .then(b.1.0.cmp(&a.1.0))
+            .then(a.0.cmp(&b.0))
+    });
+    for ((label, kind, property), (count, sample)) in rows.iter().take(120) {
+        let _ = writeln!(
+            text,
+            "{count:6}  {label:14} {kind:11} {property:28} {}",
+            clip(sample, 100)
+        );
+    }
 
     let _ = writeln!(text, "\n## at-rules (count, body kept?, skipped bytes)");
     for (name, (count, kept, bytes)) in &at_rules {
@@ -1382,6 +1471,9 @@ struct Anomalies {
     offscreen: Vec<String>,
     text_boxes: usize,
     widest: f32,
+    /// The widest box: its element ancestry, declared `width`, and layout
+    /// path (step 5: GitHub's widest box should reach viewport scale).
+    widest_label: String,
     /// `<style>`/`<script>`/`<template>` elements that got a layout box
     /// (their source text would paint as page text).
     unrendered: Vec<String>,
@@ -1496,9 +1588,10 @@ impl Anomalies {
 
     fn render(&self, page_width: f32) -> String {
         let mut text = format!(
-            "{}\n{}\npage width {page_width}\n",
+            "{}\n{}\npage width {page_width}\nwidest box: {}\n",
             self.headline(),
-            self.clip_headline()
+            self.clip_headline(),
+            self.widest_label
         );
         let _ = writeln!(
             text,
@@ -1765,7 +1858,6 @@ impl Walk<'_> {
         let out = &mut *self.out;
         out.boxes += 1;
         let rect = layout.dimensions.content;
-        out.widest = out.widest.max(rect.width);
         let styled = match &layout.box_type {
             BoxType::BlockNode(n)
             | BoxType::FlexNode(n)
@@ -1773,6 +1865,27 @@ impl Walk<'_> {
             | BoxType::TableNode(n) => Some(n),
             BoxType::AnonymousBlock => None,
         };
+        if rect.width > out.widest {
+            out.widest = rect.width;
+            out.widest_label = format!(
+                "{:.0}px {}  width={:?} min-width={:?}\n    layout path: {} < {}",
+                rect.width,
+                styled.map_or_else(
+                    || "(anonymous)".to_string(),
+                    |n| ancestry(self.document, n.node_id, 3)
+                ),
+                styled.and_then(|n| n.value("width")),
+                styled.and_then(|n| n.value("min-width")),
+                box_label(layout),
+                self.path
+                    .iter()
+                    .rev()
+                    .take(6)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" < ")
+            );
+        }
         // Step 3b: whether any box of each element survives its clip (the
         // agent's click target — page coordinates ∩ clip table).
         if let Some(node) = styled

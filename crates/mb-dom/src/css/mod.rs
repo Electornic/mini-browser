@@ -28,7 +28,7 @@ use grid::{
 use parse::{is_parse_only, parse_clip, parse_font_family, parse_raw, parse_value};
 pub use report::{
     AtRuleSeen, DropReason, DroppedDeclaration, DroppedRule, MediaVerdict, Origin, ParseReport,
-    media_verdict, parse_with_report, supports_verdict,
+    STEP5_FEATURES, media_verdict, parse_with_report, supports_verdict, value_features,
 };
 use selector::SelectorParserImpl;
 pub use selector::{

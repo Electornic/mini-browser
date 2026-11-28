@@ -360,6 +360,8 @@ MB_NET_CACHE_OFFLINE=1 ./target/debug/mb-mcp --start-url https://news.ycombinato
 
 ---
 
+**5단계 P "전" 측정** (2026-11-28, 라벨 `calc-before`, `selectors-4b` 대비 — probe 에 버림의 5단계 기능 판정(`css::value_features`)·가장 넓은 상자 열만 추가, 엔진 `dbcb7f0`, [compat-round3.md 5단계 구현 메모](compat-round3.md#5단계-구현-메모-2026-11-28)): 기존 열·요소 목록 25곳 동일, `[mb-budget]` 0. 20곳 합산 버림 **3,200** 중 값에 5단계 기능이 있는 것 **1,271**(`calc()` 803 · 뷰포트 단위 408 · `repeat()` 85 · `max()` 84 · `min()` 64; 사이트별 yna 491 · github 295 · kakaocorp 120), 2차 5곳 920 중 322. 기능 몫을 다 없애도 20곳 1,929 · 5곳 598 이 남아 동결 목표(−95%: ≤706 · ≤369)는 5단계만으로 닿지 않는다 — 나머지 상위는 `display:-ms-flexbox` 키워드 241 · `box-shadow:none` 165 · 정의 없는 `var()` 154 · `content` 148 · `outline` 112. 가장 넓은 상자 GitHub 3,143px(2차의 187M px 아님), 최대 microsoft 5,137(줄바꿈 안 된 `span`).
+
 ## 호환성 3차 제안 순서
 
 > **확정판은 [compat-round3.md](compat-round3.md)** (2026-11-26): 아래 제안에서 0단계(견고성 점검 + 스크립트 에러 위치)를 앞에 추가하고, 1~5단계(값 파서 → `@media`/`@layer`/`@supports` → 클리핑 → 셀렉터 → `calc`/트랙; 실행은 `@media` 평가를 값 파서보다 먼저)만 3차 범위로, 이미지·JS 소소·ES 모듈·`::before` 는 4차 이후로 뺐다. 아래 목록은 조사 당시 제안으로 남겨 둔다.

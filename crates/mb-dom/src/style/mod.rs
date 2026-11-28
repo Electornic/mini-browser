@@ -133,6 +133,11 @@ pub struct StyleReport {
     /// `--w: 100vw`) — the computed-time twin of the parse-time keyword
     /// fallback count.
     pub var_keyword_fallback: BTreeSet<String>,
+    /// For entries of either set whose substitution succeeded but whose
+    /// re-parse failed or was rejected: the substituted text (the first
+    /// node's), so the probe can tell what the parser didn't read — a
+    /// `calc()` inside a custom property (step 5 P).
+    pub reparsed_text: BTreeMap<String, String>,
 }
 
 /// The identity [`StyleReport`] records a declaration under: property name
@@ -2986,6 +2991,25 @@ mod tests {
                 .contains(&sheet_key(css, "color"))
         );
         assert!(report.iacvt.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn style_report_keeps_the_text_a_failed_reparse_saw() {
+        // The probe blames a computed-time failure on what was re-parsed,
+        // not on `var()` (step 5 P): here a `calc()` from the custom
+        // property (a length times a length — invalid in every engine).
+        let css = "div { --w: calc(2px * 3px); } p { width: var(--w); color: var(--undefined); }";
+        let report = report_for("<div><p>x</p></div>", css);
+        let width = sheet_key(css, "width");
+        assert!(report.iacvt.contains(&width), "{report:?}");
+        assert_eq!(
+            report.reparsed_text.get(&width).map(String::as_str),
+            Some("calc(2px * 3px)")
+        );
+        // The substitution itself failed: nothing was re-parsed.
+        let color = sheet_key(css, "color");
+        assert!(report.iacvt.contains(&color), "{report:?}");
+        assert!(!report.reparsed_text.contains_key(&color), "{report:?}");
     }
 
     #[test]

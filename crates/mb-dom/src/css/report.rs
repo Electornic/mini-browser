@@ -15,7 +15,7 @@
 
 use std::cell::RefCell;
 
-use cssparser::Parser as CssParser;
+use cssparser::{Parser as CssParser, Token};
 
 use super::Stylesheet;
 use super::media;
@@ -125,6 +125,8 @@ pub struct DroppedDeclaration {
     /// `name: value` excerpt.
     pub text: String,
     pub reason: DropReason,
+    /// [`value_features`] of the whole value (not the excerpt).
+    pub features: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -316,15 +318,18 @@ pub(super) fn dropped_declaration(source: &str) -> DroppedDeclaration {
             property: String::new(),
             text,
             reason: DropReason::NestedRule,
+            features: Vec::new(),
         };
     }
     let (name, value) = source.split_once(':').unwrap_or((source, ""));
     let property = name.trim().to_ascii_lowercase();
     let reason = declaration_reason(&property, value);
+    let features = value_features(&property, value);
     DroppedDeclaration {
         property,
         text,
         reason,
+        features,
     }
 }
 
@@ -551,6 +556,95 @@ pub(super) fn excerpt(source: &str) -> String {
     match flat.char_indices().nth(EXCERPT_LIMIT) {
         Some((cut, _)) => format!("{}…", &flat[..cut]),
         None => flat,
+    }
+}
+
+/// The step-5 value features (docs/compat-round3.md 5단계) in a
+/// declaration's value, for the compat probe: math functions, viewport
+/// units, `ex`, grid track functions and line names — each label once, in
+/// first-seen order. Labels: `calc()` (vendor spellings too) `min()`
+/// `max()` `clamp()` `viewport-unit` `ex` `repeat()` `fit-content()`
+/// `line-names` (only in a track-list property) — and, named but not step
+/// 5, `math()` (the other CSS math functions) and `env()`. Strings and
+/// `url()` are opaque. Nesting past [`super::MAX_VAR_NESTING`] is not read.
+pub fn value_features(property: &str, value: &str) -> Vec<&'static str> {
+    let tracks = matches!(
+        property,
+        "grid-template-columns" | "grid-template-rows" | "grid-template" | "grid"
+    );
+    let mut out = Vec::new();
+    collect_features(&mut CssParser::new(value), tracks, 0, &mut out);
+    out
+}
+
+/// The labels [`value_features`] may return that step 5 is meant to read.
+pub const STEP5_FEATURES: &[&str] = &[
+    "calc()",
+    "min()",
+    "max()",
+    "clamp()",
+    "viewport-unit",
+    "ex",
+    "repeat()",
+    "fit-content()",
+    "line-names",
+];
+
+fn collect_features(
+    parser: &mut CssParser<'_>,
+    tracks: bool,
+    depth: usize,
+    out: &mut Vec<&'static str>,
+) {
+    while let Ok(token) = parser.next_including_whitespace_and_comments() {
+        let (label, nested) = match token {
+            Token::Function(name) => (function_feature(name), true),
+            Token::Dimension { unit, .. } => (unit_feature(unit), false),
+            Token::SquareBracketBlock => (tracks.then_some("line-names"), true),
+            Token::ParenthesisBlock | Token::CurlyBracketBlock => (None, true),
+            _ => (None, false),
+        };
+        if let Some(label) = label
+            && !out.contains(&label)
+        {
+            out.push(label);
+        }
+        if nested && depth < super::MAX_VAR_NESTING {
+            // Reads the block to its end, as `parse_nested_block` requires.
+            let _ = parser.parse_nested_block(|inner| {
+                collect_features(inner, tracks, depth + 1, out);
+                Ok::<(), cssparser::ParseError<()>>(())
+            });
+        }
+    }
+}
+
+fn function_feature(name: &str) -> Option<&'static str> {
+    let name = name.to_ascii_lowercase();
+    Some(match name.as_str() {
+        "calc" | "-webkit-calc" | "-moz-calc" => "calc()",
+        "min" => "min()",
+        "max" => "max()",
+        "clamp" => "clamp()",
+        "repeat" => "repeat()",
+        "fit-content" => "fit-content()",
+        "env" => "env()",
+        "round" | "mod" | "rem" | "abs" | "sign" | "sin" | "cos" | "tan" | "asin" | "acos"
+        | "atan" | "atan2" | "pow" | "sqrt" | "hypot" | "log" | "exp" => "math()",
+        _ => return None,
+    })
+}
+
+fn unit_feature(unit: &str) -> Option<&'static str> {
+    let unit = unit.to_ascii_lowercase();
+    let viewport = matches!(
+        unit.trim_start_matches(['d', 's', 'l']),
+        "vw" | "vh" | "vi" | "vb" | "vmin" | "vmax"
+    );
+    if viewport {
+        Some("viewport-unit")
+    } else {
+        (unit == "ex").then_some("ex")
     }
 }
 
@@ -832,6 +926,61 @@ mod tests {
                 Some(DropReason::SkippedAtRule),
                 Some(DropReason::SkippedAtRule)
             ]
+        );
+    }
+
+    #[test]
+    fn value_features_name_step5_functions_and_units() {
+        use super::value_features;
+        // Functions anywhere in the value (nested too), each label once,
+        // in first-seen order; vendor `calc` is `calc()`.
+        assert_eq!(
+            value_features("width", "min(100% - 2rem, calc(1200px + 1vw))"),
+            ["min()", "calc()", "viewport-unit"]
+        );
+        assert_eq!(
+            value_features(
+                "margin",
+                "-webkit-calc(1px + 2px) clamp(1px, 2vmax, 3px) max(1px,2px)"
+            ),
+            ["calc()", "clamp()", "viewport-unit", "max()"]
+        );
+        // `minmax()` is not `min()`/`max()` (2.1a reads it); `rem` and `em`
+        // are units, not features; `ex` is.
+        assert_eq!(
+            value_features("grid-template-columns", "minmax(0, 1fr) 2rem"),
+            [] as [&str; 0]
+        );
+        assert_eq!(value_features("width", "2ex"), ["ex"]);
+        // Every viewport unit spelling.
+        for unit in [
+            "vw", "vh", "vmin", "vmax", "dvh", "svh", "lvh", "dvw", "svw", "lvw", "vi", "vb",
+        ] {
+            assert_eq!(
+                value_features("height", &format!("100{unit}")),
+                ["viewport-unit"],
+                "{unit}"
+            );
+        }
+        // Grid track functions and line names — `[` only counts in a
+        // track-list property (it is an attribute selector elsewhere).
+        assert_eq!(
+            value_features(
+                "grid-template-columns",
+                "[full-start] repeat(auto-fill, minmax(10px, 1fr)) fit-content(20px) [full-end]"
+            ),
+            ["line-names", "repeat()", "fit-content()"]
+        );
+        assert_eq!(value_features("content", "\"[a]\""), [] as [&str; 0]);
+        // Functions inside strings and `url()` don't count; other math
+        // functions and `env()` are named but are not step 5.
+        assert_eq!(
+            value_features("background", "url(calc.png) \"calc(\""),
+            [] as [&str; 0]
+        );
+        assert_eq!(
+            value_features("width", "round(1.5px) env(safe-area-inset-left)"),
+            ["math()", "env()"]
         );
     }
 }

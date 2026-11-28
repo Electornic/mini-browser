@@ -164,13 +164,20 @@ pub(super) fn resolve_var_references(
     report: Option<&RefCell<StyleReport>>,
 ) {
     for (name, value) in values.iter_mut() {
+        // The substituted text, kept for the report only.
+        let mut reparsed_text = None;
         let resolved = match &*value {
             Value::Unparsed { shorthand, raw } => {
                 let parse_as = shorthand.as_deref().unwrap_or(name);
                 substitute(raw, 0, &Cell::new(false), &mut |reference, _| {
                     scope.get(reference).map(str::to_string)
                 })
-                .and_then(|text| reparse(memo, parse_as, text, name))
+                .and_then(|text| {
+                    if report.is_some() {
+                        reparsed_text = Some(text.clone());
+                    }
+                    reparse(memo, parse_as, text, name)
+                })
             }
             // Never produced by the parser any more (step 1c): invalid.
             Value::Var { .. } => None,
@@ -196,7 +203,11 @@ pub(super) fn resolve_var_references(
                     } else {
                         &mut report.iacvt
                     };
-                    set.insert(declaration_key(name, &declared));
+                    let key = declaration_key(name, &declared);
+                    set.insert(key.clone());
+                    if let Some(text) = reparsed_text {
+                        report.reparsed_text.entry(key).or_insert(text);
+                    }
                 }
                 // Invalid at computed-value time = `unset`.
                 *value = Value::Keyword("unset".into());
