@@ -9,12 +9,18 @@
 #   scripts/compat-corpus.sh diff LABEL_BEFORE LABEL_AFTER
 #   # script-error columns from a run's saved console.txt (round 4 P4)
 #   scripts/compat-corpus.sh classify LABEL
+#   # targeted re-fetch (round 4 S): build a list from a run's misses (N6
+#   # filter), then fetch exactly the list — fresh robots.txt per origin
+#   scripts/compat-corpus.sh refetch-list LABEL [NAME…]
+#   MB_NET_CACHE=$PWD/compat-cache/net scripts/compat-corpus.sh record --refetch LIST
 #
 # Sites come from scripts/compat-sites.tsv. Outputs (all git-ignored):
 #   compat-cache/corpus/recorded.tsv        name, url, robots verdict, rule, http code, date — written by record
 #   compat-cache/corpus/robots/<name>.txt   the robots.txt that verdict came from (+ .code = HTTP status)
 #   compat-cache/corpus/<LABEL>/<name>/     compat_probe output + stdout/stderr ("record" for the recording run)
 #   compat-cache/corpus/<LABEL>/corpus-report.tsv  one row per site
+#   compat-cache/corpus/refetched.tsv       every targeted re-fetch: name, url, kind, robots, rule, date, supp_status, cache
+#   compat-cache/corpus/robots/refetch-<stamp>/<host>.txt  the fresh robots.txt of each re-fetch run
 #
 # Politeness (record): robots.txt fetched once per site by this script and
 # obeyed for the `*` group (disallowed → skipped); one visit per site,
@@ -32,8 +38,11 @@ set -euo pipefail
 
 ROOT=$(git rev-parse --show-toplevel)
 SITES=$ROOT/scripts/compat-sites.tsv
-CORPUS=$ROOT/compat-cache/corpus
+# COMPAT_CORPUS_DIR: another (git-ignored) corpus directory — for trying
+# the tooling against a loopback server without touching the real records.
+CORPUS=${COMPAT_CORPUS_DIR:-$ROOT/compat-cache/corpus}
 PROBE=$ROOT/target/release/examples/compat_probe
+HELPER=$ROOT/target/release/examples/survey_cache
 UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 LIMIT_SECS=120
 GAP_SECS=2
@@ -44,7 +53,7 @@ die() {
 }
 
 usage() {
-    sed -n '2,12p' "$0" >&2
+    sed -n '2,16p' "$0" >&2
     exit 2
 }
 
@@ -73,6 +82,10 @@ find_timeout() {
 
 build_probe() {
     (cd "$ROOT" && cargo build --release -p mb-agent --example compat_probe >&2)
+}
+
+build_helper() {
+    (cd "$ROOT" && cargo build --release -p mb-runtime --example survey_cache >&2)
 }
 
 # name<TAB>url<TAB>expected, comments and blank lines skipped.
@@ -133,9 +146,11 @@ else:
     print("disallow\tDisallow: " + best[2])
 '
 
+origin_of() { printf '%s' "$1" | sed -E 's#^(https?://[^/]+).*#\1#'; }
+
 robots_check() { # name url → sets ROBOTS_VERDICT ROBOTS_RULE ROBOTS_CODE
     local name=$1 url=$2 origin file
-    origin=$(printf '%s' "$url" | sed -E 's#^(https?://[^/]+).*#\1#')
+    origin=$(origin_of "$url")
     file=$CORPUS/robots/$name.txt
     mkdir -p "$CORPUS/robots"
     # Once per site, even across an interrupted record: reuse what we got.
@@ -145,6 +160,13 @@ robots_check() { # name url → sets ROBOTS_VERDICT ROBOTS_RULE ROBOTS_CODE
         ROBOTS_CODE=$(curl -sS -L --max-time 20 -A "$UA" -o "$file" -w '%{http_code}' "$origin/robots.txt" 2>/dev/null) || ROBOTS_CODE=000
         printf '%s\n' "$ROBOTS_CODE" >"$CORPUS/robots/$name.code"
     fi
+    robots_verdict "$file" "$url"
+}
+
+# The verdict for URL from a robots.txt already in FILE (HTTP status in
+# ROBOTS_CODE) → sets ROBOTS_VERDICT ROBOTS_RULE.
+robots_verdict() { # file url
+    local file=$1 url=$2
     case $ROBOTS_CODE in
         2??)
             local out
@@ -184,7 +206,24 @@ probe_site() { # url dir expected
 }
 
 report_header() {
-    printf 'name\trobots\tbudget_lines\t%s\n' "$("$PROBE" --header)"
+    printf 'name\trobots\tbudget_lines\t%s\tsupp_status\tsupp_skipped\n' "$("$PROBE" --header)"
+}
+
+# Round 4 S: a site's targeted re-fetches from refetched.tsv —
+# `code:count` over the fetched URLs (latest attempt per URL) and the sum
+# of `skipped:N` (N6 filter). "-" when the site was never re-fetched.
+supp_columns() { # name
+    local log=$CORPUS/refetched.tsv statuses skipped
+    if [[ ! -f $log ]] || ! awk -F'\t' -v n="$1" 'NR > 1 && $1 == n { found = 1 } END { exit !found }' "$log"; then
+        printf -- '-\t-'
+        return
+    fi
+    # latest attempt per URL, then code:count in sorted order
+    statuses=$(awk -F'\t' -v n="$1" 'NR > 1 && $1 == n && $7 !~ /^skipped:/ { latest[$2] = $7 }
+        END { for (u in latest) print latest[u] }' "$log" | sort | uniq -c |
+        awk '{ printf "%s%s:%s", (NR > 1 ? "," : ""), $2, $1 }')
+    skipped=$(awk -F'\t' -v n="$1" 'NR > 1 && $1 == n && $7 ~ /^skipped:/ { split($7, a, ":"); s += a[2] } END { print s + 0 }' "$log")
+    printf '%s\t%s' "${statuses:--}" "$skipped"
 }
 
 # One report row: name, robots, [mb-budget] lines, then the probe columns
@@ -194,12 +233,12 @@ report_row() { # name url robots dir
     [[ -f $dir/stderr.txt ]] && budget=$(grep -c '^\[mb-budget\]' "$dir/stderr.txt" || true)
     columns=$("$PROBE" --header | awk -F'\t' '{ print NF }')
     if [[ -f $dir/summary.tsv && $RESULT != timeout && $RESULT != panic ]]; then
-        printf '%s\t%s\t%s\t%s\n' "$name" "$robots" "$budget" "$(sed -n 2p "$dir/summary.tsv")"
+        printf '%s\t%s\t%s\t%s' "$name" "$robots" "$budget" "$(sed -n 2p "$dir/summary.tsv")"
     else
         printf '%s\t%s\t%s\t%s\t%s' "$name" "$robots" "$budget" "$url" "$RESULT"
         for ((i = 3; i <= columns; i++)); do printf '\t-'; done
-        printf '\n'
     fi
+    printf '\t%s\n' "$(supp_columns "$name")"
 }
 
 print_table() { # report
@@ -215,6 +254,12 @@ cmd_record() {
     [[ -z ${MB_NET_CACHE_OFFLINE:-} ]] || die "record with MB_NET_CACHE_OFFLINE set would record nothing; unset it"
     command -v curl >/dev/null || die "curl is needed for robots.txt"
     command -v python3 >/dev/null || die "python3 is needed to evaluate robots.txt"
+    if [[ ${1:-} == --refetch ]]; then
+        shift
+        (($# == 1)) || die "--refetch needs one list file (name<TAB>url<TAB>kind per line)"
+        refetch_list_file "$1"
+        return
+    fi
     local supplement=0
     if [[ ${1:-} == --supplement ]]; then
         supplement=1
@@ -348,6 +393,96 @@ diff_unreachable() { # before after
     done < <(sites)
 }
 
+# Round 4 S: fetch exactly the URLs of a list file, politely.
+#   - each URL's origin gets a fresh robots.txt (once per origin per run,
+#     never reused from earlier runs), `*` group; disallowed → `blocked`,
+#     the old cache entry stays
+#   - sequential, GAP_SECS between every request (robots included), GET
+#     only (the helper uses the engine's wire path), no retries — a 429 is
+#     recorded and left alone
+#   - the cache entry is replaced only by a 200 (survey_cache refetch)
+# Every line lands in refetched.tsv (supp_status).
+refetch_list_file() { # list
+    local list=$1
+    [[ -f $list ]] || die "no list file $list"
+    require_ignored "$CORPUS"
+    build_helper
+    local stamp robots_dir log=$CORPUS/refetched.tsv
+    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    robots_dir=$CORPUS/robots/refetch-$stamp
+    mkdir -p "$robots_dir"
+    [[ -f $log ]] || printf 'name\turl\tkind\trobots\trule\tdate\tsupp_status\tcache\n' >"$log"
+    local first=1 name url kind
+    pace() { ((first)) || sleep "$GAP_SECS"; first=0; }
+    while IFS=$'\t' read -r name url kind; do
+        [[ -z $name ]] && continue
+        local date
+        date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        if [[ $name == "#skipped" ]]; then
+            # `#skipped<TAB>site<TAB>N` — what the N6 filter left out.
+            printf '%s\t-\t-\t-\t-\t%s\tskipped:%s\t-\n' "$url" "$date" "$kind" >>"$log"
+            continue
+        fi
+        [[ $name == \#* ]] && continue
+        [[ -n $url && -n $kind ]] || die "bad list line: $name $url $kind"
+        [[ $url =~ ^https?:// ]] || die "not an http(s) URL: $url"
+        local origin host file
+        origin=$(origin_of "$url")
+        host=${origin#*://}
+        host=${host//[^A-Za-z0-9.-]/_}
+        file=$robots_dir/$host.txt
+        if [[ ! -f $file.code ]]; then
+            pace
+            echo "robots $origin/robots.txt" >&2
+            ROBOTS_CODE=$(curl -sS -L --max-time 20 -A "$UA" -o "$file" -w '%{http_code}' "$origin/robots.txt" 2>/dev/null) || ROBOTS_CODE=000
+            printf '%s\n' "$ROBOTS_CODE" >"$file.code"
+        fi
+        ROBOTS_CODE=$(cat "$file.code")
+        robots_verdict "$file" "$url"
+        local status cache=-
+        if [[ $ROBOTS_VERDICT != allow ]]; then
+            status=blocked
+            echo "  blocked $url ($ROBOTS_RULE)" >&2
+        else
+            pace
+            local out
+            out=$("$HELPER" refetch "$url" "$kind") || true
+            status=${out%%$'\t'*}
+            cache=${out#*$'\t'}
+            [[ $status == error ]] && status="error:$(printf '%s' "$cache" | tr -s ' ' '_' | cut -c1-60)" cache=-
+            echo "  $status $cache $url" >&2
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$url" "$kind" "$ROBOTS_VERDICT" "$ROBOTS_RULE" "$date" "$status" "$cache" >>"$log"
+    done <"$list"
+    echo "log: $log" >&2
+}
+
+# Round 4 S / N6: the re-fetch list for a run — each site's misses.tsv
+# filtered (compat_probe --refetch-list), each URL once.
+cmd_refetch_list() {
+    (($# >= 1)) || usage
+    local label=$1 out=$CORPUS/$1
+    shift
+    [[ -d $out ]] || die "no such run: $out"
+    require_ignored "$out"
+    build_probe
+    local list=$out/refetch-list.tsv names=() name
+    if (($# > 0)); then names=("$@"); else while IFS= read -r name; do names+=("$name"); done < <(sites | cut -f1); fi
+    printf '# re-fetch list from run %s (N6 filter), %s\n' "$label" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$list"
+    for name in "${names[@]}"; do
+        local misses=$out/$name/misses.tsv final host
+        [[ -s $misses ]] || continue
+        final=$(awk -F'\t' 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "final_url") c = i; next } c { print $c }' "$out/$name/summary.tsv" 2>/dev/null)
+        [[ -z $final || $final == - ]] && final=$(site_field "$name" 2)
+        host=$(origin_of "$final")
+        host=${host#*://}
+        host=${host%%:*}
+        "$PROBE" --refetch-list "$name" "$host" "$misses" >>"$list"
+    done
+    grep -c -v '^#' "$list" | sed 's/^/urls: /' >&2
+    echo "list: $list" >&2
+}
+
 # Round 4 P4 on a saved run: the js columns from each site's console.txt
 # with today's scripts/compat-js-apis.tsv (compiled into the probe).
 cmd_classify() {
@@ -377,5 +512,6 @@ case ${1:-} in
     run) shift; cmd_run "$@" ;;
     diff) shift; cmd_diff "$@" ;;
     classify) shift; cmd_classify "$@" ;;
+    refetch-list) shift; cmd_refetch_list "$@" ;;
     *) usage ;;
 esac

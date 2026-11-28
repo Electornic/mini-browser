@@ -126,6 +126,37 @@ impl Cache {
         Ok(result)
     }
 
+    /// A targeted re-fetch (compat round 4 S): `fetch` goes to the network
+    /// whatever the cache holds, and only a 200 is written (replacing the
+    /// entry). Any other status leaves the cache as it was — an old entry
+    /// stays, a miss stays a miss. Returns (status, stored).
+    pub(super) fn refetch(
+        &self,
+        kind: RequestKind,
+        url: &Url,
+        fetch: impl FnOnce() -> Result<FetchResult, NetworkError>,
+    ) -> Result<(u16, bool), NetworkError> {
+        if self.offline {
+            return Err(NetworkError::Io(
+                "MB_NET_CACHE_OFFLINE is set: a re-fetch needs the network".into(),
+            ));
+        }
+        let follows_redirects = kind != RequestKind::Document;
+        let url_text = url.to_string();
+        let identity = identity_line(&url_text, "GET", follows_redirects, b"");
+        let key = survey_cache_key(kind, url);
+        let result = fetch()?;
+        let status = result.response.status_code;
+        if status != 200 {
+            return Ok((status, false));
+        }
+        let meta_path = self.dir.join(format!("{key}.meta"));
+        let body_path = self.dir.join(format!("{key}.body"));
+        self.write_entry(&meta_path, &body_path, &identity, url, &result)
+            .map_err(|error| NetworkError::Io(error.to_string()))?;
+        Ok((status, true))
+    }
+
     fn write_entry(
         &self,
         meta_path: &Path,
@@ -236,10 +267,18 @@ fn read_entry(meta_path: &Path, body_path: &Path, identity: &str) -> Option<Fetc
     })
 }
 
+/// The entry name (`DIR/{key}.meta`/`.body`) the engine uses for a GET of
+/// `url` made as `kind`: a navigation doesn't follow redirects (each hop
+/// has its own entry), every subresource does.
+pub fn survey_cache_key(kind: RequestKind, url: &Url) -> String {
+    cache_key(&url.to_string(), "GET", kind != RequestKind::Document, b"")
+}
+
 /// FNV-1a over the identity bytes. Stable across runs and Rust versions
 /// (unlike `DefaultHasher`), which is all a file name needs — collisions are
-/// caught by the full identity comparison.
-fn cache_key(url: &str, method: &str, follows_redirects: bool, body: &[u8]) -> String {
+/// caught by the full identity comparison. Public for the survey tooling
+/// (the re-fetch helper names entries with it); nothing else needs it.
+pub fn cache_key(url: &str, method: &str, follows_redirects: bool, body: &[u8]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in identity_bytes(url, method, follows_redirects, body) {
         hash ^= u64::from(byte);
@@ -254,8 +293,95 @@ mod tests {
 
     use super::{
         Cache, FetchResult, HttpResponse, NetworkError, RequestKind, SurveyMiss, Url, cache_key,
-        identity_bytes, normalize_method, survey_stats,
+        identity_bytes, normalize_method, survey_cache_key, survey_stats,
     };
+
+    fn response_with(status_code: u16, body: &str) -> Result<FetchResult, NetworkError> {
+        let mut result = response(body)?;
+        result.response.status_code = status_code;
+        Ok(result)
+    }
+
+    #[test]
+    fn survey_cache_key_names_the_entry_the_engine_writes() {
+        // The re-fetch helper (compat round 4 S) finds entries by this key:
+        // a navigation is keyed without following redirects, a stylesheet
+        // with.
+        let cache = temp_cache("survey-key", false);
+        let page = Url::parse("https://a.test/page").unwrap();
+        let sheet = Url::parse("https://a.test/site.css").unwrap();
+        cache
+            .fetch(RequestKind::Document, (&page, "GET", false, b""), || {
+                response("<p>")
+            })
+            .unwrap();
+        cache
+            .fetch(RequestKind::Css, (&sheet, "GET", true, b""), || {
+                response("p{}")
+            })
+            .unwrap();
+        for (kind, url) in [(RequestKind::Document, &page), (RequestKind::Css, &sheet)] {
+            let meta = cache
+                .dir
+                .join(format!("{}.meta", survey_cache_key(kind, url)));
+            assert!(meta.exists(), "{kind:?} entry at {meta:?}");
+        }
+        assert_ne!(
+            survey_cache_key(RequestKind::Document, &page),
+            survey_cache_key(RequestKind::Css, &page)
+        );
+        let _ = std::fs::remove_dir_all(&cache.dir);
+    }
+
+    #[test]
+    fn refetch_stores_only_a_200_and_otherwise_keeps_the_old_entry() {
+        let cache = temp_cache("refetch", false);
+        let url = Url::parse("https://a.test/skin.css").unwrap();
+        let key = (&url, "GET", true, &b""[..]);
+        // Recorded once as a 429 (the round-3 kowiki skin sheet).
+        cache
+            .fetch(RequestKind::Css, key, || response_with(429, "slow down"))
+            .unwrap();
+        // A re-fetch that is rate-limited again changes nothing.
+        assert_eq!(
+            cache
+                .refetch(RequestKind::Css, &url, || response_with(429, "again"))
+                .unwrap(),
+            (429, false)
+        );
+        let hit = cache
+            .fetch(RequestKind::Css, key, || panic!("cached"))
+            .unwrap();
+        assert_eq!(hit.response.body, b"slow down");
+        // A 200 replaces it.
+        assert_eq!(
+            cache
+                .refetch(RequestKind::Css, &url, || response("p{}"))
+                .unwrap(),
+            (200, true)
+        );
+        let hit = cache
+            .fetch(RequestKind::Css, key, || panic!("cached"))
+            .unwrap();
+        assert_eq!(
+            (hit.response.status_code, &hit.response.body[..]),
+            (200, &b"p{}"[..])
+        );
+        // A miss answered with 404 stays a miss.
+        let gone = Url::parse("https://a.test/chunk-1a2b.js").unwrap();
+        assert_eq!(
+            cache
+                .refetch(RequestKind::Script, &gone, || response_with(404, ""))
+                .unwrap(),
+            (404, false)
+        );
+        let meta = cache.dir.join(format!(
+            "{}.meta",
+            survey_cache_key(RequestKind::Script, &gone)
+        ));
+        assert!(!meta.exists());
+        let _ = std::fs::remove_dir_all(&cache.dir);
+    }
 
     fn response(body: &str) -> Result<FetchResult, NetworkError> {
         Ok(FetchResult {

@@ -1,0 +1,14 @@
+img	cdn.example.test	https://cdn.example.test/img/logo.png
+css	static.other.test	https://static.other.test/skin.css?v=3
+js	cdn.example.test	https://cdn.example.test/chunks/app-1a2b.js
+font	fonts.other.test	https://fonts.other.test/a.woff2
+fetch	www.example.test	https://www.example.test/api/menu.json
+xhr	api.example.test	https://api.example.test/v1/feed
+other	www.example.test	https://www.example.test/blog/catalog
+img	ads.other.test	https://ads.other.test/pixel.gif?id=9
+img	www.example.test	https://www.example.test/track/view?x=1
+fetch	www.example.test	https://www.example.test/g/collect?v=2
+js	stats.other.test	https://stats.other.test/log?e=load
+document	www.example.test	https://www.example.test/next
+document	other.test	https://other.test/
+img	cdn.example.test	https://cdn.example.test/img/logo.png

@@ -19,7 +19,7 @@ use ureq::{
 pub use mb_dom::url::{NetworkError, Url};
 
 mod cache;
-pub use cache::{SurveyCacheStats, SurveyMiss, survey_stats};
+pub use cache::{SurveyCacheStats, SurveyMiss, cache_key, survey_cache_key, survey_stats};
 
 /// What a request is for. The survey cache records it with each offline
 /// miss (`compat_probe`'s `misses.tsv`, compat round 4 P7), so a targeted
@@ -53,6 +53,22 @@ impl RequestKind {
             Self::Xhr => "xhr",
             Self::Other => "other",
         }
+    }
+
+    /// The kind named by [`RequestKind::as_str`].
+    pub fn parse(name: &str) -> Option<Self> {
+        [
+            Self::Document,
+            Self::Css,
+            Self::Script,
+            Self::Image,
+            Self::Font,
+            Self::Fetch,
+            Self::Xhr,
+            Self::Other,
+        ]
+        .into_iter()
+        .find(|kind| kind.as_str() == name)
     }
 
     /// The `Accept` Chrome sends for this kind of request (compat round 4
@@ -254,28 +270,53 @@ fn cached_fetch(
     extra_headers: &[(String, String)],
     body: &[u8],
 ) -> Result<FetchResult, NetworkError> {
-    // The `Accept` default rides on the wire request only: it is not part
-    // of the cache key (the frozen survey cache stays valid, K5).
-    let fetch = || {
-        let agent = if follows_redirects {
-            agent()
-        } else {
-            agent_without_redirects()
-        };
-        let has_accept = extra_headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("accept"));
-        if has_accept {
-            return fetch_with_agent(agent, url, method, extra_headers, body);
-        }
-        let mut headers = extra_headers.to_vec();
-        headers.push(("accept".to_string(), kind.default_accept().to_string()));
-        fetch_with_agent(agent, url, method, &headers, body)
-    };
+    let fetch = || wire_fetch(kind, follows_redirects, url, method, extra_headers, body);
     match cache::Cache::from_env() {
         Some(cache) => cache.fetch(kind, (url, method, follows_redirects, body), fetch),
         None => fetch(),
     }
+}
+
+/// The network request itself. The `Accept` default rides on the wire
+/// request only: it is not part of the cache key (the frozen survey cache
+/// stays valid, K5).
+fn wire_fetch(
+    kind: RequestKind,
+    follows_redirects: bool,
+    url: &Url,
+    method: &str,
+    extra_headers: &[(String, String)],
+    body: &[u8],
+) -> Result<FetchResult, NetworkError> {
+    let agent = if follows_redirects {
+        agent()
+    } else {
+        agent_without_redirects()
+    };
+    let has_accept = extra_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("accept"));
+    if has_accept {
+        return fetch_with_agent(agent, url, method, extra_headers, body);
+    }
+    let mut headers = extra_headers.to_vec();
+    headers.push(("accept".to_string(), kind.default_accept().to_string()));
+    fetch_with_agent(agent, url, method, &headers, body)
+}
+
+/// Survey tooling only (compat round 4 S, `examples/survey_cache.rs`):
+/// fetch one GET of `url` as `kind` from the network — the engine's own
+/// wire path (`Accept` by kind; a document doesn't follow redirects) —
+/// and store it in `MB_NET_CACHE` only when it is a 200, replacing what is
+/// there. Returns (status, stored). Errors without `MB_NET_CACHE` or with
+/// `MB_NET_CACHE_OFFLINE`.
+pub fn survey_refetch(kind: RequestKind, url: &Url) -> Result<(u16, bool), NetworkError> {
+    let cache = cache::Cache::from_env()
+        .ok_or_else(|| NetworkError::Io("MB_NET_CACHE is not set".into()))?;
+    let follows_redirects = kind != RequestKind::Document;
+    cache.refetch(kind, url, || {
+        wire_fetch(kind, follows_redirects, url, "GET", &[], &[])
+    })
 }
 
 fn fetch_with_agent(

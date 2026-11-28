@@ -444,6 +444,27 @@ enwiki·kowiki 의 첫 스크립트가 `document.cookie.match(…)` 에서 죽�
   | `obs_u_intercepted_ours` | 286 | **270** |
   | 옮긴 몫(`obs_u_i_above_page`) | — | 16 = `no_hit` 16 전부 (naver 8 · kakaocorp 2 · korea-kr 2 · mdn 2 · docsrs 1 · bbc 1) |
 
+**③ S — 보충 도구(네트워크 없음, 커밋 대기)** — 구현 전에 정한 규칙:
+- **목록 파일**(`record --refetch` 의 입력): 한 줄 = `이름<TAB>URL<TAB>종류`(종류 = `net::RequestKind` 이름: document·css·js·img·font·fetch·xhr·other). `#` 줄은 주석, `#skipped<TAB>이름<TAB>N` 줄은 N6 필터가 거른 수(`supp_skipped`). 보충 ①은 손으로 쓰고, 보충 ②는 `compat-corpus.sh refetch-list <라벨>` 이 각 사이트의 `misses.tsv` 를 N6 로 걸러 `compat-cache/corpus/<라벨>/refetch-list.tsv` 로 만든다(같은 URL 은 한 번).
+- **N6 필터**(`examples/compat_support/refetch_filter.rs`):
+  - (iii) 비콘 흔적이 먼저다. 경로·쿼리를 소문자로 바꿔 영숫자가 아닌 글자로 자른 **토큰**이 `collect`·`beacon`·`pixel`·`track` 으로 시작하거나(`collector`·`beacons`·`pixels`·`tracking` 포함), `log`·`logs`·`logging`·`logger` 와 같으면 종류와 무관하게 거른다. 글자 단위 부분 일치로 하면 `logo.png`·`blog`·`catalog` 까지 걸러져서 토큰으로 정했다.
+  - (i) 그다음 css·js·font·img 는 호스트와 무관하게 받는다.
+  - (ii) 그 밖(document·fetch·xhr·other)은 URL 호스트가 사이트 문서 호스트(그 라벨 `summary.tsv` 의 `final_url`, 없으면 `compat-sites.tsv` URL)와 **글자 그대로 같을 때만** 받는다.
+- **받기**(`crates/mb-runtime/examples/survey_cache.rs refetch URL 종류`): `net::survey_refetch` 가 엔진의 `cached_fetch` 와 같은 와이어 경로(GET 만, 종류별 `Accept`, document 는 리다이렉트를 따라가지 않음)로 받는다. 캐시 항목은 **200 일 때만** 쓴다(옛 항목을 덮음). 200 이 아니면 캐시를 바꾸지 않는다 — 옛 항목은 그대로이고, 미스였으면 미스로 남아 `ok*` 를 유지한다. 그래서 일부러 지울 일이 없다. 키는 `net::cache_key`(내보냄)·`net::survey_cache_key(종류, URL)`(document = `follows_redirects` 거짓)이고, 도우미 `key URL 종류` 가 같은 값을 찍는다.
+- **robots**: 받을 URL 의 **출처마다** 그 실행에서 robots.txt 를 새로 한 번 받는다(사이트 문서 출처만이 아니라 CDN 출처도 — 3차보다 엄격). `User-agent: *` 그룹, 3차와 같은 판정기. 금지면 그 출처의 URL 은 받지 않고 `blocked` 로 적는다. 원문은 `compat-cache/corpus/robots/refetch-<UTC 날짜시각>/<호스트>.txt`.
+- **예의**: 순차, robots 요청과 문서·리소스 요청을 모두 포함해 **요청 사이 2초**, 재시도 없음(429 도), 3차와 같은 데스크톱 UA(식별 토큰 없음).
+- **기록**: `compat-cache/corpus/refetched.tsv`(이름·URL·종류·robots 판정·근거 규칙·UTC 날짜·`supp_status`). `supp_status` = HTTP 코드, 또는 `blocked`·`error:…`·`skipped:N`. 문서 초안의 "`recorded.tsv` 에 남긴다"는 따로 적는 파일로 바꿨다 — `run` 이 `recorded.tsv` 의 **마지막 줄**로 robots 판정·날짜를 읽어서, 보충 기록을 거기 더하면 재생 판정이 바뀐다. `run` 은 보고서 끝에 `supp_status`(그 사이트 보충의 `코드:개수`, URL 마다 마지막 시도)·`supp_skipped` 두 열을 붙인다.
+- **구현 결과**:
+  - `net::cache_key`·`net::survey_cache_key` 를 내보냈다(동작 무변경). `net::survey_refetch` 와 `RequestKind::parse` 를 더했다. `cached_fetch` 의 와이어 부분은 `wire_fetch` 로 뽑아 엔진과 보충이 같이 쓴다.
+  - 도우미 예제 `survey_cache key|refetch URL 종류`. `MB_NET_CACHE` 가 없거나 `MB_NET_CACHE_OFFLINE` 이면 받지 않고 에러로 끝난다.
+  - 스크립트: `refetch-list <라벨> [이름…]`, `record --refetch <목록>`, 보고서 두 열. `COMPAT_CORPUS_DIR` 로 다른 ignored 코퍼스 디렉터리를 줄 수 있다(시험용). 도우미는 0.5일 안에 끝났다.
+- **테스트**: `survey_cache_key_names_the_entry_the_engine_writes`(document·CSS), `refetch_stores_only_a_200_and_otherwise_keeps_the_old_entry`(429 → 그대로, 200 → 덮음, 미스 + 404 → 미스 유지 — `net/cache.rs`), `tests/compat_refetch_filter.rs` 3개(손으로 쓴 `fixtures/compat-misses.tsv` — 가짜 호스트).
+- **실사이트 없이 확인**:
+  - `refetch-list r4-k5`: 8곳 42 URL(img 40 · css 1 · js 1), 걸러진 것 0. 이 목록은 보충 ②(2단계) 몫이라 지웠다.
+  - 루프백(127.0.0.1) 서버로 `record --refetch` 를 시험했다(임시 코퍼스·캐시, 끝나고 지움). robots 를 한 번 새로 받았고, 요청 사이가 2초였고, `Disallow` URL 은 요청하지 않고 `blocked` 로 남았고, 404 는 캐시를 안 바꿨고(`kept`), 200 은 도우미 키 이름으로 저장됐고, `#skipped` 가 적혔다.
+  - 전체 오프라인 `run`(임시 라벨)은 `r4-p0` 와 105열 같고 diff 가 비었다. 새 두 열은 `-` 다.
+- 테스트 1199(+5).
+
 ### 설계 결정
 
 - **합집합과 우선순위**: `hidden` 을 맨 앞에 둔다. 1단계가 그것을 관찰에서 빼면 그 요소는 관찰 요소 자체에서 사라지므로, 다른 범주로 옮겨 가 이중으로 줄어든 것처럼 보이지 않는다.
@@ -873,7 +894,7 @@ M (3~4일).
 | 단계 | 상태 | 커밋 | 테스트 수 | 코퍼스 fail/panic/timeout | 기대 컨트롤 누락 | `obs_unreachable`(ours) 관찰 요소당 비율(절대 수) · 구성 hidden/clipped/offscreen_x/intercepted(참고) | `Uncaught`(중복 제거) / 스크립트 완주 / missing-api 첫·어느 줄 | 합산 ours / 버린 규칙 ours(참고) | 메모 |
 |---|---|---|---|---|---|---|---|---|---|
 | 3차 끝(`final`) | ✅ | `cef51c5` | 1173 | ok 12 + ok* 8 · nav-fail 1(crates.io) · panic 0 · timeout 0 · blocked 2 · robots skip 2 · `[mb-budget]` 0 | 7/20 (naver·daum·hani·korea-kr·velog·d2·google) | 미측정(클립 거절 276) | 83(중복 포함 96) / 미측정 / 10 · 14 | 1,356 / 1,506 | `r4-check` 재생이 `final` 과 같음([부록 D](#부록-d--측정-재현과-명령)) |
-| 0 측정 정비 | 진행 중 — ① P ✅ · ② K5 ✅ · P2b 세로 행 ✅(커밋 대기) | `4f46de3`(P) | 1190 (P) → 1193 (K5) → 1194 (P2b 세로) | 목표 nav-fail 0(crates.io 문서 보충 — N1-나) | (D6 철자 수정 뒤 6/20) | 첫 측정(`r4-p0`, 참고): 0.180(796; 첫 P2b 표로 0.184·812) · 359/73/94/270 | 83 / `js_scripts` 열 / 10 · 14(`classify final` 재현) | 그대로 | `r4-p0` ✅(기존 77열 = `final`, 요소 diff 0) → `r4-k5` ✅(빈 diff, 102열 동일) → `r4-base` |
+| 0 측정 정비 | 진행 중 — ① P ✅ · ② K5 ✅ · P2b 세로 행 ✅ · ③ S ✅(커밋 대기) | `4f46de3`(P) · `68498f3`(K5·P2b 세로) | 1190 (P) → 1194 (K5·P2b 세로) → 1199 (S) | 목표 nav-fail 0(crates.io 문서 보충 — N1-나) | (D6 철자 수정 뒤 6/20) | 첫 측정(`r4-p0`, 참고): 0.180(796; 첫 P2b 표로 0.184·812) · 359/73/94/270 | 83 / `js_scripts` 열 / 10 · 14(`classify final` 재현) | 그대로 | `r4-p0` ✅(기존 77열 = `final`, 요소 diff 0) → `r4-k5` ✅(빈 diff, 102열 동일) → `r4-base` |
 | 1 에이전트 정합성 | 설계 | | | | | | | | |
 | 2 작은 JS | 설계 | | | | | | | | 겹마다 `r4-js-1`… → 보충 ② → `r4-js-sup`(후) / `r4-base-sup`(③④·보조의 기준) |
 | 3 레이아웃 | 설계 | | | | | | | | |

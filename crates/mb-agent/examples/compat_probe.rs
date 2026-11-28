@@ -38,6 +38,9 @@ use std::{
 #[allow(dead_code)] // shared with tests/compat_classify.rs
 #[path = "compat_support/classify.rs"]
 mod classify;
+#[allow(dead_code)] // shared with tests/compat_refetch_filter.rs
+#[path = "compat_support/refetch_filter.rs"]
+mod refetch_filter;
 
 use mb_agent::reach::{self, InterceptCause, Reach, ReachContext};
 use mb_agent::{AgentBrowser, AgentConfig, ClockMode, Observation};
@@ -71,6 +74,21 @@ fn main() {
         let mut row = Row::default();
         push_js_columns(&mut row, Some(&verdict));
         print!("{}", row.render());
+        return;
+    }
+    if url == "--refetch-list" {
+        // N6 (step 0 S): `--refetch-list NAME DOCUMENT_HOST MISSES.TSV`
+        // prints the list-file lines and a `#skipped` line.
+        let usage = "usage: compat_probe --refetch-list NAME DOCUMENT_HOST MISSES.TSV";
+        let name = args.next().expect(usage);
+        let host = args.next().expect(usage);
+        let misses = fs::read_to_string(args.next().expect(usage)).unwrap_or_default();
+        let (lines, skipped) =
+            refetch_filter::refetch_lines(&name, &host, &refetch_filter::parse_misses(&misses));
+        for line in lines {
+            println!("{line}");
+        }
+        println!("#skipped\t{name}\t{skipped}");
         return;
     }
     let out = PathBuf::from(args.next().expect(usage));
