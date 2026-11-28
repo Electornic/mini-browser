@@ -345,6 +345,8 @@ MB_NET_CACHE_OFFLINE=1 ./target/debug/mb-mcp --start-url https://news.ycombinato
 
 **3c 재측정** (2026-11-28, 라벨 `pct-top`, `clip-hit` 대비 — relative `top`/`bottom` % 를 높이 기준으로, [compat-round3.md 3c](compat-round3.md#3c--topbottom--기준-2026-11-28)): 시간 열 외 모든 열·요소 목록 25곳 동일, `[mb-budget]` 0.
 
+**3d 재측정 / 3단계 완료** (2026-11-28, 라벨 `floats`, `pct-top` 대비 — float shrink-to-fit·줄바꿈, [compat-round3.md 3d](compat-round3.md#3d--float-의-shrink-to-fit-폭과-줄바꿈-2026-11-28-3a-후속)): 결과·요소·텍스트·기대 컨트롤·요소 목록 25곳 동일, `[mb-budget]` 0. d2 — 클립에 숨던 날짜 20 → 0(페이지 밖 40 → 0). kakaocorp — Slick 캐러셀 슬라이드(서버 HTML 에 폭 없음)가 줄바꿈되어 세로로 쌓임, 문서 높이 2,102 → 4,244(부작용, 후속). 3단계 전체(`clip-before` → `floats`): 그려지는 sr-only 꼴 슬리버 266 → 51(전부 폭 1px), 페이지 안에서 클립에 숨은 텍스트 154(enwiki 닫힌 드롭다운 145 · hani 9), 요소 4,508 · 텍스트 블록 4,164 그대로 — [완료 판정](compat-round3.md#3단계-완료-판정-2026-11-28-라벨-floats).
+
 - `ms` = `navigate`(settle 포함) 벽시계, 이 맥에서. 두 실행 사이 차이는 대부분 ±10% 안, 가장 큰 것은 kowiki 256 → 197(−23%)·github 1,829 → 1,562(−15%) — 시간은 비교용이 아니라 timeout 판정용.
 - 기대 컨트롤 **누락 사이트 8곳**(naver·daum·hani·korea-kr·velog·d2·google·enwiki; 0b 때는 측정된 17곳 중 6곳). 원인 분류는 각 단계에서 — 지금 표는 기준선. naver 검색창은 ARIA `combobox` 다(역할 오기를 녹화 후 tsv 에서 고침).
 - **콘솔 에러**(`prompts.rs` "제3자 스크립트 콘솔 에러" 결정용 입력): 측정된 20곳 중 **16곳이 1건 이상**, 합 104건 중 98건이 `Uncaught in script`. 많은 곳 korea-kr 33·bbc 15·yna 13·daum 9·google 6·kakaocorp 6. 대부분 빠진 API(`getElementsByTagName` 류, [JS API 표면 프로브](#js-api-표면-프로브)). naver 광고 2건은 이번 스냅샷에서 `near "document.getElementsByTagName"` / `near "Na"`(gfp-core 의 축약 별칭 — 2차의 `console.debug` 가 이번 빌드에선 지역 변수로 줄여져 있음)로 읽힌다. 0a 권고(지금은 `prompts.rs` 를 안 바꿈)를 바꿀 근거는 아직 없다 — 다음은 제3자 에러가 있는 손으로 쓴 eval 페이지로 확인.

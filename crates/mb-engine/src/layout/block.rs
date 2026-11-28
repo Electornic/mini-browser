@@ -6,8 +6,8 @@ use crate::{css::Value, style::StyledNode};
 use super::flex::{is_flex_container, layout_flex_children};
 use super::grid::{is_grid_container, layout_grid_children};
 use super::inline::{
-    BlockChild, group_block_children, inline_align_for, layout_inline_children, layout_inline_run,
-    uses_inline_flow,
+    BlockChild, group_block_children, inline_align_for, inline_block_shrink_to_fit_width,
+    layout_inline_children, layout_inline_run, uses_inline_flow,
 };
 use super::table::{is_table_container, layout_table_children};
 use super::{
@@ -23,15 +23,29 @@ pub(super) fn layout_node(
     cursor_y: &mut f32,
     parent_width: f32,
 ) -> LayoutBox {
+    layout_node_sized(node, parent_x, cursor_y, parent_width, None)
+}
+
+/// [`layout_node`] with a used content width decided by the caller — a
+/// float's shrink-to-fit width (step 3d). Such a box ignores `auto`
+/// margins (they are 0 on floats).
+fn layout_node_sized(
+    node: &StyledNode,
+    parent_x: f32,
+    cursor_y: &mut f32,
+    parent_width: f32,
+    used_width: Option<f32>,
+) -> LayoutBox {
     let raw_margin = edge_sizes(node, "margin", parent_width);
     let padding = edge_sizes(node, "padding", parent_width);
     let border = edge_sizes(node, "border", parent_width);
 
     // CSS auto-margin centering only applies when a width is specified.
-    let explicit_width =
-        length_value(node, "width", parent_width).or_else(|| intrinsic_width(node));
-    let left_auto = is_auto(node, "margin-left");
-    let right_auto = is_auto(node, "margin-right");
+    let explicit_width = used_width
+        .or_else(|| length_value(node, "width", parent_width))
+        .or_else(|| intrinsic_width(node));
+    let left_auto = used_width.is_none() && is_auto(node, "margin-left");
+    let right_auto = used_width.is_none() && is_auto(node, "margin-right");
 
     let (content_width, margin_left, margin_right) = if let Some(width) = explicit_width {
         let used = padding.left + padding.right + border.left + border.right + width;
@@ -151,9 +165,32 @@ pub(super) fn layout_node(
                     // float's outer top sits at the current in-flow cursor, but
                     // we never write back to the cursor — siblings flow past it.
                     let mut throwaway = child_cursor_y;
-                    let float_box =
-                        layout_node(child, next_left_float_x, &mut throwaway, content_width);
+                    let width = float_width(child, content_width);
+                    let mut float_box = layout_node_sized(
+                        child,
+                        next_left_float_x,
+                        &mut throwaway,
+                        content_width,
+                        width,
+                    );
                     let outer = outer_rect(&float_box);
+                    // No room beside the floats already on this row (step
+                    // 3d): start a new row below them, at the left edge.
+                    if next_left_float_x > content_x
+                        && next_left_float_x + outer.width > next_right_float_right + 0.01
+                    {
+                        let row_y = float_bottom_left.max(child_cursor_y);
+                        shift_layout_subtree(
+                            &mut float_box,
+                            content_x - next_left_float_x,
+                            row_y - child_cursor_y,
+                        );
+                        throwaway += row_y - child_cursor_y;
+                        next_left_float_x = content_x;
+                        if row_y >= float_bottom_right {
+                            next_right_float_right = content_x + content_width;
+                        }
+                    }
                     next_left_float_x += outer.width;
                     float_bottom_left = float_bottom_left.max(throwaway);
                     children.push(float_box);
@@ -164,13 +201,27 @@ pub(super) fn layout_node(
                     // lay out at the left edge first to measure, then shift the
                     // whole subtree to (right_edge - outer_width).
                     let mut throwaway = child_cursor_y;
+                    let width = float_width(child, content_width);
                     let mut float_box =
-                        layout_node(child, content_x, &mut throwaway, content_width);
+                        layout_node_sized(child, content_x, &mut throwaway, content_width, width);
                     let outer_width = outer_rect(&float_box).width;
-                    let dx = (next_right_float_right - outer_width) - content_x;
-                    if dx != 0.0 {
-                        shift_layout_subtree(&mut float_box, dx, 0.0);
+                    let mut dy = 0.0;
+                    if next_right_float_right < content_x + content_width
+                        && next_right_float_right - outer_width < next_left_float_x - 0.01
+                    {
+                        // Same as a left float: a new row below.
+                        let row_y = float_bottom_right.max(child_cursor_y);
+                        dy = row_y - child_cursor_y;
+                        next_right_float_right = content_x + content_width;
+                        if row_y >= float_bottom_left {
+                            next_left_float_x = content_x;
+                        }
                     }
+                    let dx = (next_right_float_right - outer_width) - content_x;
+                    if dx != 0.0 || dy != 0.0 {
+                        shift_layout_subtree(&mut float_box, dx, dy);
+                    }
+                    throwaway += dy;
                     next_right_float_right -= outer_width;
                     float_bottom_right = float_bottom_right.max(throwaway);
                     children.push(float_box);
@@ -253,6 +304,31 @@ fn collapse_margins(prev: f32, next: f32) -> f32 {
     } else {
         prev + next
     }
+}
+
+/// The used content width of a float with `width: auto` — shrink-to-fit
+/// (CSS 2.1 §10.3.5), measured like an inline-block against what's left of
+/// the containing block after the float's own margins, borders and padding.
+/// `None` when the float has a width of its own (or an intrinsic one).
+/// Before step 3d an auto-width float stretched to the whole container,
+/// so floated `dt`/`dd` pairs marched off to the right one container-width
+/// apart.
+fn float_width(node: &StyledNode, containing_width: f32) -> Option<f32> {
+    if length_value(node, "width", containing_width).is_some() || intrinsic_width(node).is_some() {
+        return None;
+    }
+    let margin = edge_sizes(node, "margin", containing_width);
+    let padding = edge_sizes(node, "padding", containing_width);
+    let border = edge_sizes(node, "border", containing_width);
+    let available = (containing_width
+        - margin.left
+        - margin.right
+        - padding.left
+        - padding.right
+        - border.left
+        - border.right)
+        .max(0.0);
+    Some(inline_block_shrink_to_fit_width(node, available))
 }
 
 fn clear_target_y(node: &StyledNode, float_bottom_left: f32, float_bottom_right: f32) -> f32 {

@@ -599,7 +599,7 @@ fn inline_block_resolved_width(node: &StyledNode, available_width: f32) -> f32 {
         .unwrap_or_else(|| inline_block_shrink_to_fit_width(node, available_width))
 }
 
-fn inline_block_shrink_to_fit_width(node: &StyledNode, available_width: f32) -> f32 {
+pub(super) fn inline_block_shrink_to_fit_width(node: &StyledNode, available_width: f32) -> f32 {
     // Toy shrink-to-fit: text uses approximate glyph width; element uses the
     // sum of inline child widths, capped to the available content width so a
     // long run still wraps rather than overflowing the container. Floored at

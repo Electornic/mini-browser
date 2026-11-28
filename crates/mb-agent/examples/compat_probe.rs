@@ -1301,6 +1301,8 @@ struct Anomalies {
     elements_clipped_out: Vec<String>,
     /// Text boxes the `ClipTable` cuts but doesn't hide.
     text_cut: usize,
+    /// … listed (first 100) with the visible part, for reviewing a change.
+    text_cut_lines: Vec<String>,
     /// `ClipGroup` commands in the frame's display list.
     clip_groups: usize,
     /// First-viewport raster time, and the same list unclipped.
@@ -1403,6 +1405,10 @@ impl Anomalies {
             "\n## observed elements clipped out (click refused: \"clipped out of view\")"
         );
         for line in &self.elements_clipped_out {
+            let _ = writeln!(text, "{line}");
+        }
+        let _ = writeln!(text, "\n## text cut by a clip (first 100)");
+        for line in &self.text_cut_lines {
             let _ = writeln!(text, "{line}");
         }
         let _ = writeln!(text, "### boxes (first 200)");
@@ -1797,7 +1803,25 @@ impl Walk<'_> {
                         .unwrap_or_default()
                 ));
             }
-            Some(v) if area(v) < area(page_rect) => out.text_cut += 1,
+            // More than a pixel lost — sub-pixel rounding at a clip edge
+            // isn't a cut.
+            Some(v) if area(page_rect) - area(v) > 1.0 => {
+                out.text_cut += 1;
+                if out.text_cut_lines.len() < 100 {
+                    out.text_cut_lines.push(format!(
+                        "{:.0}x{:.0} at ({:.0},{:.0}) shows {:.0}x{:.0}  {:?}  in {}  clip={}",
+                        page_rect.width,
+                        page_rect.height,
+                        page_rect.x,
+                        page_rect.y,
+                        v.width,
+                        v.height,
+                        clip(text, 30),
+                        ancestry(self.document, node, 2),
+                        ctx.nearest.as_deref().unwrap_or("-")
+                    ));
+                }
+            }
             Some(_) => {}
         }
     }

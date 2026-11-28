@@ -1879,6 +1879,67 @@ mod tests {
     }
 
     #[test]
+    fn auto_width_floats_shrink_to_fit_their_content() {
+        // Step 3d (d2's post meta line: `dt, dd {float: left}` in a 690px
+        // `dl`): a float without a width is as wide as its content, so the
+        // floats sit side by side at the start of the line — before, each
+        // took the whole 690px and they marched off to x = 690, 1380, …
+        let styled = styled_root(
+            r#"<dl id="root"><dt>by</dt><dd>2026.11.26</dd><dd>509</dd></dl>"#,
+            r#"
+                #root { width: 690px; margin: 0; }
+                dt, dd { float: left; margin: 0 5px 0 0; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let boxes: Vec<_> = layout.children.iter().map(outer_rect).collect();
+        assert_eq!(boxes.len(), 3, "{boxes:?}");
+        let mut x = 0.0;
+        for b in &boxes {
+            assert_eq!(b.y, 0.0, "one row: {boxes:?}");
+            assert_eq!(b.x, x, "packed left to right: {boxes:?}");
+            assert!(b.width < 150.0, "shrunk to its text: {boxes:?}");
+            x += b.width;
+        }
+    }
+
+    #[test]
+    fn floats_that_do_not_fit_wrap_below_earlier_floats() {
+        let styled = styled_root(
+            r#"<div id="root"><div class="f"></div><div class="f"></div><div class="f"></div></div>"#,
+            r#"
+                #root { width: 100px; }
+                .f { float: left; width: 40px; height: 20px; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let at = |i: usize| {
+            let d = layout.children[i].dimensions.content;
+            (d.x, d.y)
+        };
+        assert_eq!(at(0), (0.0, 0.0));
+        assert_eq!(at(1), (40.0, 0.0));
+        assert_eq!(at(2), (0.0, 20.0), "no room for 40px after 80px");
+        assert_eq!(layout.dimensions.content.height, 40.0);
+    }
+
+    #[test]
+    fn right_float_with_auto_width_shrinks_to_its_content() {
+        let styled = styled_root(
+            r#"<div id="root"><span class="f">ok</span></div>"#,
+            r#"
+                #root { width: 400px; }
+                .f { float: right; margin: 0 auto; }
+            "#,
+        );
+        let layout = layout_tree(&styled, 800.0);
+        let f = outer_rect(&layout.children[0]);
+        assert!(f.width > 0.0 && f.width < 100.0, "{f:?}");
+        // `auto` margins on a float are 0: flush with the right edge.
+        assert_eq!(f.x + f.width, 400.0, "{f:?}");
+    }
+
+    #[test]
     fn right_float_pins_to_parent_right_edge() {
         // The right float's outer right edge should land at parent's content
         // right edge — measured then shifted into place.
