@@ -2394,6 +2394,97 @@ mod tests {
         assert_eq!(browser.document_html, original_html, "inert");
     }
 
+    /// Click at page (`x`, `y`) on a page at `http://t/p` and return the
+    /// fragment of the same-document link that was followed (`a`, `b`,
+    /// `next`), or `None` when nothing navigated.
+    fn followed_link(html: &str, css: &str, x: f32, y: f32) -> Option<String> {
+        let mut browser = browser_with_html_and_css(html, css);
+        browser.current_url = Some(mb_runtime::net::Url::parse("http://t/p").unwrap());
+        click_at(&mut browser, x, y);
+        let url = browser.current_url.as_ref()?.to_string();
+        url.split_once('#')
+            .map(|(_, fragment)| fragment.to_string())
+    }
+
+    #[test]
+    fn pointer_events_none_link_does_not_navigate() {
+        // Compat round 4 step 1b: the click goes through the link to the box
+        // under it.
+        let html = r##"<div id="outer"><a id="lnk" href="#next">go</a></div>"##;
+        let css = "#outer { width: 200px; height: 100px; }";
+        assert_eq!(followed_link(html, css, 5.0, 5.0).as_deref(), Some("next"));
+        assert_eq!(
+            followed_link(
+                html,
+                &format!("{css} #lnk {{ pointer-events: none }}"),
+                5.0,
+                5.0
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn pointer_events_auto_child_of_none_receives_the_click() {
+        let html = r##"<div id="outer"><a id="lnk" href="#next">go</a></div>"##;
+        let css = "#outer { width: 200px; height: 100px; pointer-events: none } #lnk { pointer-events: auto }";
+        assert_eq!(followed_link(html, css, 5.0, 5.0).as_deref(), Some("next"));
+    }
+
+    #[test]
+    fn overlay_blocks_link_navigation_for_people_and_agents() {
+        // Step 1b-link: a covered link doesn't navigate — the click lands
+        // on the cover, as in Chrome (it used to follow the link's
+        // geometry under any cover).
+        let html = r##"<div><a id="lnk" href="#next">go</a><div id="cover"></div></div>"##;
+        let css = "#cover { position: absolute; left: 0; top: 0; width: 400px; height: 300px; }";
+        assert_eq!(followed_link(html, css, 5.0, 5.0), None);
+        // A `pointer-events: none` cover lets it through.
+        assert_eq!(
+            followed_link(
+                html,
+                &format!("{css} #cover {{ pointer-events: none }}"),
+                5.0,
+                5.0
+            )
+            .as_deref(),
+            Some("next")
+        );
+    }
+
+    #[test]
+    fn link_navigation_follows_the_hit_node_ancestor_href() {
+        // The link a click follows is the hit node's nearest `<a href>`
+        // ancestor: here a later absolute link sits over the first one, and
+        // a `z-index` puts the first back on top (paint order, 1b-z).
+        let html = r##"<div><a id="first" href="#a"><span>one</span></a><a id="second" href="#b">two</a></div>"##;
+        let css = "a { display: block; width: 100px; height: 30px; } \
+                   #second { position: absolute; left: 0; top: 0; }";
+        assert_eq!(followed_link(html, css, 5.0, 5.0).as_deref(), Some("b"));
+        let raised = format!("{css} #first {{ position: relative; z-index: 2 }}");
+        assert_eq!(followed_link(html, &raised, 5.0, 5.0).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn label_ancestor_of_the_hit_activates_its_checkbox() {
+        // The checkbox hack under z-index: the label paints above a later
+        // box (1b-z), so a click there toggles the checkbox through it.
+        let mut browser = browser_with_html_and_css(
+            r#"<div><input id="c" type="checkbox"><label id="lab" for="c"><span>Menu</span></label><div id="later"></div></div>"#,
+            "#c { position: absolute; left: 300px; top: 0; } \
+             #lab { position: absolute; left: 0; top: 0; width: 100px; height: 30px; z-index: 3; } \
+             #later { position: relative; width: 100px; height: 30px; }",
+        );
+        click_at(&mut browser, 5.0, 5.0);
+        assert_eq!(
+            browser
+                .js
+                .execute("document.getElementById('c').getAttribute('checked') !== null")
+                .unwrap(),
+            "true"
+        );
+    }
+
     #[test]
     fn radio_click_unchecks_group() {
         // `selecting_a_radio_clears_the_rest_of_its_group` pins the

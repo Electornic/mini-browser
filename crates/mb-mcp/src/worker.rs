@@ -124,6 +124,11 @@ pub struct ErrorReport {
     pub repeat_count: u32,
     /// The page after the failure, when the error carries one.
     pub observation: Option<(String, String)>,
+    /// Page-written details of the error, already labelled as untrusted
+    /// page content (`AgentError::page_content` — what took an intercepted
+    /// click). Sent as its own content item after the error JSON, never
+    /// inside `message`/`hint`.
+    pub page: Option<String>,
 }
 
 pub struct Job {
@@ -1159,6 +1164,7 @@ pub fn browser_closed() -> Reply {
                 .into(),
         repeat_count: 1,
         observation: None,
+        page: None,
     })
 }
 
@@ -1270,9 +1276,9 @@ impl ToolError {
         }
     }
 
-    fn hint(&self) -> &'static str {
-        match self {
-            ToolError::Agent(e) => e.hint(),
+    fn hint(&self) -> String {
+        let hint = match self {
+            ToolError::Agent(e) => return e.hint(),
             ToolError::InvalidId(_) => {
                 "Element ids look like \"e21\"; copy one from the latest observation."
             }
@@ -1294,7 +1300,8 @@ impl ToolError {
             ToolError::Paused => {
                 "Call the same tool with the same arguments again to wait until they resume (it runs then), or tell the user the browser is paused."
             }
-        }
+        };
+        hint.to_string()
     }
 
     fn observation_blocks(&self) -> Option<(String, String)> {
@@ -1325,7 +1332,7 @@ pub(crate) fn error_reply(error: &ToolError, repeat_count: u32) -> Reply {
     let hint = if repeat_count >= REPEAT_LIMIT && !error.is_waiting() {
         STOP_REPEATING.to_string()
     } else {
-        error.hint().to_string()
+        error.hint()
     };
     let mut message = error.message();
     if error.person_changed_page() {
@@ -1341,6 +1348,10 @@ pub(crate) fn error_reply(error: &ToolError, repeat_count: u32) -> Reply {
         hint,
         repeat_count,
         observation: error.observation_blocks(),
+        page: match error {
+            ToolError::Agent(e) => e.page_content(),
+            _ => None,
+        },
     })
 }
 

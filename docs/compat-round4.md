@@ -672,6 +672,50 @@ M (3.5일): `reach` 함수·테스트 1일, probe 열·P4 후처리·P7 0.75일,
   - enwiki `link:main page`: Vector 의 주 메뉴는 닫힌 드롭다운(`visibility`)이다. Chrome 은 JS 가 돌면 1280px 에서 사이드바에 고정해 보여 준다(우리 JS 는 `document.cookie` 에서 죽음 — D8, 2단계). 에이전트가 직접 여는 길("Main menu" 체크박스 해킹)은 `intercepted:z_order` 라 지금 클릭이 빗나간다(미리보기 `compat-cache/previews/1a/enwiki-main-menu.png`) — **1b-z 가 고칠 몫**이다.
 - 짧은 release 퍼저(각 3,000) 실패 0. 테스트 1215, clippy·fmt clean.
 
+**1b — `pointer-events`·1b-링크·1b-z(+1b-z′)·가로챈 클릭 거절(커밋 대기)** — 임계값이 걸려 멈췄고, **사용자가 거절 유지 + 링크 URL 힌트로 결정**(아래 "1b 임계값").
+- **스타일**: `pointer-events` 를 `Keywords`(`auto`·`none` + SVG 값 9개 — 모두 `auto` 로 읽음)로 바꾸고 `INHERITED_PROPERTIES`·`RENDERED` 에 넣었다. `StyledNode::pointer_events_none()`(대소문자 무시 — `visibility_hidden()` 도 같이 고침).
+- **히트 테스트(1b + 1b-z)**: `view::compute_hovered_hit` 이 이제 페인터의 순서(`render::paint_order` — 같은 `walk_paint_order`)를 걷고 마지막으로 맞은 상자를 고른다. DFS 걸음(`walk_for_hover`)은 지웠다. 경로(`HoverHit::path`)는 고른 상자까지의 레이아웃 경로를 따로 찾는다. 건너뛰는 상자 = `visibility` 숨김 · `pointer-events: none`(자기 기록만 — `auto` 자손은 받음) · inert(하위 트리). `hit_node_in_paint_order` 는 같은 함수를 부르는 이름으로만 남겼다(reach 의 `z_order` 원인은 이제 구조적으로 0, `pointer_none_overlay` 도 0).
+- **1b-z′**: 위 "끼워 넣는 부분 ①". `creates_stacking_context` = positioned 이면서 정수 `z-index`·`opacity<1`·`transform`. `z-index:auto` positioned 상자의 positioned 자손은 부모 맥락의 층으로 올라간다(`collect_positioned_into`). 페인트 순서가 바뀌므로 스크린샷도 같이 바뀐다(Chrome 쪽으로).
+- **1b-링크**: 클릭이 따라가는 링크 = 히트 노드에서 위로 처음 만나는 `<a href>`/`<area href>`(`state::link_href_from`) — JS 클릭 디스패치·라벨 활성화와 같은 히트. `clicked_link`(기하 판정)는 지웠다. `LinkTarget` 은 커서·밑줄·hover 표시에만 남고, 숨김·`pointer-events:none`·inert 상자는 `LinkTarget` 도 아니다.
+- **`error.rs`**: `NotInteractable { id, reason: NotInteractableReason, label: Option<NodeId> }`. 사유 = `NotRendered | ZeroSize | Clipped | Hidden | Inert | NoFocus | Intercepted(Interceptor)`(1c 가 `Clipped` 의 힌트 갈래와 `OutsideViewportX` 를 더함). `hint()` 는 `String`. 메시지 글은 그대로다("it is hidden" 등 — 기존 테스트·replay 비교가 그대로 맞음).
+  - `Interceptor { id(이미 발급된 것만), role, name, tag, origin }`. **trusted**(메시지·힌트)에는 역할과 `eN` 만: "covered at its click point by a button e12 (shown below as page content)". 이름·태그는 `AgentError::page_content()` 가 `# page content (untrusted, origin=…)` 블록으로만 낸다. mb-mcp `ErrorReport::page` → 에러 JSON 다음의 별도 content item. 태그도 페이지가 고르는 이름이라(커스텀 요소) 이름 글자만 남기고 40자로 자른다.
+  - 힌트: 덮개를 먼저 닫거나 치우라 — **Tab + Enter 우회는 안내하지 않는다**(문서 결정). 체크박스·라디오 거절은 이미 발급된 `<label>` 이 있으면 "그 라벨 eN 을 눌러라"를 붙인다(`label` 필드, 모든 사유).
+- **에이전트 클릭**: `click_raw` 가 스크롤 뒤 오늘의 클릭 점(1c 전 — 상자 중심 x)에서 히트를 보고, `reach::hit_reaches`(대상·자손·연결된 라벨 — probe 의 `reach` 와 같은 함수)가 아니면 거절한다. `type` 도 같은 경로. `fill_as_person` 은 거절하지 않는다.
+- **테스트**(+13 → 1228, 임계값 결정 뒤 +1 → **1229**): 스타일 1 · 엔진 3(`pointer_events_none_box_is_skipped_but_an_auto_child_is_hit`·`hit_test_follows_paint_order_for_z_index`·`a_z_index_auto_positioned_box_makes_no_stacking_context`) · 런타임 5(`pointer_events_none_link_does_not_navigate`·`pointer_events_auto_child_of_none_receives_the_click`·`overlay_blocks_link_navigation_for_people_and_agents`·`link_navigation_follows_the_hit_node_ancestor_href`·`label_ancestor_of_the_hit_activates_its_checkbox`) · 에이전트 3(`intercepted_click_is_refused_naming_the_interceptor_outside_the_trusted_block`·`a_pointer_events_none_decoration_lets_the_click_through`·`a_refused_checkbox_points_at_its_label`) · mb-mcp e2e 1(`an_intercepted_click_names_the_cover_only_as_page_content`). 모두 구현 전에 실패를 확인했다 — 예외: `pointer_events_auto_child_of_none_receives_the_click` 은 오늘도 기하 링크로 통과해 회귀 방지로 두었고, e2e 는 에이전트 쪽 실패를 본 뒤에 썼다. 바꾼 기존 테스트 3: 엔진 `paint_order_hit_sees_…`(DFS 히트가 `#later` → 이제 `#top`), reach `button_under_an_overlay_is_intercepted`·`z_order_interception_is_classified_separately`(0단계가 옛 엔진을 고정한 부분 → 이제 `Reached`).
+- **퍼저**(1a 에서 미룬 것): 별도 난수 흐름 `hit_rng` 로 인라인 `visibility`·`pointer-events`(대문자·SVG 값 포함)·`z-index`(음수·큰 값)와 `inert` 속성을 넣고, 판정 `check_hits`(30점 격자)가 "히트가 건너뛰어야 할 상자에 멈추지 않음 + 히트 경로가 그 상자로 돌아감"을 단정한다(`Kind::HitMismatch`). 커버리지 검사에 네 입력 각 ≥20/200. `hit_testable` 에서 `pointer-events` 를 빼는 변이로 시드 39 가 잡히는 것을 확인했다. 짧은 release 실행(각 3,000) 실패 0(레이아웃 2.84 → 3.21 ms/사례 — 히트 판정 몫).
+
+**1b 코퍼스 — 확인 라벨 `r4-vis-1b`**(1b-z′ 포함, 오프라인):
+- 요소 목록 diff 없음(`r4-vis-1a` 대비 사라짐·생김 0). ① 그대로 8/20(enwiki "Main menu" 는 이제 닿지만 `link:main page` 는 닫힌 드롭다운 안이라 그대로 — 아래).
+- **② (20곳, ours)**: **0.1004 (408 / 4,064)** ← 1a 0.1078 (438). 구성 hidden 0 · clipped 73 · offscreen_x 94 · **intercepted 241**(z-order **0** · pointer-none **0** · other 241). 목표 ≤135 는 **아직 못 맞춤**(판정은 `r4-final` — 3단계 몫이 큼).
+- **새로 닿지 않게 된 요소 32**(1b-z′ 전 46) — **에이전트 영향 기준 위반이라 사용자 판단이 필요하다**. 전부 원인을 확인했다(진단은 지운 임시 예제로):
+  - apple 12 — 미디어 갤러리의 현재가 아닌 슬라이드. 사이트 CSS 가 `.media-gallery-contents{pointer-events:none}` 이고 `.current-item .media-gallery-wrapper-link{pointer-events:all}` 만 되살린다. `current-item` 은 스크립트가 붙인다 → **Chrome 도 못 누름(정상)**. 현재 슬라이드 하나는 2단계에서 다시 본다.
+  - 20 — 페인트 순서가 맞아지자 **우리 레이아웃 갭**이 위에 오게 됨(Chrome 은 겹치게 배치하지 않음). 전에는 DFS 순서가 우연히 대상을 골라 닿았다:
+    - yna 8: 그림 넘침 `img`(`absolute; z-index:1`, 270×360 이 180 높이 칸을 넘음)가 아래 제목 링크를 덮음 6, 주 메뉴 목록이 바닥글 링크를 덮음 2.
+    - korea-kr 2: 높이 0 인 `.thumb` 밖으로 넘친 `img`.
+    - enwiki 2: Vector 주 메뉴 체크박스(`absolute; z-index:1`)가 1,204px 폭으로 늘어나 검색 칸·검색 버튼을 덮음 — 같은 체크박스가 1a 의 "Main menu" 문제였다(이제 "Main menu" 자체는 닿음).
+    - mdn 2: 바닥글 `a.external`(`relative`)이 사이드바 링크를 덮음(3a 대상 레이아웃).
+    - github 1: 너무 넓은 ref 선택 버튼 글자.
+    - velog 5: 스크립트가 치워야 할 고정 떠 있는 헤더(`fixed; z-index:1`)가 같은 탭 링크의 복사본으로 위에 있음.
+- **1b-링크 때문에 이동이 막히는 관찰 링크**: `intercepted` 274 중 링크 **260**(ours 227).
+
+**1b 임계값(위험 절, 사용자 확인 값) — 걸림, 멈춤**:
+- "새로 거절" = `r4-vis-1b` 의 `intercepted` 전부(에이전트는 덮개 browser-too 도 거절) = **274 / 4,064 = 6.74%**(기준 1% ≈ 41) — (a) 걸림. 사이트별 20 초과: **mdn 81 · apple 44 · yna 29 · microsoft 26** — (b) 걸림.
+- 표본: 미리보기 `compat-cache/previews/1b/mdn-intercepted.png`(mdn 은 사이드바 글이 본문 위에 겹쳐 놓임)·`microsoft-intercepted.png`(바닥글 열이 한 줄로 무너져 링크끼리 겹침 — e295 클릭 거절). 덮개 종류 집계: mdn 은 사이드바의 `code`·`li`·`ol`, microsoft 는 이웃 링크·묶음 제목, yna 는 넘친 그림·메뉴 — **거짓이 절반을 넘는다**(대부분 3단계 레이아웃 몫).
+- 문서의 처방("덮개가 `fixed`·`absolute`·`sticky` 일 때만 거절")을 적용해 미리 셌다: 남는 거절 **129**(mdn 77 — mdn 사이드바가 `sticky` 라서. 우리 엔진은 `sticky` 를 정적 배치) → **처방 뒤에도 (a)·(b) 둘 다 걸린다**. `sticky` 를 빼고 `fixed`·`absolute` 만 세면 **52**(apple 17 이 최대 · browser-too 17) → (b) 는 통과, (a) 는 1.28% 로 여전히 걸림.
+- **중요한 상호작용**: 1b-링크 때문에, 거절을 좁혀도 좁힌 쪽 링크는 **이동하지 않는다**(히트가 덮개라서). 좁히면 "덮였다"는 거절 대신 "눌렀는데 아무 일 없음/덮개가 눌림"이 될 뿐이고, 그 링크들이 다시 동작하게 되지는 않는다. 근본 원인은 레이아웃(3단계)이고, ②의 `intercepted` 목표(≤135)가 같은 것을 잰다.
+- **결정(2026-11-28, 사용자) — 임계값이 걸린 뒤의 판단**:
+  - **가로챈 클릭 거절을 그대로 둔다**(처방으로 좁히지 않음). 수치: 새 거절 **274 / 4,064 = 6.74%**, 사이트 초과 mdn 81·apple 44·yna 29·microsoft 26. 문서 처방(positioned 덮개만)을 적용하면 **129** 가 남고, `sticky` 를 빼면 **52** 가 남는다 — 어느 쪽도 임계값을 맞추지 못하고, 1b-링크 때문에 좁혀도 그 링크들이 다시 동작하지 않는다.
+  - **완화책**: 거절된 대상이 링크이거나 링크 안이면, 그 링크의 URL(페이지 기준으로 푼 것)을 알려 에이전트가 `navigate` 로 바로 갈 수 있게 한다. URL 은 페이지에서 온 값이라 **untrusted 부분에만**(가로챈 요소 이름처럼 따옴표로, `link: "…"` 줄) 싣고, trusted 힌트는 "링크다: 치울 것이 없으면 아래 `link:` 줄의 URL 로 `navigate` 하라"만 말한다. `navigate` 와 같은 규칙으로 **http(s) 만**(`javascript:`·`mailto:` 등은 줄 자체가 없음 — `Url::resolve`/`Url::parse` 가 그 밖의 스킴을 거절). 정책 게이트는 그 `navigate` 가 평소대로 지난다.
+  - 3단계 레이아웃 수정이 거짓 겹침 대부분을 없앨 때까지의 완화책이다. 3단계 끝(`r4-layout`)에서 새 거절 수를 다시 센다.
+  - 구현: `NotInteractableReason::Intercepted(Box<CoveredClick { by, link }>)`(크기 때문에 상자에 담음 — clippy `result_large_err`), `AgentBrowser::link_url_of`(대상 또는 조상의 `<a href>`/`<area href>`). 테스트(실패 먼저 확인) `a_refused_covered_link_offers_its_url_as_page_content` — http URL 은 untrusted 에만 있고 메시지·힌트에는 없음, `javascript:` 링크는 `link:` 줄도 `navigate` 안내도 없음.
+  - 확인 라벨 `r4-vis-1b2`(결정 반영 뒤, 오프라인): `r4-vis-1b` 와 모든 열이 같고 diff 가 비었다(거절 글만 바뀜 — probe 는 거절 글을 재지 않음). 테스트 1229, clippy·fmt clean.
+
+**끼워 넣는 부분 ① — 1b-z′ 쌓임 맥락(2026-11-28, 시작 전에 적음 — 1단계 끼워 넣기 1/2)**:
+- **이름**: 1b-z′ — `z-index: auto` 인 positioned 상자는 쌓임 맥락을 만들지 않는다(CSS 2.1 부록 E). 페인터(`walk_paint_order`)와 히트 테스트가 같이 바뀐다.
+- **이유**: 1b-z 로 히트 테스트가 페인터 순서를 따르자, 페인터의 단순화("positioned 상자는 모두 쌓임 맥락" — `z_index_of` 주석에 적혀 있던 것)가 클릭으로 드러났다. 확인 라벨 `r4-vis-1b`(첫 실행)에서 두 라벨에 다 있는데 **새로 닿지 않게 된 요소가 46** 이었고, 그중 37(yna 25 · apple 12)이 이 원인이다. 예: yna 캐러셀 버튼 묶음(`absolute; z-index:2`)이 같은 `relative`(z auto) 섹션 안의 제목(`relative; z-index:2`)보다 문서 뒤라 Chrome 에서는 위에 그려지는데, 우리는 둘 사이의 `relative` 조상을 원자 층으로 묶어 제목 아래에 깔았다. 에이전트 영향 기준(새로 닿지 않음 0)을 지키려면 페인트 순서 자체를 바로잡아야 한다.
+- **범위**: 쌓임 맥락 = 뿌리, 또는 positioned 이면서 `z-index` 가 정수이거나 `opacity < 1` 이거나 `transform` 이 있는 상자. `z-index: auto` positioned 상자는 0 층에 자기 자리로 그려지되(자기 + 비positioned 자손), 그 안의 positioned 자손은 부모 쌓임 맥락의 층으로 올라간다. 비positioned 상자의 `opacity`/`transform` 이 맥락을 만드는 것(CSS 3)은 오늘처럼 다루지 않는다(별도 — 페인트만 바뀌고 실사이트 근거가 아직 없음).
+- 나머지 9(mdn 2 · github 1 · enwiki 1 · velog 5)는 원인이 다르다 — 아래 1b 메모.
+
 ### 설계 결정
 
 - **`visibility` 는 레이아웃을 바꾸지 않는다**: 공간과 문서 높이는 그대로다. 페인트·히트·링크·관찰·행동만 바뀐다.
@@ -1001,7 +1045,8 @@ M (3~4일).
 |---|---|---|---|---|---|---|---|---|---|
 | 3차 끝(`final`) | ✅ | `cef51c5` | 1173 | ok 12 + ok* 8 · nav-fail 1(crates.io) · panic 0 · timeout 0 · blocked 2 · robots skip 2 · `[mb-budget]` 0 | 7/20 (naver·daum·hani·korea-kr·velog·d2·google) | 미측정(클립 거절 276) | 83(중복 포함 96) / 미측정 / 10 · 14 | 1,356 / 1,506 | `r4-check` 재생이 `final` 과 같음([부록 D](#부록-d--측정-재현과-명령)) |
 | 0 측정 정비 | ✅ 완료 — ② 목표 창 결정(2026-11-28) · F ✅(`e034ae2`, 각 3만·실패 0) | `4f46de3`(P) · `68498f3`(K5·P2b 세로) · `d263093`(S) · `6e62671`(보충 ①) · `e034ae2`(G) · (T·`r4-base` 커밋 대기) | 1201 | `r4-base`: ok 12 + ok\* 9 · nav-fail **0** · panic 0 · timeout 0 · blocked 2 · robots skip 2 · `[mb-budget]` 0 | **6/20** (naver·daum·hani·korea-kr·velog·google) | **0.1800 (796)** · 359/73/94/270 (첫 P2b 표 0.1836·812) | 83(96) / **179/272 (65.8%)** / 10 · 14 | 1,356(kowiki 제외 1,346) / 1,506 | `r4-p0` → `r4-k5`(빈 diff) → `r4-sup1`(확인) → **`r4-base`**. **목표 창 결정**: hidden 0 · intercepted ours ≤135 · offscreen_x ours ≤28 · clipped 목표 없음(절대 수) |
-| 1 에이전트 정합성 | 진행 중 — P ✅(probe 변경 없음, "전" = `r4-base`) · 1a ✅ | (P·1a: 커밋 대기) | 1215 | 1a(`r4-vis-1a`): 그대로 · nav-fail 0 | 1a: **8/20**(+kakaocorp·enwiki — 스크립트가 여는 화면, 2단계·1b-z 에서 다시 봄) | "전" `r4-base` 0.1800 (796) · 359/73/94/270 → 1a **0.1078 (438/4,064)** · 0/73/94/271 | | | P: 확인 라벨 `r4-s1-check` = `r4-base`(빈 diff). `intercepted` 306 중 링크 287 — 1b 임계값 걸림 예상. 1a: 사라진 359 = `r4-base` `hidden` 그대로, 새로 닿지 않음 0, d2 이름 변화 1(정상)([1단계 메모](#1단계-구현-메모-2026-11-28)) |
+| 1 에이전트 정합성 | 진행 중 — P ✅ · 1a ✅ · 1b ✅(임계값 걸림 → 사용자 결정: 거절 유지 + 링크 URL 힌트) | P·1a `91f8260` · 1b 커밋 대기 | 1229 | 1a(`r4-vis-1a`): 그대로 · nav-fail 0 | 1a: **8/20**(+kakaocorp·enwiki — 스크립트가 여는 화면, 2단계·1b-z 에서 다시 봄) | "전" `r4-base` 0.1800 (796) · 359/73/94/270 → 1a **0.1078 (438/4,064)** · 0/73/94/271 → 1b **0.1004 (408/4,064)** · 0/73/94/241(z-order 0) | | | P: 확인 라벨 `r4-s1-check` = `r4-base`(빈 diff). `intercepted` 306 중 링크 287 — 1b 임계값 걸림 예상. 1a: 사라진 359 = `r4-base` `hidden` 그대로, 새로 닿지 않음 0, d2 이름 변화 1(정상). ① 8/20 추적: enwiki 는 1b-z 뒤 다시 봄("Main menu" 는 닿게 됐지만 `main page` 는 닫힌 드롭다운 — 2단계), kakaocorp 는 2단계. 1b(`r4-vis-1b` = `r4-vis-1b2`): 요소 diff 없음. **새로 닿지 않음 32 — 1단계에서 받아들임(사용자 2026-11-28)**: apple 12(현재가 아닌 갤러리 슬라이드, `pointer-events:none` — Chrome 도 못 누름, 현재 슬라이드는 스크립트 몫 → **2단계**) · 20 = 맞아진 페인트 순서가 드러낸 레이아웃/JS 갭(yna 8 넘친 그림·메뉴 겹침 · korea-kr 2 넘친 그림 · enwiki 2 1,204px 체크박스 · mdn 2 사이드바 겹침 · github 1 넓은 버튼 글자 → **3단계**; velog 5 스크립트가 치울 떠 있는 헤더 → **2단계**). **임계값 걸림**: 새 거절 274(6.74%) · mdn 81·apple 44·yna 29·microsoft 26, 처방 뒤 129(`sticky` 빼면 52) → **결정: 거절 유지 + 링크 URL 을 untrusted 로 알림**(3단계까지의 완화책) ([1단계 메모](#1단계-구현-메모-2026-11-28)) |
+| 1b-z′ 쌓임 맥락(**끼워 넣기 1/2**) | ✅(커밋 대기, 1b 와 함께) | | | | | | | | `z-index:auto` positioned 상자는 쌓임 맥락이 아님(CSS 2.1 부록 E) — 1b-z 가 드러낸 페인터 단순화, `r4-vis-1b` 첫 실행의 새로 닿지 않음 46 중 37 |
 | 2 작은 JS | 설계 | | | | | | | | 겹마다 `r4-js-1`… → 보충 ② → `r4-js-sup`(후) / `r4-base-sup`(③④·보조의 기준) |
 | 3 레이아웃 | 설계 | | | | | | | | |
 | 4 셀렉터 | 설계 | | | | | | | | |

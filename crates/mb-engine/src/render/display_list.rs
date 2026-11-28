@@ -175,18 +175,48 @@ pub fn translate(mut commands: Vec<DisplayCommand>, dx: f32, dy: f32) -> Vec<Dis
 }
 
 /// The stacking walk: `visit(box, alpha, transform)` once per box, in
-/// paint order (the box's own alpha and transform already applied).
+/// paint order (the box's own alpha and transform already applied). The
+/// root is the initial stacking context.
 fn walk_paint_order<'a>(
     layout_box: &'a LayoutBox,
     inherited_alpha: f32,
     inherited_transform: Affine,
     visit: &mut dyn FnMut(&'a LayoutBox, f32, Affine),
 ) {
+    walk_layer(
+        layout_box,
+        inherited_alpha,
+        inherited_transform,
+        true,
+        visit,
+    );
+}
+
+/// One layer of a stacking context: a box and what paints with it. A
+/// stacking context (`context`) also paints its positioned descendants,
+/// sorted into z-layers. A positioned box with `z-index: auto` is no
+/// context (CSS 2.1 appendix E, compat round 4 step 1b-z′): it paints
+/// itself and its in-flow content in its parent's 0 layer, and its
+/// positioned descendants were already hoisted into the parent context by
+/// `collect_positioned_into`.
+fn walk_layer<'a>(
+    layout_box: &'a LayoutBox,
+    inherited_alpha: f32,
+    inherited_transform: Affine,
+    context: bool,
+    visit: &mut dyn FnMut(&'a LayoutBox, f32, Affine),
+) {
     let effective_alpha = inherited_alpha * opacity_of(layout_box);
     let effective_transform = inherited_transform.compose(transform_for(layout_box));
 
-    // 1. Paint this stacking-context-creator's own bg/border/text.
+    // 1. Paint this box's own bg/border/text.
     visit(layout_box, effective_alpha, effective_transform);
+    if !context {
+        for child in &layout_box.children {
+            walk_non_positioned(child, effective_alpha, effective_transform, visit);
+        }
+        return;
+    }
 
     // Walk descendants and pluck out the positioned subtrees — each becomes
     // its own atomic z-layer. Non-positioned content is painted between the
@@ -221,7 +251,7 @@ fn walk_paint_order<'a>(
 
     // 2. Negative-z layers paint first → they sit BEHIND non-positioned content.
     for (child, alpha, transform) in &negative {
-        walk_paint_order(child, *alpha, *transform, visit);
+        walk_layer(child, *alpha, *transform, true, visit);
     }
 
     // 3. Non-positioned descendants in tree order. Positioned subtrees are
@@ -232,7 +262,13 @@ fn walk_paint_order<'a>(
 
     // 4 & 5. Zero/auto layers in tree order, then positive-z (sorted asc).
     for (child, alpha, transform) in zero_or_auto.iter().chain(positive.iter()) {
-        walk_paint_order(child, *alpha, *transform, visit);
+        walk_layer(
+            child,
+            *alpha,
+            *transform,
+            creates_stacking_context(child),
+            visit,
+        );
     }
 }
 
@@ -338,11 +374,21 @@ fn collect_positioned_into<'a>(
 ) {
     if is_positioned_box(layout_box) {
         // Stash the *inherited* alpha and *inherited* transform (before this
-        // box's own opacity / own transform); the recipient walk_paint_order
+        // box's own opacity / own transform); the recipient walk_layer
         // applies the box's own contributions itself.
         out.push((layout_box, inherited_alpha, inherited_transform));
-        // Don't recurse: the positioned box's own descendants live inside its
-        // own stacking context and are handled when we paint it.
+        if creates_stacking_context(layout_box) {
+            // Its positioned descendants live inside its own stacking
+            // context and are handled when we paint it.
+            return;
+        }
+        // `z-index: auto` (step 1b-z′): its positioned descendants stack
+        // in this context, after it in tree order.
+        let effective_alpha = inherited_alpha * opacity_of(layout_box);
+        let effective_transform = inherited_transform.compose(transform_for(layout_box));
+        for child in &layout_box.children {
+            collect_positioned_into(child, out, effective_alpha, effective_transform);
+        }
         return;
     }
     let effective_alpha = inherited_alpha * opacity_of(layout_box);
@@ -521,6 +567,26 @@ fn is_positioned_box(layout_box: &LayoutBox) -> bool {
     )
 }
 
+/// A positioned box that starts its own stacking context: an integer
+/// `z-index`, or `opacity` < 1, or a `transform`. (`z-index: auto` alone
+/// doesn't — step 1b-z′. Non-positioned boxes never do here: their
+/// `opacity`/`transform` contexts aren't modelled.)
+fn creates_stacking_context(layout_box: &LayoutBox) -> bool {
+    is_positioned_box(layout_box)
+        && (has_integer_z_index(layout_box)
+            || opacity_of(layout_box) < 1.0
+            || transform_for(layout_box) != Affine::IDENTITY)
+}
+
+fn has_integer_z_index(layout_box: &LayoutBox) -> bool {
+    layout_box.styled_node().is_some_and(|node| {
+        matches!(
+            node.value("z-index"),
+            Some(Value::Number(_) | Value::Length(..))
+        )
+    })
+}
+
 fn opacity_of(layout_box: &LayoutBox) -> f32 {
     // CSS `opacity` is a unitless number in [0, 1]; default 1 (fully opaque).
     // Real CSS would isolate the subtree as a compositing group; we cheat by
@@ -547,9 +613,8 @@ fn apply_alpha(color: Color, factor: f32) -> Color {
 }
 
 fn z_index_of(layout_box: &LayoutBox) -> i32 {
-    // `z-index: auto` is treated as 0 here. Per CSS spec, auto and 0 differ
-    // (auto does not create a stacking context), but this toy treats every
-    // positioned box as a context, so they share the same layer in practice.
+    // `z-index: auto` sorts as 0 (the same layer, tree order); whether it
+    // starts a stacking context is `creates_stacking_context`'s question.
     let node = match layout_box.styled_node() {
         Some(node) => node,
         None => return 0,

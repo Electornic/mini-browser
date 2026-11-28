@@ -3,9 +3,10 @@
 // chrome clicks, address-bar focus, page scroll, and (when focus is in
 // the document) per-key JS dispatch via dispatch_typed_keys.
 //
-// Hit-testing helpers (clicked_link / hovered_link / hovered_chrome_action)
-// live here because they all answer "what does this mouse position
-// land on?" — the same question apply_input reaches for first.
+// Hit-testing helpers (hovered_link / hovered_chrome_action) live here
+// because they answer "what does this mouse position land on?" — the same
+// question apply_input reaches for first. A click's link is not one of
+// them: it follows the page hit test (compat round 4 step 1b-link).
 
 use crate::{
     chrome::{
@@ -241,18 +242,6 @@ impl BrowserState {
 
     pub(super) fn clamp_scroll(&mut self, viewport_height: usize, document_height: f32) {
         self.scroll_offset = clamped_scroll(self.scroll_offset, viewport_height, document_height);
-    }
-
-    pub(super) fn clicked_link<'a>(
-        &self,
-        input: &input::WindowInput,
-        links: &'a [LinkTarget],
-    ) -> Option<&'a LinkTarget> {
-        if !input.left_mouse_pressed {
-            return None;
-        }
-
-        self.hovered_link(input, links)
     }
 
     pub(super) fn hovered_link<'a>(

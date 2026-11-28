@@ -273,6 +273,9 @@ struct Gen {
     /// A second stream for the step 5a math-function lengths, so adding
     /// them didn't reshuffle every other choice (and coverage) per seed.
     calc_rng: Rng,
+    /// A third stream for what the hit test reads (compat round 4 step 1:
+    /// `visibility`, `pointer-events`, `z-index`, `inert`) — same reason.
+    hit_rng: Rng,
     values: Values,
     budget: usize,
     max_depth: usize,
@@ -295,6 +298,7 @@ impl Gen {
         let mut generator = Gen {
             rng,
             calc_rng: Rng::new(seed ^ 0x5CA1_C0DE),
+            hit_rng: Rng::new(seed ^ 0x0001_B17E),
             values,
             budget,
             max_depth,
@@ -408,12 +412,18 @@ impl Gen {
             "a" if self.rng.chance(70) => attrs.push(("href", "#x".to_string())),
             _ => {}
         }
-        let style = if self.rng.chance(20) {
+        let mut style: Vec<String> = if self.rng.chance(20) {
             let n = self.rng.range(1, 4);
             (0..n).map(|_| self.flagged_declaration()).collect()
         } else {
             Vec::new()
         };
+        if self.hit_rng.chance(15) {
+            style.push(self.hit_declaration());
+        }
+        if self.hit_rng.chance(3) {
+            attrs.push(("inert", String::new()));
+        }
         let children = if VOID_TAGS.contains(&tag) {
             Vec::new()
         } else if descend {
@@ -741,6 +751,25 @@ impl Gen {
         out.trim_end().to_string()
     }
 
+    /// What the hit test and the painter's order read (step 1).
+    fn hit_declaration(&mut self) -> String {
+        let rng = &mut self.hit_rng;
+        match rng.below(3) {
+            0 => format!(
+                "visibility: {}",
+                rng.pick(&["visible", "hidden", "collapse", "VISIBLE"])
+            ),
+            1 => format!(
+                "pointer-events: {}",
+                rng.pick(&["auto", "none", "visiblePainted", "all", "NONE"])
+            ),
+            _ => format!(
+                "z-index: {}",
+                rng.pick(&["auto", "0", "1", "-1", "5", "-99999", "99999", "2147483647"])
+            ),
+        }
+    }
+
     fn declaration(&mut self) -> String {
         const DISPLAY: &[&str] = &[
             "block",
@@ -1046,6 +1075,9 @@ enum Kind {
     /// The rule-indexed cascade styled differently from the flat one
     /// (every selector tried on every node — follow-up F4).
     IndexMismatch,
+    /// The hit test stopped on a box it must pass through, or its path
+    /// didn't lead back to the box it named (compat round 4 step 1).
+    HitMismatch,
 }
 
 #[derive(Clone, Debug)]
@@ -1183,6 +1215,7 @@ fn judge(case: &Case) -> Result<(), Failure> {
     let check_width = !case.has_unbounded_values();
     check_box(&view.layout_root, check_width, &mut Vec::new())?;
     check_commands(&view.commands)?;
+    check_hits(&view)?;
     // Step 3: the scissor paths (byte-loop clamps, cropped scratch
     // pixmaps) see every generated clip shape. A small surface keeps it
     // cheap; scaling down keeps most of the page on it.
@@ -1268,6 +1301,72 @@ fn check_box(
         check_box(child, check_width, path)?;
     }
     path.pop();
+    Ok(())
+}
+
+/// Step 1: at a grid of points the hit test (paint order, 1b-z) never stops
+/// on a box it must pass through — `visibility: hidden`, `pointer-events:
+/// none`, inert — and its path leads back to the box it named.
+fn check_hits(view: &view::DocumentView) -> Result<(), Failure> {
+    for gx in 0..6 {
+        for gy in 0..5 {
+            let point = (gx as f32 * 150.0 + 7.0, gy as f32 * 140.0 + 9.0);
+            let input = mb_engine::input::WindowInput {
+                mouse_position: Some((point.0, point.1 + mb_engine::chrome::CHROME_HEIGHT)),
+                ..Default::default()
+            };
+            let hit =
+                quietly(|| view::compute_hovered_hit(&input, &view.layout_root, &view.clips, 0.0));
+            let hit = match hit {
+                Ok(hit) => hit,
+                Err(payload) => {
+                    return Err(Failure {
+                        kind: Kind::Panic,
+                        detail: format!("hit test: {}", panic_message(payload.as_ref())),
+                    });
+                }
+            };
+            let Some(hit) = hit else {
+                continue;
+            };
+            let mut layout_box = &view.layout_root;
+            for &i in &hit.path {
+                match layout_box.children.get(i) {
+                    Some(child) => layout_box = child,
+                    None => {
+                        return Err(Failure {
+                            kind: Kind::HitMismatch,
+                            detail: format!("hit-path {:?} at {point:?} leads nowhere", hit.path),
+                        });
+                    }
+                }
+            }
+            let node = match &layout_box.box_type {
+                layout::BoxType::BlockNode(n)
+                | layout::BoxType::FlexNode(n)
+                | layout::BoxType::GridNode(n)
+                | layout::BoxType::TableNode(n) => Some(n),
+                layout::BoxType::AnonymousBlock => None,
+            };
+            if node.map(|n| n.node_id) != hit.node_id {
+                return Err(Failure {
+                    kind: Kind::HitMismatch,
+                    detail: format!("hit-path {:?} at {point:?} names another box", hit.path),
+                });
+            }
+            if let Some(n) = node
+                && (n.visibility_hidden() || n.pointer_events_none() || n.inert())
+            {
+                return Err(Failure {
+                    kind: Kind::HitMismatch,
+                    detail: format!(
+                        "hit-through-box at {point:?} stopped on <{}>",
+                        box_tag(layout_box)
+                    ),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3066,9 +3165,21 @@ fn fuzz_generator_covers_its_spec() {
     let mut korean = 0;
     let mut clip_shapes = 0;
     let mut clip_kinds = [0usize; 4];
+    let mut hit_kinds = [0usize; 4];
     for seed in 1..=200 {
         let case = Gen::case(seed);
         let css = case.css() + &case.html();
+        for (i, p) in [
+            "visibility: hidden",
+            "pointer-events: none",
+            "z-index: -",
+            " inert",
+        ]
+        .iter()
+        .enumerate()
+        {
+            hit_kinds[i] += usize::from(css.contains(p));
+        }
         for (i, p) in ["overflow", "clip:", "clip-path:", "transform:"]
             .iter()
             .enumerate()
@@ -3131,6 +3242,11 @@ fn fuzz_generator_covers_its_spec() {
         "{with_areas}/200 cases with grid-template-areas"
     );
     assert!(korean >= 20, "{korean}/200 cases with Korean text");
+    // Step 1: what the hit test passes through, and paint-order layers.
+    assert!(
+        hit_kinds.iter().all(|&n| n >= 20),
+        "hit-test inputs per 200 cases: visibility hidden, pointer-events none, negative z-index, inert = {hit_kinds:?}"
+    );
     // Step 3: overflow / clip / clip-path / transform each in many cases,
     // all four together in some (nested clips under a transform).
     assert!(

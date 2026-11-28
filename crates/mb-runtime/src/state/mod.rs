@@ -603,11 +603,20 @@ impl BrowserState {
             }
         }
 
+        // The link a click follows is the hit node's nearest `<a href>`
+        // (compat round 4 step 1b-link) — the same hit the JS dispatch and
+        // label activation used, so a cover takes the click as in Chrome
+        // and a hidden / `pointer-events: none` / inert link is never hit.
+        // (`LinkTarget` geometry is left to the cursor and underlines.)
+        let link_href = if click_in_page && let Some(id) = click_node_id {
+            link_href_from(&self.parsed_document.borrow(), id)
+        } else {
+            None
+        };
         if !click_default_prevented {
             if let Some(form_id) = submit_form_id {
                 self.try_submit_form(form_id);
-            } else if let Some(link_target) = self.clicked_link(input, &document_view.links) {
-                let href = link_target.href.clone();
+            } else if let Some(href) = link_href {
                 self.navigate_to_href(&href);
             }
         }
@@ -1601,6 +1610,22 @@ fn collect_box_node_ids(
     for child in &layout_box.children {
         collect_box_node_ids(child, out);
     }
+}
+
+/// The `href` of the nearest `<a href>`/`<area href>` at or above `id` —
+/// the link a click on `id` follows.
+fn link_href_from(document: &dom::Document, id: NodeId) -> Option<String> {
+    let mut current = Some(id);
+    while let Some(node) = current {
+        if let Some(element) = document.element_data(node)
+            && matches!(element.tag_name.as_str(), "a" | "area")
+            && let Some(href) = element.attributes.get("href")
+        {
+            return Some(href.clone());
+        }
+        current = document.get(node)?.parent;
+    }
+    None
 }
 
 // Sequential-focus candidates: links with href, form controls (not

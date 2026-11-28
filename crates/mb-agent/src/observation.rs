@@ -342,6 +342,49 @@ pub fn observe(input: &ObserveInput<'_>, options: &ObserveOptions) -> Observatio
     }
 }
 
+/// How the agent would know the element a click landed on instead of its
+/// target (step 1b): the nearest element at or above `hit` the observation
+/// would list — its id, role and accessible name — and the hit element's
+/// own tag (the hit may be a text node: its parent's).
+pub(crate) fn acting_element_at(
+    document: &Document,
+    layout_root: &LayoutBox,
+    click_listeners: &[NodeId],
+    hit: NodeId,
+) -> (Option<(NodeId, Role, String)>, String) {
+    let index = DomIndex::build(document, layout_root, click_listeners);
+    let element = std::iter::successors(Some(hit), |&n| index.parent(n))
+        .find(|&n| index.element(n).is_some());
+    let tag = element
+        .and_then(|n| index.tag(n))
+        .unwrap_or_default()
+        .to_string();
+    let acting = std::iter::successors(Some(hit), |&n| index.parent(n)).find_map(|n| {
+        let role = classify(&index, n)?;
+        Some((n, role, accessible_name(&index, n, role)))
+    });
+    (acting, tag)
+}
+
+/// The `<label>`s of a checkbox / radio `id` (`for` its `id`, or holding
+/// it), in document order; empty for any other element.
+pub(crate) fn labels_of_checkable(
+    document: &Document,
+    layout_root: &LayoutBox,
+    id: NodeId,
+) -> Vec<NodeId> {
+    let index = DomIndex::build(document, layout_root, &[]);
+    if !matches!(classify(&index, id), Some(Role::Checkbox | Role::Radio)) {
+        return Vec::new();
+    }
+    index
+        .order
+        .iter()
+        .copied()
+        .filter(|&n| index.tag(n) == Some("label") && crate::reach::label_labels(document, n, id))
+        .collect()
+}
+
 // `<template>` content and `<head>` aren't rendered, but a stray layout box
 // shouldn't be able to smuggle them into the element list either.
 fn is_inside_hidden_or_inert(index: &DomIndex<'_>, id: NodeId) -> bool {
@@ -536,7 +579,7 @@ fn same_origin(a: &Url, b: &Url) -> bool {
     a.scheme == b.scheme && a.host == b.host && a.port == b.port
 }
 
-fn origin_of(url: &Url) -> String {
+pub(crate) fn origin_of(url: &Url) -> String {
     let default_port = if url.scheme == "https" { 443 } else { 80 };
     if url.port == default_port {
         format!("{}://{}", url.scheme, url.host)

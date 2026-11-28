@@ -449,6 +449,7 @@ fn replay_step(
             hint: String::new(),
             repeat_count: 1,
             observation: None,
+            page: None,
         });
         return compare(
             browser,

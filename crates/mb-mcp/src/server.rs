@@ -243,6 +243,7 @@ fn invalid_arguments(message: &str) -> ErrorReport {
         hint: "Check the tool's parameters.".into(),
         repeat_count: 1,
         observation: None,
+        page: None,
     }
 }
 
@@ -278,6 +279,9 @@ fn to_result(reply: Reply) -> CallToolResult {
                 "repeat_count": report.repeat_count,
             });
             let mut content = vec![ContentBlock::text(json.to_string())];
+            if let Some(page) = report.page {
+                content.push(ContentBlock::text(page));
+            }
             if let Some((browser, page)) = report.observation {
                 content.push(ContentBlock::text(browser));
                 content.push(ContentBlock::text(page));

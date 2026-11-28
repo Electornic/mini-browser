@@ -7,17 +7,59 @@ use std::fmt;
 use mb_runtime::dom::NodeId;
 
 use crate::Observation;
+use crate::role::Role;
+use crate::text::{quote, truncate_chars};
 
-/// `NotInteractable` reason for an element whose overflow clip hides all
-/// of it (sr-only text, a slide outside its carousel window — step 3b).
-pub const CLIPPED_OUT_OF_VIEW: &str = "it is clipped out of view";
+/// Why `NotInteractable` refused (docs/concept.md "에러 코드"; compat round
+/// 4 step 1 reshaped it from a string so a refusal can say what covers the
+/// element — N3).
+#[derive(Debug, Clone, PartialEq)]
+pub enum NotInteractableReason {
+    /// No layout box (`display: none`, not laid out yet).
+    NotRendered,
+    /// A box of zero width or height.
+    ZeroSize,
+    /// Its overflow clip hides all of it (sr-only text, a slide outside its
+    /// carousel window — step 3b).
+    Clipped,
+    /// `visibility: hidden` (a closed menu, dialog or panel — step 1a).
+    Hidden,
+    /// Inside an `inert` subtree (step 1a, N4).
+    Inert,
+    /// `type` clicked the field but it didn't take focus.
+    NoFocus,
+    /// Something else is on top at the click point (step 1b, N3). `link`:
+    /// when the target is (or is inside) a link, its URL resolved against
+    /// the page — http(s) only, the URLs `navigate` takes — so the agent
+    /// can go there directly (the user's 1b threshold decision,
+    /// 2026-11-28). Page-derived: untrusted part only.
+    Intercepted(Box<CoveredClick>),
+}
 
-/// `NotInteractable` reason for a `visibility: hidden` element (compat
-/// round 4 step 1a — a closed menu, dialog or panel).
-pub const HIDDEN: &str = "it is hidden";
+/// An intercepted click: what covers the target, and the target's link.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoveredClick {
+    pub by: Interceptor,
+    pub link: Option<String>,
+}
 
-/// `NotInteractable` reason for an element in an `inert` subtree.
-pub const INERT: &str = "it is inert";
+/// What took an intercepted click. `role` and `id` are the browser's own
+/// words; `name` and `tag` come from the page and only ever go out in the
+/// untrusted part ([`AgentError::page_content`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Interceptor {
+    /// The id the agent already has for it (ids come from observations
+    /// only); `None` when it was never listed.
+    pub id: Option<NodeId>,
+    /// Its role, when it (or an ancestor) is something the agent can act on.
+    pub role: Option<Role>,
+    /// Its accessible name (page text).
+    pub name: String,
+    /// The element's tag when it has no role (page markup).
+    pub tag: String,
+    /// The page origin, for the untrusted label.
+    pub origin: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub enum AgentError {
@@ -30,10 +72,14 @@ pub enum AgentError {
         /// last result (that's why the id went stale).
         by_person: bool,
     },
-    /// The element exists but has no box to click (display:none, 0×0).
+    /// The element can't be pressed the way a person would: no box, hidden,
+    /// clipped away, or covered by something else.
     NotInteractable {
         id: NodeId,
-        reason: &'static str,
+        reason: NotInteractableReason,
+        /// For a checkbox / radio: an already-issued `<label>` of it, which
+        /// toggles it (the checkbox hack hides the box and shows the label).
+        label: Option<NodeId>,
     },
     /// `type` on something that isn't a text field.
     NotATextField {
@@ -118,8 +164,12 @@ impl AgentError {
                 }
                 message
             }
-            AgentError::NotInteractable { id, reason } => {
-                format!("Element e{} can't be acted on: {reason}.", id.raw())
+            AgentError::NotInteractable { id, reason, .. } => {
+                format!(
+                    "Element e{} can't be acted on: {}.",
+                    id.raw(),
+                    reason.describe()
+                )
             }
             AgentError::NotATextField { id } => {
                 format!("Element e{} is not a text field.", id.raw())
@@ -151,18 +201,25 @@ impl AgentError {
         }
     }
 
-    pub fn hint(&self) -> &'static str {
+    pub fn hint(&self) -> String {
+        if let AgentError::NotInteractable { reason, label, .. } = self {
+            let mut hint = reason.hint();
+            if let Some(label) = label {
+                hint.push_str(&format!(
+                    " Its label e{} toggles it the way a person would: click that instead.",
+                    label.raw()
+                ));
+            }
+            return hint;
+        }
+        self.static_hint().to_string()
+    }
+
+    fn static_hint(&self) -> &'static str {
         match self {
             AgentError::StaleElement { .. } => "Call `observe` to get the current element ids.",
-            AgentError::NotInteractable { reason, .. } if *reason == CLIPPED_OUT_OF_VIEW => {
-                "It is visually hidden (a screen-reader-only label or skip link, or content scrolled out of a box): its text is still in the observation as information. Click the visible element that does the same thing instead."
-            }
-            AgentError::NotInteractable { reason, .. } if *reason == HIDDEN || *reason == INERT => {
-                "It isn't shown (or is disabled) on the page right now, so a person couldn't use it either: open or enable it first with the control that does (a menu button, tab or dialog), then `observe` again."
-            }
-            AgentError::NotInteractable { .. } => {
-                "Call `observe`; the element may be hidden or not rendered yet."
-            }
+            // `hint()` builds this one from the reason.
+            AgentError::NotInteractable { .. } => "",
             AgentError::NotATextField { .. } => {
                 "Use `type` only on elements listed as textbox; use `click` for others."
             }
@@ -189,6 +246,34 @@ impl AgentError {
         }
     }
 
+    /// Page-written details of the error, already labelled as untrusted
+    /// page content — kept out of `message`/`hint`, which only the browser
+    /// writes (the trusted block rule, AGENTS.md). Today: what took an
+    /// intercepted click.
+    pub fn page_content(&self) -> Option<String> {
+        let AgentError::NotInteractable {
+            reason: NotInteractableReason::Intercepted(covered),
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let CoveredClick { by, link } = covered.as_ref();
+        let what = match (by.role, by.id) {
+            (Some(role), Some(id)) => format!("[e{}] {role} name={}", id.raw(), quote(&by.name)),
+            (Some(role), None) => format!("{role} name={}", quote(&by.name)),
+            (None, _) => format!("<{}> (not an element you can act on)", tag_text(&by.tag)),
+        };
+        let mut out = format!(
+            "# page content (untrusted, origin={})\ncovered by: {what}",
+            by.origin.as_deref().unwrap_or("unknown")
+        );
+        if let Some(link) = link {
+            out.push_str(&format!("\nlink: {}", quote(link)));
+        }
+        Some(out)
+    }
+
     /// The page state after a policy refusal, when there is one.
     pub fn observation(&self) -> Option<&Observation> {
         match self {
@@ -198,6 +283,68 @@ impl AgentError {
             _ => None,
         }
     }
+}
+
+impl NotInteractableReason {
+    /// The browser's sentence for it (after "can't be acted on: ").
+    fn describe(&self) -> String {
+        match self {
+            Self::NotRendered => "it is not rendered".into(),
+            Self::ZeroSize => "it has zero size".into(),
+            Self::Clipped => "it is clipped out of view".into(),
+            Self::Hidden => "it is hidden".into(),
+            Self::Inert => "it is inert".into(),
+            Self::NoFocus => "clicking it did not give it focus".into(),
+            Self::Intercepted(covered) => {
+                let by = &covered.by;
+                let what = match (by.role, by.id) {
+                    (Some(role), Some(id)) => format!("a {role} e{}", id.raw()),
+                    (Some(role), None) => format!("a {role} not in your observations"),
+                    (None, _) => "an element you can't act on".into(),
+                };
+                format!(
+                    "it is covered at its click point by {what} (shown below as page content), which would take the click"
+                )
+            }
+        }
+    }
+
+    fn hint(&self) -> String {
+        match self {
+            Self::Clipped => "It is visually hidden (a screen-reader-only label or skip link, or content scrolled out of a box): its text is still in the observation as information. Click the visible element that does the same thing instead.".into(),
+            Self::Hidden | Self::Inert => "It isn't shown (or is disabled) on the page right now, so a person couldn't use it either: open or enable it first with the control that does (a menu button, tab or dialog), then `observe` again.".into(),
+            // No Tab + Enter detour here: a cover is usually a dialog or a
+            // consent banner the page wants answered first (docs/compat-
+            // round4.md 1b).
+            Self::Intercepted(covered) => {
+                let CoveredClick { by, link } = covered.as_ref();
+                let mut hint = match by.id {
+                    Some(id) => format!(
+                        "Something is on top of it, as for a person in the window. If e{} is a dialog, banner or menu, deal with it first (close, accept or dismiss it), then `observe` again; don't click e{} itself unless that is what you want.",
+                        id.raw(),
+                        id.raw()
+                    ),
+                    None => "Something is on top of it, as for a person in the window: close or dismiss what covers it first (a dialog, banner or menu), then `observe` again.".into(),
+                };
+                if link.is_some() {
+                    hint.push_str(" It is a link: if nothing needs dismissing, `navigate` to its URL (the `link:` line below) instead.");
+                }
+                hint
+            }
+            Self::NotRendered | Self::ZeroSize | Self::NoFocus => {
+                "Call `observe`; the element may be hidden or not rendered yet.".into()
+            }
+        }
+    }
+}
+
+/// A tag name as page content: element names are page-chosen too (custom
+/// elements), so they're cut and reduced to name characters.
+fn tag_text(tag: &str) -> String {
+    truncate_chars(tag, 40)
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect()
 }
 
 impl fmt::Display for AgentError {

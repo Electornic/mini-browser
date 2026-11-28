@@ -62,7 +62,16 @@ impl StyledNode {
     /// observation and actions skip it. `collapse` on table rows/columns is
     /// approximated as `hidden`.
     pub fn visibility_hidden(&self) -> bool {
-        matches!(self.value("visibility"), Some(Value::Keyword(k)) if k == "hidden" || k == "collapse")
+        matches!(self.value("visibility"), Some(Value::Keyword(k))
+            if k.eq_ignore_ascii_case("hidden") || k.eq_ignore_ascii_case("collapse"))
+    }
+
+    /// Computed `pointer-events` is `none` (compat round 4 step 1b —
+    /// inherited): the hit test passes through the box to what is under
+    /// it; an `auto` descendant takes clicks again. HTML has only `auto`
+    /// and `none`; the SVG values count as `auto`.
+    pub fn pointer_events_none(&self) -> bool {
+        matches!(self.value("pointer-events"), Some(Value::Keyword(k)) if k.eq_ignore_ascii_case("none"))
     }
 
     /// Inside an `inert` subtree (HTML §6.3; Blink keeps this as a computed
@@ -629,6 +638,9 @@ pub(super) const INHERITED_PROPERTIES: &[&str] = &[
     // and text; a `visible` descendant shows again. (`<col>`'s value never
     // reaches cells — they aren't its DOM children.)
     "visibility",
+    // Step 1b: a `pointer-events: none` decoration's text and children
+    // pass clicks through too.
+    "pointer-events",
 ];
 
 /// Replace `currentcolor` keywords with the computed `color` (see the call).
@@ -875,6 +887,27 @@ mod tests {
         let sheet = parse_css("div { visibility: collapse }");
         let styled = style::style_tree(&document, root, &[sheet]);
         assert!(styled.children[0].visibility_hidden());
+    }
+
+    #[test]
+    fn pointer_events_inherits_and_an_auto_descendant_takes_clicks_again() {
+        // Compat round 4 step 1b: `pointer-events` is inherited; HTML only
+        // knows `auto`/`none` — the SVG values read as `auto`.
+        let (document, root) = parse_html(
+            r#"<div class="deco"><p>x</p><p class="on">y</p><p class="svg">z</p></div>"#,
+        );
+        let sheet = parse_css(
+            ".deco { pointer-events: NONE } .on { pointer-events: auto } .svg { pointer-events: visiblePainted }",
+        );
+        let styled = style::style_tree(&document, root, &[sheet]);
+        assert!(styled.pointer_events_none());
+        assert!(styled.children[0].pointer_events_none());
+        assert!(
+            styled.children[0].children[0].pointer_events_none(),
+            "text leaf"
+        );
+        assert!(!styled.children[1].pointer_events_none());
+        assert!(!styled.children[2].pointer_events_none());
     }
 
     #[test]

@@ -215,7 +215,8 @@ struct BoxFacts {
     /// `visibility` then; the inherited computed value is the same answer,
     /// P1 → step 1a.)
     hidden: bool,
-    /// The same for `pointer-events: none`.
+    /// Computed `pointer-events: none` (inherited since step 1b — the
+    /// nearest declaration step 0 read gives the same answer).
     pointer_none: bool,
     /// `position` is fixed / sticky / absolute.
     overlay_position: bool,
@@ -338,26 +339,8 @@ impl<'a> ReachContext<'a> {
         })
     }
 
-    /// A click on `hit` acts on `target`: `hit` is the target or inside it,
-    /// or inside a `<label>` that labels it.
     fn reaches(&self, hit: NodeId, target: NodeId) -> bool {
-        self.ancestors_or_self(hit)
-            .any(|n| n == target || (self.tag(n) == Some("label") && self.labels(n, target)))
-    }
-
-    fn labels(&self, label: NodeId, target: NodeId) -> bool {
-        match self
-            .document
-            .element_data(label)
-            .and_then(|e| e.attributes.get("for"))
-        {
-            Some(for_id) => self
-                .document
-                .element_data(target)
-                .and_then(|e| e.attributes.get("id"))
-                .is_some_and(|id| id == for_id),
-            None => self.ancestors_or_self(target).any(|n| n == label),
-        }
+        hit_reaches(self.document, hit, target)
     }
 
     /// P2b browser-too `intercepted`: between the hit and the element they
@@ -382,13 +365,40 @@ impl<'a> ReachContext<'a> {
             })
     }
 
-    fn tag(&self, id: NodeId) -> Option<&str> {
-        self.document.element_data(id).map(|e| e.tag_name.as_str())
-    }
-
     fn ancestors_or_self(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         std::iter::successors(Some(id), |&n| self.document.get(n)?.parent)
     }
+}
+
+/// A click whose hit is `hit` acts on `target`: `hit` is the target or
+/// inside it, or inside a `<label>` that labels it (label activation starts
+/// from the hit node too). The agent's click refuses otherwise (step 1b).
+pub fn hit_reaches(document: &Document, hit: NodeId, target: NodeId) -> bool {
+    ancestors_or_self(document, hit).any(|n| {
+        n == target
+            || (document
+                .element_data(n)
+                .is_some_and(|e| e.tag_name == "label")
+                && label_labels(document, n, target))
+    })
+}
+
+/// `label` labels `target`: by `for` = its `id`, or (no `for`) by holding it.
+pub fn label_labels(document: &Document, label: NodeId, target: NodeId) -> bool {
+    match document
+        .element_data(label)
+        .and_then(|e| e.attributes.get("for"))
+    {
+        Some(for_id) => document
+            .element_data(target)
+            .and_then(|e| e.attributes.get("id"))
+            .is_some_and(|id| id == for_id),
+        None => ancestors_or_self(document, target).any(|n| n == label),
+    }
+}
+
+fn ancestors_or_self(document: &Document, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+    std::iter::successors(Some(id), |&n| document.get(n)?.parent)
 }
 
 fn intersection_area(a: Rect, b: Rect) -> f32 {
@@ -428,11 +438,7 @@ fn own_facts(
         _ => None,
     };
     let hidden = node.visibility_hidden();
-    let pointer_none = match keyword("pointer-events") {
-        Some("none") => true,
-        Some(_) => false,
-        None => inherited.pointer_none,
-    };
+    let pointer_none = node.pointer_events_none();
     let far_left = |name: &str| matches!(node.value(name), Some(Value::Length(v, Unit::Px)) if *v <= -viewport_width);
     let author_offset = inherited.author_offset
         || render::transform_for(layout_box).e < 0.0
@@ -648,32 +654,28 @@ mod tests {
         };
         assert_eq!(i.cause, InterceptCause::Other);
         assert!(!i.browser_too());
-        // The same cover with `pointer-events: none` would let the click
-        // through in Chrome.
+        // The same cover with `pointer-events: none` lets the click through
+        // as in Chrome (step 0 counted it as `PointerNoneOverlay`; since 1b
+        // the hit test itself passes through, so that cause stays 0).
         let page = Page::new(
             "<html><body><button id=b>Go</button><div id=over></div></body></html>",
             "#b { width: 100px; height: 30px; } #over { margin-top: -30px; width: 100px; height: 30px; position: relative; pointer-events: none; }",
         );
-        let Reach::Intercepted(i) = page.reach("b") else {
-            panic!("{:?}", page.reach("b"))
-        };
-        assert_eq!(i.cause, InterceptCause::PointerNoneOverlay);
+        assert_eq!(page.reach("b"), Reach::Reached);
     }
 
     #[test]
     fn z_order_interception_is_classified_separately() {
         // The button paints on top (z-index) but comes first in the
-        // document, so today's DFS hit test picks the later box.
+        // document. Step 0's DFS hit test picked the later box (`ZOrder`);
+        // since 1b-z the hit test walks paint order, so it is reached and
+        // that cause stays 0.
         let page = Page::new(
             "<html><body><button id=b>Go</button><div id=later></div></body></html>",
             "#b { position: absolute; left: 0; top: 0; width: 100px; height: 30px; z-index: 2; } \
              #later { position: relative; width: 100px; height: 30px; }",
         );
-        let Reach::Intercepted(i) = page.reach("b") else {
-            panic!("{:?}", page.reach("b"))
-        };
-        assert_eq!(i.cause, InterceptCause::ZOrder);
-        assert!(!i.browser_too(), "an engine gap: ours");
+        assert_eq!(page.reach("b"), Reach::Reached);
     }
 
     #[test]

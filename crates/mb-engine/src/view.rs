@@ -515,10 +515,15 @@ pub fn compute_hovered_dom_path(
     .map(|hit| hit.path)
 }
 
-/// The deepest box under the pointer. A box whose overflow clip (`clips`,
-/// the frame's `DocumentView::clips`) excludes the point is not a hit —
-/// but its descendants are still tested (an absolute child can sit under
-/// a different clip). Human clicks and the agent's synthetic clicks both
+/// The topmost box under the pointer, the way paint stacks boxes (compat
+/// round 4 step 1b-z): the painter's own order (`render::paint_order` —
+/// z-index and positioned layers), last match wins. A box whose overflow
+/// clip (`clips`, the frame's `DocumentView::clips`) excludes the point is
+/// not a hit — but its descendants are still tested (an absolute child can
+/// sit under a different clip). Boxes the hit test passes through:
+/// `visibility: hidden`, `pointer-events: none` (own record only — a
+/// `visible`/`auto` child still takes clicks) and inert subtrees. Human
+/// clicks, link navigation (1b-link) and the agent's synthetic clicks all
 /// come through here.
 pub fn compute_hovered_hit(
     input: &input::WindowInput,
@@ -534,57 +539,71 @@ pub fn compute_hovered_hit(
         return None;
     }
     let doc_y = mouse_y - CHROME_HEIGHT + scroll_offset;
-
-    // Walk the layout tree depth-first, tracking the path of child
-    // indices alongside the StyledNode behind each box. Layout child
-    // positions mirror DOM child positions (no anonymous boxes are
-    // created today), so the path doubles as a DOM path. The deepest
-    // containing box wins by virtue of being visited last.
-    let mut best: Option<HoverHit> = None;
-    let mut path: Vec<usize> = Vec::new();
-    walk_for_hover(
-        layout_root,
-        mouse_x,
-        doc_y,
-        render::Affine::IDENTITY,
-        clips,
-        &mut path,
-        &mut best,
-    );
-    best
+    let hit = topmost_box_at(layout_root, mouse_x, doc_y, clips)?;
+    // The layout child-index path to the box (the fallback path for a hit
+    // without a NodeId — callers rebuild DOM paths from the NodeId).
+    let mut path = Vec::new();
+    layout_path_to(layout_root, hit, &mut path);
+    Some(HoverHit {
+        path,
+        node_id: node_id_for_layout_box(hit),
+    })
 }
 
-/// The node under the pointer the way paint stacks boxes: the same
-/// per-box test as [`compute_hovered_hit`] (padding box under the box's
-/// transform, inside its clip), but the topmost box in paint order wins —
-/// z-index and positioned layers, as the screen shows them — instead of
-/// the last one in document order. Not used for input yet: the reach check
-/// (compat round 4 P2) compares the two to tell a z-order miss from other
-/// interceptions; the hit test switches to this order in step 1b-z.
+/// The node [`compute_hovered_hit`] picks. Kept as its own entry for the
+/// reach check (compat round 4 P2), which before step 1b-z compared it with
+/// the old document-order hit to tell a z-order miss apart; the two are the
+/// same function now.
 pub fn hit_node_in_paint_order(
     input: &input::WindowInput,
     layout_root: &layout::LayoutBox,
     clips: &layout::ClipTable,
     scroll_offset: f32,
 ) -> Option<NodeId> {
-    let (mouse_x, mouse_y) = input.mouse_position?;
-    if mouse_y < CHROME_HEIGHT {
-        return None;
-    }
-    let doc_y = mouse_y - CHROME_HEIGHT + scroll_offset;
+    compute_hovered_hit(input, layout_root, clips, scroll_offset)?.node_id
+}
+
+/// The last box in paint order whose padding box (under its transform)
+/// holds page point (`x`, `doc_y`) inside its clip — the one on top.
+fn topmost_box_at<'a>(
+    layout_root: &'a layout::LayoutBox,
+    x: f32,
+    doc_y: f32,
+    clips: &layout::ClipTable,
+) -> Option<&'a layout::LayoutBox> {
     let mut best = None;
     for (layout_box, transform) in render::paint_order(layout_root) {
-        let (logical_x, logical_y) = transform.inverse().apply_point(mouse_x, doc_y);
-        let node_id = node_id_for_layout_box(layout_box);
-        let clip = node_id.and_then(|id| clips.clip_of(id));
-        if hit_testable(layout_box)
-            && point_in_rect(logical_x, logical_y, padding_box(layout_box))
-            && point_in_clip(mouse_x, doc_y, clip)
+        if !hit_testable(layout_box) {
+            continue;
+        }
+        let (logical_x, logical_y) = transform.inverse().apply_point(x, doc_y);
+        let clip = node_id_for_layout_box(layout_box).and_then(|id| clips.clip_of(id));
+        if point_in_rect(logical_x, logical_y, padding_box(layout_box))
+            && point_in_clip(x, doc_y, clip)
         {
-            best = Some(node_id);
+            best = Some(layout_box);
         }
     }
-    best.flatten()
+    best
+}
+
+/// Child indices from `layout_box` down to `target` (by identity).
+fn layout_path_to(
+    layout_box: &layout::LayoutBox,
+    target: &layout::LayoutBox,
+    path: &mut Vec<usize>,
+) -> bool {
+    if std::ptr::eq(layout_box, target) {
+        return true;
+    }
+    for (index, child) in layout_box.children.iter().enumerate() {
+        path.push(index);
+        if layout_path_to(child, target, path) {
+            return true;
+        }
+        path.pop();
+    }
+    false
 }
 
 /// Whether page point (`x`, `y`) is inside `clip` (`None` = unclipped; a
@@ -593,58 +612,18 @@ pub fn point_in_clip(x: f32, y: f32, clip: Option<layout::Rect>) -> bool {
     clip.is_none_or(|c| c.width > 0.0 && c.height > 0.0 && point_in_rect(x, y, c))
 }
 
-fn walk_for_hover(
-    layout_box: &layout::LayoutBox,
-    mouse_x: f32,
-    doc_y: f32,
-    inherited_transform: render::Affine,
-    clips: &layout::ClipTable,
-    path: &mut Vec<usize>,
-    best: &mut Option<HoverHit>,
-) {
-    // Compose this box's own `transform` onto the inherited matrix, then map
-    // the screen-space cursor back into the box's logical coordinates so the
-    // padding-box compare can stay axis-aligned. Pages without `transform`
-    // keep the matrix at identity, so the inverse + apply collapse to a no-op.
-    let effective_transform = inherited_transform.compose(render::transform_for(layout_box));
-    let (logical_x, logical_y) = effective_transform.inverse().apply_point(mouse_x, doc_y);
-    let outer = padding_box(layout_box);
-    let node_id = node_id_for_layout_box(layout_box);
-    // The clip is in page space — compared with the untransformed point.
-    let clip = node_id.and_then(|id| clips.clip_of(id));
-    if hit_testable(layout_box)
-        && point_in_rect(logical_x, logical_y, outer)
-        && point_in_clip(mouse_x, doc_y, clip)
-    {
-        *best = Some(HoverHit {
-            path: path.clone(),
-            node_id,
-        });
-    }
-    for (idx, child) in layout_box.children.iter().enumerate() {
-        path.push(idx);
-        walk_for_hover(
-            child,
-            mouse_x,
-            doc_y,
-            effective_transform,
-            clips,
-            path,
-            best,
-        );
-        path.pop();
-    }
-}
-
-/// Whether the hit test may stop at this box (step 1a): not
-/// `visibility: hidden` (its descendants are still tested — a `visible`
-/// child shows) and not inert (the whole subtree is, by inheritance).
+/// Whether the hit test may stop at this box (steps 1a/1b): not
+/// `visibility: hidden` and not `pointer-events: none` (its descendants are
+/// still tested — a `visible`/`auto` child takes clicks) and not inert (the
+/// whole subtree is, by inheritance).
 fn hit_testable(layout_box: &layout::LayoutBox) -> bool {
     match &layout_box.box_type {
         layout::BoxType::BlockNode(node)
         | layout::BoxType::FlexNode(node)
         | layout::BoxType::GridNode(node)
-        | layout::BoxType::TableNode(node) => !node.visibility_hidden() && !node.inert(),
+        | layout::BoxType::TableNode(node) => {
+            !node.visibility_hidden() && !node.pointer_events_none() && !node.inert()
+        }
         layout::BoxType::AnonymousBlock => true,
     }
 }
@@ -955,8 +934,9 @@ mod tests {
         };
         let attr_id =
             |id: Option<NodeId>| document.element_data(id?)?.attributes.get("id").cloned();
-        let dfs = compute_hovered_hit(&input, &layout_root, &clips, 0.0).and_then(|h| h.node_id);
-        assert_eq!(attr_id(dfs).as_deref(), Some("later"));
+        // Step 1b-z: the hit test itself walks in paint order now.
+        let hit = compute_hovered_hit(&input, &layout_root, &clips, 0.0).and_then(|h| h.node_id);
+        assert_eq!(attr_id(hit).as_deref(), Some("top"));
         let painted = hit_node_in_paint_order(&input, &layout_root, &clips, 0.0);
         assert_eq!(attr_id(painted).as_deref(), Some("top"));
     }
@@ -1102,6 +1082,96 @@ mod tests {
             y
         };
         assert_eq!(after_y(&hidden), after_y(&shown));
+    }
+
+    #[test]
+    fn pointer_events_none_box_is_skipped_but_an_auto_child_is_hit() {
+        // Step 1b: a `pointer-events: none` decoration over a button lets
+        // the click through; its `auto` child still takes clicks.
+        let css = "#b { position: absolute; left: 0; top: 0; width: 200px; height: 40px; } \
+                   #deco { position: absolute; left: 0; top: 0; width: 200px; height: 40px; pointer-events: none; } \
+                   #grip { position: absolute; left: 150px; top: 0; width: 50px; height: 40px; pointer-events: auto; }";
+        let html =
+            "<div id=page><button id=b>Go</button><div id=deco><div id=grip></div></div></div>";
+        assert_eq!(
+            hit_with_clips(html, css, 10.0, 10.0)[1].as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            hit_with_clips(html, css, 160.0, 10.0)[1].as_deref(),
+            Some("grip")
+        );
+    }
+
+    #[test]
+    fn hit_test_follows_paint_order_for_z_index() {
+        // Step 1b-z: #top comes first in the document but paints above
+        // #later (z-index) — the hit test now agrees with the screen, and
+        // its path still names the DOM position of the box it picked.
+        let css = "#top { position: absolute; left: 0; top: 0; width: 100px; height: 50px; z-index: 5; } \
+                   #later { position: relative; width: 100px; height: 50px; } \
+                   #neg { position: absolute; left: 0; top: 60px; width: 100px; height: 50px; z-index: -1; } \
+                   #flow { margin-top: 10px; height: 50px; }";
+        let html = "<div id=page><div id=top></div><div id=later></div><div id=neg></div><div id=flow></div></div>";
+        assert_eq!(
+            hit_with_clips(html, css, 10.0, 10.0)[1].as_deref(),
+            Some("top")
+        );
+        // A negative z-index paints under in-flow content.
+        assert_eq!(
+            hit_with_clips(html, css, 10.0, 75.0)[1].as_deref(),
+            Some("flow")
+        );
+        let document = html::parse(html).unwrap();
+        let root = document.roots()[0];
+        let sheet = css::parse(css).unwrap();
+        let styled = style::style_tree(&document, root, &[sheet]);
+        let layout_root = layout::layout_tree(&styled, 400.0);
+        let input = input::WindowInput {
+            mouse_position: Some((10.0, 10.0 + CHROME_HEIGHT)),
+            ..input::WindowInput::default()
+        };
+        let hit =
+            compute_hovered_hit(&input, &layout_root, &layout::ClipTable::default(), 0.0).unwrap();
+        assert_eq!(hit.path, vec![0], "the layout path of #top");
+    }
+
+    #[test]
+    fn a_z_index_auto_positioned_box_makes_no_stacking_context() {
+        // Step 1b-z′ (CSS 2.1 appendix E): #wrap is positioned with
+        // `z-index: auto`, so #btns (z 2) stacks in #sec's context next to
+        // #title (z 2) and, coming later in the document, paints on top —
+        // yna's carousel buttons. With `z-index: 0` #wrap is a context of
+        // its own at 0 and #title (2) covers everything in it.
+        let html = "<div id=page><section id=sec><header id=title>Title</header>\
+                    <div id=wrap><div id=btns></div></div></section></div>";
+        let css = "#sec { position: relative; } \
+                   #title { position: relative; z-index: 2; height: 40px; } \
+                   #wrap { position: relative; } \
+                   #btns { position: absolute; left: 0; top: -40px; width: 100px; height: 40px; z-index: 2; }";
+        assert_eq!(
+            hit_with_clips(html, css, 10.0, 10.0)[1].as_deref(),
+            Some("btns")
+        );
+        let own_context = format!("{css} #wrap {{ z-index: 0; }}");
+        assert_eq!(
+            hit_with_clips(html, &own_context, 10.0, 10.0)[1].as_deref(),
+            Some("title")
+        );
+        // The painter agrees: #btns' fill comes after #title's text.
+        let view = page_view(
+            &format!("<html><body>{html}</body></html>"),
+            &format!("{css} #btns {{ background-color: #0000ff; }}"),
+        );
+        let mut order = Vec::new();
+        render::walk_commands(&view.commands, &mut |c| match c {
+            DisplayCommand::Text(t) if t.text.trim() == "Title" => order.push("title"),
+            DisplayCommand::SolidRect(color, _) if color.b == 255 && color.r == 0 => {
+                order.push("btns")
+            }
+            _ => {}
+        });
+        assert_eq!(order, ["title", "btns"]);
     }
 
     #[test]

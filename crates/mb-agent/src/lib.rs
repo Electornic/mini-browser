@@ -27,7 +27,7 @@ pub use browser::{
     AgentBrowser, AgentConfig, ClockMode, PendingWait, SUPPORTED_KEYS, Screenshot, WaitCondition,
     is_local_dev_host,
 };
-pub use error::AgentError;
+pub use error::{AgentError, CoveredClick, Interceptor, NotInteractableReason};
 pub use mb_runtime::state::policy::ApproveMode;
 pub use observation::{
     Changes, ElementObservation, ElementValue, Flag, Observation, ObserveInput, ObserveOptions,

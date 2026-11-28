@@ -16,11 +16,14 @@ use mb_runtime::net::Url;
 use mb_runtime::render::rasterize;
 use mb_runtime::state::policy::{AgentPolicy, ApproveMode, GatedAction, GatedKind, PolicyDecision};
 use mb_runtime::state::{BrowserState, install_fonts};
+use mb_runtime::view;
 
 use crate::error::AgentError;
-use crate::error::{CLIPPED_OUT_OF_VIEW, HIDDEN, INERT};
+use crate::error::{CoveredClick, Interceptor, NotInteractableReason as Why};
 use crate::index::find_rect;
-use crate::observation::{Changes, Observation, ObserveInput, ObserveOptions, Scope, observe};
+use crate::observation::{
+    self, Changes, Observation, ObserveInput, ObserveOptions, Scope, observe,
+};
 use crate::reach;
 
 /// Virtual-clock step per frame (≈60 fps).
@@ -436,10 +439,7 @@ impl AgentBrowser {
             browser.click_raw(id)?;
             browser.settle();
             if browser.state.focused_element() != Some(id) {
-                return Err(AgentError::NotInteractable {
-                    id,
-                    reason: "clicking it did not give it focus",
-                });
+                return Err(browser.not_interactable(id, Why::NoFocus));
             }
             if clear {
                 let length = browser
@@ -990,6 +990,7 @@ impl AgentBrowser {
         self.scroll_into_view(rect);
         let rect = self.agent_target_rect(id)?;
         let point = self.click_point(rect);
+        self.refuse_if_intercepted(id, point)?;
         // Move first so :hover lands, then press and release on their own
         // frames — the same edge/level sequence the window produces.
         self.frame(WindowInput {
@@ -1050,42 +1051,105 @@ impl AgentBrowser {
         // applied) cut to its overflow clip — the hit test's own terms, so
         // the click can't land on whatever lies under a clipped element
         // (compat round 3 step 3b).
-        match find_rect(&view.layout_root, id) {
-            Some(rect) if rect.width > 0.0 && rect.height > 0.0 => {}
-            Some(_) => {
-                return Err(AgentError::NotInteractable {
-                    id,
-                    reason: "it has zero size",
-                });
-            }
-            None => {
-                return Err(AgentError::NotInteractable {
-                    id,
-                    reason: "it is not rendered",
-                });
-            }
+        let refusal = match find_rect(&view.layout_root, id) {
+            Some(rect) if rect.width > 0.0 && rect.height > 0.0 => None,
+            Some(_) => Some(Why::ZeroSize),
+            None => Some(Why::NotRendered),
         }
-        if agent {
-            let reason = match reach::concealment(&view.layout_root, id) {
-                Some(reach::Concealment::Hidden) => Some(HIDDEN),
-                Some(reach::Concealment::Inert) => Some(INERT),
-                None => None,
-            };
-            if let Some(reason) = reason {
-                return Err(AgentError::NotInteractable { id, reason });
+        .or_else(|| {
+            agent
+                .then(|| match reach::concealment(&view.layout_root, id)? {
+                    reach::Concealment::Hidden => Some(Why::Hidden),
+                    reach::Concealment::Inert => Some(Why::Inert),
+                })
+                .flatten()
+        });
+        let visible = match refusal {
+            Some(_) => None,
+            None => reach::visible_rect(&view.layout_root, id, &view.clips),
+        };
+        match (refusal, visible) {
+            (Some(why), _) => Err(self.not_interactable(id, why)),
+            (None, Some(Ok(rect))) => Ok(rect),
+            (None, Some(Err(()))) => Err(self.not_interactable(id, Why::Clipped)),
+            (None, None) => Err(self.not_interactable(id, Why::NotRendered)),
+        }
+    }
+
+    /// A `NotInteractable` for `id`, naming an issued label of a checkbox
+    /// or radio (the checkbox hack's way in — docs/compat-round4.md N3).
+    fn not_interactable(&self, id: NodeId, reason: Why) -> AgentError {
+        let label = self.state.current_view().and_then(|view| {
+            let document = self.state.parsed_document.borrow();
+            observation::labels_of_checkable(&document, &view.layout_root, id)
+                .into_iter()
+                .find(|&label| self.is_issued(label))
+        });
+        AgentError::NotInteractable { id, reason, label }
+    }
+
+    /// Refuse a click at window `point` whose hit isn't `id` (or inside it,
+    /// or its label): something else is on top there and would take it —
+    /// WebDriver's "element click intercepted" (step 1b, N3).
+    fn refuse_if_intercepted(&self, id: NodeId, point: (f32, f32)) -> Result<(), AgentError> {
+        let Some(view) = self.state.current_view() else {
+            return Ok(());
+        };
+        let input = WindowInput {
+            mouse_position: Some(point),
+            ..WindowInput::default()
+        };
+        let hit = view::compute_hovered_hit(
+            &input,
+            &view.layout_root,
+            &view.clips,
+            self.state.scroll_offset,
+        )
+        .and_then(|hit| hit.node_id);
+        let document = self.state.parsed_document.borrow();
+        if hit.is_some_and(|hit| reach::hit_reaches(&document, hit, id)) {
+            return Ok(());
+        }
+        let (acting, tag) = match hit {
+            Some(hit) => {
+                let listeners = self.state.js.nodes_with_listener("click");
+                observation::acting_element_at(&document, &view.layout_root, &listeners, hit)
             }
+            None => (None, String::new()),
+        };
+        drop(document);
+        let by = Interceptor {
+            id: acting
+                .as_ref()
+                .map(|(node, _, _)| *node)
+                .filter(|&node| self.is_issued(node)),
+            role: acting.as_ref().map(|(_, role, _)| *role),
+            name: acting.map(|(_, _, name)| name).unwrap_or_default(),
+            tag,
+            origin: self.state.current_url.as_ref().map(observation::origin_of),
+        };
+        let link = self.link_url_of(id);
+        Err(self.not_interactable(id, Why::Intercepted(Box::new(CoveredClick { by, link }))))
+    }
+
+    /// The URL the link at or around `id` would load — its nearest
+    /// `<a href>`/`<area href>`, resolved against the page — when that is an
+    /// http(s) URL `navigate` accepts (no `javascript:`, `mailto:`, …).
+    fn link_url_of(&self, id: NodeId) -> Option<String> {
+        let document = self.state.parsed_document.borrow();
+        let href = std::iter::successors(Some(id), |&n| document.get(n)?.parent).find_map(|n| {
+            let element = document.element_data(n)?;
+            matches!(element.tag_name.as_str(), "a" | "area")
+                .then(|| element.attributes.get("href"))
+                .flatten()
+                .cloned()
+        })?;
+        let resolved = match &self.state.current_url {
+            Some(base) => base.resolve(href.trim()).ok()?,
+            None => Url::parse(href.trim()).ok()?,
         }
-        match reach::visible_rect(&view.layout_root, id, &view.clips) {
-            Some(Ok(rect)) => Ok(rect),
-            Some(Err(())) => Err(AgentError::NotInteractable {
-                id,
-                reason: CLIPPED_OUT_OF_VIEW,
-            }),
-            None => Err(AgentError::NotInteractable {
-                id,
-                reason: "it is not rendered",
-            }),
-        }
+        .to_string();
+        Url::parse(&resolved).is_ok().then_some(resolved)
     }
 
     // Bring the element's box into the viewport, centred, via the wheel
