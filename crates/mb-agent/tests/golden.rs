@@ -8,7 +8,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use mb_agent::{Observation, ObserveInput, ObserveOptions, Scope, observe};
+use mb_agent::{
+    AgentBrowser, AgentConfig, Observation, ObserveInput, ObserveOptions, Role, Scope, observe,
+};
 use mb_runtime::net::Url;
 use mb_runtime::{css, dom, html, style, view::build_document_view};
 
@@ -125,6 +127,38 @@ fn injection() {
 #[test]
 fn compat3() {
     golden("compat3");
+}
+
+/// Round-4 tracker: like compat3, today's (partly wrong) observation on
+/// purpose — but with the page's scripts run (round 4 step 2 is JS), in a
+/// real `AgentBrowser` (fallback fonts, virtual clock): on load, then after
+/// clicking "Menu". See the list at the top of fixtures/compat4.html.
+#[test]
+fn compat4() {
+    let source = std::fs::read_to_string(fixtures_dir().join("compat4.html")).unwrap();
+    let mut browser = AgentBrowser::new(AgentConfig {
+        viewport_width: VIEWPORT_W as usize,
+        viewport_height: VIEWPORT_H as usize,
+        ..AgentConfig::default()
+    });
+    browser.state_mut().current_url = Some(Url::parse("http://localhost:8000/compat4").unwrap());
+    browser
+        .state_mut()
+        .install_document(source, String::new(), HashMap::new());
+    let on_load = browser.observe(&ObserveOptions::default());
+    let menu = on_load
+        .elements
+        .iter()
+        .find(|e| e.role == Role::Button && e.name == "Menu")
+        .expect("the Menu button")
+        .id;
+    let after_menu = browser.click(menu).expect("click Menu");
+    let text = format!(
+        "=== on load ===\n{}\n=== after clicking \"Menu\" ===\n{}",
+        on_load.to_text(),
+        after_menu.to_text()
+    );
+    assert_golden("compat4", &text);
 }
 
 #[test]

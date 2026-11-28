@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>Northwind Docs Hub</title>
+<!--
+  Compat round 4 tracker (docs/compat-round4.md, common rules "추적 골든 +
+  eval", appendix E). Hand-written; patterns only, no real-site content.
+
+  compat4.observation.txt records TODAY's observation ON PURPOSE, wrong
+  parts included — with the page's scripts run (mb-agent tests/golden.rs
+  `compat4`): once on load, once after clicking "Menu". Each round-4 step
+  should move it in a known direction; review the golden diff against this
+  list (what Chrome shows at 800px), each item with the step that fixes it:
+
+  1. Site menu (#site-menu) — closed by `visibility: hidden`, opened by the
+     script (`.open`). In Chrome: not observed on load (hidden), shown
+     after "Menu". Today `visibility` is read by nothing, so "Docs" and
+     "Pricing" are observed and clickable before the menu ever opens.
+     Step 1a: the two links leave both observations (the script still
+     dies, so "Menu" opens nothing). Step 2 (2a getElementsByTagName +
+     2b matchMedia): "Menu" opens it — the links are back after the click
+     only.
+  2. Script — dies on its first line today (`getElementsByTagName` is
+     missing): the console line in the load observation. Step 2: gone; it
+     also adds "Sign in" (`insertAdjacentHTML`, 2a) to the greeting.
+  3. Draft panel (`inert`) — "Download draft" is observed today. In
+     Chrome it can't be clicked or focused. Step 1a (N4): not observed.
+  4. "Send feedback" (`opacity: 0`) — observed, and Chrome clicks it too.
+     Stays in every step (N4).
+  5. Background link under `aria-hidden="true"` — Chrome drops it from
+     the a11y tree; round 4 keeps it on purpose (N4, revisit in round 5).
+     Stays.
+  6. `<noscript><style>` hiding the "Search as you type" button (a
+     no-JS fallback rule) — today the parser has scripting off, so the
+     style is a real element and applies: the button is not observed.
+     Chrome runs scripts, so `<noscript>` holds raw text and the button
+     shows. Step 1e: "Search as you type" appears.
+  7. Closed popover (`[popover]`) "Popover tip" — Chrome's UA sheet hides
+     it until shown. Step 4 (`:popover-open` + UA rule): gone.
+  8. Icon button whose only text is `::before { content: "Close" }` —
+     today name="". Chrome names it "Close". Step 5c: name="Close".
+  9. "Subscribe" under a `pointer-events: none` decoration — observed
+     the same in every step; Chrome's click goes through the decoration,
+     ours lands on it until step 1b (the probe's reach columns count it).
+
+  eval/scenarios/compat4-menu.json drives item 1 ("open the menu, go to
+  Docs"). Today it can pass for the wrong reason (Docs is visible and
+  clickable without opening anything); after step 1 it should fail (the
+  script still dies); from step 2 it passes the Chrome way. mb-agent
+  actions.rs `compat4_menu_opens_through_its_script_and_leads_to_docs` is
+  the LLM-free counterpart.
+-->
+<style>
+  body { margin: 0; font-size: 16px; }
+  header { padding: 8px; position: relative; }
+  .menu { visibility: hidden; position: absolute; left: 8px; top: 40px; margin: 0; padding: 8px; background: #fff; }
+  .menu.open { visibility: visible; }
+  main { padding: 80px 8px 8px; }
+  .ghost { opacity: 0; }
+  .icon-close { width: 24px; height: 24px; }
+  .icon-close::before { content: "Close"; }
+  .promo { position: relative; width: 300px; height: 40px; }
+  .promo-art { position: absolute; left: 0; top: 0; width: 300px; height: 40px; pointer-events: none; }
+</style>
+</head>
+<body>
+<header>
+  <button id="menu-button" aria-controls="site-menu">Menu</button>
+  <ul id="site-menu" class="menu">
+    <li><a href="compat4-docs.html">Docs</a></li>
+    <li><a href="#pricing">Pricing</a></li>
+  </ul>
+</header>
+<main id="main">
+  <h1>Northwind Docs Hub</h1>
+  <p id="greeting">Welcome back. </p>
+  <div class="draft" inert>
+    <p>Draft release notes</p>
+    <button>Download draft</button>
+  </div>
+  <button class="ghost">Send feedback</button>
+  <div aria-hidden="true"><a href="#background">Background link</a></div>
+  <noscript><style>.js-search { display: none; }</style></noscript>
+  <button class="js-search">Search as you type</button>
+  <div popover id="tips"><a href="#tips">Popover tip</a></div>
+  <button class="icon-close"></button>
+  <div class="promo"><button id="subscribe">Subscribe</button><div class="promo-art"></div></div>
+</main>
+<script>
+  // The menu script: both APIs are missing until step 2, so today it
+  // stops on the first line and "Menu" never gets its listener.
+  var lists = document.getElementsByTagName("ul");
+  var wide = window.matchMedia("(min-width: 600px)").matches;
+  var menu = lists[0];
+  menu.setAttribute("data-layout", wide ? "wide" : "narrow");
+  document.getElementById("menu-button").addEventListener("click", function () {
+    menu.classList.toggle("open");
+  });
+  document.getElementById("greeting").insertAdjacentHTML("beforeend", '<a href="#signin">Sign in</a>');
+</script>
+</body>
+</html>

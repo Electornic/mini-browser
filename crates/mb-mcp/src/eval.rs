@@ -648,7 +648,9 @@ mod tests {
                 names.push(scenario.name);
             }
         }
-        assert!(names.iter().any(|n| n == "compat3-menu"), "{names:?}");
+        for tracker in ["compat3-menu", "compat4-menu"] {
+            assert!(names.iter().any(|n| n == tracker), "{tracker}: {names:?}");
+        }
     }
 
     #[test]

@@ -484,6 +484,15 @@ enwiki·kowiki 의 첫 스크립트가 `document.cookie.match(…)` 에서 죽�
   - crates.io: `nav-fail` → **`ok*`**(최종 URL 생김, 앱 껍데기 — 미스 6: css 5 · img 1, 받지 않음). 요소 0, 클래식 스크립트 1/2 완주, `Uncaught` 1줄(page-bug 모양). N1-나대로 견고성 지표에만 들고 ①·②·③·④·보조 합계에서는 뺀다.
 - **kowiki 는 CSS 지표에서 뺀다**(0단계 S 규칙 "429 가 다시 오면"): 스킨 시트가 4차 내내 없으므로 kowiki 의 `decl_drop_*`·`rule_drop_*`·합산 버린 선언은 보조 지표 합계(`r4-base-sup`·`r4-final`)에서 빼고 따로 적는다. 에이전트 지표(①·②)에는 그대로 든다 — 스킨 없이 보이는 화면이 우리가 실제로 관찰하는 화면이다. 보충 ②는 이 시트를 저절로 다시 요청하지 않는다 — 캐시에 429 항목이 있어 오프라인 미스가 아니므로 `misses.tsv` 에 안 나온다.
 
+**⑤ G — 추적 골든·eval(커밋 대기)**:
+- `crates/mb-agent/tests/fixtures/compat4.html`(손으로 씀, 패턴만). 맨 위 주석의 "Chrome 이라면" 목록 9항목에 고치는 단계를 적었다: ① `visibility` 메뉴(1a → 2) · ② 메뉴 스크립트가 첫 줄 `getElementsByTagName` 에서 죽음(2a·2b, `insertAdjacentHTML` "Sign in" 도 2a) · ③ `inert` 패널(1a) · ④ `opacity:0` 버튼(모든 단계 유지, N4) · ⑤ `aria-hidden` 링크(4차 유지, N4) · ⑥ `<noscript><style>` 이 "Search as you type" 버튼을 숨김(1e) · ⑦ 닫힌 `[popover]`(4) · ⑧ `::before { content }` 만 있는 아이콘 버튼 이름(5c) · ⑨ `pointer-events:none` 장식 아래 "Subscribe"(관찰은 그대로, 클릭은 1b — probe 의 도달 열이 셈).
+- **골든은 스크립트를 돌린다**(compat3 와 다른 점): `tests/golden.rs` `compat4` 가 실제 `AgentBrowser`(대체 글꼴·가상 시계·800×600)에 `install_document` 로 문서를 넣고, **불러온 직후**와 **"Menu" 클릭 뒤** 두 관찰을 한 골든 파일(`compat4.observation.txt`)에 적는다. 부록 E 의 골든 열("1 메뉴 항목 사라짐 · 2 메뉴 버튼으로 열림")은 클릭 뒤 관찰이 있어야 보이고, 2단계가 바꾸는 콘솔 줄도 관찰에 나온다. 결정적인지는 여러 번 돌려 확인했다.
+- **만들며 바로잡은 것**: 초안의 ⑥은 `<noscript>` 안 **링크**였는데, 오늘도 관찰되지 않는다(UA 가 `<noscript>` 를 그리지 않음). 그래서 1e 의 증상은 `<noscript>` 안 `<style>` 이 적용되는 쪽(3차 docsrs −1 과 같은 모양)으로 바꿨다.
+- 오늘 골든: 요소 9개(Menu · Docs · Pricing · Download draft · Send feedback · Background link · Popover tip · 이름 없는 버튼 · Subscribe). 콘솔 `Uncaught … near "document.getElementsByTagName"` 1줄. "Menu" 클릭 뒤 `+0 / -0`.
+- `eval/scenarios/compat4-menu.json`("메뉴를 열어 Docs 로 가서 내용을 말하라", 성공 = `/compat4-docs.html`). 페이지는 `examples/agent-demo/compat4.html`(골든 픽스처의 심볼릭 링크)과 `compat4-docs.html`. mb-mcp `every_committed_scenario_parses` 가 `compat4-menu` 도 요구하게 했다. **LLM eval 은 돌리지 않았다** — 사용자 터미널 몫(`scripts/eval-run.sh eval/scenarios/compat4-menu.json 3`, 0단계 기대 3/3 — 틀린 이유로).
+- 대응 테스트 `compat4_menu_opens_through_its_script_and_leads_to_docs`(actions.rs, LLM 없음): 오늘의 틀린 상태를 단언한다. 스크립트가 첫 줄에서 죽고, "Docs" 가 처음부터 관찰되며, "Menu" 를 눌러도 `+0 / -0` 이고, Docs 를 누르면 이동한다. 1·2단계에서 단언을 다시 쓴다(주석에 적음).
+- 테스트 1201(+2).
+
 ### 설계 결정
 
 - **합집합과 우선순위**: `hidden` 을 맨 앞에 둔다. 1단계가 그것을 관찰에서 빼면 그 요소는 관찰 요소 자체에서 사라지므로, 다른 범주로 옮겨 가 이중으로 줄어든 것처럼 보이지 않는다.
@@ -913,7 +922,7 @@ M (3~4일).
 | 단계 | 상태 | 커밋 | 테스트 수 | 코퍼스 fail/panic/timeout | 기대 컨트롤 누락 | `obs_unreachable`(ours) 관찰 요소당 비율(절대 수) · 구성 hidden/clipped/offscreen_x/intercepted(참고) | `Uncaught`(중복 제거) / 스크립트 완주 / missing-api 첫·어느 줄 | 합산 ours / 버린 규칙 ours(참고) | 메모 |
 |---|---|---|---|---|---|---|---|---|---|
 | 3차 끝(`final`) | ✅ | `cef51c5` | 1173 | ok 12 + ok* 8 · nav-fail 1(crates.io) · panic 0 · timeout 0 · blocked 2 · robots skip 2 · `[mb-budget]` 0 | 7/20 (naver·daum·hani·korea-kr·velog·d2·google) | 미측정(클립 거절 276) | 83(중복 포함 96) / 미측정 / 10 · 14 | 1,356 / 1,506 | `r4-check` 재생이 `final` 과 같음([부록 D](#부록-d--측정-재현과-명령)) |
-| 0 측정 정비 | 진행 중 — ① P ✅ · ② K5 ✅ · P2b 세로 행 ✅ · ③ S ✅ · ④ 보충 ① ✅(kowiki 429 다시 — CSS 지표 제외, crates.io 200) | `4f46de3`(P) · `68498f3`(K5·P2b 세로) · `d263093`(S) | 1190 (P) → 1194 (K5·P2b 세로) → 1199 (S) | nav-fail **0**(`r4-sup1`: crates.io `ok*` — N1-나) | (D6 철자 수정 뒤 6/20) | 첫 측정(`r4-p0`, 참고): 0.180(796; 첫 P2b 표로 0.184·812) · 359/73/94/270 | 83 / `js_scripts` 열 / 10 · 14(`classify final` 재현) | 그대로 | `r4-p0` ✅(기존 77열 = `final`, 요소 diff 0) → `r4-k5` ✅(빈 diff, 102열 동일) → `r4-base` |
+| 0 측정 정비 | 진행 중 — ① P ✅ · ② K5 ✅ · P2b 세로 행 ✅ · ③ S ✅ · ④ 보충 ① ✅(kowiki 429 다시 — CSS 지표 제외, crates.io 200) · ⑤ G ✅(커밋 대기) | `4f46de3`(P) · `68498f3`(K5·P2b 세로) · `d263093`(S) | 1190 (P) → 1194 (K5·P2b 세로) → 1199 (S) → 1201 (G) | nav-fail **0**(`r4-sup1`: crates.io `ok*` — N1-나) | (D6 철자 수정 뒤 6/20) | 첫 측정(`r4-p0`, 참고): 0.180(796; 첫 P2b 표로 0.184·812) · 359/73/94/270 | 83 / `js_scripts` 열 / 10 · 14(`classify final` 재현) | 그대로 | `r4-p0` ✅(기존 77열 = `final`, 요소 diff 0) → `r4-k5` ✅(빈 diff, 102열 동일) → `r4-base` |
 | 1 에이전트 정합성 | 설계 | | | | | | | | |
 | 2 작은 JS | 설계 | | | | | | | | 겹마다 `r4-js-1`… → 보충 ② → `r4-js-sup`(후) / `r4-base-sup`(③④·보조의 기준) |
 | 3 레이아웃 | 설계 | | | | | | | | |
@@ -1123,7 +1132,7 @@ MB_NET_CACHE=$PWD/compat-cache/net scripts/compat-corpus.sh record --refetch <�
 
 ## 부록 E — 골든·eval 단계별 기대표
 
-`compat4.html` 은 오늘의 **틀린** 관찰을 골든으로 남기고 단계마다 바뀐다. `compat4-menu` 는 "JS 로 여는 메뉴를 펼쳐 항목으로 이동" 시나리오다. 메뉴는 `visibility:hidden` 으로 닫혀 있고, `getElementsByTagName`·`matchMedia` 로 여닫는다.
+`compat4.html` 은 오늘의 **틀린** 관찰을 골든으로 남기고 단계마다 바뀐다. 골든은 스크립트를 돌린 관찰 둘(불러온 직후 · "Menu" 클릭 뒤)이다(0단계 ⑤ 메모). `compat4-menu` 는 "JS 로 여는 메뉴를 펼쳐 항목으로 이동" 시나리오다. 메뉴는 `visibility:hidden` 으로 닫혀 있고, `getElementsByTagName`·`matchMedia` 로 여닫는다.
 
 | 단계 | `compat4` 골든 | `compat4-menu` eval(LLM, 3회 — **사용자가 자기 터미널에서** `scripts/eval-run.sh`) | 대응 테스트 `compat4_menu_opens_through_its_script_and_leads_to_docs`(LLM 없음) |
 |---|---|---|---|

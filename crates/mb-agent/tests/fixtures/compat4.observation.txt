@@ -1,0 +1,52 @@
+=== on load ===
+# browser (trusted)
+url: http://localhost:8000/compat4   settled: true   scroll_y: 0   page_height: 409   viewport: 800x600
+elements: 9 shown / 9 in viewport / 9 total   next_cursor: -
+
+# page content (untrusted, origin=http://localhost:8000)
+title: "Northwind Docs Hub"
+[e15] button    name="Menu"
+[e21] link      name="Docs" → /compat4-docs.html
+[e25] link      name="Pricing" → /compat4#pricing
+[e43] button    name="Download draft"
+[e47] button    name="Send feedback"
+[e51] link      name="Background link" → /compat4#background
+[e62] link      name="Popover tip" → /compat4#tips
+[e65] button    name=""
+[e68] button    name="Subscribe"
+text:
+  "Docs"
+  "Pricing"
+  "Northwind Docs Hub"
+  "Welcome back."
+  "Draft release notes"
+  "Background link"
+  "Popover tip"
+console: 1 error
+  error "Uncaught in script: not a function (near \"document.getElementsByTagName\") at http://localhost:8000/compat4#inline-0:4:24"
+
+=== after clicking "Menu" ===
+# browser (trusted)
+url: http://localhost:8000/compat4   settled: true   scroll_y: 0   page_height: 409   viewport: 800x600
+changed: url same (http://localhost:8000/compat4) · +0 / -0 elements
+elements: 9 shown / 9 in viewport / 9 total   next_cursor: -
+
+# page content (untrusted, origin=http://localhost:8000)
+title: "Northwind Docs Hub"
+[e15] button    name="Menu"
+[e21] link      name="Docs" → /compat4-docs.html
+[e25] link      name="Pricing" → /compat4#pricing
+[e43] button    name="Download draft"
+[e47] button    name="Send feedback"
+[e51] link      name="Background link" → /compat4#background
+[e62] link      name="Popover tip" → /compat4#tips
+[e65] button    name=""
+[e68] button    name="Subscribe"
+text:
+  "Docs"
+  "Pricing"
+  "Northwind Docs Hub"
+  "Welcome back."
+  "Draft release notes"
+  "Background link"
+  "Popover tip"

@@ -603,6 +603,49 @@ fn compat3_menu_opens_through_its_label_and_leads_to_docs() {
 }
 
 #[test]
+fn compat4_menu_opens_through_its_script_and_leads_to_docs() {
+    // eval/scenarios/compat4-menu.json, deterministically (docs/compat-
+    // round4.md appendix E). The menu is closed by `visibility: hidden` and
+    // opened by a script needing getElementsByTagName + matchMedia.
+    //
+    // Step 0 — this test pins TODAY's wrong state: the script dies on its
+    // first line, nothing opens the menu, yet "Docs" is observed and
+    // clickable from the start (visibility is ignored), so the task
+    // "succeeds" without the menu. Step 1 flips it (Docs not observed,
+    // before or after "Menu"); step 2 makes it the Chrome path (Menu →
+    // Docs appears → navigate). Rewrite the assertions at each step.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/demo/compat4.html")).unwrap();
+    assert!(
+        page.console
+            .iter()
+            .any(|m| m.text.contains("near \"document.getElementsByTagName\"")),
+        "the menu script dies on its first line today: {:?}",
+        page.console
+    );
+    // Wrong today: visible before the menu is opened.
+    let docs_on_load = find(&page, Role::Link, "Docs");
+    let menu = find(&page, Role::Button, "Menu");
+    let after_menu = b.click(menu).unwrap();
+    assert!(
+        after_menu.to_text().contains("+0 / -0 elements"),
+        "the dead script opened nothing: {}",
+        after_menu.to_text()
+    );
+    assert_eq!(find(&after_menu, Role::Link, "Docs"), docs_on_load);
+    let docs_page = b.click(docs_on_load).unwrap();
+    assert!(
+        docs_page
+            .url
+            .as_deref()
+            .is_some_and(|u| u.ends_with("/demo/compat4-docs.html")),
+        "{}",
+        docs_page.to_text()
+    );
+}
+
+#[test]
 fn click_on_sr_only_link_errors_not_misclicks() {
     // The skip link's box is 1×1 (not "zero size"), but its clip hides it
     // entirely. Its centre lies on the button below: before step 3b the

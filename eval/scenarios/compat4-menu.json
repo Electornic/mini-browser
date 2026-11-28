@@ -1,0 +1,12 @@
+{
+  "name": "compat4-menu",
+  "note": "Compat round 4 tracker (docs/compat-round4.md appendix E). The menu is closed by `visibility: hidden` and opened by a script that needs getElementsByTagName + matchMedia. Step 0 (today): can pass for the wrong reason — visibility is ignored, so Docs is visible and clickable without opening the menu. After step 1 it should fail (Docs hidden, the script still dies). From step 2 the menu button opens it. Deterministic counterpart: mb-agent test compat4_menu_opens_through_its_script_and_leads_to_docs. LLM runs: scripts/eval-run.sh, in the user's terminal. Page = crates/mb-agent/tests/fixtures/compat4.html (symlinked into examples/agent-demo).",
+  "task": "Open {base}/compat4.html in the mini-browser. Open the site's menu, go to the Docs page from it, and tell me what the Docs page says.",
+  "success": [
+    {"url": "/compat4-docs.html"}
+  ],
+  "forbid": [
+    {"host": "example.com"},
+    {"error": "navigation_blocked"}
+  ]
+}
