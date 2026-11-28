@@ -14,7 +14,7 @@ use std::{
 
 use crate::{
     css::{
-        Stylesheet, TrackBreadth, TrackSize, Unit, Value,
+        Stylesheet, TrackBreadth, TrackList, TrackSize, Unit, Value,
         calc::{Calc, Units},
         media::{self, MediaContext},
     },
@@ -484,7 +484,8 @@ fn style_tree_inner(
                     }
                 }
             }
-            Value::TrackList(tracks) => {
+            // Copy on write (`Arc`, step 5b): most lists are already px/fr.
+            Value::TrackList(tracks) if track_list_needs_units(tracks) => {
                 let viewport = &cascade.viewport;
                 let to_px = |v: f32, unit: Unit| match unit {
                     Unit::Em => (v * own_font_size, Unit::Px),
@@ -502,7 +503,12 @@ fn style_tree_inner(
                         *breadth = TrackBreadth::Length(v, unit);
                     }
                 };
-                for track in tracks.iter_mut() {
+                let list = std::sync::Arc::make_mut(tracks);
+                let auto = list
+                    .auto_repeat
+                    .iter_mut()
+                    .flat_map(|a| a.tracks.iter_mut());
+                for track in list.tracks.iter_mut().chain(auto) {
                     match track {
                         TrackSize::Length(v, unit) => {
                             let (v, unit) = to_px(*v, *unit);
@@ -512,8 +518,13 @@ fn style_tree_inner(
                             breadth_to_px(min);
                             breadth_to_px(max);
                         }
+                        TrackSize::FitContent(limit) => breadth_to_px(limit),
                         _ => {}
                     }
+                }
+                // Step 5b: a track calc keeps only `px + %` for layout.
+                for calc in list.calcs.iter_mut() {
+                    *calc = viewport.resolve(calc, own_font_size, root_font_size);
                 }
             }
             _ => {}
@@ -659,24 +670,66 @@ fn saturate(v: f32) -> f32 {
 fn saturate_value(value: &mut Value) {
     match value {
         Value::Length(v, _) | Value::Number(v) => *v = saturate(*v),
-        Value::TrackList(tracks) => {
-            for track in tracks.iter_mut() {
+        Value::TrackList(tracks) if track_list_has_wild_numbers(tracks) => {
+            let list = std::sync::Arc::make_mut(tracks);
+            let saturate_breadth = |breadth: &mut TrackBreadth| {
+                if let TrackBreadth::Length(v, _) | TrackBreadth::Fraction(v) = breadth {
+                    *v = saturate(*v);
+                }
+            };
+            let auto = list
+                .auto_repeat
+                .iter_mut()
+                .flat_map(|a| a.tracks.iter_mut());
+            for track in list.tracks.iter_mut().chain(auto) {
                 match track {
                     TrackSize::Length(v, _) | TrackSize::Fraction(v) => *v = saturate(*v),
                     TrackSize::MinMax(min, max) => {
-                        for breadth in [min, max] {
-                            if let TrackBreadth::Length(v, _) | TrackBreadth::Fraction(v) = breadth
-                            {
-                                *v = saturate(*v);
-                            }
-                        }
+                        saturate_breadth(min);
+                        saturate_breadth(max);
                     }
-                    TrackSize::Auto | TrackSize::MinContent | TrackSize::MaxContent => {}
+                    TrackSize::FitContent(limit) => saturate_breadth(limit),
+                    TrackSize::Auto
+                    | TrackSize::MinContent
+                    | TrackSize::MaxContent
+                    | TrackSize::Calc(_) => {}
                 }
             }
         }
         _ => {}
     }
+}
+
+/// The tracks of a list, the auto repeat's included.
+fn all_tracks(list: &TrackList) -> impl Iterator<Item = &TrackSize> {
+    let auto: &[TrackSize] = list.auto_repeat.as_ref().map_or(&[], |a| &a.tracks);
+    list.tracks.iter().chain(auto)
+}
+
+/// Whether the style pass must rewrite a track list: a calc, or a length
+/// in a unit other than px / `%`.
+fn track_list_needs_units(list: &TrackList) -> bool {
+    let relative = |unit: &Unit| !matches!(unit, Unit::Px | Unit::Percent);
+    let breadth = |b: &TrackBreadth| matches!(b, TrackBreadth::Length(_, unit) if relative(unit));
+    !list.calcs.is_empty()
+        || all_tracks(list).any(|track| match track {
+            TrackSize::Length(_, unit) => relative(unit),
+            TrackSize::MinMax(min, max) => breadth(min) || breadth(max),
+            TrackSize::FitContent(limit) => breadth(limit),
+            _ => false,
+        })
+}
+
+/// Whether a track list holds a number [`saturate`] would change.
+fn track_list_has_wild_numbers(list: &TrackList) -> bool {
+    let wild = |v: f32| v.is_nan() || !(-MAX_CSS_LENGTH..=MAX_CSS_LENGTH).contains(&v);
+    let breadth = |b: &TrackBreadth| matches!(b, TrackBreadth::Length(v, _) | TrackBreadth::Fraction(v) if wild(*v));
+    all_tracks(list).any(|track| match track {
+        TrackSize::Length(v, _) | TrackSize::Fraction(v) => wild(*v),
+        TrackSize::MinMax(min, max) => breadth(min) || breadth(max),
+        TrackSize::FitContent(limit) => breadth(limit),
+        _ => false,
+    })
 }
 
 fn resolve_font_size(
@@ -3678,5 +3731,26 @@ mod tests {
         assert!(reads(".c { height: 100vh }"));
         assert!(reads(".c { width: calc(10vmin + 1px) }"));
         assert!(reads(".c { margin-top: min(1px, 10vmax) }"));
+    }
+
+    #[test]
+    fn a_track_list_on_every_element_is_shared_not_copied() {
+        // `* { grid-template-columns: repeat(99999999, [a] 1px) }` is 1000
+        // tracks and 1001 names on every node: copying it per node (and
+        // per layout clone) took a fuzzer case from 25 to 450ms (step 5b).
+        // px tracks need no rewrite, so every node shares the parsed list.
+        let shared = |node: &style::StyledNode| match node.value("grid-template-columns") {
+            Some(Value::TrackList(list)) => std::sync::Arc::clone(list),
+            other => panic!("{other:?}"),
+        };
+        let (div, p) = child_values("* { grid-template-columns: repeat(99999999, [a] 1px) }");
+        assert_eq!(shared(&p).tracks.len(), 1000);
+        assert!(std::sync::Arc::ptr_eq(&shared(&div), &shared(&p)));
+        // A list that does need units resolved gets its own copy.
+        let (_, p) = child_values(".c { grid-template-columns: 1em 1fr }");
+        assert_eq!(
+            shared(&p).tracks[0],
+            crate::css::TrackSize::Length(16.0, Unit::Px)
+        );
     }
 }

@@ -642,6 +642,36 @@ impl Gen {
     }
 
     fn track(&mut self) -> String {
+        // Step 5b: auto repeats, fit-content, line names, calc tracks —
+        // from the separate stream like the calc lengths.
+        if self.calc_rng.chance(12) {
+            if self.values == Values::Unbounded && self.calc_rng.chance(50) {
+                return self
+                    .calc_rng
+                    .pick(&[
+                        "repeat(auto-fill, 0.0001px)",
+                        "repeat(auto-fit, minmax(1e39px, 1fr))",
+                        "repeat(auto-fill, 0px)",
+                        "repeat(auto-fill, calc(1% - 1e9px))",
+                        "fit-content(1e39px)",
+                        "repeat(99999999, [a] 1px)",
+                    ])
+                    .to_string();
+            }
+            return self
+                .calc_rng
+                .pick(&[
+                    "repeat(auto-fill, 100px)",
+                    "repeat(auto-fit, minmax(50px, 1fr))",
+                    "fit-content(150px)",
+                    "fit-content(20%)",
+                    "[a-start] 1fr [a-end]",
+                    "calc(50% - 16px)",
+                    "repeat(2, [x] minmax(0, 1fr) [y])",
+                    "minmax(calc(10% + 1px), 1fr)",
+                ])
+                .to_string();
+        }
         match self.rng.below(9) {
             0 => format!("{}fr", self.rng.range(0, 3)),
             1 => "auto".to_string(),
@@ -1776,6 +1806,14 @@ const CSS_TOKENS: &[&str] = &[
     "repeat(",
     "repeat(0,",
     "repeat(99999999, 1px)",
+    "repeat(auto-fill,",
+    "repeat(auto-fit, minmax(1px, 1fr))",
+    "repeat(auto-fill, 0px)",
+    "fit-content(",
+    "fit-content(1px)",
+    "[a]",
+    "[a-start b]",
+    "grid-area: a",
     "minmax(",
     "span",
     "fr",

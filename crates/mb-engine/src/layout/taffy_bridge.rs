@@ -34,8 +34,8 @@ use taffy::prelude::{
 use taffy::style::{
     AlignContent, AlignItems, AlignSelf, AvailableSpace, BoxSizing, Display, FlexDirection,
     FlexWrap, GridAutoFlow, GridPlacement as TaffyGridPlacement, GridTemplateComponent,
-    JustifyContent, MaxTrackSizingFunction, MinTrackSizingFunction, Overflow, Position, Style,
-    TrackSizingFunction,
+    GridTemplateRepetition, JustifyContent, MaxTrackSizingFunction, MinTrackSizingFunction,
+    Overflow, Position, RepetitionCount, Style, TrackSizingFunction,
 };
 
 use crate::css::{GridLine, TrackBreadth, TrackSize, Unit, Value};
@@ -342,13 +342,40 @@ fn number_value(value: Option<&Value>) -> Option<f32> {
 // ---------- grid helpers ----------
 
 fn grid_template(value: Option<&Value>) -> Vec<GridTemplateComponent<String>> {
-    let Some(Value::TrackList(tracks)) = value else {
+    let Some(Value::TrackList(list)) = value else {
         return Vec::new();
     };
-    tracks
+    let mut components: Vec<GridTemplateComponent<String>> = list
+        .tracks
         .iter()
         .map(|track| GridTemplateComponent::Single(track_to_taffy(track)))
-        .collect()
+        .collect();
+    // `repeat(auto-fill | auto-fit, …)` (step 5b): taffy counts it.
+    if let Some(auto) = &list.auto_repeat {
+        let repeat = GridTemplateComponent::Repeat(GridTemplateRepetition {
+            count: if auto.fit {
+                RepetitionCount::AutoFit
+            } else {
+                RepetitionCount::AutoFill
+            },
+            tracks: auto.tracks.iter().map(track_to_taffy).collect(),
+            line_names: Vec::new(),
+        });
+        components.insert(auto.at.min(components.len()), repeat);
+    }
+    components
+}
+
+/// A grid container the legacy grid must lay out (step 5b): one with
+/// line names (items may be placed by them) or a track `calc()` that keeps
+/// a `%` (taffy's `TaffyTree` resolves calc to 0 — 5s).
+fn grid_needs_legacy(node: &StyledNode) -> bool {
+    ["grid-template-columns", "grid-template-rows"]
+        .iter()
+        .any(|name| match node.value(name) {
+            Some(Value::TrackList(list)) => !list.names.is_empty() || !list.calcs.is_empty(),
+            _ => false,
+        })
 }
 
 fn track_to_taffy(track: &TrackSize) -> TrackSizingFunction {
@@ -385,6 +412,21 @@ fn track_to_taffy(track: &TrackSize) -> TrackSizingFunction {
             min: MinTrackSizingFunction::auto(),
             max: MaxTrackSizingFunction::auto(),
         },
+        TrackSize::FitContent(limit) => MinMax {
+            min: MinTrackSizingFunction::auto(),
+            max: match limit {
+                TrackBreadth::Length(v, Unit::Percent) => {
+                    MaxTrackSizingFunction::fit_content_percent(*v / 100.0)
+                }
+                TrackBreadth::Length(v, _) => MaxTrackSizingFunction::fit_content_px(*v),
+                _ => MaxTrackSizingFunction::auto(),
+            },
+        },
+        // Never reaches taffy: such a grid is laid out by the legacy path.
+        TrackSize::Calc(_) => MinMax {
+            min: MinTrackSizingFunction::auto(),
+            max: MaxTrackSizingFunction::auto(),
+        },
     }
 }
 
@@ -394,8 +436,11 @@ fn min_breadth_to_taffy(breadth: &TrackBreadth) -> MinTrackSizingFunction {
         TrackBreadth::Length(v, _) => MinTrackSizingFunction::length(*v),
         TrackBreadth::MinContent => MinTrackSizingFunction::min_content(),
         TrackBreadth::MaxContent => MinTrackSizingFunction::max_content(),
-        // `fr` never parses as a minimum; `auto` either way.
-        TrackBreadth::Auto | TrackBreadth::Fraction(_) => MinTrackSizingFunction::auto(),
+        // `fr` never parses as a minimum; `auto` either way. A calc grid
+        // never reaches taffy (`grid_needs_legacy`).
+        TrackBreadth::Auto | TrackBreadth::Fraction(_) | TrackBreadth::Calc(_) => {
+            MinTrackSizingFunction::auto()
+        }
     }
 }
 
@@ -406,7 +451,7 @@ fn max_breadth_to_taffy(breadth: &TrackBreadth) -> MaxTrackSizingFunction {
         TrackBreadth::Fraction(weight) => MaxTrackSizingFunction::fr(*weight),
         TrackBreadth::MinContent => MaxTrackSizingFunction::min_content(),
         TrackBreadth::MaxContent => MaxTrackSizingFunction::max_content(),
-        TrackBreadth::Auto => MaxTrackSizingFunction::auto(),
+        TrackBreadth::Auto | TrackBreadth::Calc(_) => MaxTrackSizingFunction::auto(),
     }
 }
 
@@ -808,6 +853,7 @@ fn is_native_block(node: &StyledNode) -> bool {
         || has_percent_inset_or_padding(node)
         || uses_grid_template_areas(node)
         || has_calc_box_property(node)
+        || grid_needs_legacy(node)
     {
         return false;
     }

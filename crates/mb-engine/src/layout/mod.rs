@@ -4493,4 +4493,129 @@ mod tests {
             },
         );
     }
+
+    // ---- 5b: grid track functions (compat round 3 step 5b) ----
+
+    fn grid_items(n: usize) -> String {
+        let items: String = (0..n)
+            .map(|i| format!(r#"<div class="i{i}">x</div>"#))
+            .collect();
+        format!(r#"<div class="g">{items}</div>"#)
+    }
+
+    #[test]
+    fn grid_repeat_n() {
+        both(
+            &grid_items(3),
+            ".g { display: grid; width: 600px; grid-template-columns: repeat(3, 1fr) }",
+            800.0,
+            |l, label| {
+                for i in 0..3 {
+                    let c = content(l, &format!("i{i}"));
+                    assert_eq!(
+                        (c.width, c.x - content(l, "g").x),
+                        (200.0, 200.0 * i as f32),
+                        "{label} {i}"
+                    );
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn grid_repeat_auto_fill_count_includes_gap() {
+        // 500px with a 20px gap: four 100px columns fit (4·100 + 3·20 =
+        // 460), five don't (560) — the fifth item wraps.
+        both(
+            &grid_items(5),
+            ".g { display: grid; width: 500px; column-gap: 20px; grid-template-columns: repeat(auto-fill, 100px) }",
+            800.0,
+            |l, label| {
+                let x0 = content(l, "g").x;
+                assert_eq!(content(l, "i3").x - x0, 360.0, "{label}");
+                assert_eq!(content(l, "i4").x - x0, 0.0, "{label}");
+                assert!(content(l, "i4").y > content(l, "i0").y, "{label}");
+            },
+        );
+    }
+
+    #[test]
+    fn grid_auto_fit_collapses_empty() {
+        // Five 100px-minimum tracks fit in 500px; with two items `auto-fill`
+        // keeps all five (100 each), `auto-fit` collapses the three empty
+        // ones so the two items share the row.
+        for (kind, width) in [("auto-fill", 100.0), ("auto-fit", 250.0)] {
+            both(
+                &grid_items(2),
+                &format!(
+                    ".g {{ display: grid; width: 500px; grid-template-columns: repeat({kind}, minmax(100px, 1fr)) }}"
+                ),
+                800.0,
+                |l, label| {
+                    assert_eq!(content(l, "i0").width, width, "{label} {kind}");
+                    assert_eq!(
+                        content(l, "i1").x - content(l, "g").x,
+                        width,
+                        "{label} {kind}"
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn grid_fit_content_caps_track() {
+        let long = "word ".repeat(40);
+        both(
+            &format!(
+                r#"<div class="g"><div class="a">{long}</div><div class="b">x</div></div><div class="h"><div class="c">x</div><div>y</div></div>"#
+            ),
+            ".g, .h { display: grid; width: 600px; grid-template-columns: fit-content(150px) 1fr }",
+            800.0,
+            |l, label| {
+                assert_eq!(content(l, "a").width, 150.0, "{label}");
+                assert_eq!(content(l, "b").width, 450.0, "{label}");
+                assert!(
+                    content(l, "c").width < 50.0,
+                    "{label}: {}",
+                    content(l, "c").width
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn grid_area_name_resolves_against_line_names() {
+        // mdn's layout: columns named by lines, items placed with
+        // `grid-area: <name>` (its `<name>-start` / `<name>-end` lines),
+        // the column list coming through a custom property.
+        both(
+            r#"<div class="g"><div class="c">x</div><div class="s">y</div></div>"#,
+            ".g { display: grid; width: 600px;
+                  --cols: [full-start side-start] 100px [side-end] 20px [content-start] 1fr [content-end full-end];
+                  grid-template-columns: var(--cols) }
+             .c { grid-area: content } .s { grid-area: side }",
+            800.0,
+            |l, label| {
+                let x0 = content(l, "g").x;
+                let (c, s) = (content(l, "c"), content(l, "s"));
+                assert_eq!((c.x - x0, c.width), (120.0, 480.0), "{label}");
+                assert_eq!((s.x - x0, s.width), (0.0, 100.0), "{label}");
+                assert_eq!(c.y, s.y, "{label}: same row");
+            },
+        );
+    }
+
+    #[test]
+    fn grid_calc_track() {
+        both(
+            &grid_items(2),
+            ".g { display: grid; width: 600px; column-gap: 32px; grid-template-columns: repeat(2, calc(50% - 16px)) }",
+            800.0,
+            |l, label| {
+                assert_eq!(content(l, "i0").width, 284.0, "{label}");
+                assert_eq!(content(l, "i1").x - content(l, "g").x, 316.0, "{label}");
+            },
+        );
+    }
 }

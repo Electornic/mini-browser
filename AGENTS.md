@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1154 (workspace 합계, 2026-11-28 호환성 3차 5a `calc()`·`min/max/clamp`·뷰포트 단위 +26; 5m 레거시 `min/max-width`·`box-sizing` 은 1128(+7); 5단계 P probe(`css::value_features`·`StyleReport::reparsed_text`) 는 1121(+2); 4b 상태 의사 클래스 는 1119(+12) — 4단계 완료; 4a `:is()`/`:where()`·의사 요소·결합자 중첩 상한 은 1107(+14); 4단계 P 셀렉터 블로커 probe 는 1093, 3d float shrink-to-fit 은 1092 — 3단계 완료, 3c 는 1089, 3b 는 1087, 3a 는 1081). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1166 (workspace 합계, 2026-11-28 호환성 3차 5b 그리드 트랙 함수 +12; 5a `calc()`·`min/max/clamp`·뷰포트 단위 는 1154(+26); 5m 레거시 `min/max-width`·`box-sizing` 은 1128(+7); 5단계 P probe(`css::value_features`·`StyleReport::reparsed_text`) 는 1121(+2); 4b 상태 의사 클래스 는 1119(+12) — 4단계 완료; 4a `:is()`/`:where()`·의사 요소·결합자 중첩 상한 은 1107(+14); 4단계 P 셀렉터 블로커 probe 는 1093, 3d float shrink-to-fit 은 1092 — 3단계 완료, 3c 는 1089, 3b 는 1087, 3a 는 1081). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -241,6 +241,10 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - 수학 함수는 `css/calc.rs` 가 `Value::Calc(Box<Calc>)` 로 파싱한다 — 선형 부분은 `CalcSum`(단위마다 계수, `*`·`/` 는 파싱 때 접힘), `min`/`max` 만 노드(`clamp` = `max(a, min(b, c))`). 단위 하나면 `Length`, 단위 없으면 `Number`. 무효(길이×길이·0 나누기·숫자+길이·비유한·`+`/`-` 공백 없음·중첩 32 초과)는 선언 버림. `Calc` 는 값 종류가 `Length` 인 속성에서만 받는다 — 새 단축 파서는 `parse_length_or_number`/`peek_starts_length` 를 쓰면 calc 가 따라온다. 길이를 px 로만 읽는 파서(그림자 `parse_length_token`)는 뷰포트 단위·calc 를 받지 말 것.
 - 뷰포트 단위(`Unit::Vw/Vh/Vmin/Vmax`, `d/s/l`·`vi/vb` 철자는 `calc::length_unit` 한 곳)와 calc 의 em/rem/vw/vh 는 **스타일 패스**가 px 로 접는다(`Cascade::viewport`). 스타일 뒤 `Calc` 는 `%` 가 있을 때만 남는다(`px + %`) — `font-size`·`line-height` 는 완전히 px(`%`·em = 부모 / 자기 글꼴). 레이아웃은 `length_like(노드, 이름)`(`Px`/`Percent`/`Calc`, `resolve(기준)`·`has_percent`)로 읽는다 — **"폭이 있나" 를 `matches!(…, Value::Length(..))` 로 판정하지 말 것**(calc 를 auto 로 읽는다).
 - taffy 브릿지는 `Dimension::calc` 를 만들지 않는다(`TaffyTree` 는 0 으로 푼다 — 5s). 상자 속성에 `Calc` 가 있는 노드와 **그런 자식을 가진 노드**는 고유가 아니다(`has_calc_box_property`) — 레거시가 맞는 기준으로 푼다.
+
+### 그리드 트랙 목록 (호환성 3차 5b)
+- `Value::TrackList(Arc<TrackList>)` — `tracks`·줄 `names`(없으면 빈 벡터)·`auto_repeat`(`repeat(auto-fill|auto-fit)`, `tracks[at]` 앞)·`calcs`(`TrackSize::Calc`/`TrackBreadth::Calc` 의 색인). `repeat(<n>)` 은 파싱 때 펼쳐지고(1000 트랙 상한), 자동 반복은 레이아웃이 센다(`layout/grid.rs::expand_axis` — 간격 포함, 크기 탐색 중엔 1번). 트랙 목록을 고치는 새 스타일 단계는 **`Arc::make_mut` 를 고칠 게 있을 때만** 부를 것 — 아니면 노드마다 1000 트랙·이름이 복사된다(퍼저 25 → 457ms). 소비자는 `list.tracks` 만 보지 말고 자동 반복을 고려할 것(레거시는 `expand_axis`, taffy 는 `grid_template`).
+- 이름 배치: `grid-area: <이름>` 은 템플릿 영역 → 없으면 각 축의 `<이름>-start`/`<이름>-end` 줄. 줄 이름이나 `%` 트랙 calc 가 있는 그리드는 taffy 고유가 아니다(`grid_needs_legacy`).
 
 ### `@layer` 순위는 스타일 패스마다 문서 단위로 (호환성 3차 2.2)
 - 규칙은 `Rule::layer`(시트 안 레이어 번호)만 들고, 순위는 `style_pass` 가 시작할 때 `css::layer::document_layer_ranks` 가 **모든 시트를 합쳐** 매긴다(같은 이름 = 같은 레이어, 후위 순서 — 자식 레이어 < 부모 직속 규칙). 시트 하나만 보고 순위를 정하지 말 것(뒤 시트·뒤 문장이 순서를 바꾼다). 캐스케이드 키는 `(순위, 특정성, 순서)` 이고, 중요 패스는 순위를 뒤집는다. 레이어 밖은 `UNLAYERED`(`u32::MAX`). `style` 속성은 레이어보다 먼저 비교되어 같은 중요도의 모든 레이어를 이긴다.

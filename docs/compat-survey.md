@@ -366,6 +366,8 @@ MB_NET_CACHE_OFFLINE=1 ./target/debug/mb-mcp --start-url https://news.ycombinato
 
 **5a 재측정** (2026-11-28, 라벨 `calc`, `minmax` 대비 — `calc()`·`min()`/`max()`/`clamp()`·뷰포트 단위, [compat-round3.md 5a](compat-round3.md#5a--calcminmaxclamp뷰포트-단위-2026-11-28-5s-결정-b)): 요소 목록·기대 컨트롤·결과 25곳 동일, `[mb-budget]` 0. 합산 버림 20곳 3,200 → **2,082**, 2차 5곳 920 → **625**; 값에 5단계 기능이 있는 버림 1,271 → 154(그리드 `repeat()`·줄 이름 89 는 5b 몫, 나머지는 `env()`·`lh`·`transform`/`background-position`/그라디언트 안 calc). 사이트별 yna 664 → 179 · github 741 → 466 · korea-kr 96 → 41. **GitHub 가장 넓은 상자 3,079 → 1,280**(내비 카드가 `min(256px, 100vw - 2rem)` 로 묶임). 문서 높이 kakaocorp 4,244 → 6,148(`calc(100vh - 72px)` 전체 화면 섹션) · korea-kr 5,335 → 7,464(`padding-top: calc(425/479*100%)` 비율 상자) · yna 19,080 → 17,385(`width: calc(100% - 340px)` 본문 열) · mdn −596 · example +200(`padding-top: 25vh`). 스타일 시간 GitHub 183.2ms.
 
+**5b 재측정** (2026-11-28, 라벨 `tracks`, `calc` 대비 — `repeat()`·`auto-fill`/`auto-fit`·`fit-content()`·트랙 calc·줄 이름, [compat-round3.md 5b](compat-round3.md#5b--그리드-트랙-함수-2026-11-28)): 요소 목록·기대 컨트롤·결과 25곳 동일, `[mb-budget]` 0. 합산 버림 20곳 2,082 → **1,993**, 2차 5곳 625 → **611**; 그리드 트랙 몫 89 → 0. **bbc** 가장 넓은 상자 3,356 → 1,280·문서 높이 7,589 → 5,310(24열·5열 그리드가 열을 가짐; 슬리버 +29 는 300px 열에서 접힌 문단 — probe 판정 거짓 양성, 남은 이상은 블록을 감싼 인라인 링크 973px). mdn 트랙은 읽히지만 본문 열 240px 는 `display: contents` 미지원 몫.
+
 ## 호환성 3차 제안 순서
 
 > **확정판은 [compat-round3.md](compat-round3.md)** (2026-11-26): 아래 제안에서 0단계(견고성 점검 + 스크립트 에러 위치)를 앞에 추가하고, 1~5단계(값 파서 → `@media`/`@layer`/`@supports` → 클리핑 → 셀렉터 → `calc`/트랙; 실행은 `@media` 평가를 값 파서보다 먼저)만 3차 범위로, 이미지·JS 소소·ES 모듈·`::before` 는 4차 이후로 뺐다. 아래 목록은 조사 당시 제안으로 남겨 둔다.

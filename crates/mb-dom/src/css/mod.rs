@@ -141,7 +141,9 @@ pub enum Value {
     // ordered list of track sizes. `fr` is scoped to the track-list context
     // (it has no meaning as a stand-alone length), so it lives on `TrackSize`
     // instead of growing the global `Unit` enum.
-    TrackList(Vec<TrackSize>),
+    // Shared (`Arc`): a page can write 1000 tracks with names on `*`, and
+    // every styled node clones its values (step 5b).
+    TrackList(std::sync::Arc<TrackList>),
     // CSS Grid `grid-column` / `grid-row` placement. Encodes a (start, end)
     // pair of grid lines or spans; the layout pass turns this into a
     // (cell_start, cell_end) cell range that may be auto-resolved against the
@@ -260,6 +262,51 @@ pub enum TrackSize {
     /// `minmax(min, max)`. `min` is never `Fraction` (the parser rejects a
     /// flexible minimum, as browsers do).
     MinMax(TrackBreadth, TrackBreadth),
+    /// `fit-content(<length-percentage>)` (step 5b): sizes to the content
+    /// but no wider than the limit. The limit is a `Length` or a `Calc`.
+    FitContent(TrackBreadth),
+    /// A `calc()` that keeps a `%` (step 5b): `TrackList::calcs[i]`.
+    Calc(u16),
+}
+
+/// A `grid-template-columns` / `-rows` value (step 5b). `repeat(<n>, …)`
+/// is already expanded (at most [`TrackList::MAX_TRACKS`]); a
+/// `repeat(auto-fill | auto-fit, …)` waits for layout, which knows how
+/// many fit.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TrackList {
+    pub tracks: Vec<TrackSize>,
+    /// Line names: `names[i]` are the names of the line before
+    /// `tracks[i]` (`names[tracks.len()]` after the last). Empty when the
+    /// list names no line. Names inside an auto repeat are not kept.
+    pub names: Vec<Vec<String>>,
+    pub auto_repeat: Option<AutoRepeat>,
+    /// The `calc()` breadths `TrackSize::Calc` / `TrackBreadth::Calc` index.
+    pub calcs: Vec<calc::Calc>,
+}
+
+/// `repeat(auto-fill | auto-fit, <tracks>)`, inserted before
+/// `TrackList::tracks[at]`. Every track has a definite minimum or maximum.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoRepeat {
+    /// `auto-fit`: repetitions that end up empty collapse.
+    pub fit: bool,
+    pub at: usize,
+    pub tracks: Vec<TrackSize>,
+}
+
+impl TrackList {
+    /// Grid lines past this are clamped (Blink's implicit-grid cap, the
+    /// layout's `MAX_GRID_LINES`); `repeat(99999999, …)` stops here.
+    pub const MAX_TRACKS: usize = 1000;
+
+    /// Tracks only — no names, no repeat, no calc.
+    pub fn plain(tracks: Vec<TrackSize>) -> TrackList {
+        TrackList {
+            tracks,
+            ..TrackList::default()
+        }
+    }
 }
 
 /// One side of `minmax()`.
@@ -270,6 +317,8 @@ pub enum TrackBreadth {
     Auto,
     MinContent,
     MaxContent,
+    /// `TrackList::calcs[i]` (step 5b).
+    Calc(u16),
 }
 
 /// Single function in a `transform: ...` list. Stored in source order so the
@@ -2585,7 +2634,7 @@ mod tests {
         let stylesheet = parse(".g { grid-template-columns: 100px 1fr 2fr 50px; }").unwrap();
         let value = &stylesheet.rules[0].declarations[0].value;
         let tracks = match value {
-            Value::TrackList(tracks) => tracks,
+            Value::TrackList(tracks) => &tracks.tracks,
             other => panic!("expected TrackList, got {other:?}"),
         };
         assert_eq!(tracks.len(), 4);
@@ -2612,13 +2661,15 @@ mod tests {
         .unwrap();
         assert_eq!(
             decl(&sheet, "grid-template-columns"),
-            Some(&Value::TrackList(vec![
-                TrackSize::MinMax(B::Length(0.0, Unit::Px), B::Fraction(1.0)),
-                TrackSize::MinContent,
-                TrackSize::MaxContent,
-                TrackSize::MinMax(B::Length(100.0, Unit::Px), B::Length(59.25, Unit::Rem)),
-                TrackSize::MinMax(B::MinContent, B::Auto),
-            ]))
+            Some(&Value::TrackList(std::sync::Arc::new(
+                super::TrackList::plain(vec![
+                    TrackSize::MinMax(B::Length(0.0, Unit::Px), B::Fraction(1.0)),
+                    TrackSize::MinContent,
+                    TrackSize::MaxContent,
+                    TrackSize::MinMax(B::Length(100.0, Unit::Px), B::Length(59.25, Unit::Rem)),
+                    TrackSize::MinMax(B::MinContent, B::Auto),
+                ])
+            )))
         );
     }
 
@@ -2660,21 +2711,25 @@ mod tests {
                 .unwrap();
         assert_eq!(
             decl(&sheet, "grid-template-rows"),
-            Some(&Value::TrackList(vec![
-                TrackSize::MinContent,
-                TrackSize::Fraction(1.0),
-                TrackSize::MinContent
-            ]))
+            Some(&Value::TrackList(std::sync::Arc::new(
+                super::TrackList::plain(vec![
+                    TrackSize::MinContent,
+                    TrackSize::Fraction(1.0),
+                    TrackSize::MinContent
+                ])
+            )))
         );
         assert_eq!(
             decl(&sheet, "grid-template-columns"),
-            Some(&Value::TrackList(vec![
-                TrackSize::Length(12.25, Unit::Rem),
-                TrackSize::MinMax(
-                    super::TrackBreadth::Length(0.0, Unit::Px),
-                    super::TrackBreadth::Fraction(1.0)
-                ),
-            ]))
+            Some(&Value::TrackList(std::sync::Arc::new(
+                super::TrackList::plain(vec![
+                    TrackSize::Length(12.25, Unit::Rem),
+                    TrackSize::MinMax(
+                        super::TrackBreadth::Length(0.0, Unit::Px),
+                        super::TrackBreadth::Fraction(1.0)
+                    ),
+                ])
+            )))
         );
         assert_eq!(
             decl(&sheet, "grid-template-areas"),
@@ -2695,17 +2750,15 @@ mod tests {
         );
         assert_eq!(
             decl(&sheet, "grid-template-rows"),
-            Some(&Value::TrackList(vec![
-                TrackSize::Length(40.0, Unit::Px),
-                TrackSize::Auto
-            ]))
+            Some(&Value::TrackList(std::sync::Arc::new(
+                super::TrackList::plain(vec![TrackSize::Length(40.0, Unit::Px), TrackSize::Auto])
+            )))
         );
         assert_eq!(
             decl(&sheet, "grid-template-columns"),
-            Some(&Value::TrackList(vec![
-                TrackSize::Fraction(1.0),
-                TrackSize::Fraction(2.0)
-            ]))
+            Some(&Value::TrackList(std::sync::Arc::new(
+                super::TrackList::plain(vec![TrackSize::Fraction(1.0), TrackSize::Fraction(2.0)])
+            )))
         );
         // Without columns: rows only, columns reset to none.
         let sheet = parse(r#".g { grid-template: "a" "b"; }"#).unwrap();
@@ -2740,7 +2793,7 @@ mod tests {
                     if decl.name == "grid-template-columns"
                         && let Value::TrackList(tracks) = decl.value
                     {
-                        assert!(tracks.is_empty(), "unitless number should not parse");
+                        assert!(tracks.tracks.is_empty(), "unitless number should not parse");
                     }
                 }
             }
@@ -3483,5 +3536,155 @@ mod tests {
             "{d:?}"
         );
         assert_eq!(d.get("padding-top"), d.get("padding-bottom"));
+    }
+
+    // ---- step 5b: grid track functions ----
+
+    fn tracks_of(css: &str) -> Option<super::TrackList> {
+        let sheet = parse(&format!(".g {{ grid-template-columns: {css}; }}")).ok()?;
+        match decl(&sheet, "grid-template-columns")? {
+            Value::TrackList(list) => Some((**list).clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn grid_repeat_n_expands() {
+        use TrackSize as T;
+        let px = |v| T::Length(v, Unit::Px);
+        assert_eq!(
+            tracks_of("repeat(3, 1fr)").unwrap().tracks,
+            [T::Fraction(1.0); 3]
+        );
+        assert_eq!(
+            tracks_of("repeat(2, 10px 1fr) 5px").unwrap().tracks,
+            [
+                px(10.0),
+                T::Fraction(1.0),
+                px(10.0),
+                T::Fraction(1.0),
+                px(5.0)
+            ]
+        );
+        assert_eq!(
+            tracks_of("REPEAT(2,auto)").unwrap().tracks,
+            [T::Auto, T::Auto]
+        );
+        // A hostile count stops at the grid's 1000 tracks.
+        assert_eq!(
+            tracks_of("repeat(99999999, 1px)").unwrap().tracks.len(),
+            1000
+        );
+        for bad in [
+            "repeat(0, 1px)",
+            "repeat(-1, 1px)",
+            "repeat(2)",
+            "repeat(2, )",
+            "repeat(1.5, 1px)",
+            "repeat(2, repeat(2, 1px))",
+        ] {
+            assert_eq!(tracks_of(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn grid_auto_repeat_and_fit_content_parse() {
+        use super::TrackBreadth as B;
+        use TrackSize as T;
+        let list = tracks_of("100px repeat(auto-fit, minmax(10rem, 1fr)) 1fr").unwrap();
+        assert_eq!(list.tracks, [T::Length(100.0, Unit::Px), T::Fraction(1.0)]);
+        let auto = list.auto_repeat.unwrap();
+        assert!(auto.fit);
+        assert_eq!(auto.at, 1);
+        assert_eq!(
+            auto.tracks,
+            [T::MinMax(B::Length(10.0, Unit::Rem), B::Fraction(1.0))]
+        );
+        assert!(
+            !tracks_of("repeat(auto-fill, 50px 20%)")
+                .unwrap()
+                .auto_repeat
+                .unwrap()
+                .fit
+        );
+        // One auto repeat per list, with definite sizes only.
+        for bad in [
+            "repeat(auto-fill, 1px) repeat(auto-fit, 1px)",
+            "repeat(auto-fill, auto)",
+            "repeat(auto-fill, 1fr)",
+            "repeat(auto-fill, minmax(min-content, 1fr))",
+        ] {
+            assert_eq!(tracks_of(bad), None, "{bad}");
+        }
+        assert_eq!(
+            tracks_of("fit-content(200px) fit-content(20%)")
+                .unwrap()
+                .tracks,
+            [
+                T::FitContent(B::Length(200.0, Unit::Px)),
+                T::FitContent(B::Length(20.0, Unit::Percent))
+            ]
+        );
+        assert_eq!(tracks_of("fit-content(1fr)"), None);
+    }
+
+    #[test]
+    fn grid_line_names_are_kept() {
+        let list =
+            tracks_of("[full-start a] 1fr [content-start] minmax(0, 48rem) [content-end] [x]")
+                .unwrap();
+        assert_eq!(list.tracks.len(), 2);
+        let names: Vec<Vec<&str>> = list
+            .names
+            .iter()
+            .map(|n| n.iter().map(String::as_str).collect())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                vec!["full-start", "a"],
+                vec!["content-start"],
+                vec!["content-end", "x"]
+            ]
+        );
+        // Names inside `repeat()` repeat with the tracks.
+        let list = tracks_of("repeat(2, [col] 1px)").unwrap();
+        assert_eq!(
+            list.names,
+            [vec!["col".to_string()], vec!["col".to_string()], vec![]]
+        );
+        // A list without names keeps none.
+        assert!(tracks_of("1px 2px").unwrap().names.is_empty());
+        assert_eq!(tracks_of("[a 1px] 1fr"), None);
+    }
+
+    #[test]
+    fn grid_tracks_take_calc_and_viewport_units() {
+        use super::TrackBreadth as B;
+        use TrackSize as T;
+        let list = tracks_of("repeat(2, calc(50% - 16px)) calc(1px + 2px) 10vw").unwrap();
+        assert_eq!(list.tracks.len(), 4);
+        assert!(matches!(list.tracks[0], T::Calc(_)));
+        assert_eq!(list.tracks[0], list.tracks[1]);
+        assert_eq!(list.calcs.len(), 1);
+        assert_eq!(list.tracks[2], T::Length(3.0, Unit::Px));
+        assert_eq!(list.tracks[3], T::Length(10.0, Unit::Vw));
+        let list = tracks_of("minmax(calc(10% + 1px), 1fr)").unwrap();
+        assert!(matches!(
+            list.tracks[0],
+            T::MinMax(B::Calc(0), B::Fraction(_))
+        ));
+    }
+
+    #[test]
+    fn grid_template_shorthand_takes_repeat_and_names() {
+        let sheet = parse(".g { grid-template: auto 1fr / [a] repeat(2, 1fr) [b]; }").unwrap();
+        match decl(&sheet, "grid-template-columns") {
+            Some(Value::TrackList(list)) => {
+                assert_eq!(list.tracks, [TrackSize::Fraction(1.0); 2]);
+                assert_eq!(list.names.len(), 3);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }
