@@ -648,6 +648,39 @@ fn unit_feature(unit: &str) -> Option<&'static str> {
     }
 }
 
+/// Who drops a kept declaration whose value is a `Keyword` its property
+/// doesn't take (the probe's keyword fallback, step 5r): another engine's
+/// prefixed value (`display: -ms-flexbox`, `width: -moz-fit-content`) is
+/// invalid in Chrome too — browser-too; anything else is ours (frozen
+/// table, docs/compat-round3.md "계산값 시점 분류").
+pub fn keyword_fallback_origin(keyword: &str) -> Origin {
+    let lower = keyword.to_ascii_lowercase();
+    if ["-ms-", "-moz-", "-o-", "-khtml-"]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+    {
+        Origin::BrowserToo
+    } else {
+        Origin::Ours
+    }
+}
+
+/// Who an invalid-at-computed-value-time declaration is on (step 5r):
+/// browser-too when every `var()` its substitution couldn't find names a
+/// custom property the page declares nowhere (`declared`: every `--*` in
+/// its sheets and `style` attributes) — Chrome fails it the same way. A
+/// declared name we couldn't reach (cascade gap, cycle) is ours.
+pub fn iacvt_origin(
+    missing: &std::collections::BTreeSet<String>,
+    declared: &std::collections::BTreeSet<String>,
+) -> Origin {
+    if !missing.is_empty() && missing.iter().all(|name| !declared.contains(name)) {
+        Origin::BrowserToo
+    } else {
+        Origin::Ours
+    }
+}
+
 /// The selector part of a dropped rule's source (everything before `{`).
 fn rule_prelude(source: &str) -> String {
     let prelude = source.split('{').next().unwrap_or(source);
@@ -982,5 +1015,40 @@ mod tests {
             value_features("width", "round(1.5px) env(safe-area-inset-left)"),
             ["math()", "env()"]
         );
+    }
+
+    #[test]
+    fn computed_time_drops_chrome_makes_too_are_browser_too() {
+        use super::{iacvt_origin, keyword_fallback_origin};
+        // Step 5r: other engines' prefixed values Chrome rejects too.
+        for keyword in [
+            "-ms-flexbox",
+            "-MS-inline-flexbox",
+            "-moz-fit-content",
+            "-o-box",
+            "-khtml-box",
+        ] {
+            assert_eq!(
+                keyword_fallback_origin(keyword),
+                Origin::BrowserToo,
+                "{keyword}"
+            );
+        }
+        for keyword in ["-webkit-box", "100vw", "flexbox", "\"quoted\""] {
+            assert_eq!(keyword_fallback_origin(keyword), Origin::Ours, "{keyword}");
+        }
+        // A `var()` naming nothing the page declares is IACVT in Chrome
+        // too; one the page declares (out of our reach, or a cycle) is ours.
+        let declared: std::collections::BTreeSet<String> = ["--a".to_string()].into();
+        let missing = |names: &[&str]| names.iter().map(|n| n.to_string()).collect();
+        assert_eq!(
+            iacvt_origin(&missing(&["--nope"]), &declared),
+            Origin::BrowserToo
+        );
+        assert_eq!(
+            iacvt_origin(&missing(&["--nope", "--a"]), &declared),
+            Origin::Ours
+        );
+        assert_eq!(iacvt_origin(&missing(&[]), &declared), Origin::Ours);
     }
 }

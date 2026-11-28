@@ -138,7 +138,16 @@ MB_NET_CACHE=$PWD/compat-cache/net MB_NET_CACHE_OFFLINE=1 scripts/compat-corpus.
 | at-rule | `foreign-at-rule` | 이름이 다른 엔진 접두사(`@-moz-document`) | browser-too |
 | at-rule | `skipped-at-rule` | `@media` 외 본문을 건너뛴 at-rule(`@supports`·`@layer`·`@font-face`·`@keyframes`·`@import`…, `@charset` 은 cssparser 가 먹어서 안 옴) | ours |
 
-- **`keyword_fallback`**: 남은 선언 중 속성 표의 값 종류가 `Other` 가 아닌(길이·숫자·색·키워드 목록·이미지·전용 파서) 속성인데 값이 그 종류가 받지 않는 `Keyword`(전역 키워드 `inherit/initial/unset/revert/revert-layer` 제외) — `width: 100vw`, 따옴표 문자열 등.
+- **`keyword_fallback`**: 남은 선언 중 속성 표의 값 종류가 `Other` 가 아닌(길이·숫자·색·키워드 목록·이미지·전용 파서) 속성인데 값이 그 종류가 받지 않는 `Keyword`(전역 키워드 `inherit/initial/unset/revert/revert-layer` 제외) — `width: 100vw`, 따옴표 문자열 등. **5r 정정**: 전용 파서(`Dedicated`) 속성의 `Keyword` 는 그 파서가 일부러 만든 값(`box-shadow: none`)이라 폴백이 아니다(`ValueKind::accepts_keyword` 가 `Dedicated` 에 참 — 전엔 거짓이라 `box-shadow: none` 165건이 폴백으로 세졌고, `box-shadow: var(--s)` + `--s: none` 이 계산값 시점에 `unset` 이 됐다).
+
+**계산값 시점 분류(5r 추가 — 동결 표의 확장, 사용자 결정 2026-11-28)**: 1단계부터 합산 지표(`decl_drop_total` = 파서 버림 ours + IACVT + `Keyword` 폴백 + var 폴백)는 계산값 시점 두 종류를 전부 ours 로 셌다. 그중 **Chrome 도 똑같이 버리는 것**을 browser-too 로 옮긴다(파서 버림의 `unknown-property`·`legacy-hack` 과 같은 기준 — 엔진 갭이 아니라 사이트 작성):
+
+| 대상 | 판정 기준 | 분류 | 이유 |
+|---|---|---|---|
+| `Keyword` 폴백·var 폴백 | 키워드가 다른 엔진 접두사 `-ms-`·`-moz-`·`-o-`·`-khtml-` 로 시작(`display: -ms-flexbox`·`-ms-inline-flexbox`·`-ms-grid`·`width: -moz-fit-content` …) | browser-too | Chrome 은 이 값을 무효로 버리고 앞선 선언을 쓴다 — 우리도 그 값을 안 쓰니 결과가 같다. `-webkit-` 값(`-webkit-box`·`-webkit-sticky`)은 Chrome 이 받는 것이 있어 ours 그대로 |
+| IACVT | 치환이 실패한 `var()` 가 폴백 없이 가리킨 이름이 **페이지의 어느 시트·`style` 속성에도 선언되지 않음**(`StyleReport::undefined_vars` + probe 의 선언 이름 집합) | browser-too | Chrome 에서도 계산값 시점 무효다. 어딘가 선언은 있는데 우리 캐스케이드가 그 노드에 못 닿은 것(셀렉터·`@media`·스코프 갭), 순환, 길이 상한은 **ours 그대로** |
+
+- probe 는 옛 정의의 합계(`decl_drop_total`, 동결 — 전/후 비교용)를 그대로 두고, 새 열 `keyword_fallback_browser`·`iacvt_browser`(옮긴 몫)와 **`decl_drop_total_ours`**(= `decl_drop_total` − 옮긴 몫)를 더한다. 0b 기준선(파서 버림 ours 14,112 / 5곳 7,389)은 계산값 시점 항목을 포함하지 않았으므로 이 재분류로 바뀌지 않는다.
 - **`parse_only`**: 남은 선언 중 아래쪽(레이아웃·페인트·인덱스)이 아무도 안 읽는 속성(probe 의 `CONSUMED` 목록 밖, `--*` 제외). 1단계에서 `transition`/`animation` 이 "파싱만" 으로 살아나면 버림이 이 열로 옮겨 간다.
 - 토큰이 하나인 모르는 속성(`-moz-appearance: none`)은 지금 파서가 **버리지 않고 보관**한다 — 버림이 아니라 `parse_only` 로 잡힌다(정상: 아무도 안 읽음).
 - 2차 기준선(7,593 / 1,931)은 다른 날 스냅샷이고 2차 캐시는 요청 정보 줄이 없어 재생이 안 되므로 **둘로 나눠 다시 적지 않는다** — 새 캐시의 같은 5곳 합계가 대신한다(아래 [진행 표](#진행-표) 0행).
@@ -1603,16 +1612,66 @@ GitHub 간격(`margin-top: calc(var(--base-size-8) + var(--Layout-row-gap))` 류
 
 **코퍼스**(라벨 `fixes`, `tracks` 대비, 동결 캐시·오프라인·release): `scripts/compat-corpus.sh diff` **비어 있음**, 버림 열·결과·기대 컨트롤 그대로, `[mb-budget]` 0. 바뀐 열 셋 — 실사이트는 `<body>` 부터 레거시라(5s) 두 버그 모두 taffy 고유 노드가 있는 사이트에서만 보인다: **hani** 클립에 잘려 클릭이 거절될 요소 50 → 48("사설" 섹션 링크 둘이 이제 보이는 영역 안 — hani 는 고유 노드 29개, `%` 폭 잎이 한 번만 풀려 목록 폭이 맞음), 숨은 글자 50 → 48, 잘린 글자 12 → 14; **microsoft** 가장 넓은 상자(줄바꿈 안 된 `span`) 5,137 → 5,117; **github** 슬리버 28 → 29.
 
+#### 5r — 재분류·`box-shadow: none`·3차 최종 목표 (2026-11-28, 사용자 결정: −95% 는 5단계를 넓히지 않고 조정)
+
+- **분류표 먼저**: [0b 분류표](#0b-분류표-동결--바꾸려면-이-표를-먼저-고친다)에 "계산값 시점 분류" 표를 이유와 함께 더했다 — 다른 엔진 접두사 키워드(`-ms-`·`-moz-`·`-o-`·`-khtml-` — `display: -ms-flexbox` 등)의 `Keyword`/var 폴백과, 페이지 어디에도 선언되지 않은 이름을 폴백 없이 가리킨 `var()` 의 IACVT 를 browser-too 로. 선언은 있는데 우리 캐스케이드가 못 닿은 것·순환은 ours 그대로. 코드: `css::keyword_fallback_origin`·`css::iacvt_origin`(`css/report.rs`), `StyleReport::missing_vars`(치환이 못 찾은 이름 — 실패한 선언만, 폴백으로 살아난 건 기록 안 함), probe 의 선언 이름 집합(시트 + DOM `style` 속성). 옛 정의 합계 `decl_drop_total` 은 그대로 두고 `keyword_fallback_browser`·`iacvt_browser`·**`decl_drop_total_ours`** 열을 더했다(전/후를 같은 실행에서 나란히).
+- **`box-shadow: none` 버그**(실제 버그 둘): ① `ValueKind::Dedicated` 의 `accepts_keyword` 가 거짓이라 전용 파서가 일부러 만든 키워드(`box-shadow: none`)가 폴백으로 세졌고, **`box-shadow: var(--s)` + `--s: none` 이 계산값 시점에 거절돼 `unset`** 이 됐다(비상속이라 그림은 같았지만 다른 전용 속성에선 아님) — `Dedicated` 는 참. ② `text-shadow: none` 이 아예 파싱되지 않아(파서 버림 17) 앞선 그림자를 지우지 못했다 — `Keyword("none")`.
+- 테스트 +4(1169 → **1173**): `dedicated_property_keywords_are_not_fallbacks`, `text_shadow_none_parses`, `computed_time_drops_chrome_makes_too_are_browser_too`(접두사 5개 철자·`-webkit-`/`100vw` 는 ours·선언된 이름이 섞이면 ours), `style_report_names_the_vars_a_failed_substitution_missed`(정의 없음·순환·폴백으로 산 것·`--s: none` 이 `box-shadow` 에서 IACVT 아님) — 구현 전 실패(컴파일) 확인.
+
+**코퍼스**(라벨 `final`, `fixes` 대비, 동결 캐시·오프라인·release): `diff` **비어 있음**, 결과·기대 컨트롤·버린 규칙 그대로, `[mb-budget]` 0. 전/후(같은 동결 정의 `decl_drop_total` → 5r 정의 `decl_drop_total_ours`):
+
+| | 파서 버림 ours | IACVT (그중 → browser-too) | `Keyword`+var 폴백 (그중 → browser-too) | **옛 정의 합계** | **5r 합계 ours** |
+|---|---:|---:|---:|---:|---:|
+| 20곳 전(`fixes`) | 1,137 | 303 | 553 | 1,993 | (1,993) |
+| 20곳 후(`final`) | 1,121 | 303 (191) | 370 (247) | **1,794** | **1,356** |
+| 2차 5곳 전 | 375 | 42 | 194 | 611 | (611) |
+| 2차 5곳 후 | 369 | 42 (3) | 64 (8) | **475** | **464** |
+
+- 옛 정의 합계가 1,993 → 1,794 로 준 것은 **버그 수정** 몫(`box-shadow: none` 등 `Dedicated` 키워드 폴백 179, `text-shadow: none` 16)이고, 재분류 몫(438)은 옛 정의 합계에 그대로 들어 있다 — 숨긴 것 없음.
+- 옮긴 것(사이트·속성): `display: -ms-flexbox` 230(kakaocorp 154 · daum 57 · naver·microsoft 6 · apple 5 …), `width: -moz-fit-content` 13, `background-color: -moz-combobox` 2 / 정의 없는 `var()` — kakaocorp `--baseForeground` 152 · `--baseBackground` 29, github 테두리·그림자 토큰 7, apple 1, **kowiki `--color-base` 2**(주의: kowiki 는 동결 녹화에 스킨 시트가 없어 "선언 없음" 이 된 것 — 3a 메모, 엄밀히는 ours).
 
 
 
 
+
+
+
+
+### 5단계 완료 판정 (2026-11-28, 라벨 `final`)
+
+| 기준 | 결과 |
+|---|---|
+| 코퍼스 "버린 선언" 에서 `calc`/`min`/`max`/`var` 원인 **0** | ✅ 길이 속성에서는 사실상 — 5단계 기능 몫 1,271(`calc-before`) → **64**. 남은 64 는 일부러 받지 않은 자리뿐: `env()`·`lh`·`round()` 를 품은 길이(apple), `transform`·`background-position`·`background-size`·그라디언트·`mask` 안의 calc, `border-image-outset` 의 `vw`. `var()` 원인은 1단계에 이미 해결 — 남은 IACVT 는 정의 없음(5r 재분류) 또는 재파싱이 못 읽는 값(`rgba(245, 245, 247, .8)` 등, 아래 4차 후보) |
+| 총 버림(`ours` 합산) 0단계 기준선 대비 **−95%** | ❌ **조정됨**(사용자 결정, 아래 "3차 최종 목표") — 5단계 몫을 다 없애도 남는 것이 5단계 밖이었다(P 측정). 달성: 합산 ours 20곳 14,112 → **1,356(−90.4%)** · 5곳 7,389 → **464(−93.7%)**; 0b 와 같은 정의(파서 버림 ours만)로는 20곳 **1,121(−92.1%)** · 5곳 **369(−95.0%, 목표 ≤369 정확히 충족)** |
+| 위키: 본문이 사이드바 오른쪽·뷰포트 안, 가장 넓은 상자 ≤ 뷰포트 | 🔶 본문 열 배치는 2.1a 에서 해결(그리드 `minmax`·영역, 코퍼스 요소·텍스트 그대로). **가장 넓은 상자는 아직 > 뷰포트**: enwiki 2,338 · kowiki 2,528 — 둘 다 줄바꿈 안 된 인라인 글자 상자(참고문헌·빈 `span`)이고 열 폭 문제가 아니다(기존 인라인 측정 모양, 5단계 밖 — 4차 후보). 미리보기 PNG 로 다시 보지는 않았다 |
+| GitHub 가장 넓은 상자 187M px → 뷰포트 폭 수준 | ✅ **1,280**(0c 이후 3,143 → 5m 3,079 → 5a 1,280) |
+| 테스트·퍼저 | 1119 → **1173**(P +2 · 5m +7 · 5a +26 · 5b +12 · 5f +3 · 5r +4), 설계의 5단계 테스트 전부(이름 그대로) + 각 부분의 발견. 퍼저: calc·트랙 풀(별도 난수 흐름), 레이아웃 release 3만 × 두 창 실패 0, CSS 3만 무결 |
+| 시간 예산 | `[mb-budget]` 0. GitHub 스타일 패스 183.0(4단계 끝) → **182.5ms** |
+| 요소 목록 | P·5m·5a·5b·5f·5r 모두 25곳 diff **비어 있음** — 바뀐 건 기하(문서 높이·가장 넓은 상자·클립)뿐, 부분마다 메모에 원인 |
+
+### 3차 최종 목표 (재진술, 2026-11-28)
+
+- **원래 목표**(0단계에 동결, 그대로 남김): 코퍼스 버린 선언 ours **−95%** — 20곳 14,112 → ≤706, 2차 5곳 7,389 → ≤369(1단계부터 합산 지표로 판정).
+- **조정한 이유**: 4단계 뒤 남은 합산 3,200 중 5단계 기능이 원인인 것은 1,271(39.7%)뿐이었다(5단계 P). 나머지 — `content`·`outline`·두 값 `gap`·그라디언트 배경·`filter`·색 문법… — 는 각각 새 속성·값 모델이 필요한 4차 규모 작업이라, 5단계를 넓혀 −95% 를 맞추지 않고 목표를 조정하기로 사용자가 정했다(2026-11-28). 동시에 Chrome 도 버리는 계산값 시점 항목을 ours 에서 뺐다(5r, 분류표).
+- **조정된 3차 최종 목표**: 합산 ours(`decl_drop_total_ours`) **−90%** — 20곳 ≤1,411, 2차 5곳 ≤739. 이 수치는 5r 측정 시점에 정했다(달성 값을 본 뒤 정한 목표임을 밝혀 둔다).
+- **실제 남은 수치**(라벨 `final`):
+
+| | 0b 기준선 | 1단계 뒤(`var`) | 4단계 뒤(`selectors-4b`) | **3차 끝(`final`)** | 기준선 대비 |
+|---|---:|---:|---:|---:|---:|
+| 20곳 파서 버림 ours | 14,112 | 1,806 | 1,903 | **1,121** | −92.1% |
+| 20곳 합산(옛 정의) | — | 3,037 | 3,200 | **1,794** | −87.3% |
+| 20곳 합산 ours(5r 정의) | — | — | — | **1,356** | **−90.4%** ✅ |
+| 2차 5곳 파서 버림 ours | 7,389 | 335 | 479 | **369** | −95.0% |
+| 2차 5곳 합산 ours(5r 정의) | — | — | — | **464** | **−93.7%** ✅ |
+
+  (1단계 뒤보다 4단계 뒤 파서 버림이 많은 것은 4단계가 살린 규칙 안의 선언이 새로 셀 대상이 된 것 — 4a 메모.)
+- **남은 ours 상위 원인 = 4차 후보**(20곳, 합산 ours 1,356 중): `content`(아이콘 글꼴 `"\f8ff"/""` 대체 텍스트 문법) **148** · `outline` 단축 **112** · 두 값 `gap` **93** · 그라디언트 배경(`radial-gradient` 위치·크기 문법) **92** · `filter` **56** · 색 문법(공백 든 `rgba()` 재파싱 53 · `rgb(… / 70%)` 34 · `hsla()` 18) · 시스템 색(`canvastext`·`graytext` 72) · `object-position`·`transform-origin` 각 28 · 두 값 `overflow` 26 · `grid-area: 1/1` 25 · 3–4 값 `background-position` 24 · `mask-size` 21(+`-webkit-` 18) · `transform` 조합 21 · `aspect-ratio` 19 · `clip-path: polygon()` 18 · `backdrop-filter` 15 · `flex-flow` 15. 규칙 쪽은 `:lang()` 1,228(4단계 판정). 레이아웃 쪽 후속: `display: contents`(mdn 본문 열), 블록을 품은 인라인의 폭(bbc 973px 링크), 줄바꿈 안 된 인라인 글자 상자(가장 넓은 상자 > 뷰포트 6곳), probe 슬리버 판정의 줄 수 무시(bbc +29 거짓 양성), `grid-column: span 0`(19, Chrome 도 무효일 가능성 — 분류 확인 필요).
 
 ---
 
 ## 진행 표
 
-버린 선언·규칙 목표(≤1,500 · ≤380 등)는 [공통 규칙](#범위와-순서)대로 `ours` 기준이다 — 0b 기준선(2차 5곳, 새 캐시)으로 다시 환산하면 **버린 선언 ours 7,389 → 1단계 −80% = ≤1,478, 5단계 −95% = ≤369**(코퍼스 측정 20곳 합계로는 14,112 → ≤2,822 / ≤706 — K4 수정으로 daum·hani·bbc 가 들어와 0b 의 17곳 13,251 에서 늘었다). browser-too(5곳 15, 17곳 236)는 목표 밖.
+**3차 끝(5r)에 목표를 다시 적었다 — [3차 최종 목표](#3차-최종-목표-재진술-2026-11-28)(원래 −95% 는 남겨 둠, 조정된 목표 합산 ours −90% 충족).** 버린 선언·규칙 목표(≤1,500 · ≤380 등)는 [공통 규칙](#범위와-순서)대로 `ours` 기준이다 — 0b 기준선(2차 5곳, 새 캐시)으로 다시 환산하면 **버린 선언 ours 7,389 → 1단계 −80% = ≤1,478, 5단계 −95% = ≤369**(코퍼스 측정 20곳 합계로는 14,112 → ≤2,822 / ≤706 — K4 수정으로 daum·hani·bbc 가 들어와 0b 의 17곳 13,251 에서 늘었다). browser-too(5곳 15, 17곳 236)는 목표 밖.
 
 단계를 마칠 때마다 이 표와 [compat-survey.md](compat-survey.md) 의 사이트별 수치를 갱신한다. 수치는 `scripts/compat-corpus.sh run` 의 `corpus-report.tsv` 합계(코퍼스 전체)와, 비교용으로 2차 5곳 합계를 따로.
 
@@ -1626,7 +1685,7 @@ GitHub 간격(`margin-top: calc(var(--base-size-8) + var(--Layout-row-gap))` 류
 | 2F 후속 묶음 | 🔶 F1 · F1b · F2 · F3 완료 · F4 · F3b 완료(미커밋) | F1 `749ab63` · F1b `f0e3e97` · F2 `e5eb066` · F3 `7fd7bf0` · F4 · F3b 미커밋 | 1028 → 1034 (F1) → 1035 (F1b) → 1041 (F2) → 1045 (F3) → 1048 (F4) → 1049 (F3b) | 25곳 그대로 · `[mb-budget]` 0 | 20곳 합산 3,310 → 3,303 (F1) → **2,766** (F2) · 2차 5곳 994 → 779 | — | 417 그대로 | 7/20 그대로 | [F1 메모](#f1--인라인-svg-고유-크기--논리-속성-2026-11-28): 인라인 SVG = 대체 요소(속성 = 프레젠테이션 힌트, 고유 크기 = 속성 → `viewBox` 비율 → 300×150, 자식 버림), 논리 속성 → 물리. 요소 diff github +1 "Appearance settings" · bbc +1 "Open menu" · mdn +1 · velog +2(로고 링크), 파싱만 12,649 → 10,181. 퍼저가 기존 버그 하나(seed 28718, % 패딩 × max-content 그리드 폭 증폭) 발견 — HEAD 에서도 재현 → **F1b**(`with_intrinsic_probe`: 크기 탐색 중 `%` 패딩·여백 = 0, [부록 C F12](#부록-c--0c-퍼저에서-찾은-것)), 퍼저 3만 실패 0, 코퍼스 변화 없음. **F2**([메모](#f2--값-파서-갭-이름-있는-색rgba-webkit--별칭transform-2026-11-28)): 이름 있는 색 148 + `currentcolor` 를 스타일 패스가 풂, `#rgba`, Chrome `-webkit-` 별칭 107개 → 표준 파서, `transform: none`·3d·`matrix`·`%` 이동(전엔 단위를 버려 50% = 50px). 요소 diff 없음, 버린 선언 ours 1,977 → 1,488, mdn `not (light-dark(tan,tan))` 거짓. **F3**([메모](#f3--둥근-테두리-2026-11-28)): `border-radius` 가 있는 테두리를 고리 하나(`RoundedBorder`)로, 변별 색은 대각선 마스크. 코퍼스 열·요소 변화 없음(페인트만), 스냅숏 `border_radius` 갱신. **F4**([메모](#f4--셀렉터-규칙-색인-2026-11-28)): 셀렉터 규칙 색인(id/클래스/태그/범용 버킷) — **GitHub 스타일 패스 974 → 130ms**, yna 758 → 218, 코퍼스 diff 비어 있음·열 동일, 퍼저가 색인 == 평평한 캐스케이드를 단정. **F3b**([메모](#f3b--둥근-테두리-변별-색의-작업량-상한-2026-11-28-보안-검토)): 변별 색 둥근 테두리의 픽스맵 전체 마스크 → 상자 크기 레이어·마스크 하나(작업 = 상자 넓이) |
 | 3 클리핑 | ✅ P · 3a · 3b · 3c · 3d 완료(3d 미커밋) — [완료 판정](#3단계-완료-판정-2026-11-28-라벨-floats) | P `19ebf41` · 3a `c86bf9c` · 3b `87600f8` · 3c `a8fd56d` · 3d 미커밋 | 1049 → 1050 (P) → 1081 (3a) → 1087 (3b) → 1089 (3c) → 1092 (3d) | 25곳 그대로(결과·요소·텍스트 수 `clip-before` 와 동일) · `[mb-budget]` 0 | — | — | 목표 0 — **전(`clip-before`)**: 슬리버 417 중 sr-only 꼴 조상 아래 **266** 이 그려짐 → **3a(`clip`)**: 그려지는 슬리버 201, sr-only 꼴 **51 — 전부 폭 1px(1×1 50, 1×25 1; Chrome 도 같은 픽셀), 세로 글자 줄 0** | 7/20 그대로 | [3단계 구현 메모](#3단계-구현-메모-2026-11-28). P = `layout/clip.rs` 공용 표 API·probe 클리핑 열. **3a** = `compute_clips`(페이지 공간·레이아웃과 같은 positioned 집합 — 설계와 달라진 두 점은 메모), `ClipGroup` + `walk_commands`, 래스터 가위(바이트 루프 범위·사각형 교차·도형 crop), `DocumentView::clips`·`<img>`·링크 밑줄·스크롤 높이, 퍼저 클립 모양 + 래스터(긴 실행 3만 무결). 페이지 안에서 사라진 텍스트 **174**: enwiki 145(닫힌 언어 드롭다운 — Chrome 도 안 보임) · **d2 20(float shrink-to-fit 없는 기존 레이아웃 버그로 날짜가 dl 밖에 놓였다가 이제 잘림 — 후속)** · hani 9(캐러셀 5 + 줄 수 제한 제목 꼬리표 4). 문서 높이 5곳 감소(bbc 25,582 → 7,589). GitHub 래스터 2.8ms(펼치면 17.0), `compute_clips` 0.42ms. kowiki "주 메뉴" 는 스킨 CSS 미적용 탓(클리핑 아님, 후속). **3b** = 히트 테스트가 클립 밖 기록을 건너뜀(자손은 계속)·링크는 보이는 부분만·에이전트 클릭 대상 = 페이지 좌표(transform 적용) ∩ 클립(비면 "clipped out of view", 일부면 보이는 부분 중심); 코퍼스 열 동일, 클릭 거절될 관찰 요소 332(sr-only 건너뛰기 링크·닫힌 드롭다운·화면 밖 캐러셀)  **3c** = relative `top`/`bottom` % 를 포함 블록 확정 높이로(아니면 auto); 코퍼스 열 변화 없음  **3d** = float shrink-to-fit + 줄바꿈 — d2 사라진 날짜 20 → 0(페이지 안 사라진 텍스트 합 174 → 154 = enwiki 닫힌 드롭다운 145 + hani 9); 부작용 kakaocorp 캐러셀 슬라이드가 세로로 쌓임(문서 높이 2,102 → 4,244 — 진단·선택지는 메모) |
 | 4 셀렉터 | ✅ P · 4a 완료 · 4b 완료 — [완료 판정](#4단계-완료-판정-2026-11-28-라벨-selectors-4b) | P `d4fcf6b` · 4a `b6a3f36` · 4b `81ad233` | 1092 → 1093 (P) → 1107 (4a) → 1119 (4b) | 25곳: 4a 요소 목록 diff 없음, 4b mdn −85(닫힌 메가 메뉴) · `[mb-budget]` 0 · daum `ok*`(4a 새 이미지 요청 4) | 합산 2,766 → 3,103 (4a) → 3,200 (4b) — 살아난 규칙 안의 못 읽는 선언이 보이는 것 | 목표: 대상 범주 0 — **전(`selectors-before`)**: 20곳 버린 규칙 ours 11,706 중 4단계 대상 **10,483**(의사 요소 8,887) → **4a**: ours 2,112, 대상 703, 의사 요소 5 → **4b(`selectors-4b`)**: ours **1,506**, 대상 **4**(결합자 중첩 상한에 걸린 mdn `:is()`), 의사 요소 5(무효·`::part()`) ✅ | — | mdn 3/3 → 2/3(`link:references` 가 닫힌 메뉴 안) → 기대 컨트롤을 `button:html` 로 갱신(사용자 결정) | [4단계 구현 메모](#4단계-구현-메모-2026-11-28). P = 블로커 probe·`style_ms`. **4a** = `:is`/`:where`(관대)·의사 요소 9종 + `::-webkit-*`·`ToCss`·`@supports selector()` 비관대·색인에서 의사 요소 셀렉터 제외·의사 요소만인 규칙은 이미지 안 받음 + **결합자 중첩 상한 2**(사용자 결정: 실사이트 17규칙 포기, `:is` 매칭 메모 = 후속). **4b** = `:checked`(첫 option 규칙, multiple 제외)·`:disabled`/`:enabled`(`fieldset[disabled]`)·`:focus-within`(포커스 없으면 즉시 거짓)·`:focus-visible`(Chrome 휴리스틱 — `FocusCause`, 캐시 키). GitHub 스타일 131.9 → 183.0ms. 대상 밖 최대 = `:lang()` 1,228 — 후속 후보 |
-| 5 calc/트랙 | 🔶 P · 5s · 5m · 5a · 5b 완료 · 5f 완료(미커밋) · 다음 5r | P `d333c05` · 5m `9d1237e` · 5a `f3c1e3b` · 5b `dfa3159` · 5f 미커밋 | 1119 → 1121 (P) → 1128 (5m) → 1154 (5a) → 1166 (5b) → 1169 (5f) | 25곳 그대로(`calc-before` = `selectors-4b`) · `[mb-budget]` 0 | 목표 합산 −95%(20곳 ≤706 · 5곳 ≤369) — **전(`calc-before`)**: 20곳 **3,200**(5단계 기능 몫 **1,271** — `calc()` 803 · 뷰포트 단위 408 · `repeat()` 85 · `max()` 84 · `min()` 64), 5곳 **920**(몫 322). 몫을 다 없애도 20곳 1,929 · 5곳 598 — **5단계만으로는 목표 밖**([P 메모](#p--probe-변경--전-측정-4)) | — | — | 7/20 그대로 | [5단계 구현 메모](#5단계-구현-메모-2026-11-28). P = `css::value_features`·`StyleReport::reparsed_text`·probe `drop_step5*`·`widest_box` 열. GitHub 가장 넓은 상자 3,143px(187M 아님). **5s**(진단만, [메모](#5s--taffy-calc-스파이크-2026-11-28-진단만--결정-b)): 실사이트는 `<body>` 부터 레거시(taffy 고유 노드 = `<html>` 하나) → 계산값 상자 904 중 taffy 가 푸는 것 1, `%` 포함 186. 레거시는 `min/max-width` 를 안 읽는다(~700 노드, 기존 갭). **결정 (b)** `TaffyTree` 유지 + `%` calc 는 경계로, 레거시 `min/max-width` 는 5m 으로. **5m**([메모](#5m--레거시-min-widthmax-widthbox-sizing-2026-11-28-5s-발견-2)): 레거시 블록·float·inline-block·absolute·flex(§9.7 동결 루프)·그리드 늘림·표 상자에 `min/max-width`, `width` 도 `box-sizing` — 코퍼스 요소 목록 diff 없음, 문서 높이 7곳(yna −1,496 · docsrs +701 · github +356…), 테스트 1121 → 1128. **5a**([메모](#5a--calcminmaxclamp뷰포트-단위-2026-11-28-5s-결정-b)): `Value::Calc`·뷰포트 단위·스타일 때 접기·`vh_height` 캐시 키·`length_like`·브릿지 (b)·`Value::Var` 제거 — 요소 목록 diff 없음, 합산 20곳 3,200 → **2,082** · 5곳 920 → **625**, 5단계 몫 1,271 → 154(5b 몫 89), **GitHub 가장 넓은 상자 3,079 → 1,280**. **5b**([메모](#5b--그리드-트랙-함수-2026-11-28)): `repeat(n)` 펼침·`auto-fill`/`auto-fit`(간격 포함 개수·빈 반복 접힘)·`fit-content()`·트랙 calc·줄 이름 + `grid-area` 이름 배치, `Arc<TrackList>` — 요소 목록 diff 없음, 합산 20곳 **1,993** · 5곳 **611**, 5단계 몫 65(트랙 0), bbc 가장 넓은 상자 3,356 → 1,280. **5f**([메모](#5f--5a-에서-찾은-기존-버그-둘-2026-11-28-사용자-결정)): 크기 탐색 중 `%` 폭 = auto·대리 폭을 채운 경계 잎은 shrink-to-fit 폭으로 보고(시드 26412 1e7 초과), taffy 경계 잎의 `%` 폭은 포함 블록 기준으로 한 번만 — 요소 목록 diff 없음, hani 클릭 거절 요소 −2 |
+| 5 calc/트랙 | ✅ P · 5s · 5m · 5a · 5b · 5f · 5r 완료(5r 미커밋) — [완료 판정](#5단계-완료-판정-2026-11-28-라벨-final) · [3차 최종 목표](#3차-최종-목표-재진술-2026-11-28) | P `d333c05` · 5m `9d1237e` · 5a `f3c1e3b` · 5b `dfa3159` · 5f `b87e431` · 5r 미커밋 | 1119 → 1121 (P) → 1128 (5m) → 1154 (5a) → 1166 (5b) → 1169 (5f) → 1173 (5r) | 25곳 그대로(`calc-before` = `selectors-4b`) · `[mb-budget]` 0 | 목표 합산 −95%(20곳 ≤706 · 5곳 ≤369) — **전(`calc-before`)**: 20곳 **3,200**(5단계 기능 몫 **1,271** — `calc()` 803 · 뷰포트 단위 408 · `repeat()` 85 · `max()` 84 · `min()` 64), 5곳 **920**(몫 322). 몫을 다 없애도 20곳 1,929 · 5곳 598 — **5단계만으로는 목표 밖**([P 메모](#p--probe-변경--전-측정-4)) | — | — | 7/20 그대로 | [5단계 구현 메모](#5단계-구현-메모-2026-11-28). P = `css::value_features`·`StyleReport::reparsed_text`·probe `drop_step5*`·`widest_box` 열. GitHub 가장 넓은 상자 3,143px(187M 아님). **5s**(진단만, [메모](#5s--taffy-calc-스파이크-2026-11-28-진단만--결정-b)): 실사이트는 `<body>` 부터 레거시(taffy 고유 노드 = `<html>` 하나) → 계산값 상자 904 중 taffy 가 푸는 것 1, `%` 포함 186. 레거시는 `min/max-width` 를 안 읽는다(~700 노드, 기존 갭). **결정 (b)** `TaffyTree` 유지 + `%` calc 는 경계로, 레거시 `min/max-width` 는 5m 으로. **5m**([메모](#5m--레거시-min-widthmax-widthbox-sizing-2026-11-28-5s-발견-2)): 레거시 블록·float·inline-block·absolute·flex(§9.7 동결 루프)·그리드 늘림·표 상자에 `min/max-width`, `width` 도 `box-sizing` — 코퍼스 요소 목록 diff 없음, 문서 높이 7곳(yna −1,496 · docsrs +701 · github +356…), 테스트 1121 → 1128. **5a**([메모](#5a--calcminmaxclamp뷰포트-단위-2026-11-28-5s-결정-b)): `Value::Calc`·뷰포트 단위·스타일 때 접기·`vh_height` 캐시 키·`length_like`·브릿지 (b)·`Value::Var` 제거 — 요소 목록 diff 없음, 합산 20곳 3,200 → **2,082** · 5곳 920 → **625**, 5단계 몫 1,271 → 154(5b 몫 89), **GitHub 가장 넓은 상자 3,079 → 1,280**. **5b**([메모](#5b--그리드-트랙-함수-2026-11-28)): `repeat(n)` 펼침·`auto-fill`/`auto-fit`(간격 포함 개수·빈 반복 접힘)·`fit-content()`·트랙 calc·줄 이름 + `grid-area` 이름 배치, `Arc<TrackList>` — 요소 목록 diff 없음, 합산 20곳 **1,993** · 5곳 **611**, 5단계 몫 65(트랙 0), bbc 가장 넓은 상자 3,356 → 1,280. **5f**([메모](#5f--5a-에서-찾은-기존-버그-둘-2026-11-28-사용자-결정)): 크기 탐색 중 `%` 폭 = auto·대리 폭을 채운 경계 잎은 shrink-to-fit 폭으로 보고(시드 26412 1e7 초과), taffy 경계 잎의 `%` 폭은 포함 블록 기준으로 한 번만 — 요소 목록 diff 없음, hani 클릭 거절 요소 −2. **5r**([메모](#5r--재분류box-shadow-none3차-최종-목표-2026-11-28-사용자-결정-95-는-5단계를-넓히지-않고-조정)): 계산값 시점 분류(접두사 키워드·선언 없는 `var()` → browser-too), `Dedicated` 키워드·`text-shadow: none` 버그 — 20곳 합산 옛 정의 1,993 → **1,794**, 5r 정의 ours **1,356**(−90.4%) · 5곳 **464**(−93.7%), 조정된 목표 −90% 충족 |
 
 "에이전트 컨트롤 누락 사이트" = [compat-survey 에이전트 관점 표](compat-survey.md#에이전트-관점-요약) 처럼 사이트마다 사람이 기대하는 주요 컨트롤(검색창·검색 버튼·주 내비·본문 링크)을 관찰이 찾는지. 코퍼스가 커지면 사이트별 기대 컨트롤 목록을 `compat-cache/sites.tsv` 옆 열로 적고 probe 가 이름 부분 일치로 자동 판정한다(목록은 사람이 처음 한 번 작성).
 

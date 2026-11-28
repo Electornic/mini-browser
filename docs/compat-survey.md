@@ -370,6 +370,8 @@ MB_NET_CACHE_OFFLINE=1 ./target/debug/mb-mcp --start-url https://news.ycombinato
 
 **5f 재측정** (2026-11-28, 라벨 `fixes`, `tracks` 대비 — 크기 탐색 대리 폭(퍼저 시드 26412)·taffy 경계 잎 `%` 폭 이중 적용, [compat-round3.md 5f](compat-round3.md#5f--5a-에서-찾은-기존-버그-둘-2026-11-28-사용자-결정)): 요소 목록·버림·결과·기대 컨트롤 25곳 동일, `[mb-budget]` 0. 실사이트는 `<body>` 부터 레거시라 영향이 작다 — hani 클릭 거절 요소 50 → 48("사설" 링크 둘), microsoft 가장 넓은 상자 5,137 → 5,117, github 슬리버 +1.
 
+**5r / 3차 끝** (2026-11-28, 라벨 `final`, `fixes` 대비 — 계산값 시점 재분류·`box-shadow`/`text-shadow: none`, [compat-round3.md 5r](compat-round3.md#5r--재분류box-shadow-none3차-최종-목표-2026-11-28-사용자-결정-95-는-5단계를-넓히지-않고-조정) · [3차 최종 목표](compat-round3.md#3차-최종-목표-재진술-2026-11-28)): 요소 목록·결과·기대 컨트롤 25곳 동일, `[mb-budget]` 0. 20곳 합산(옛 정의) 1,993 → **1,794**(버그 수정 몫), 그중 Chrome 도 버리는 것 438(`display:-ms-flexbox` 230 · 정의 없는 `var()` 191 …)을 뺀 **합산 ours 1,356** — 0b 기준선 14,112 대비 −90.4%(2차 5곳 464, −93.7%; 파서 버림만으로는 5곳 369 = 원래 −95% 목표와 같음). 원래 −95% 는 조정(사용자 결정), 조정된 목표 −90% 충족. 남은 상위: `content` 148 · `outline` 112 · 두 값 `gap` 93 · 그라디언트 92 · `filter` 56 → 4차 후보.
+
 ## 호환성 3차 제안 순서
 
 > **확정판은 [compat-round3.md](compat-round3.md)** (2026-11-26): 아래 제안에서 0단계(견고성 점검 + 스크립트 에러 위치)를 앞에 추가하고, 1~5단계(값 파서 → `@media`/`@layer`/`@supports` → 클리핑 → 셀렉터 → `calc`/트랙; 실행은 `@media` 평가를 값 파서보다 먼저)만 3차 범위로, 이미지·JS 소소·ES 모듈·`::before` 는 4차 이후로 뺐다. 아래 목록은 조사 당시 제안으로 남겨 둔다.

@@ -16,7 +16,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     rc::Rc,
 };
 
@@ -164,13 +164,18 @@ pub(super) fn resolve_var_references(
     report: Option<&RefCell<StyleReport>>,
 ) {
     for (name, value) in values.iter_mut() {
-        // The substituted text, kept for the report only.
+        // The substituted text and the names it missed, for the report only.
         let mut reparsed_text = None;
+        let mut missing: BTreeSet<String> = BTreeSet::new();
         let resolved = match &*value {
             Value::Unparsed { shorthand, raw } => {
                 let parse_as = shorthand.as_deref().unwrap_or(name);
                 substitute(raw, 0, &Cell::new(false), &mut |reference, _| {
-                    scope.get(reference).map(str::to_string)
+                    let found = scope.get(reference).map(str::to_string);
+                    if found.is_none() && report.is_some() {
+                        missing.insert(reference.to_string());
+                    }
+                    found
                 })
                 .and_then(|text| {
                     if report.is_some() {
@@ -203,6 +208,11 @@ pub(super) fn resolve_var_references(
                     };
                     let key = declaration_key(name, &declared);
                     set.insert(key.clone());
+                    // A substitution that failed: the names it missed (a
+                    // missed name with a working fallback never gets here).
+                    if reparsed_text.is_none() && !rejected_keyword && !missing.is_empty() {
+                        report.missing_vars.entry(key.clone()).or_insert(missing);
+                    }
                     if let Some(text) = reparsed_text {
                         report.reparsed_text.entry(key).or_insert(text);
                     }

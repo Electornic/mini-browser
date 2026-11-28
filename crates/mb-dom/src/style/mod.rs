@@ -152,6 +152,11 @@ pub struct StyleReport {
     /// node's), so the probe can tell what the parser didn't read — a
     /// `calc()` inside a custom property (step 5 P).
     pub reparsed_text: BTreeMap<String, String>,
+    /// For IACVT entries: the `var()` names the substitution looked up and
+    /// found nothing for (undefined, or guaranteed-invalid — a cycle) on
+    /// the first node it failed at. The probe calls the declaration
+    /// browser-too when the page declares none of them (step 5r).
+    pub missing_vars: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// The identity [`StyleReport`] records a declaration under: property name
@@ -3751,6 +3756,26 @@ mod tests {
         assert_eq!(
             shared(&p).tracks[0],
             crate::css::TrackSize::Length(16.0, Unit::Px)
+        );
+    }
+
+    #[test]
+    fn style_report_names_the_vars_a_failed_substitution_missed() {
+        let css = "p { color: var(--nope); width: var(--cyc); --cyc: var(--cyc); \
+                   margin-left: var(--nope2, 1px); box-shadow: var(--s) } div { --s: none }";
+        let report = report_for("<div><p>x</p></div>", css);
+        let missing = |prop: &str| report.missing_vars.get(&sheet_key(css, prop)).cloned();
+        assert_eq!(missing("color"), Some(["--nope".to_string()].into()));
+        // A cycle reads as missing here too; the probe tells them apart by
+        // whether the page declares the name.
+        assert_eq!(missing("width"), Some(["--cyc".to_string()].into()));
+        // Resolved through its fallback: no failure, nothing recorded.
+        assert_eq!(missing("margin-left"), None);
+        // `--s: none` is a real `box-shadow` value, not a rejected keyword.
+        assert!(report.var_keyword_fallback.is_empty(), "{report:?}");
+        assert!(
+            !report.iacvt.contains(&sheet_key(css, "box-shadow")),
+            "{report:?}"
         );
     }
 }

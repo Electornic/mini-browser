@@ -29,7 +29,8 @@ use grid::{
 use parse::{is_parse_only, parse_clip, parse_font_family, parse_raw, parse_value};
 pub use report::{
     AtRuleSeen, DropReason, DroppedDeclaration, DroppedRule, MediaVerdict, Origin, ParseReport,
-    STEP5_FEATURES, media_verdict, parse_with_report, supports_verdict, value_features,
+    STEP5_FEATURES, iacvt_origin, keyword_fallback_origin, media_verdict, parse_with_report,
+    supports_verdict, value_features,
 };
 use selector::SelectorParserImpl;
 pub use selector::{
@@ -3686,5 +3687,15 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn text_shadow_none_parses() {
+        // Was a parse drop (17 in the corpus, step 5r).
+        assert_eq!(
+            decls("text-shadow: none").get("text-shadow"),
+            Some(&Value::Keyword("none".into()))
+        );
+        assert!(decls("text-shadow: none 1px 1px").is_empty());
     }
 }

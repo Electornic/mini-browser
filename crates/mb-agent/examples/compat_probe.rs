@@ -28,7 +28,7 @@
 // third-party text.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
@@ -140,6 +140,7 @@ fn main() {
         &inline_css,
         media_ctx,
         &style_report.unwrap_or_default(),
+        &style_attribute_vars(&document),
     );
     css_report.counts.media_attr_sheets = media_attr_sheets(&document);
     css_report.counts.style_ms = style_ms;
@@ -407,6 +408,15 @@ fn push_columns(row: &mut Row, columns: Option<&Columns>) {
     });
     col("drop_step5_causes", &|c| c.css.step5_causes.clone());
     col("widest_box", &|c| format!("{:.0}", c.widest));
+    // Step 5r: the computed-time drops Chrome makes too (`decl_drop_total`
+    // keeps its frozen meaning, for comparisons across labels).
+    col("keyword_fallback_browser", &|c| {
+        c.css.keyword_fallback_browser.to_string()
+    });
+    col("iacvt_browser", &|c| c.css.iacvt_browser.to_string());
+    col("decl_drop_total_ours", &|c| {
+        c.css.drop_total_ours().to_string()
+    });
     col("at_skipped_ours", &|c| c.css.at_ours.to_string());
     col("at_skipped_browser", &|c| c.css.at_browser.to_string());
     col("at_skipped_bytes", &|c| c.css.at_skipped_bytes.to_string());
@@ -764,6 +774,10 @@ struct CssCounts {
     /// (`css::STEP5_FEATURES`): parser drops (ours) / IACVT / keyword
     /// fallback / var keyword fallback.
     step5: [usize; 4],
+    /// Of `keyword_fallback` + `var_keyword_fallback` / of `iacvt`: what
+    /// step 5r reclassified browser-too (Chrome drops them as well).
+    keyword_fallback_browser: usize,
+    iacvt_browser: usize,
     /// `feature:drops` over every drop in the total, most first — a drop
     /// counts once under each feature in its value (non-step-5 `math()` /
     /// `env()` included).
@@ -800,6 +814,40 @@ impl CssCounts {
     fn drop_total(&self) -> usize {
         self.decl_ours + self.iacvt + self.keyword_fallback + self.var_keyword_fallback
     }
+
+    /// The same total without what step 5r reclassified as browser-too
+    /// (docs/compat-round3.md "계산값 시점 분류"): other engines' prefixed
+    /// keywords and `var()`s naming nothing the page declares.
+    fn drop_total_ours(&self) -> usize {
+        self.drop_total() - self.keyword_fallback_browser - self.iacvt_browser
+    }
+}
+
+/// Every custom property name the DOM's `style` attributes declare (the
+/// sheets' own are collected in [`css_drops`]).
+fn style_attribute_vars(document: &Document) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut stack: Vec<NodeId> = document.roots().iter().rev().copied().collect();
+    while let Some(id) = stack.pop() {
+        let Some(node) = document.get(id) else {
+            continue;
+        };
+        if let NodeType::Element(element) = &node.node_type
+            && let Some(style) = element.attributes.get("style")
+            && style.contains("--")
+            && let Ok(sheet) = css::parse(&format!("x{{{style}}}"))
+        {
+            for rule in &sheet.rules {
+                for decl in &rule.declarations {
+                    if decl.name.starts_with("--") {
+                        names.insert(decl.name.clone());
+                    }
+                }
+            }
+        }
+        stack.extend(node.children.iter().rev().copied());
+    }
+    names
 }
 
 fn css_drops(
@@ -807,9 +855,26 @@ fn css_drops(
     inline: &str,
     (width, height): (f32, f32),
     computed: &style::StyleReport,
+    attribute_vars: &BTreeSet<String>,
 ) -> CssReport {
     let mut text = String::new();
     let mut c = CssCounts::default();
+    // Every `--*` the page declares (step 5r: a `var()` naming none of
+    // them is IACVT in Chrome too).
+    let mut declared_vars = attribute_vars.clone();
+    for source in [external, inline] {
+        if let Ok(sheet) = css::parse(source) {
+            for rule in &sheet.rules {
+                for decl in &rule.declarations {
+                    if decl.name.starts_with("--") {
+                        declared_vars.insert(decl.name.clone());
+                    }
+                }
+            }
+        }
+    }
+    // property → (count, sample) of what 5r moved to browser-too
+    let mut moved: BTreeMap<(&'static str, String), (usize, String)> = BTreeMap::new();
     // property → (count, sample) of the computed-value-time failures
     let mut iacvt_props: BTreeMap<String, (usize, String)> = BTreeMap::new();
     let mut var_fallback_props: BTreeMap<String, (usize, String)> = BTreeMap::new();
@@ -863,9 +928,26 @@ fn css_drops(
                 if first_in_rule {
                     let failed = if computed.iacvt.contains(&key) {
                         c.iacvt += 1;
+                        let missing = computed.missing_vars.get(&key).cloned().unwrap_or_default();
+                        if css::iacvt_origin(&missing, &declared_vars) == Origin::BrowserToo {
+                            c.iacvt_browser += 1;
+                            let names = missing.iter().cloned().collect::<Vec<_>>().join(" ");
+                            let entry = moved
+                                .entry(("iacvt (undeclared var)", decl.name.clone()))
+                                .or_insert((0, format!("{key}  missing: {names}")));
+                            entry.0 += 1;
+                        }
                         Some((1, &mut iacvt_props))
                     } else if computed.var_keyword_fallback.contains(&key) {
                         c.var_keyword_fallback += 1;
+                        let keyword = computed.reparsed_text.get(&key).map_or("", String::as_str);
+                        if css::keyword_fallback_origin(keyword.trim()) == Origin::BrowserToo {
+                            c.keyword_fallback_browser += 1;
+                            let entry = moved
+                                .entry(("var keyword (prefixed)", decl.name.clone()))
+                                .or_insert((0, format!("{key} → {keyword}")));
+                            entry.0 += 1;
+                        }
                         Some((3, &mut var_fallback_props))
                     } else {
                         None
@@ -896,6 +978,13 @@ fn css_drops(
                     && !kind.accepts_keyword(keyword)
                 {
                     c.keyword_fallback += 1;
+                    if css::keyword_fallback_origin(keyword) == Origin::BrowserToo {
+                        c.keyword_fallback_browser += 1;
+                        let entry = moved
+                            .entry(("keyword (prefixed)", decl.name.clone()))
+                            .or_insert((0, format!("{}: {keyword}", decl.name)));
+                        entry.0 += 1;
+                    }
                     let found = css::value_features(&decl.name, keyword);
                     record_features(
                         &mut c,
@@ -1133,6 +1222,20 @@ fn css_drops(
             text,
             "{count:6}  {label:14} {kind:11} {property:28} {}",
             clip(sample, 100)
+        );
+    }
+
+    let _ = writeln!(
+        text,
+        "\n## step 5r: computed-time drops reclassified browser-too (count, sample)"
+    );
+    let mut moved: Vec<_> = moved.into_iter().collect();
+    moved.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(a.0.cmp(&b.0)));
+    for ((kind, property), (count, sample)) in moved.iter().take(60) {
+        let _ = writeln!(
+            text,
+            "{count:6}  {kind:24} {property:24} {}",
+            clip(sample, 90)
         );
     }
 

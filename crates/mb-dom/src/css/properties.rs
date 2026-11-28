@@ -55,7 +55,12 @@ impl ValueKind {
             | ValueKind::Color(list)
             | ValueKind::Keywords(list)
             | ValueKind::Image(list) => list.contains(&keyword.as_str()),
-            ValueKind::Dedicated | ValueKind::Other => false,
+            // A dedicated parser never stores the generic fallback: a
+            // keyword it returns is a value it chose (`box-shadow: none`,
+            // step 5r — it used to count as a fallback, and a `var()` that
+            // substituted it became `unset`).
+            ValueKind::Dedicated => true,
+            ValueKind::Other => false,
         }
     }
 
@@ -1166,5 +1171,15 @@ mod tests {
         assert!(is_foreign_vendor_prefix("-MS-filter"));
         assert!(!is_foreign_vendor_prefix("-webkit-appearance"));
         assert!(!is_foreign_vendor_prefix("--moz-var"));
+    }
+
+    #[test]
+    fn dedicated_property_keywords_are_not_fallbacks() {
+        // A dedicated parser's keyword is a value it chose (`box-shadow:
+        // none`), never the generic parser's fallback (step 5r).
+        for name in ["box-shadow", "text-shadow", "transform", "clip-path"] {
+            assert!(lookup(name).unwrap().accepts_keyword("none"), "{name}");
+        }
+        assert!(!lookup("width").unwrap().accepts_keyword("none"));
     }
 }

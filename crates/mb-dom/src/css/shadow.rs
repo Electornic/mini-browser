@@ -121,6 +121,16 @@ fn parse_box_shadow_layer<'i>(input: &mut CssParser<'i>) -> Result<(bool, BoxSha
 }
 
 pub(super) fn parse_text_shadow_value<'i>(input: &mut CssParser<'i>) -> Result<Value, ParseError> {
+    // `none` (step 5r — it was dropped, so it never cleared a shadow).
+    if input
+        .try_parse(|i| {
+            i.expect_ident_matching("none")?;
+            i.expect_exhausted()
+        })
+        .is_ok()
+    {
+        return Ok(Value::Keyword("none".into()));
+    }
     let offset_x = parse_length_token(input)?;
     input.skip_whitespace();
     let offset_y = parse_length_token(input)?;
