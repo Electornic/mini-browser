@@ -16,7 +16,7 @@ velog	https://velog.io/	link:트렌딩;button:로그인
 d2	https://d2.naver.com/home	link:helloworld
 google	https://www.google.com/	combobox:검색|search;button:google 검색|google search;link:gmail
 enwiki	https://en.wikipedia.org/wiki/Web_browser	textbox:search;link:main page;link:log in
-mdn	https://developer.mozilla.org/en-US/docs/Web/HTML	link:references;link:guides;link:elements
+mdn	https://developer.mozilla.org/en-US/docs/Web/HTML	button:html;link:guides;link:elements
 docsrs	https://docs.rs/tokio	textbox:search;link:all items;link:source
 rustlang	https://www.rust-lang.org/	link:install;link:learn;link:get started
 cratesio	https://crates.io/	textbox:search;link:browse all crates
