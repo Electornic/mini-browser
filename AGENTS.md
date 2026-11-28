@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1093 (workspace 합계, 2026-11-28 호환성 3차 4단계 P 셀렉터 블로커 probe +1; 3d float shrink-to-fit 은 1092 — 3단계 완료, 3c 는 1089, 3b 는 1087, 3a 는 1081). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1107 (workspace 합계, 2026-11-28 호환성 3차 4a `:is()`/`:where()`·의사 요소·결합자 중첩 상한 +14; 4단계 P 셀렉터 블로커 probe 는 1093, 3d float shrink-to-fit 은 1092 — 3단계 완료, 3c 는 1089, 3b 는 1087, 3a 는 1081). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -219,7 +219,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - `CHROME_HEIGHT` 는 에이전트 클릭 좌표·스크린샷 자르기·창 크기와 묶여 있다. 크롬 줄을 창 종류마다 다르게 하거나 아래쪽 바를 두지 말 것 (docs/concept.md "디자인 적용"). 페이지 위에 띠를 겹쳐 그리는 것도 안 된다(에이전트만 보는 영역이 생김). 크롬에 임베더 것을 넣을 자리는 툴바 `accessory_width`(알약)와 탭 줄 `strip_reserved`(좁은 창의 에이전트 바) 둘 — docs/concept.md "좁은 창".
 
 ### CSS 파서는 조용히 버린다
-- 선언 값은 `parse_entirely` 안에서 읽혀서, 전용 파서가 없는 속성은 토큰이 둘 이상이면(`border: 1px solid`, 쉼표 목록, `calc()`) **선언 통째로** 사라진다. `!important` 는 1a 부터 파싱된다 — 값 파서는 `!` 앞까지만 보고(`parse_until_before(Bang)`), 플래그는 `Declaration::important`, 캐스케이드는 두 패스(작성자 일반 < 인라인 일반 < 작성자 중요 < 인라인 중요). 새 값 파서도 `!` 를 신경 쓸 필요 없다. 지원 안 하는 의사 클래스 하나가 있으면 **규칙 통째로**(콤마로 묶인 셀렉터까지), `@media`·`@layer`·`@supports` 외 at-rule 은 **본문 통째로**(`@container`·`@keyframes`·`@font-face`…). 실사이트에서 "왜 이 스타일이 안 먹지?" 는 먼저 `css::parse_with_report` 로 확인.
+- 선언 값은 `parse_entirely` 안에서 읽혀서, 전용 파서가 없는 속성은 토큰이 둘 이상이면(`border: 1px solid`, 쉼표 목록, `calc()`) **선언 통째로** 사라진다. `!important` 는 1a 부터 파싱된다 — 값 파서는 `!` 앞까지만 보고(`parse_until_before(Bang)`), 플래그는 `Declaration::important`, 캐스케이드는 두 패스(작성자 일반 < 인라인 일반 < 작성자 중요 < 인라인 중요). 새 값 파서도 `!` 를 신경 쓸 필요 없다. 지원 안 하는 의사 클래스 하나가 있으면 **규칙 통째로**(콤마로 묶인 셀렉터까지 — 단 `:is()`/`:where()` 인자 목록은 관대해서 못 읽는 인자만 빠진다, 4a; 의사 요소·`::-webkit-*` 는 유효하고 아무것도 안 맞는다), `@media`·`@layer`·`@supports` 외 at-rule 은 **본문 통째로**(`@container`·`@keyframes`·`@font-face`…). 실사이트에서 "왜 이 스타일이 안 먹지?" 는 먼저 `css::parse_with_report` 로 확인.
 
 ### 테두리 키와 CSS 전역 키워드 (호환성 3차 1b)
 - 테두리는 표준 longhand 이름이 아니다: 폭 = `border-{side}`(레이아웃의 `edge_sizes(node, "border")` 가 읽음), 스타일 = `border-{side}-style`, 색 = `border-{side}-color`(페인터가 단일 `border-color` 보다 먼저). `border`·`border-{side}`·`border-width/-style/-color`·`border-{side}-width` 파서가 이 키로 펼친다. 스타일 패스가 명시적 `none`/`hidden` 면의 폭을 0 으로 만든다 — 스타일 키가 없는 폭(UA 기본)은 그대로 그려진다. 진짜 longhand 체계로의 전환은 4차 후보.
@@ -247,6 +247,9 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
 ### 셀렉터 규칙 색인 (호환성 3차 후속 F4)
 - 캐스케이드는 노드마다 `Stylesheet::index`(`css/rule_index.rs`)가 주는 후보 셀렉터만 시험한다 — 오른쪽 끝 복합의 id/클래스/태그 버킷 + 범용 목록. 키는 `dom_select` 의 매칭 규칙과 같아야 한다(id·클래스 대소문자 구분, 클래스는 `split_whitespace`, 태그는 ASCII 대소문자 무시): **`dom_select` 의 `has_id`/`has_class`/`has_local_name` 을 바꾸면 색인 키도 같이**. 파싱 뒤 `rules` 를 고치면 `reindex()`. 동등성은 `with_flat_index()`(전부 범용) 와 비교하는 테스트·퍼저(`IndexMismatch`)가 지킨다.
+
+### 셀렉터 결합자 중첩 상한 (호환성 3차 4a)
+- `:is()`/`:where()`/`:not()` 인자 안의 결합자가 바깥 결합자 안에 겹치면 매칭이 조상(형제) 걷기를 곱한다 — DOM 깊이^단계(200 깊이 사슬에서 4단계 20초). `css::MAX_COMBINATOR_NESTING` 2(`:is(.a .b) .c` 까지)를 넘는 셀렉터는 무효 = 규칙 통째로 버림(`parse_selector` 도 에러). 상한은 파싱 **뒤** 검사라 관대한 목록 안이어도 인자 하나만 빼지 못한다(병적 입력만 해당). 블록 중첩은 cssparser 가 75 로 막는다. 규칙 색인은 의사 요소가 있는 셀렉터를 아예 버킷에 넣지 않는다(절대 안 맞음 — 평평한 색인과 결과 동일). `@supports selector()` 는 관대하지 않다(`Selector::has_forgiven_argument`). CSS 이미지 미리 받기(`resource::stylesheet_image_urls`)는 의사 요소로만 끝나는 규칙을 건너뛴다(`Selector::can_match_elements` — 그려지지 않으니).
 
 ### 둥근 테두리 (호환성 3차 후속 F3)
 - 모서리 반지름이 있는 상자의 테두리는 `DisplayCommand::RoundedBorder` 하나(고리 — 바깥 둥근 사각형 − 안쪽, 변별 색은 대각선 사다리꼴 마스크), 없으면 네 `SolidRect` 띠. 새 `DisplayCommand` 를 더하면 `display_list::translate`·`bake_axis_aligned`·`scale_display_list`·`view::command_bottom`/`projected_command_bottom`·래스터(`rasterize_command`·`command_bounds`)·퍼저 `check_commands` 를 모두 고칠 것(일부는 `_` 갈래가 없어 컴파일러가 알려 준다) — 그리고 `_ =>` 와일드카드로 평평하게 훑는 곳(mb-mcp `overlay::text_obstacles` 같은)은 컴파일러가 못 잡으니 grep.

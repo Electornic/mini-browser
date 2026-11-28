@@ -262,7 +262,8 @@ fn selector_supported(selector: &str) -> bool {
     // One complex selector, parsed without forgiveness: an unsupported
     // pseudo-class anywhere (`:is(:foo)`) makes it false, as in Chrome.
     !selector.is_empty()
-        && super::parse_selector(selector).is_ok_and(|list| list.list().slice().len() == 1)
+        && super::parse_selector(selector)
+            .is_ok_and(|list| list.list().slice().len() == 1 && !list.has_forgiven_argument())
 }
 
 #[cfg(test)]

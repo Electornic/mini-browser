@@ -1,8 +1,9 @@
 // Selector glue for the `selectors` crate. Defines the
 // `MiniBrowserSelectorImpl` flavour (pseudo-classes, namespace-free
-// identifier type, no pseudo-elements), the owned `Selector` newtype
-// wrapping the parsed `SelectorList`, and the `SelectorParserImpl`
-// callback that maps recognised pseudo-class names. The rest of
+// identifier type, never-matching pseudo-elements), the owned `Selector`
+// newtype wrapping the parsed `SelectorList` (with the combinator nesting
+// cap), and the `SelectorParserImpl` callback that maps recognised
+// pseudo-class and pseudo-element names and turns on `:is()`/`:where()`. The rest of
 // css/mod.rs treats this as an opaque toolkit — it imports `Selector`
 // and (via `pub(super)`) `SelectorParserImpl` to feed into
 // `SelectorList::parse`.
@@ -12,11 +13,12 @@ use std::fmt;
 
 use cssparser::{ParseError as CssParseError, ToCss};
 use precomputed_hash::PrecomputedHash;
+use selectors::parser::Component;
 use selectors::parser::SelectorList as SelectorsSelectorList;
 
 /// Selector implementation flavour for the `selectors` crate. We don't need
-/// namespaces, custom case sensitivity, pseudo-elements, or extra matching
-/// data, so most associated types are stringy or unit.
+/// namespaces, custom case sensitivity or extra matching data, so most
+/// associated types are stringy or unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MiniBrowserSelectorImpl;
 
@@ -121,21 +123,84 @@ impl selectors::parser::NonTSPseudoClass for NonTSPseudoClass {
     }
 }
 
-/// Uninhabited pseudo-element type: we don't model `::before`/`::after`/etc.
-/// `void::Void` would do but it's not in std, so an empty enum suffices.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PseudoElement {}
+/// Pseudo-elements we parse (compat round 3 step 4). None is rendered —
+/// no generated content — and none ever matches an element
+/// (`match_pseudo_element` is always false): they exist so a comma list
+/// like `a::before, .x` keeps `.x` instead of losing the whole rule.
+/// Every `::-webkit-*` name is valid (the Selectors 4 legacy rule — Chrome
+/// does the same); other vendor prefixes (`::-moz-*`) still fail to parse,
+/// as in Chrome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PseudoElement {
+    Before,
+    After,
+    Placeholder,
+    Marker,
+    Selection,
+    FirstLine,
+    FirstLetter,
+    Backdrop,
+    FileSelectorButton,
+    /// Any `::-webkit-…` name, lower-cased, without the colons.
+    WebkitUnknown(String),
+}
 
-impl ToCss for PseudoElement {
-    fn to_css<W>(&self, _dest: &mut W) -> fmt::Result
-    where
-        W: fmt::Write,
-    {
-        match *self {}
+impl PseudoElement {
+    fn from_name(name: &str) -> Option<Self> {
+        let lc = name.to_ascii_lowercase();
+        Some(match lc.as_str() {
+            "before" => PseudoElement::Before,
+            "after" => PseudoElement::After,
+            "placeholder" => PseudoElement::Placeholder,
+            "marker" => PseudoElement::Marker,
+            "selection" => PseudoElement::Selection,
+            "first-line" => PseudoElement::FirstLine,
+            "first-letter" => PseudoElement::FirstLetter,
+            "backdrop" => PseudoElement::Backdrop,
+            "file-selector-button" => PseudoElement::FileSelectorButton,
+            _ if lc.starts_with("-webkit-") => PseudoElement::WebkitUnknown(lc),
+            _ => return None,
+        })
     }
 }
 
-impl selectors::parser::PseudoElement for PseudoElement {}
+impl ToCss for PseudoElement {
+    fn to_css<W>(&self, dest: &mut W) -> fmt::Result
+    where
+        W: fmt::Write,
+    {
+        dest.write_str("::")?;
+        dest.write_str(match self {
+            PseudoElement::Before => "before",
+            PseudoElement::After => "after",
+            PseudoElement::Placeholder => "placeholder",
+            PseudoElement::Marker => "marker",
+            PseudoElement::Selection => "selection",
+            PseudoElement::FirstLine => "first-line",
+            PseudoElement::FirstLetter => "first-letter",
+            PseudoElement::Backdrop => "backdrop",
+            PseudoElement::FileSelectorButton => "file-selector-button",
+            PseudoElement::WebkitUnknown(name) => name,
+        })
+    }
+}
+
+impl selectors::parser::PseudoElement for PseudoElement {
+    /// `::-webkit-scrollbar-thumb:hover`, `::before:hover`: user-action
+    /// states after a pseudo-element are valid (Chrome keeps them).
+    fn accepts_state_pseudo_classes(&self) -> bool {
+        true
+    }
+
+    fn is_before_or_after(&self) -> bool {
+        matches!(self, PseudoElement::Before | PseudoElement::After)
+    }
+
+    /// `::before::marker` is valid.
+    fn valid_after_before_or_after(&self) -> bool {
+        matches!(self, PseudoElement::Marker)
+    }
+}
 
 impl selectors::SelectorImpl for MiniBrowserSelectorImpl {
     type ExtraMatchingData<'a> = ();
@@ -176,6 +241,72 @@ impl Selector {
     }
 }
 
+/// Most combinator levels one selector may stack through `:is()`/
+/// `:where()`/`:not()` arguments (robustness, compat round 3 step 4a).
+/// Matching an argument that has a combinator, inside a selector that has
+/// one, walks the ancestors (or siblings) once per candidate of the outer
+/// walk — the cost is DOM depth to the power of the levels (4 levels: 20 s
+/// on a 200-deep chain). Two keep `:is(.a .b) .c` (real sites) at
+/// O(depth²); a selector past the cap is invalid, the rule dropped.
+pub const MAX_COMBINATOR_NESTING: usize = 2;
+
+type InnerSelector = selectors::parser::Selector<MiniBrowserSelectorImpl>;
+
+/// Combinator levels of `selector`: 1 if it has a combinator, plus the
+/// deepest of its selector-list arguments. Recursion is bounded by
+/// cssparser's block nesting limit (75).
+fn combinator_nesting(selector: &InnerSelector) -> usize {
+    let mut own = false;
+    let mut inner = 0;
+    for component in selector.iter_raw_match_order() {
+        match component {
+            Component::Combinator(combinator) if !combinator.is_pseudo_element() => own = true,
+            Component::Is(list) | Component::Where(list) | Component::Negation(list) => {
+                let deepest = list.slice().iter().map(combinator_nesting).max();
+                inner = inner.max(deepest.unwrap_or(0));
+            }
+            _ => {}
+        }
+    }
+    usize::from(own) + inner
+}
+
+/// Whether a forgiving `:is()`/`:where()` list (at any depth) dropped an
+/// argument that didn't parse.
+fn has_forgiven_argument(selector: &InnerSelector) -> bool {
+    selector
+        .iter_raw_match_order()
+        .any(|component| match component {
+            Component::Invalid(_) => true,
+            Component::Is(list) | Component::Where(list) | Component::Negation(list) => {
+                list.slice().iter().any(has_forgiven_argument)
+            }
+            _ => false,
+        })
+}
+
+impl Selector {
+    /// Within [`MAX_COMBINATOR_NESTING`] on every branch.
+    pub(super) fn within_nesting_cap(&self) -> bool {
+        self.0
+            .slice()
+            .iter()
+            .all(|s| combinator_nesting(s) <= MAX_COMBINATOR_NESTING)
+    }
+
+    /// Whether some branch can match an element at all — false when every
+    /// one ends in a pseudo-element (`a::before, .b::after`).
+    pub fn can_match_elements(&self) -> bool {
+        self.0.slice().iter().any(|s| !s.has_pseudo_element())
+    }
+
+    /// Whether any `:is()`/`:where()` argument was dropped by forgiving
+    /// parsing — `@supports selector()` parses without forgiveness.
+    pub fn has_forgiven_argument(&self) -> bool {
+        self.0.slice().iter().any(has_forgiven_argument)
+    }
+}
+
 // SelectorList is internally a tagged-pointer ThinArc; a deep structural
 // `PartialEq` would have to walk the parsed components. For our purposes
 // (test snapshotting), comparing two Stylesheets via `PartialEq` is no
@@ -198,6 +329,24 @@ impl<'i> selectors::parser::Parser<'i> for SelectorParserImpl {
     type Impl = MiniBrowserSelectorImpl;
     type Error = selectors::parser::SelectorParseErrorKind;
 
+    /// `:is()`/`:where()` — matched (and `:where`'s zero specificity) by
+    /// the crate. Their argument lists are forgiving: an argument that
+    /// doesn't parse is kept as never-matching instead of failing the rule.
+    fn parse_is_and_where(&self) -> bool {
+        true
+    }
+
+    fn parse_pseudo_element(
+        &self,
+        name: &str,
+    ) -> Result<PseudoElement, CssParseError<Self::Error>> {
+        PseudoElement::from_name(name).ok_or_else(|| {
+            CssParseError::custom(
+                selectors::parser::SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
+            )
+        })
+    }
+
     fn parse_non_ts_pseudo_class(
         &self,
         name: &str,
@@ -217,5 +366,31 @@ impl<'i> selectors::parser::Parser<'i> for SelectorParserImpl {
                 selectors::parser::SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cssparser::ToCss;
+
+    fn serialized(selector: &str) -> String {
+        let parsed = super::super::parse_selector(selector).expect(selector);
+        parsed.list().to_css_string()
+    }
+
+    #[test]
+    fn pseudo_elements_and_is_where_serialize() {
+        assert_eq!(serialized("a::before"), "a::before");
+        assert_eq!(serialized("a:after"), "a::after");
+        assert_eq!(
+            serialized("::-webkit-scrollbar-thumb:hover"),
+            "::-webkit-scrollbar-thumb:hover"
+        );
+        assert_eq!(
+            serialized("input::-WEBKIT-Inner-Spin-Button"),
+            "input::-webkit-inner-spin-button"
+        );
+        assert_eq!(serialized(":is(.a, :frob) p"), ":is(.a, :frob) p");
+        assert_eq!(serialized(":where(#x)"), ":where(#x)");
     }
 }

@@ -825,6 +825,211 @@ mod tests {
         }
     }
 
+    // ---- compat round 3 step 4a: `:is()`/`:where()` and pseudo-elements ----
+
+    #[test]
+    fn is_and_where_match() {
+        let html = r#"<div id="x" class="a"><p class="t">x</p></div>"#;
+        assert_eq!(
+            color_with_sheets(&[":is(.b, .a) p { color: #000001 }"], html),
+            rgb(0, 0, 1)
+        );
+        assert_eq!(
+            color_with_sheets(&[":where(#x) p { color: #000001 }"], html),
+            rgb(0, 0, 1)
+        );
+        // `:where()` adds nothing: `:where(#x) p` ties with `p`, so the
+        // later one wins either way round.
+        assert_eq!(
+            color_with_sheets(
+                &[":where(#x) p { color: #000001 } p { color: #000002 }"],
+                html
+            ),
+            rgb(0, 0, 2)
+        );
+        assert_eq!(
+            color_with_sheets(
+                &["p { color: #000002 } :where(#x) p { color: #000001 }"],
+                html
+            ),
+            rgb(0, 0, 1)
+        );
+        // `:is()` takes its most specific argument: `:is(#x, .q) p` beats `p.t`.
+        assert_eq!(
+            color_with_sheets(
+                &[":is(#x, .q) p { color: #000001 } p.t { color: #000002 }"],
+                html
+            ),
+            rgb(0, 0, 1)
+        );
+        assert_eq!(
+            color_with_sheets(&["p:is(.nope, .other) { color: #000009 }"], html),
+            None
+        );
+    }
+
+    #[test]
+    fn is_forgiving_keeps_valid_arguments() {
+        let html = r#"<div class="a"><p class="t">x</p></div>"#;
+        assert_eq!(
+            color_with_sheets(&[":is(.a, :unknown) p { color: #000001 }"], html),
+            rgb(0, 0, 1)
+        );
+        // Every argument invalid: kept, matches nothing (and the comma
+        // sibling still works).
+        assert_eq!(
+            color_with_sheets(&[":where(:frob, ::before) p, .q { color: #000009 }"], html),
+            None
+        );
+        assert_eq!(
+            color_with_sheets(&[":where(:frob) p, .t { color: #000002 }"], html),
+            rgb(0, 0, 2)
+        );
+    }
+
+    #[test]
+    fn webkit_pseudo_with_hover_keeps_rule() {
+        let css = "::-webkit-scrollbar-thumb:hover, .t { color: #000001 }
+                   input::-webkit-search-cancel-button, .t { background-color: #000002 }";
+        let (document, root) = parse_html(r#"<div><p class="t">x</p></div>"#);
+        let styled = style::style_tree(&document, root, &[parse_css(css)]);
+        let t = &styled.children[0];
+        assert_eq!(t.value("color").cloned(), rgb(0, 0, 1));
+        assert_eq!(t.value("background-color").cloned(), rgb(0, 0, 2));
+    }
+
+    #[test]
+    fn unsupported_pseudo_still_drops_rule() {
+        // `:has()` stays out of step 4: the whole rule, comma siblings
+        // included, is dropped (as before).
+        assert_eq!(layered_color(".t:has(span), .t { color: #000009 }"), None);
+        let (_, report) = crate::css::parse_with_report(".t:has(span), .t { color: red }");
+        assert_eq!(report.dropped_rules.len(), 1);
+    }
+
+    #[test]
+    fn pseudo_element_in_list_keeps_sibling_selectors() {
+        for pseudo in [
+            "a::before",
+            "a::after",
+            "a:before",
+            "a:after",
+            "input::placeholder",
+            "li::marker",
+            "::selection",
+            "p::first-line",
+            "p:first-letter",
+            "dialog::backdrop",
+            "input::file-selector-button",
+            "::-webkit-scrollbar",
+        ] {
+            let css = format!("{pseudo}, .t {{ color: #ff0000 }}");
+            assert_eq!(layered_color(&css), rgb(255, 0, 0), "{css}");
+        }
+    }
+
+    #[test]
+    fn pseudo_element_never_matches_element() {
+        for css in [
+            ".t::before { color: #000009 }",
+            "p::after { color: #000009 }",
+            "*::-webkit-scrollbar { color: #000009 }",
+            ".t::first-line { color: #000009 }",
+            "::selection { color: #000009 }",
+        ] {
+            assert_eq!(layered_color(css), None, "{css}");
+        }
+        let sheet = parse_css(".t::before { color: red }");
+        assert_eq!(sheet.rules.len(), 1, "kept, not dropped");
+    }
+
+    #[test]
+    fn moz_pseudo_element_still_drops_rule() {
+        // Chrome drops these too (browser-too): only `-webkit-` is legacy-valid.
+        assert_eq!(
+            layered_color("a::-moz-selection, .t { color: #000009 }"),
+            None
+        );
+        let (_, report) = crate::css::parse_with_report("a::-moz-focus-inner, .t { color: red }");
+        assert_eq!(
+            report.dropped_rules[0].reason,
+            crate::css::DropReason::ForeignSelector
+        );
+    }
+
+    #[test]
+    fn deeply_nested_is_drops_the_rule_without_overflowing() {
+        // Untrusted input: the selector parser recurses per `:is(`.
+        let deep = format!(
+            "{}.t{} {{ color: #000009 }}",
+            ":is(".repeat(20_000),
+            ")".repeat(20_000)
+        );
+        assert_eq!(layered_color(&deep), None);
+        let shallow = format!(
+            "{}.t{} {{ color: #000001 }}",
+            ":is(".repeat(8),
+            ")".repeat(8)
+        );
+        assert_eq!(layered_color(&shallow), rgb(0, 0, 1));
+        assert!(
+            crate::css::parse_selector(&format!(
+                "{}a{}",
+                ":where(".repeat(20_000),
+                ")".repeat(20_000)
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn combinators_stacked_through_selector_arguments_are_capped() {
+        // Each `:is()`/`:where()`/`:not()` argument with a combinator inside
+        // another combinator multiplies the ancestor walks (DOM depth to
+        // the power of the levels — 4 levels took 20 s on a 200-deep chain).
+        // Two levels are allowed (`:is(.a .b) .c`, real sites use it);
+        // three drop the selector like any invalid one.
+        let html = r#"<div class="a"><p class="b"><span class="t">x</span></p></div>"#;
+        let color = |css: &str| {
+            let (document, root) = parse_html(html);
+            let styled = style::style_tree(&document, root, &[parse_css(css)]);
+            styled.children[0].children[0].value("color").cloned()
+        };
+        assert_eq!(color(":is(.a .b) .t { color: #000001 }"), rgb(0, 0, 1));
+        assert_eq!(color(".a :is(.b > .t) { color: #000001 }"), rgb(0, 0, 1));
+        assert_eq!(color(":not(.q .r) .t { color: #000001 }"), rgb(0, 0, 1));
+        assert_eq!(color(":is(:is(.a) .b) .t { color: #000001 }"), rgb(0, 0, 1));
+        // Nesting without combinators costs nothing extra.
+        assert_eq!(
+            color(":is(:where(:is(:not(.q)))).t { color: #000001 }"),
+            rgb(0, 0, 1)
+        );
+        assert_eq!(color(":is(:is(.a .b) .q) .t { color: #000009 }"), None);
+        assert_eq!(color(":not(:not(.a ~ .b) .q) .t { color: #000009 }"), None);
+        // Checked after parsing, so even inside a forgiving list the whole
+        // rule goes (only pathological input gets here).
+        assert_eq!(
+            color(":is(.a, :is(:is(.a .b) .q) .z) .t, .t { color: #000009 }"),
+            None
+        );
+        assert!(crate::css::parse_selector(":is(:is(i b) b) b").is_err());
+    }
+
+    #[test]
+    fn rule_index_matches_the_flat_cascade_with_is_where_and_pseudo_elements() {
+        let html = r##"<!DOCTYPE html><html><body>
+            <div id="x" class="a b"><p class="t">t <span class="u">u</span></p>
+            <input class="i"></div></body></html>"##;
+        let css = "
+            :is(.a, .zz) p { color: #000001 } .t:is(p, .zz) { margin-top: 1px }
+            :where(#x) .u { color: #000002 } p:where(.t) { padding-top: 3px }
+            :is(#x) > p { padding-left: 4px } :is(.t, :frob) span { width: 5px }
+            a::before, .u { height: 6px } p::after { height: 9px } .i::placeholder { color: #000009 }
+            ::-webkit-scrollbar-thumb:hover, .i { opacity: 0.5 } :where(*) { line-height: 2 }
+            :is(span) { font-size: 11px } :is(.a .t, #nope) { border-top-width: 2px }";
+        assert_index_matches_flat(html, css);
+    }
+
     #[test]
     fn currentcolor_resolves_to_the_color_property() {
         let (document, root) =

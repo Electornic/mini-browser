@@ -237,7 +237,10 @@ impl<'a> selectors::Element for MatchingElement<'a> {
         _pe: &<Self::Impl as selectors::SelectorImpl>::PseudoElement,
         _context: &mut MatchingContext<Self::Impl>,
     ) -> bool {
-        // Our PseudoElement is the empty enum, so this can never be reached.
+        // Pseudo-elements parse (compat round 3 step 4) but we generate no
+        // boxes for them: a selector ending in one matches no element —
+        // `a::before, .x` still styles `.x`, `querySelector('a::before')`
+        // is null, as in a browser.
         false
     }
 

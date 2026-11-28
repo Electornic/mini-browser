@@ -877,7 +877,9 @@ fn css_drops(
                 .or_insert((0, rule.selector.clone()));
             entry.0 += 1;
             let ours = rule.reason.origin() == Origin::Ours;
-            let fallback = [if rule.selector.contains('&') {
+            let fallback = [if rule.over_nesting_cap {
+                "(combinator nesting cap)".to_string()
+            } else if rule.selector.contains('&') {
                 "(nesting &)".to_string()
             } else {
                 "(no pseudo)".to_string()

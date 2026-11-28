@@ -450,12 +450,41 @@ impl Gen {
                 _ => format!("{}.{}", g.rng.pick(TAGS), g.rng.pick(CLASSES)),
             }
         };
-        match self.rng.below(6) {
+        match self.rng.below(7) {
             0 => "*".to_string(),
             1 | 2 => simple(self),
             3 => format!("{} {}", simple(self), simple(self)),
             4 => format!("{} > {}", simple(self), simple(self)),
+            5 => self.step4_selector(),
             _ => format!("{} {} {}", simple(self), simple(self), simple(self)),
+        }
+    }
+
+    /// Step 4 selector syntax: `:is()`/`:where()` (forgiving — some
+    /// arguments invalid, some nested, some past the combinator cap),
+    /// pseudo-elements (never match) in comma lists next to ones that do.
+    fn step4_selector(&mut self) -> String {
+        let simple = |g: &mut Gen| -> String {
+            match g.rng.below(3) {
+                0 => g.rng.pick(TAGS).to_string(),
+                _ => format!(".{}", g.rng.pick(CLASSES)),
+            }
+        };
+        let a = simple(self);
+        let b = simple(self);
+        let c = simple(self);
+        match self.rng.below(10) {
+            0 => format!(":is({a}, {b}) {c}"),
+            1 => format!(":where({a}) > {b}"),
+            2 => format!("{a}:is({b}, :frob, ::before)"),
+            3 => format!(":is({a} {b}) {c}"),
+            4 => format!(":where(:is({a}, {b}) {c})"),
+            5 => format!("{a}::before, {b}"),
+            6 => format!("::-webkit-scrollbar-thumb:hover, {a} {b}"),
+            7 => format!("{a}:not(:is({b} {c}))"),
+            // Past the combinator cap: dropped whole.
+            8 => format!(":is(:is({a} {b}) {c}) {a}"),
+            _ => format!("{a}:after, :where({b}):first-line, {c}::-moz-selection"),
         }
     }
 
@@ -1693,6 +1722,14 @@ const CSS_TOKENS: &[&str] = &[
     "|a",
     "a|",
     "::before",
+    "::after",
+    ":before",
+    "::-webkit-",
+    "::-webkit-scrollbar-thumb",
+    "::placeholder",
+    ":is(a,",
+    ":where(",
+    ":where(:is(",
     ":hover",
     ":not(",
     ":not(a)",
@@ -1981,7 +2018,25 @@ fn css_input(rng: &mut Rng) -> (String, String) {
         return (soup.clone(), soup);
     }
     const SELECTORS: &[&str] = &[
-        "*", "div", ".a", "p span", "div > a", "td", "ul li", "input", "button",
+        "*",
+        "div",
+        ".a",
+        "p span",
+        "div > a",
+        "td",
+        "ul li",
+        "input",
+        "button",
+        ":is(.a, :frob) p",
+        ":where(#x, div) a",
+        "a::before, .a",
+        "::-webkit-scrollbar-thumb:hover, div",
+        ":is(:is(:is(:where(a))))",
+        ":is(:is(a b) c) d",
+        "a::-moz-selection, .a",
+        ":has(a), p",
+        "p::before::marker",
+        ":is(",
     ];
     let mut sheet = String::new();
     let mut bodies = String::new();
@@ -2945,6 +3000,18 @@ fn fuzz_generator_covers_its_spec() {
         "{root_rules}/200 cases with an `html, body` rule"
     );
     assert!(var_uses >= 20, "{var_uses}/200 cases using var(--g)");
+    // Step 4: `:is()`/`:where()` and pseudo-elements reach the cascade
+    // (the indexed == flat check).
+    let step4 = (1..=200)
+        .filter(|&seed| {
+            let css = Gen::case(seed).css();
+            (css.contains(":is(") || css.contains(":where(")) && css.contains("::")
+        })
+        .count();
+    assert!(
+        step4 >= 20,
+        "{step4}/200 cases with :is or :where and a pseudo-element"
+    );
     // The CSS soup wraps rules in `@media`/`@layer`, sometimes past the
     // nesting cap (one cap for both).
     let mut media = 0;

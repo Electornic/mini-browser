@@ -96,7 +96,13 @@ fn stylesheet_image_urls(stylesheets: &[String], base_url: &Url) -> Vec<Url> {
         let Ok(parsed) = crate::css::parse(css) else {
             continue;
         };
-        for rule in &parsed.rules {
+        // A rule only pseudo-elements can match is never painted (no
+        // generated content): don't fetch its images.
+        for rule in parsed
+            .rules
+            .iter()
+            .filter(|r| r.selectors.can_match_elements())
+        {
             for decl in &rule.declarations {
                 if decl.name != "background-image" {
                     continue;
@@ -423,6 +429,22 @@ mod tests {
         extract_font_urls, favicon_url, image_urls, load_images, load_scripts, load_stylesheets,
         stylesheet_links,
     };
+
+    #[test]
+    fn pseudo_element_only_rules_fetch_no_images() {
+        // `::before`/`::after` parse (compat round 3 step 4a) but are never
+        // painted: their sprites would be requests for nothing.
+        let base = Url::parse("https://example.com/").unwrap();
+        let css = "a::before { background-image: url(a.png) }
+                   .b, .c::after { background-image: url(b.png) }
+                   .d:before, ::-webkit-scrollbar { background-image: url(d.png) }"
+            .to_string();
+        let urls: Vec<String> = super::stylesheet_image_urls(&[css], &base)
+            .iter()
+            .map(|u| u.to_string())
+            .collect();
+        assert_eq!(urls, ["https://example.com/b.png"]);
+    }
 
     #[test]
     fn font_face_scan_survives_multibyte_text_after_a_brace_or_quote() {

@@ -13,7 +13,10 @@
 //! (the cascade matches in no-quirks mode), class tokens split like
 //! `has_class` (`split_whitespace`), tag names compare ASCII
 //! case-insensitively (bucketed lower-cased). Only top-level components of
-//! the rightmost compound count — `.a` inside `:not(.a)` requires nothing.
+//! the rightmost compound count — `.a` inside `:not(.a)`, `:is(.a, .b)` or
+//! `:where(.a)` requires nothing (those go by their other components, else
+//! universal). Selectors with a pseudo-element are not filed at all: they
+//! never match an element.
 //!
 //! Lookups only: nothing iterates the maps (determinism); candidates are
 //! sorted by (rule, selector) before matching.
@@ -76,6 +79,13 @@ impl RuleIndex {
                 else {
                     continue;
                 };
+                // A selector with a pseudo-element (`a::before`) can never
+                // match an element (step 4: parsed, no generated content):
+                // filing it would only make every node try it. The flat
+                // index keeps it — and it never matches there either.
+                if selector.has_pseudo_element() {
+                    continue;
+                }
                 let entry = (rule_i, selector_i);
                 match key(selector) {
                     Key::Id(id) => index.by_id.entry(id).or_default().push(entry),
@@ -160,5 +170,23 @@ mod tests {
         // Ids and classes are case-sensitive, tags are not.
         assert!(!candidates(css, Some("X"), None, "p").contains(&(0, 0)));
         assert!(candidates(css, None, None, "span").contains(&(3, 0)));
+    }
+
+    #[test]
+    fn is_where_arguments_are_not_keys_and_pseudo_elements_are_not_filed() {
+        // rule 0 :is(.a,.b) 1 .c:is(#x) 2 :where(p) span 3 a::before 4 (.d::after | .d)
+        let css = ":is(.a, .b) {} .c:is(#x) {} :where(p) span {} a::before {} .d::after, .d {}";
+        // `:is(.a, .b)` is filed as universal: an element with neither class
+        // still gets it as a candidate (and fails to match it).
+        assert!(candidates(css, None, None, "div").contains(&(0, 0)));
+        // `.c:is(#x)` requires `.c` (top level), not `#x` (an argument).
+        assert!(candidates(css, None, Some("c"), "div").contains(&(1, 0)));
+        assert!(!candidates(css, Some("x"), None, "div").contains(&(1, 0)));
+        assert!(candidates(css, None, None, "span").contains(&(2, 0)));
+        // A selector with a pseudo-element can never match an element: in
+        // no bucket at all.
+        assert!(!candidates(css, None, Some("d"), "a").contains(&(3, 0)));
+        let d = candidates(css, None, Some("d"), "a");
+        assert!(d.contains(&(4, 1)) && !d.contains(&(4, 0)));
     }
 }

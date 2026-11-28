@@ -31,7 +31,10 @@ pub use report::{
     media_verdict, parse_with_report, supports_verdict,
 };
 use selector::SelectorParserImpl;
-pub use selector::{CssString, MiniBrowserSelectorImpl, NonTSPseudoClass, PseudoElement, Selector};
+pub use selector::{
+    CssString, MAX_COMBINATOR_NESTING, MiniBrowserSelectorImpl, NonTSPseudoClass, PseudoElement,
+    Selector,
+};
 use shadow::{parse_box_shadow_value, parse_text_shadow_value};
 use shorthand::{
     parse_background_position, parse_background_shorthand, parse_background_size,
@@ -459,7 +462,26 @@ pub fn parse_selector(input: &str) -> Result<Selector, ParseError> {
             SelectorsSelectorList::parse(&SelectorParserImpl, input, ParseRelative::No)
         })
         .map_err(convert_selector_error)?;
-    Ok(Selector(parsed))
+    capped(Selector(parsed))
+}
+
+/// Whether `input` parses as a selector list but is past
+/// [`selector::MAX_COMBINATOR_NESTING`] (for the drop report).
+fn selector_over_nesting_cap(input: &str) -> bool {
+    CssParser::new(input.trim())
+        .parse_entirely(|input| {
+            SelectorsSelectorList::parse(&SelectorParserImpl, input, ParseRelative::No)
+        })
+        .is_ok_and(|list| !Selector(list).within_nesting_cap())
+}
+
+/// The selector, or an error past [`selector::MAX_COMBINATOR_NESTING`].
+fn capped(selector: Selector) -> Result<Selector, ParseError> {
+    if selector.within_nesting_cap() {
+        Ok(selector)
+    } else {
+        Err(ParseError::new(0, "selector nests combinators too deeply"))
+    }
 }
 
 /// Convert a `selectors`-crate parse error into our `ParseError` shape.
@@ -578,12 +600,15 @@ impl<'i> CssQualifiedRuleParser<'i> for StylesheetHandler<'_> {
         // Delegate the whole comma-separated selector grammar to the
         // selectors crate — it handles compound selectors, attribute
         // selectors, the descendant/child/sibling combinators,
-        // pseudo-classes (via our `Parser` impl), `:is()`/`:where()`/
-        // `:not()`, etc. We don't enable `parse_is_and_where` / `parse_has`
-        // / `parse_part` / `parse_slotted` because we don't model the
-        // matching machinery for them yet.
+        // pseudo-classes and pseudo-elements (via our `Parser` impl),
+        // `:is()`/`:where()` (forgiving, compat round 3 step 4), `:not()`,
+        // etc. `parse_has` / `parse_part` / `parse_slotted` stay off: we
+        // don't model the matching machinery for them (`:has()` needs
+        // relative-selector caching and invalidation).
         match SelectorsSelectorList::parse(&SelectorParserImpl, input, ParseRelative::No) {
-            Ok(list) => Ok(RulePrelude(Selector(list))),
+            Ok(list) => capped(Selector(list))
+                .map(RulePrelude)
+                .map_err(CssParseError::custom),
             Err(err) => Err(CssParseError::custom(convert_selector_error(err))),
         }
     }

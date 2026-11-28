@@ -137,6 +137,9 @@ pub struct DroppedRule {
     /// ([`selector_blockers`]). Empty = it failed on something else
     /// (nesting `&`, a namespace, a syntax error).
     pub blockers: Vec<String>,
+    /// It parses, but stacks more combinator levels through `:is()`/
+    /// `:where()`/`:not()` than `selector::MAX_COMBINATOR_NESTING`.
+    pub over_nesting_cap: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -400,6 +403,7 @@ fn top_level_tokens(value: &str) -> usize {
 
 /// Classify a rule whose selector didn't parse.
 pub(super) fn dropped_rule(source: &str) -> DroppedRule {
+    let prelude_source = source.split('{').next().unwrap_or(source);
     let prelude = source
         .split('{')
         .next()
@@ -415,7 +419,8 @@ pub(super) fn dropped_rule(source: &str) -> DroppedRule {
         } else {
             DropReason::UnsupportedSelector
         },
-        blockers: selector_blockers(source.split('{').next().unwrap_or(source)),
+        blockers: selector_blockers(prelude_source),
+        over_nesting_cap: super::selector_over_nesting_cap(prelude_source),
     }
 }
 
@@ -795,6 +800,8 @@ mod tests {
         );
         // No pseudo at all: a namespace prefix.
         assert!(blockers("svg|a {}").is_empty());
+        assert!(!dropped_rule("svg|a {}").over_nesting_cap);
+        assert!(dropped_rule(":is(:is(i b) b) b {}").over_nesting_cap);
     }
 
     #[test]

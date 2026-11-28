@@ -997,6 +997,54 @@ mod tests {
     }
 
     #[test]
+    fn query_selector_supports_is_and_checked() {
+        // One selector parser for stylesheets and the DOM API (compat
+        // round 3 step 4): `:is()`/`:where()` match, pseudo-elements are
+        // valid and match nothing — as in a browser.
+        let mut rt = rt_with_html(
+            r##"<div id="w" class="m"><p class="a">x</p><p class="b">y</p><a href="#">l</a></div>"##,
+        );
+        let run = |rt: &mut JsRuntime, js: &str| rt.execute(js).unwrap();
+        assert_eq!(
+            run(&mut rt, "document.querySelectorAll(':is(.a, .b)').length"),
+            "2"
+        );
+        assert_eq!(
+            run(
+                &mut rt,
+                "document.querySelector(':where(#w) .b').textContent"
+            ),
+            "\"y\""
+        );
+        assert_eq!(
+            run(
+                &mut rt,
+                "document.querySelectorAll(':is(.a, :frob)').length"
+            ),
+            "1"
+        );
+        assert_eq!(run(&mut rt, "document.querySelector('p::before')"), "null");
+        assert_eq!(
+            run(&mut rt, "document.querySelectorAll('a::before, .a').length"),
+            "1"
+        );
+        assert_eq!(
+            run(
+                &mut rt,
+                "document.querySelector('.a').matches(':is(div) > p')"
+            ),
+            "true"
+        );
+        assert_eq!(
+            run(
+                &mut rt,
+                "document.querySelector('.b').closest(':where(.m)').id"
+            ),
+            "\"w\""
+        );
+    }
+
+    #[test]
     fn document_get_elements_by_class_name_returns_array() {
         let mut rt = rt_with_html(r#"<p class="hit">a</p><p class="hit">b</p><p>skip</p>"#);
         assert_eq!(
