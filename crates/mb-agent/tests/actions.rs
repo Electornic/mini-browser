@@ -159,6 +159,8 @@ fn route(
         ("GET", "/clipped") => ("200 OK", String::new(), CLIPPED_PAGE.into()),
         ("GET", "/concealed") => ("200 OK", String::new(), CONCEALED_PAGE.into()),
         ("GET", "/covered") => ("200 OK", String::new(), COVERED_PAGE.into()),
+        ("GET", "/wide") => ("200 OK", String::new(), WIDE_PAGE.into()),
+        ("GET", "/labels") => ("200 OK", String::new(), LABELS_PAGE.into()),
         // A real site over a real network: the document (plus its
         // subresources) takes longer than settle's frame budget lasts.
         ("GET", "/slow") => {
@@ -330,6 +332,46 @@ body { margin: 0; }
 <input type="checkbox" id="remember" class="sr"><label for="remember" tabindex="0">Remember me</label>
 <div style="position: relative"><a href="javascript:void(0)" style="display: block; width: 300px; height: 40px">Run script</a><button style="position: absolute; left: 0; top: 0; width: 300px; height: 40px">Cover two</button></div>
 <p id="out">nothing pressed</p>
+</body></html>"#;
+
+/// Off the right of an 800px viewport (compat round 4 step 1c): a button
+/// wider than the window, a button and a link pushed past its right edge,
+/// a carousel window (`overflow: hidden`) with its second slide outside,
+/// and a horizontal scroller (`overflow-x: auto`) with a link outside.
+const WIDE_PAGE: &str = r#"<html><head><title>Wide</title><style>
+body { margin: 0; }
+#wide { display: block; width: 2000px; height: 40px; }
+#right { display: block; margin-left: 900px; width: 100px; height: 40px; }
+#far { display: block; margin-left: 900px; width: 100px; height: 30px; }
+.row { display: flex; width: 300px; height: 40px; }
+.row > * { flex: none; width: 300px; height: 40px; }
+#win { overflow: hidden; }
+#scroller { overflow-x: auto; }
+</style></head><body>
+<div style="position: relative"><button id="wide" onclick="document.getElementById('out').textContent = 'wide pressed'">Wide</button><div id="beyond" style="position: absolute; left: 800px; top: 0; width: 1200px; height: 40px"></div></div>
+<button id="right" onclick="document.getElementById('out').textContent = 'right pressed'">Right</button>
+<a id="far" href="/welcome">Far link</a>
+<div id="win" class="row"><button>Slide 1</button><button onclick="document.getElementById('out').textContent = 'slide 2 pressed'">Slide 2</button></div>
+<div id="scroller" class="row"><a href="/welcome">Item 1</a><a href="/welcome">Item 2</a></div>
+<input id="farfield" aria-label="Far field" style="display: block; margin-left: 900px; width: 100px">
+<p id="out">nothing pressed</p>
+</body></html>"#;
+
+/// Checkbox-hack controls moved off the left of the viewport (compat
+/// round 4 step 1c′): one with a visible `for=` label, one whose wrapping
+/// label is off-screen too, a radio pair with visible labels, one with no
+/// label, and one whose visible label sits under a cover.
+const LABELS_PAGE: &str = r#"<html><head><title>Labels</title><style>
+body { margin: 0; }
+.off { position: absolute; left: -9999px; }
+label { display: block; width: 200px; height: 30px; }
+</style></head><body>
+<input type="checkbox" id="news" class="off"><label for="news">Newsletter</label>
+<label class="off" style="top: 300px">Far terms <input type="checkbox"></label>
+<input type="radio" name="plan" id="pa" class="off" checked><label for="pa">Plan A</label>
+<input type="radio" name="plan" id="pb" class="off"><label for="pb">Plan B</label>
+<input type="checkbox" class="off" aria-label="Orphan">
+<div style="position: relative"><input type="checkbox" id="cov" class="off"><label for="cov">Covered label</label><div style="position: absolute; left: 0; top: 0; width: 200px; height: 30px"></div></div>
 </body></html>"#;
 
 fn demo_file(name: &str) -> (&'static str, String, String) {
@@ -919,24 +961,182 @@ fn a_pointer_events_none_decoration_lets_the_click_through() {
 }
 
 #[test]
-fn a_refused_checkbox_points_at_its_label() {
-    // The checkbox hack's sr-only box is refused (clipped); the hint names
-    // the label that toggles it when the agent has its id.
+fn a_clipped_checkbox_is_pressed_through_its_label() {
+    // The checkbox hack's sr-only box is clipped away; its label shows.
+    // Before 1c′ the click was refused with a hint naming the label (this
+    // test was `a_refused_checkbox_points_at_its_label`); now the agent's
+    // click presses the label, as a person would, and the box ticks.
     let server = Server::start();
     let mut b = browser(ApproveMode::Deny);
     let page = b.navigate(&server.url("/covered")).unwrap();
-    let label = find(&page, Role::Clickable, "Remember me");
     let checkbox = find(&page, Role::Checkbox, "Remember me");
-    let err = b.click(checkbox).unwrap_err();
+    let after = b.click(checkbox).unwrap();
+    assert!(
+        after
+            .to_text()
+            .contains("checkbox  name=\"Remember me\" checked=true"),
+        "{}",
+        after.to_text()
+    );
+}
+
+#[test]
+fn an_off_screen_checkbox_is_pressed_through_its_visible_label() {
+    // Step 1c′: refused itself (left of the viewport), so the click goes
+    // to its visible `for=` label — the label stays out of the observation.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/labels")).unwrap();
+    let after = b.click(find(&page, Role::Checkbox, "Newsletter")).unwrap();
+    let text = after.to_text();
+    assert!(
+        text.contains("checkbox  name=\"Newsletter\" checked=true"),
+        "{text}"
+    );
+    assert!(!text.contains("clickable"), "{text}");
+}
+
+#[test]
+fn an_off_screen_radio_is_pressed_through_its_visible_label() {
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/labels")).unwrap();
+    let after = b.click(find(&page, Role::Radio, "Plan B")).unwrap();
+    let text = after.to_text();
+    assert!(
+        text.contains("radio     name=\"Plan B\" checked=true"),
+        "{text}"
+    );
+    assert!(
+        text.contains("radio     name=\"Plan A\" checked=false"),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_off_screen_checkbox_keeps_its_refusal_without_a_pressable_label() {
+    // No label, a label off-screen too, a label under a cover: the
+    // original refusal stands, unchanged (step 1c′).
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/labels")).unwrap();
+    for name in ["Orphan", "Far terms", "Covered label"] {
+        let err = b.click(find(&page, Role::Checkbox, name)).unwrap_err();
+        assert_eq!(err.code(), "not_interactable", "{name}");
+        assert!(
+            err.message().contains("left of the viewport"),
+            "{name}: {}",
+            err.message()
+        );
+    }
+    let page = b.observe(&ObserveOptions::default());
+    // Nothing toggled: only the radio checked in the markup ("Plan A").
+    let text = page.to_text();
+    assert_eq!(text.matches("checked=true").count(), 1, "{text}");
+}
+
+#[test]
+fn click_point_is_clamped_into_the_visible_part() {
+    // Step 1c (N3), WebDriver's in-view centre: a 2000px button is pressed
+    // in the middle of what shows (x 400), not at its box centre (x 1000 —
+    // past the window, where a cover sits off screen). Before 1c this
+    // test was `click_right_of_the_viewport_succeeds_today`: the box-centre
+    // click of a button wholly past the right edge landed.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/wide")).unwrap();
+    let after = b.click(find(&page, Role::Button, "Wide")).unwrap();
+    assert!(
+        after.to_text().contains("wide pressed"),
+        "{}",
+        after.to_text()
+    );
+}
+
+#[test]
+fn click_with_no_horizontal_intersection_is_refused_with_a_next_action() {
+    // Nothing of it is inside the viewport's width and the engine can't
+    // scroll sideways: refused (no silent press a person couldn't make).
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/wide")).unwrap();
+    let err = b.click(find(&page, Role::Button, "Right")).unwrap_err();
     assert_eq!(err.code(), "not_interactable");
     assert!(
-        err.hint().contains(&format!("e{}", label.raw())),
+        err.message().contains("right of the viewport"),
         "{}",
+        err.message()
+    );
+    assert!(
+        err.hint().contains("Tab"),
+        "not a link: focus it with Tab, then Enter: {}",
         err.hint()
     );
-    let after = b.click(label).unwrap();
+    assert!(err.page_content().is_none());
+    // A link: navigate to its URL (page content).
+    let err = b.click(find(&page, Role::Link, "Far link")).unwrap_err();
+    assert!(err.hint().contains("navigate"), "{}", err.hint());
+    let url = server.url("/welcome");
     assert!(
-        after.to_text().contains("checked=true"),
+        err.page_content()
+            .unwrap()
+            .contains(&format!("link: \"{url}\"")),
+        "{:?}",
+        err.page_content()
+    );
+    let after = b.observe(&ObserveOptions::default());
+    assert!(
+        after.to_text().contains("nothing pressed"),
+        "{}",
+        after.to_text()
+    );
+    assert_eq!(path_of(&after), "/wide");
+}
+
+#[test]
+fn carousel_slide_is_refused_as_clipped_with_a_carousel_hint() {
+    // `overflow: hidden` window, slide outside it sideways: use the
+    // carousel's own controls. `overflow-x: auto` scroller: the engine can't
+    // scroll it — a link's URL to navigate to instead.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/wide")).unwrap();
+    let err = b.click(find(&page, Role::Button, "Slide 2")).unwrap_err();
+    assert!(
+        err.message().contains("clipped out of view"),
+        "{}",
+        err.message()
+    );
+    assert!(err.hint().contains("next/previous"), "{}", err.hint());
+    let err = b.click(find(&page, Role::Link, "Item 2")).unwrap_err();
+    assert!(
+        err.message().contains("clipped out of view"),
+        "{}",
+        err.message()
+    );
+    assert!(err.hint().contains("can't scroll"), "{}", err.hint());
+    assert!(err.hint().contains("navigate"), "{}", err.hint());
+    assert!(err.page_content().is_some_and(|p| p.contains("link: ")));
+}
+
+#[test]
+fn fill_as_person_clicks_without_refusal() {
+    // Replay's person path isn't refused (it reproduces what a person
+    // did); it computes the same click point and falls back to the box
+    // centre when nothing of the field is in view.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/wide")).unwrap();
+    let field = find(&page, Role::Textbox, "Far field");
+    assert_eq!(
+        b.type_text(field, "x", false, false).unwrap_err().code(),
+        "not_interactable",
+        "the agent is refused"
+    );
+    b.fill_as_person(field, "typed").unwrap();
+    let after = b.observe(&ObserveOptions::default());
+    assert!(
+        after.to_text().contains("value=\"typed\""),
         "{}",
         after.to_text()
     );

@@ -19,7 +19,7 @@ use mb_runtime::state::{BrowserState, install_fonts};
 use mb_runtime::view;
 
 use crate::error::AgentError;
-use crate::error::{CoveredClick, Interceptor, NotInteractableReason as Why};
+use crate::error::{ClipHint, Interceptor, NotInteractableReason as Why, PageLink};
 use crate::index::find_rect;
 use crate::observation::{
     self, Changes, Observation, ObserveInput, ObserveOptions, Scope, observe,
@@ -396,7 +396,13 @@ impl AgentBrowser {
     }
 
     pub fn click(&mut self, id: NodeId) -> Result<Observation, AgentError> {
-        self.agent_target_rect(id)?;
+        if let Err(refusal) = self.agent_target_rect(id) {
+            // Step 1c′: a checkbox or radio a person would tick through its
+            // label goes on to `click_raw`, which presses that label.
+            if self.label_candidates(id, &refusal).is_empty() {
+                return Err(refusal);
+            }
+        }
         self.act(|browser| browser.click_raw(id))
     }
 
@@ -985,12 +991,13 @@ impl AgentBrowser {
     }
 
     fn click_raw(&mut self, id: NodeId) -> Result<(), AgentError> {
-        let rect = self.agent_target_rect(id)?;
-        self.last_target = Some((self.state.document_generation(), id));
-        self.scroll_into_view(rect);
-        let rect = self.agent_target_rect(id)?;
-        let point = self.click_point(rect);
-        self.refuse_if_intercepted(id, point)?;
+        let point = match self.own_press_point(id) {
+            Ok(point) => point,
+            Err(refusal) => match self.label_press_point(id, &refusal) {
+                Some(point) => point,
+                None => return Err(refusal),
+            },
+        };
         // Move first so :hover lands, then press and release on their own
         // frames — the same edge/level sequence the window produces.
         self.frame(WindowInput {
@@ -1008,6 +1015,63 @@ impl AgentBrowser {
             ..WindowInput::default()
         });
         Ok(())
+    }
+
+    // Where the agent's click on `id` lands: scrolled into view, its
+    // in-view centre, refused when something else would take it.
+    fn own_press_point(&mut self, id: NodeId) -> Result<(f32, f32), AgentError> {
+        let rect = self.agent_target_rect(id)?;
+        self.last_target = Some((self.state.document_generation(), id));
+        self.scroll_into_view(rect);
+        let rect = self.agent_target_rect(id)?;
+        let point = self.click_point(rect);
+        self.refuse_if_intercepted(id, point)?;
+        Ok(point)
+    }
+
+    /// Step 1c′ (docs/compat-round4.md, inserted part ②): the labels of a
+    /// checkbox or radio whose own click was refused (`refusal`) that the
+    /// agent could press instead — not hidden or inert, with a pressable
+    /// box inside the viewport's width. Empty when `refusal` isn't a
+    /// `NotInteractable` this applies to (never an inert control's).
+    fn label_candidates(&mut self, id: NodeId, refusal: &AgentError) -> Vec<NodeId> {
+        let AgentError::NotInteractable { reason, .. } = refusal else {
+            return Vec::new();
+        };
+        if matches!(reason, Why::Inert | Why::NoFocus) {
+            return Vec::new();
+        }
+        let labels = match self.state.current_view() {
+            Some(view) => {
+                let document = self.state.parsed_document.borrow();
+                observation::labels_of_checkable(&document, &view.layout_root, id)
+            }
+            None => return Vec::new(),
+        };
+        labels
+            .into_iter()
+            .filter(|&label| self.reach_rect(label, true).is_ok())
+            .collect()
+    }
+
+    // The in-view centre of the first label of `id` that can be pressed
+    // (scrolled into view, not intercepted) — `None`: keep the refusal.
+    fn label_press_point(&mut self, id: NodeId, refusal: &AgentError) -> Option<(f32, f32)> {
+        for label in self.label_candidates(id, refusal) {
+            let Ok(rect) = self.reach_rect(label, true) else {
+                continue;
+            };
+            self.scroll_into_view(rect);
+            let Ok(rect) = self.reach_rect(label, true) else {
+                continue;
+            };
+            let point = self.click_point(rect);
+            if self.refuse_if_intercepted(label, point).is_ok() {
+                self.last_target = Some((self.state.document_generation(), id));
+                return Some(point);
+            }
+        }
+        None
     }
 
     // -----------------------------------------------------------------
@@ -1042,6 +1106,13 @@ impl AgentBrowser {
                 by_person: self.changed_by_person(),
             });
         }
+        self.reach_rect(id, agent)
+            .map_err(|why| self.not_interactable(id, why))
+    }
+
+    /// The click target of any element, issued or not (a label in step
+    /// 1c′): what of its box shows, or why it can't be pressed.
+    fn reach_rect(&mut self, id: NodeId, agent: bool) -> Result<Rect, Why> {
         if self.state.current_view().is_none() {
             self.frame(WindowInput::default());
         }
@@ -1069,15 +1140,32 @@ impl AgentBrowser {
             None => reach::visible_rect(&view.layout_root, id, &view.clips),
         };
         match (refusal, visible) {
-            (Some(why), _) => Err(self.not_interactable(id, why)),
-            (None, Some(Ok(rect))) => Ok(rect),
-            (None, Some(Err(()))) => Err(self.not_interactable(id, Why::Clipped)),
-            (None, None) => Err(self.not_interactable(id, Why::NotRendered)),
+            (Some(why), _) => Err(why),
+            // Step 1c: nothing of it inside the viewport's width — the
+            // engine can't scroll sideways, a person can't see it.
+            (None, Some(Ok(rect))) => {
+                match reach::outside_viewport_x(rect, self.reach_viewport()) {
+                    Some(right) if agent => Err(Why::OutsideViewportX { right }),
+                    _ => Ok(rect),
+                }
+            }
+            (None, Some(Err(()))) => {
+                let document = self.state.parsed_document.borrow();
+                Err(Why::Clipped(reach::clip_hint(
+                    &document,
+                    &view.layout_root,
+                    id,
+                )))
+            }
+            (None, None) => Err(Why::NotRendered),
         }
     }
 
     /// A `NotInteractable` for `id`, naming an issued label of a checkbox
     /// or radio (the checkbox hack's way in — docs/compat-round4.md N3).
+    /// For an intercepted click, one outside the viewport or one inside a
+    /// box the engine can't scroll, also the target's link URL (page
+    /// content) to `navigate` to.
     fn not_interactable(&self, id: NodeId, reason: Why) -> AgentError {
         let label = self.state.current_view().and_then(|view| {
             let document = self.state.parsed_document.borrow();
@@ -1085,7 +1173,27 @@ impl AgentBrowser {
                 .into_iter()
                 .find(|&label| self.is_issued(label))
         });
-        AgentError::NotInteractable { id, reason, label }
+        let offers_link = matches!(
+            reason,
+            Why::Intercepted(_)
+                | Why::OutsideViewportX { .. }
+                | Why::Clipped(ClipHint::ScrollContainer)
+        );
+        let link = offers_link
+            .then(|| self.link_url_of(id))
+            .flatten()
+            .map(|url| {
+                Box::new(PageLink {
+                    url,
+                    origin: self.state.current_url.as_ref().map(observation::origin_of),
+                })
+            });
+        AgentError::NotInteractable {
+            id,
+            reason,
+            label,
+            link,
+        }
     }
 
     /// Refuse a click at window `point` whose hit isn't `id` (or inside it,
@@ -1128,8 +1236,7 @@ impl AgentBrowser {
             tag,
             origin: self.state.current_url.as_ref().map(observation::origin_of),
         };
-        let link = self.link_url_of(id);
-        Err(self.not_interactable(id, Why::Intercepted(Box::new(CoveredClick { by, link }))))
+        Err(self.not_interactable(id, Why::Intercepted(Box::new(by))))
     }
 
     /// The URL the link at or around `id` would load — its nearest
@@ -1166,10 +1273,12 @@ impl AgentBrowser {
         });
     }
 
-    // Window coordinates of the element's centre, clamped into the visible
-    // part of the box for elements taller than the viewport.
+    // Window coordinates of the press: WebDriver's in-view centre — the
+    // middle of the box's part inside the viewport on both axes (step 1c).
+    // The agent never gets here without a horizontal overlap (refused in
+    // `target_rect`); the person path falls back to the box centre.
     fn click_point(&self, rect: Rect) -> (f32, f32) {
-        reach::click_point(rect, self.state.scroll_offset, self.reach_viewport())
+        reach::press_point(rect, self.state.scroll_offset, self.reach_viewport())
     }
 
     fn reach_viewport(&self) -> reach::Viewport {

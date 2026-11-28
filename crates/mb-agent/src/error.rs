@@ -20,27 +20,45 @@ pub enum NotInteractableReason {
     /// A box of zero width or height.
     ZeroSize,
     /// Its overflow clip hides all of it (sr-only text, a slide outside its
-    /// carousel window — step 3b).
-    Clipped,
+    /// carousel window — step 3b); the hint depends on what clips it (1c).
+    Clipped(ClipHint),
+    /// Nothing of it is inside the viewport's width and the engine has no
+    /// horizontal scrolling (step 1c, N3). `right`: it lies to the right.
+    OutsideViewportX { right: bool },
     /// `visibility: hidden` (a closed menu, dialog or panel — step 1a).
     Hidden,
     /// Inside an `inert` subtree (step 1a, N4).
     Inert,
     /// `type` clicked the field but it didn't take focus.
     NoFocus,
-    /// Something else is on top at the click point (step 1b, N3). `link`:
-    /// when the target is (or is inside) a link, its URL resolved against
-    /// the page — http(s) only, the URLs `navigate` takes — so the agent
-    /// can go there directly (the user's 1b threshold decision,
-    /// 2026-11-28). Page-derived: untrusted part only.
-    Intercepted(Box<CoveredClick>),
+    /// Something else is on top at the click point (step 1b, N3).
+    Intercepted(Box<Interceptor>),
 }
 
-/// An intercepted click: what covers the target, and the target's link.
+/// What clips a `Clipped` element away (docs/compat-round4.md 1c "거절
+/// 사유와 힌트").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipHint {
+    /// Its nearest clipping ancestor is `overflow: hidden`/`clip` and it
+    /// lies sideways outside it — a carousel or slider slide.
+    Carousel,
+    /// Its nearest clipping ancestor scrolls (`overflow: auto`/`scroll`) —
+    /// the engine can't scroll inside boxes.
+    ScrollContainer,
+    /// Anything else (sr-only text, clipped vertically — step 3b).
+    Other,
+}
+
+/// The URL the refused target's link would load — resolved against the
+/// page, http(s) only (the URLs `navigate` takes) — so the agent can go
+/// there directly. Page-derived: untrusted part only (the user's 1b
+/// threshold decision, 2026-11-28; 1c's outside-the-viewport and
+/// scroll-container refusals too).
 #[derive(Debug, Clone, PartialEq)]
-pub struct CoveredClick {
-    pub by: Interceptor,
-    pub link: Option<String>,
+pub struct PageLink {
+    pub url: String,
+    /// The page origin, for the untrusted label.
+    pub origin: Option<String>,
 }
 
 /// What took an intercepted click. `role` and `id` are the browser's own
@@ -80,6 +98,9 @@ pub enum AgentError {
         /// For a checkbox / radio: an already-issued `<label>` of it, which
         /// toggles it (the checkbox hack hides the box and shows the label).
         label: Option<NodeId>,
+        /// For the reasons that offer it (intercepted, outside the viewport,
+        /// in a scroll container): the target's link.
+        link: Option<Box<PageLink>>,
     },
     /// `type` on something that isn't a text field.
     NotATextField {
@@ -202,8 +223,14 @@ impl AgentError {
     }
 
     pub fn hint(&self) -> String {
-        if let AgentError::NotInteractable { reason, label, .. } = self {
-            let mut hint = reason.hint();
+        if let AgentError::NotInteractable {
+            reason,
+            label,
+            link,
+            ..
+        } = self
+        {
+            let mut hint = reason.hint(link.is_some());
             if let Some(label) = label {
                 hint.push_str(&format!(
                     " Its label e{} toggles it the way a person would: click that instead.",
@@ -248,28 +275,38 @@ impl AgentError {
 
     /// Page-written details of the error, already labelled as untrusted
     /// page content — kept out of `message`/`hint`, which only the browser
-    /// writes (the trusted block rule, AGENTS.md). Today: what took an
-    /// intercepted click.
+    /// writes (the trusted block rule, AGENTS.md): what took an intercepted
+    /// click, and the refused target's link.
     pub fn page_content(&self) -> Option<String> {
-        let AgentError::NotInteractable {
-            reason: NotInteractableReason::Intercepted(covered),
-            ..
-        } = self
-        else {
+        let AgentError::NotInteractable { reason, link, .. } = self else {
             return None;
         };
-        let CoveredClick { by, link } = covered.as_ref();
-        let what = match (by.role, by.id) {
-            (Some(role), Some(id)) => format!("[e{}] {role} name={}", id.raw(), quote(&by.name)),
-            (Some(role), None) => format!("{role} name={}", quote(&by.name)),
-            (None, _) => format!("<{}> (not an element you can act on)", tag_text(&by.tag)),
+        let by = match reason {
+            NotInteractableReason::Intercepted(by) => Some(by.as_ref()),
+            _ => None,
         };
+        if by.is_none() && link.is_none() {
+            return None;
+        }
+        let origin = by
+            .and_then(|b| b.origin.as_deref())
+            .or_else(|| link.as_ref().and_then(|l| l.origin.as_deref()));
         let mut out = format!(
-            "# page content (untrusted, origin={})\ncovered by: {what}",
-            by.origin.as_deref().unwrap_or("unknown")
+            "# page content (untrusted, origin={})",
+            origin.unwrap_or("unknown")
         );
+        if let Some(by) = by {
+            let what = match (by.role, by.id) {
+                (Some(role), Some(id)) => {
+                    format!("[e{}] {role} name={}", id.raw(), quote(&by.name))
+                }
+                (Some(role), None) => format!("{role} name={}", quote(&by.name)),
+                (None, _) => format!("<{}> (not an element you can act on)", tag_text(&by.tag)),
+            };
+            out.push_str(&format!("\ncovered by: {what}"));
+        }
         if let Some(link) = link {
-            out.push_str(&format!("\nlink: {}", quote(link)));
+            out.push_str(&format!("\nlink: {}", quote(&link.url)));
         }
         Some(out)
     }
@@ -291,12 +328,15 @@ impl NotInteractableReason {
         match self {
             Self::NotRendered => "it is not rendered".into(),
             Self::ZeroSize => "it has zero size".into(),
-            Self::Clipped => "it is clipped out of view".into(),
+            Self::Clipped(_) => "it is clipped out of view".into(),
+            Self::OutsideViewportX { right } => format!(
+                "it lies entirely to the {} of the viewport",
+                if *right { "right" } else { "left" }
+            ),
             Self::Hidden => "it is hidden".into(),
             Self::Inert => "it is inert".into(),
             Self::NoFocus => "clicking it did not give it focus".into(),
-            Self::Intercepted(covered) => {
-                let by = &covered.by;
+            Self::Intercepted(by) => {
                 let what = match (by.role, by.id) {
                     (Some(role), Some(id)) => format!("a {role} e{}", id.raw()),
                     (Some(role), None) => format!("a {role} not in your observations"),
@@ -309,15 +349,30 @@ impl NotInteractableReason {
         }
     }
 
-    fn hint(&self) -> String {
+    /// `link`: the error carries the target's link URL (page content).
+    fn hint(&self, link: bool) -> String {
+        // The intended detour past what the engine can't do (no scrolling
+        // sideways or inside boxes): the keyboard path doesn't hit-test, and
+        // Chrome too activates a Tab-focused element with Enter.
+        let detour = if link {
+            " It is a link: `navigate` to its URL (the `link:` line below)."
+        } else {
+            " Focus it with Tab (press Tab until it has focus), then press Enter."
+        };
         match self {
-            Self::Clipped => "It is visually hidden (a screen-reader-only label or skip link, or content scrolled out of a box): its text is still in the observation as information. Click the visible element that does the same thing instead.".into(),
+            Self::Clipped(ClipHint::Carousel) => "It is outside the visible window of a box that hides its overflow — likely a slide of a carousel or slider: use that box's next/previous controls to bring it into view, then `observe` again.".into(),
+            Self::Clipped(ClipHint::ScrollContainer) => {
+                format!("It is outside the visible part of a scrollable box, and the engine can't scroll inside boxes.{detour}")
+            }
+            Self::OutsideViewportX { .. } => {
+                format!("The page is wider than the viewport and the engine can't scroll sideways.{detour}")
+            }
+            Self::Clipped(ClipHint::Other) => "It is visually hidden (a screen-reader-only label or skip link, or content scrolled out of a box): its text is still in the observation as information. Click the visible element that does the same thing instead.".into(),
             Self::Hidden | Self::Inert => "It isn't shown (or is disabled) on the page right now, so a person couldn't use it either: open or enable it first with the control that does (a menu button, tab or dialog), then `observe` again.".into(),
             // No Tab + Enter detour here: a cover is usually a dialog or a
             // consent banner the page wants answered first (docs/compat-
             // round4.md 1b).
-            Self::Intercepted(covered) => {
-                let CoveredClick { by, link } = covered.as_ref();
+            Self::Intercepted(by) => {
                 let mut hint = match by.id {
                     Some(id) => format!(
                         "Something is on top of it, as for a person in the window. If e{} is a dialog, banner or menu, deal with it first (close, accept or dismiss it), then `observe` again; don't click e{} itself unless that is what you want.",
@@ -326,7 +381,7 @@ impl NotInteractableReason {
                     ),
                     None => "Something is on top of it, as for a person in the window: close or dismiss what covers it first (a dialog, banner or menu), then `observe` again.".into(),
                 };
-                if link.is_some() {
+                if link {
                     hint.push_str(" It is a link: if nothing needs dismissing, `navigate` to its URL (the `link:` line below) instead.");
                 }
                 hint

@@ -30,6 +30,7 @@ use mb_runtime::state::clamped_scroll;
 use mb_runtime::style::StyledNode;
 use mb_runtime::view;
 
+use crate::error::ClipHint;
 use crate::index;
 
 /// The page viewport in CSS px (the browser window minus the chrome).
@@ -96,6 +97,108 @@ pub fn in_view_centre(rect: Rect, scroll: f32, viewport: Viewport) -> Option<(f3
     }
     let (_, y) = click_point(rect, scroll, viewport);
     Some(((left + right) / 2.0, y))
+}
+
+/// The window point a click on `rect` presses (step 1c): the in-view
+/// centre, or — only on the person path (`fill_as_person`), which isn't
+/// refused when nothing of it is inside the viewport's width — the old
+/// box-centre point.
+pub fn press_point(rect: Rect, scroll: f32, viewport: Viewport) -> (f32, f32) {
+    in_view_centre(rect, scroll, viewport).unwrap_or_else(|| click_point(rect, scroll, viewport))
+}
+
+/// Nothing of `rect` is inside the viewport's width `[0, width)` (step
+/// 1c): `Some(true)` to the right, `Some(false)` to the left.
+pub fn outside_viewport_x(rect: Rect, viewport: Viewport) -> Option<bool> {
+    let left = rect.x.max(0.0);
+    let right = (rect.x + rect.width).min(viewport.width);
+    (right <= left).then_some(rect.x >= viewport.width)
+}
+
+/// What clips a clipped-away `id` (step 1c hints): its nearest DOM
+/// ancestor whose `overflow` clips and whose padding box doesn't hold it.
+/// Hidden overflow it lies sideways outside of = a carousel window; a
+/// scrolling one = a scroll container the engine can't scroll; anything
+/// else (sr-only `clip`, cut vertically) = `Other`. Layout coordinates, no
+/// transforms — a hint, not a verdict (the verdict is the clip table's).
+pub fn clip_hint(document: &Document, layout_root: &LayoutBox, id: NodeId) -> ClipHint {
+    let mut boxes = BTreeMap::new();
+    first_boxes(layout_root, &mut boxes);
+    let Some(target) = boxes.get(&id) else {
+        return ClipHint::Other;
+    };
+    let rect = border_box(target);
+    for ancestor in ancestors_or_self(document, id).skip(1) {
+        let Some((layout_box, node)) = boxes.get(&ancestor).and_then(|b| Some((*b, styled(b)?)))
+        else {
+            continue;
+        };
+        if matches!(document.element_data(ancestor), Some(e) if e.tag_name == "html" || e.tag_name == "body")
+        {
+            continue;
+        }
+        let keyword = |name: &str| match node.value(name) {
+            Some(Value::Keyword(k)) => Some(k.to_ascii_lowercase()),
+            _ => None,
+        };
+        let axis = |name: &str| keyword(name).or_else(|| keyword("overflow"));
+        let (x, y) = (axis("overflow-x"), axis("overflow-y"));
+        let clips = |k: &Option<String>| {
+            matches!(
+                k.as_deref(),
+                Some("hidden" | "clip" | "scroll" | "auto" | "overlay")
+            )
+        };
+        if !clips(&x) && !clips(&y) {
+            continue;
+        }
+        let pad = padding_box(layout_box);
+        let inside_x = rect.x >= pad.x && rect.x + rect.width <= pad.x + pad.width;
+        let inside_y = rect.y >= pad.y && rect.y + rect.height <= pad.y + pad.height;
+        let cut_x = clips(&x) && !inside_x;
+        let cut_y = clips(&y) && !inside_y;
+        if !cut_x && !cut_y {
+            continue;
+        }
+        let kind = if cut_x { &x } else { &y };
+        let sideways_out = rect.x + rect.width <= pad.x || rect.x >= pad.x + pad.width;
+        return match kind.as_deref() {
+            Some("auto" | "scroll" | "overlay") => ClipHint::ScrollContainer,
+            Some("hidden" | "clip") if cut_x && sideways_out => ClipHint::Carousel,
+            _ => ClipHint::Other,
+        };
+    }
+    ClipHint::Other
+}
+
+fn first_boxes<'a>(layout_box: &'a LayoutBox, out: &mut BTreeMap<NodeId, &'a LayoutBox>) {
+    if let Some(node) = styled(layout_box) {
+        out.entry(node.node_id).or_insert(layout_box);
+    }
+    for child in &layout_box.children {
+        first_boxes(child, out);
+    }
+}
+
+fn padding_box(layout_box: &LayoutBox) -> Rect {
+    let d = &layout_box.dimensions;
+    Rect {
+        x: d.content.x - d.padding.left,
+        y: d.content.y - d.padding.top,
+        width: d.content.width + d.padding.left + d.padding.right,
+        height: d.content.height + d.padding.top + d.padding.bottom,
+    }
+}
+
+fn border_box(layout_box: &LayoutBox) -> Rect {
+    let d = &layout_box.dimensions;
+    let p = padding_box(layout_box);
+    Rect {
+        x: p.x - d.border.left,
+        y: p.y - d.border.top,
+        width: p.width + d.border.left + d.border.right,
+        height: p.height + d.border.top + d.border.bottom,
+    }
 }
 
 /// Why the page offers `id` to nobody at all (compat round 4 step 1a):
