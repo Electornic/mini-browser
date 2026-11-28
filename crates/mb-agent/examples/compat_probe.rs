@@ -141,6 +141,12 @@ fn main() {
     let clips = layout::compute_clips(&view.layout_root);
     anomalies.clip_boxes = clips.len();
     walk_layout(&view.layout_root, &document, &clips, &mut anomalies);
+    anomalies.elements_clipped_out = whole
+        .elements
+        .iter()
+        .filter(|e| anomalies.element_visible.get(&e.id) == Some(&false))
+        .map(|e| format!("{}\t{}", e.role, one_line(&e.name)))
+        .collect();
     // Step 3: the cost of the scissor — rasterise the first viewport of the
     // frame's list as is and with every `ClipGroup` flattened (what an
     // unclipped engine would paint), median of three each.
@@ -357,6 +363,9 @@ fn push_columns(row: &mut Row, columns: Option<&Columns>) {
     });
     col("text_cut", &|c| c.clip.text_cut.to_string());
     col("clip_groups", &|c| c.clip.clip_groups.to_string());
+    col("elements_clipped_out", &|c| {
+        c.clip.elements_clipped_out.to_string()
+    });
     col("raster_ms", &|c| format!("{:.1}", c.clip.raster_ms));
     col("raster_unclipped_ms", &|c| {
         format!("{:.1}", c.clip.raster_unclipped_ms)
@@ -1285,6 +1294,11 @@ struct Anomalies {
     text_hidden_other_by_clip: BTreeMap<String, usize>,
     /// Page width, for the off-page test.
     page_width: f32,
+    /// Per element node: does any of its boxes show through its clip?
+    element_visible: BTreeMap<NodeId, bool>,
+    /// Observed elements whose every box is clipped away — the agent's
+    /// click refuses them ("clipped out of view", step 3b).
+    elements_clipped_out: Vec<String>,
     /// Text boxes the `ClipTable` cuts but doesn't hide.
     text_cut: usize,
     /// `ClipGroup` commands in the frame's display list.
@@ -1310,6 +1324,7 @@ struct ClipCounts {
     clip_groups: usize,
     raster_ms: f64,
     raster_unclipped_ms: f64,
+    elements_clipped_out: usize,
 }
 
 impl Anomalies {
@@ -1330,6 +1345,7 @@ impl Anomalies {
             clip_groups: self.clip_groups,
             raster_ms: self.raster_ms,
             raster_unclipped_ms: self.raster_unclipped_ms,
+            elements_clipped_out: self.elements_clipped_out.len(),
         }
     }
 
@@ -1381,6 +1397,13 @@ impl Anomalies {
         by_clip.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
         for (clip, n) in by_clip {
             let _ = writeln!(text, "{n:5}  {clip}");
+        }
+        let _ = writeln!(
+            text,
+            "\n## observed elements clipped out (click refused: \"clipped out of view\")"
+        );
+        for line in &self.elements_clipped_out {
+            let _ = writeln!(text, "{line}");
         }
         let _ = writeln!(text, "### boxes (first 200)");
         for line in self.text_hidden_other.iter().take(200) {
@@ -1531,6 +1554,37 @@ fn median_ms<T>(mut f: impl FnMut() -> T) -> f64 {
     times[1]
 }
 
+/// `rect` under `matrix` as its axis-aligned bounding box (page space —
+/// the space the clip table and the agent's click target use).
+fn page_rect(rect: Rect, matrix: Affine) -> Rect {
+    if matrix.is_identity() {
+        return rect;
+    }
+    let corners = [
+        (rect.x, rect.y),
+        (rect.x + rect.width, rect.y),
+        (rect.x, rect.y + rect.height),
+        (rect.x + rect.width, rect.y + rect.height),
+    ]
+    .map(|(x, y)| matrix.apply_point(x, y));
+    let min_x = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min);
+    let min_y = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
+    let max_x = corners
+        .iter()
+        .map(|c| c.0)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let max_y = corners
+        .iter()
+        .map(|c| c.1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    Rect {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    }
+}
+
 fn area(rect: Rect) -> f32 {
     rect.width.max(0.0) * rect.height.max(0.0)
 }
@@ -1586,6 +1640,32 @@ impl Walk<'_> {
             | BoxType::TableNode(n) => Some(n),
             BoxType::AnonymousBlock => None,
         };
+        // Step 3b: whether any box of each element survives its clip (the
+        // agent's click target — page coordinates ∩ clip table).
+        if let Some(node) = styled
+            && matches!(node.node_type, NodeType::Element(_))
+        {
+            let d = &layout.dimensions;
+            let border = Rect {
+                x: d.content.x - d.padding.left - d.border.left,
+                y: d.content.y - d.padding.top - d.border.top,
+                width: d.content.width
+                    + d.padding.left
+                    + d.padding.right
+                    + d.border.left
+                    + d.border.right,
+                height: d.content.height
+                    + d.padding.top
+                    + d.padding.bottom
+                    + d.border.top
+                    + d.border.bottom,
+            };
+            let visible = self
+                .clips
+                .visible_rect(node.node_id, page_rect(border, matrix))
+                .is_some();
+            *out.element_visible.entry(node.node_id).or_default() |= visible;
+        }
         if let Some(node) = styled {
             if let NodeType::Text(text) = &node.node_type {
                 let trimmed = text.trim();
@@ -1650,17 +1730,8 @@ impl Walk<'_> {
         out.text_boxes += 1;
         // Under a rotation the clip table adds no clip of its own; compare
         // the untransformed box (only clips from above the rotation apply).
-        let page_rect = if matrix.is_identity() {
-            rect
-        } else if matrix.is_axis_aligned() {
-            let (x0, y0) = matrix.apply_point(rect.x, rect.y);
-            let (x1, y1) = matrix.apply_point(rect.x + rect.width, rect.y + rect.height);
-            Rect {
-                x: x0.min(x1),
-                y: y0.min(y1),
-                width: (x1 - x0).abs(),
-                height: (y1 - y0).abs(),
-            }
+        let page_rect = if matrix.is_axis_aligned() {
+            page_rect(rect, matrix)
         } else {
             rect
         };

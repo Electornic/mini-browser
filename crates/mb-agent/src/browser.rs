@@ -18,7 +18,8 @@ use mb_runtime::state::policy::{AgentPolicy, ApproveMode, GatedAction, GatedKind
 use mb_runtime::state::{BrowserState, install_fonts};
 
 use crate::error::AgentError;
-use crate::index::find_rect;
+use crate::error::CLIPPED_OUT_OF_VIEW;
+use crate::index::{find_rect, find_visible_rect};
 use crate::observation::{Changes, Observation, ObserveInput, ObserveOptions, Scope, observe};
 
 /// Virtual-clock step per frame (≈60 fps).
@@ -1035,11 +1036,31 @@ impl AgentBrowser {
             self.frame(WindowInput::default());
         }
         let view = self.state.current_view().expect("view after a frame");
+        // The layout box decides "rendered" and "zero size"; the click
+        // target is what of it shows: page coordinates (transforms
+        // applied) cut to its overflow clip — the hit test's own terms, so
+        // the click can't land on whatever lies under a clipped element
+        // (compat round 3 step 3b).
         match find_rect(&view.layout_root, id) {
-            Some(rect) if rect.width > 0.0 && rect.height > 0.0 => Ok(rect),
-            Some(_) => Err(AgentError::NotInteractable {
+            Some(rect) if rect.width > 0.0 && rect.height > 0.0 => {}
+            Some(_) => {
+                return Err(AgentError::NotInteractable {
+                    id,
+                    reason: "it has zero size",
+                });
+            }
+            None => {
+                return Err(AgentError::NotInteractable {
+                    id,
+                    reason: "it is not rendered",
+                });
+            }
+        }
+        match find_visible_rect(&view.layout_root, id, &view.clips) {
+            Some(Ok(rect)) => Ok(rect),
+            Some(Err(())) => Err(AgentError::NotInteractable {
                 id,
-                reason: "it has zero size",
+                reason: CLIPPED_OUT_OF_VIEW,
             }),
             None => Err(AgentError::NotInteractable {
                 id,

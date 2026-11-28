@@ -9,7 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mb_runtime::dom::{Document, ElementData, NodeId, NodeType};
-use mb_runtime::layout::{BoxType, LayoutBox, Rect};
+use mb_runtime::layout::{BoxType, ClipTable, LayoutBox, Rect};
+use mb_runtime::render::{self, Affine};
 
 use crate::text::{collapse_whitespace, push_text_piece};
 
@@ -223,6 +224,86 @@ pub(crate) fn find_rect(layout_box: &LayoutBox, id: NodeId) -> Option<Rect> {
         .iter()
         .filter_map(|child| find_rect(child, id))
         .fold(own, |acc, r| Some(acc.map_or(r, |a| union(a, r))))
+}
+
+/// Where `id` can be clicked: each of its boxes' border box mapped through
+/// the paint transforms (page coordinates, the space the hit test and the
+/// clip table use), cut to the box's overflow clip, unioned. `None` = no
+/// box; `Some(Err(()))` = boxes exist but the clip hides all of them.
+/// Under a rotation the box's bounding box stands in (the hit test maps
+/// the point back exactly; the bounding-box centre is inside for the
+/// convex shapes boxes are).
+pub(crate) fn find_visible_rect(
+    layout_box: &LayoutBox,
+    id: NodeId,
+    clips: &ClipTable,
+) -> Option<Result<Rect, ()>> {
+    let mut found = false;
+    let mut visible: Option<Rect> = None;
+    let mut stack = vec![(layout_box, Affine::IDENTITY)];
+    while let Some((b, inherited)) = stack.pop() {
+        let matrix = inherited.compose(render::transform_for(b));
+        if let BoxType::BlockNode(node)
+        | BoxType::FlexNode(node)
+        | BoxType::GridNode(node)
+        | BoxType::TableNode(node) = &b.box_type
+            && node.node_id == id
+        {
+            found = true;
+            let page = page_rect(border_box(b), matrix);
+            if let Some(part) = clips.visible_rect(id, page) {
+                visible = Some(visible.map_or(part, |v| union(v, part)));
+            }
+        }
+        for child in b.children.iter().rev() {
+            stack.push((child, matrix));
+        }
+    }
+    found.then_some(visible.ok_or(()))
+}
+
+fn border_box(b: &LayoutBox) -> Rect {
+    let d = &b.dimensions;
+    Rect {
+        x: d.content.x - d.padding.left - d.border.left,
+        y: d.content.y - d.padding.top - d.border.top,
+        width: d.border.left + d.padding.left + d.content.width + d.padding.right + d.border.right,
+        height: d.border.top
+            + d.padding.top
+            + d.content.height
+            + d.padding.bottom
+            + d.border.bottom,
+    }
+}
+
+/// The axis-aligned bounding box of `rect` under `matrix`.
+fn page_rect(rect: Rect, matrix: Affine) -> Rect {
+    if matrix.is_identity() {
+        return rect;
+    }
+    let corners = [
+        (rect.x, rect.y),
+        (rect.x + rect.width, rect.y),
+        (rect.x, rect.y + rect.height),
+        (rect.x + rect.width, rect.y + rect.height),
+    ]
+    .map(|(x, y)| matrix.apply_point(x, y));
+    let min_x = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min);
+    let min_y = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
+    let max_x = corners
+        .iter()
+        .map(|c| c.0)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let max_y = corners
+        .iter()
+        .map(|c| c.1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    Rect {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    }
 }
 
 fn union(a: Rect, b: Rect) -> Rect {

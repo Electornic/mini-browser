@@ -156,6 +156,7 @@ fn route(
             String::new(),
         ),
         ("GET", "/long") => ("200 OK", String::new(), long_page()),
+        ("GET", "/clipped") => ("200 OK", String::new(), CLIPPED_PAGE.into()),
         // A real site over a real network: the document (plus its
         // subresources) takes longer than settle's frame budget lasts.
         ("GET", "/slow") => {
@@ -178,6 +179,24 @@ fn route(
         }
     }
 }
+
+/// Overflow clipping (compat round 3 step 3b): a sr-only skip link sitting
+/// over a real button, a link half outside an `overflow: hidden` window
+/// (its box centre is clipped away), and a button moved by `transform`.
+const CLIPPED_PAGE: &str = r#"<html><head><title>Clipped</title><style>
+body { margin: 0; }
+.sr { position: absolute; top: 10px; left: 10px; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+#under { position: absolute; top: 0; left: 0; width: 60px; height: 40px; }
+#win { margin-top: 60px; width: 200px; height: 40px; overflow: hidden; }
+#half { display: block; margin-left: 100px; width: 400px; height: 40px; }
+#moved { display: block; margin-top: 20px; width: 80px; height: 30px; transform: translateX(300px); }
+</style></head><body>
+<a class="sr" href="/welcome">Skip to content</a>
+<button id="under" onclick="document.getElementById('out').textContent = 'under pressed'">Under</button>
+<div id="win"><a id="half" href="/welcome">Half visible</a></div>
+<button id="moved" onclick="document.getElementById('out').textContent = 'moved pressed'">Moved</button>
+<p id="out">nothing pressed</p>
+</body></html>"#;
 
 fn signup_page(other_origin: &str) -> String {
     format!(
@@ -570,6 +589,72 @@ fn compat3_menu_label_toggles_but_the_checked_menu_stays_closed() {
     assert!(
         !after.elements.iter().any(|e| e.name == "Docs"),
         "step 4 landed? update this tracker: {text}"
+    );
+}
+
+#[test]
+fn click_on_sr_only_link_errors_not_misclicks() {
+    // The skip link's box is 1×1 (not "zero size"), but its clip hides it
+    // entirely. Its centre lies on the button below: before step 3b the
+    // click silently pressed that button instead.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/clipped")).unwrap();
+    let skip = find(&page, Role::Link, "Skip to content");
+    let err = b.click(skip).unwrap_err();
+    assert_eq!(err.code(), "not_interactable");
+    assert!(
+        err.message().contains("clipped out of view"),
+        "{}",
+        err.message()
+    );
+    let after = b.observe(&ObserveOptions::default());
+    let text = after.to_text();
+    assert!(text.contains("nothing pressed"), "{text}");
+    assert_eq!(path_of(&after), "/clipped");
+    // The control: the same button *is* reachable where it shows.
+    let under = find(&after, Role::Button, "Under");
+    let pressed = b.click(under).unwrap().to_text();
+    assert!(pressed.contains("under pressed"), "{pressed}");
+}
+
+#[test]
+fn click_partially_clipped_hits_visible_part() {
+    // The link spans 100..500 inside a 200px overflow window: its box
+    // centre (300) is clipped away, so the click goes to the visible
+    // part's centre (150).
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Auto);
+    let page = b.navigate(&server.url("/clipped")).unwrap();
+    let half = find(&page, Role::Link, "Half visible");
+    let after = b.click(half).unwrap();
+    assert_eq!(path_of(&after), "/welcome", "{}", after.to_text());
+}
+
+#[test]
+fn click_lands_on_a_transformed_element() {
+    // The click target is in page coordinates, like the hit test: a
+    // `translateX` moves the button away from its layout box.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/clipped")).unwrap();
+    let moved = find(&page, Role::Button, "Moved");
+    let text = b.click(moved).unwrap().to_text();
+    assert!(text.contains("moved pressed"), "{text}");
+}
+
+#[test]
+fn sr_only_text_still_observed() {
+    // Decision (docs/compat-round3.md 3단계): observation keeps a11y-style
+    // inclusion — sr-only text is information meant for assistive tech.
+    let server = Server::start();
+    let mut b = browser(ApproveMode::Deny);
+    let page = b.navigate(&server.url("/clipped")).unwrap();
+    find(&page, Role::Link, "Skip to content");
+    assert!(
+        page.text.iter().any(|t| t.contains("Skip to content")),
+        "{}",
+        page.to_text()
     );
 }
 

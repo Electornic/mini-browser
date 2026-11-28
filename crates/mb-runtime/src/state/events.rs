@@ -13,7 +13,7 @@ use crate::{
         menu_button_rect, refresh_button_rect,
     },
     input,
-    view::{LinkTarget, point_in_rect},
+    view::{LinkTarget, point_in_clip, point_in_rect},
 };
 
 use super::{
@@ -271,7 +271,11 @@ impl BrowserState {
         links
             .iter()
             .rev()
-            .find(|link| point_in_rect(mouse_x, document_y, link.rect))
+            // Only the visible part of a link is clickable (step 3b).
+            .find(|link| {
+                point_in_rect(mouse_x, document_y, link.rect)
+                    && point_in_clip(mouse_x, document_y, link.clip)
+            })
     }
 
     pub fn hovered_chrome_action(

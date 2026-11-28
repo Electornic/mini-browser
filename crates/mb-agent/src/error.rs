@@ -8,6 +8,10 @@ use mb_runtime::dom::NodeId;
 
 use crate::Observation;
 
+/// `NotInteractable` reason for an element whose overflow clip hides all
+/// of it (sr-only text, a slide outside its carousel window — step 3b).
+pub const CLIPPED_OUT_OF_VIEW: &str = "it is clipped out of view";
+
 #[derive(Debug, Clone)]
 pub enum AgentError {
     /// The element was removed from the page, or the id came from a page
@@ -143,6 +147,9 @@ impl AgentError {
     pub fn hint(&self) -> &'static str {
         match self {
             AgentError::StaleElement { .. } => "Call `observe` to get the current element ids.",
+            AgentError::NotInteractable { reason, .. } if *reason == CLIPPED_OUT_OF_VIEW => {
+                "It is visually hidden (a screen-reader-only label or skip link, or content scrolled out of a box): its text is still in the observation as information. Click the visible element that does the same thing instead."
+            }
             AgentError::NotInteractable { .. } => {
                 "Call `observe`; the element may be hidden or not rendered yet."
             }

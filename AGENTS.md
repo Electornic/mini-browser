@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1081 (workspace 합계, 2026-11-28 호환성 3차 3a 클리핑 +31 — 클립 표 19·페인트/래스터 11·overlay 1; 3단계 P 는 1050, F3b 는 1049). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1087 (workspace 합계, 2026-11-28 호환성 3차 3b 히트 테스트·에이전트 클릭 +6; 3a 클리핑은 1081, 3단계 P 는 1050). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -253,7 +253,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 - 래스터의 스크래치 버퍼(마스크·레이어)는 **명령의 장치 경계 상자 ∩ 픽스맵** 크기로(`shapes.rs` `device_bounds`, F3b) — tiny-skia 마스크는 칠하는 픽스맵과 크기가 같아야 하니 작은 레이어에 칠해 한 번 합성한다. 명령마다 픽스맵 전체 크기를 할당하면 페이지가 명령 수 × 페이지 넓이의 작업을 고를 수 있다.
 
 ### overflow 클리핑 = 공용 클립 표 (호환성 3차 3단계)
-- 상자마다의 유효 클립은 `layout::compute_clips` 가 레이아웃 뒤 한 번 만드는 `ClipTable`(`DocumentView::clips`) 하나다 — 페인트·`<img>`·링크 밑줄·스크롤 높이·(3b) 히트 테스트·에이전트 클릭이 모두 이 표를 본다. 클립 규칙을 다른 곳에 따로 만들지 말 것. 좌표는 **페이지 공간, 축 정렬 transform 적용 후**(페인터가 굽는 좌표·히트 테스트가 비교하는 좌표) — 레이아웃 사각형과 비교하려면 그 상자까지의 transform 을 먼저 적용할 것(probe 의 `Walk::visit` 참고). 회전 아래에서는 새 클립을 만들지 않는다.
+- 상자마다의 유효 클립은 `layout::compute_clips` 가 레이아웃 뒤 한 번 만드는 `ClipTable`(`DocumentView::clips`) 하나다 — 페인트·`<img>`·링크 밑줄·스크롤 높이·히트 테스트(`compute_hovered_hit` 가 클립 밖 지점에선 그 상자 기록만 건너뛰고 자손은 계속 봄, 링크는 `LinkTarget::clip` 안에서만)·에이전트 클릭(`index::find_visible_rect` = 상자들을 transform 으로 페이지 좌표에 옮겨 클립과 교차 — 비면 `NotInteractable` "it is clipped out of view", 일부면 보이는 부분의 중심)이 모두 이 표를 본다. 관찰은 일부러 클립을 안 본다(a11y 식 포함 — sr-only 텍스트도 관찰된다). 클립 규칙을 다른 곳에 따로 만들지 말 것. 좌표는 **페이지 공간, 축 정렬 transform 적용 후**(페인터가 굽는 좌표·히트 테스트가 비교하는 좌표) — 레이아웃 사각형과 비교하려면 그 상자까지의 transform 을 먼저 적용할 것(probe 의 `Walk::visit` 참고). 회전 아래에서는 새 클립을 만들지 않는다.
 - 포함 블록 규칙은 레이아웃과 같아야 한다: "positioned" = relative/absolute/fixed(`reposition_absolutes`·페인터 z-레이어와 같은 집합). 레이아웃이 transform·sticky 를 포함 블록으로 삼게 되면 `clip.rs` 의 `visit` 도 같이 바꿀 것.
 - 페이지 명령은 `DisplayCommand::ClipGroup(rect, inner)` 안에 있을 수 있다(빈 그룹·면적 0 그룹은 없다 — 숨은 상자는 명령을 내지 않는다). 명령 종류를 찾을 땐 `render::walk_commands` 로 — 평평한 `iter()` 는 그룹 안을 놓친다. 래스터는 `Scissor` 를 원시 함수에 내려보낸다: 바이트 루프(글자·그림자·`paint_through`)는 범위를 자르고, 단색 사각형은 교집합, 그 밖의 tiny-skia 도형은 (도형 ∩ 가위) 크기 스크래치 픽스맵(`raster::crop`). 바이트 루프를 새로 쓰면 `scissor` 범위를 지킬 것.
 

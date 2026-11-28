@@ -492,12 +492,24 @@ pub fn compute_hovered_dom_path(
     layout_root: &layout::LayoutBox,
     scroll_offset: f32,
 ) -> Option<Vec<usize>> {
-    compute_hovered_hit(input, layout_root, scroll_offset).map(|hit| hit.path)
+    compute_hovered_hit(
+        input,
+        layout_root,
+        &layout::ClipTable::default(),
+        scroll_offset,
+    )
+    .map(|hit| hit.path)
 }
 
+/// The deepest box under the pointer. A box whose overflow clip (`clips`,
+/// the frame's `DocumentView::clips`) excludes the point is not a hit —
+/// but its descendants are still tested (an absolute child can sit under
+/// a different clip). Human clicks and the agent's synthetic clicks both
+/// come through here.
 pub fn compute_hovered_hit(
     input: &input::WindowInput,
     layout_root: &layout::LayoutBox,
+    clips: &layout::ClipTable,
     scroll_offset: f32,
 ) -> Option<HoverHit> {
     // Hover is only meaningful when the pointer is over the page area (i.e. below the
@@ -521,10 +533,17 @@ pub fn compute_hovered_hit(
         mouse_x,
         doc_y,
         render::Affine::IDENTITY,
+        clips,
         &mut path,
         &mut best,
     );
     best
+}
+
+/// Whether page point (`x`, `y`) is inside `clip` (`None` = unclipped; a
+/// zero-area clip contains nothing).
+pub fn point_in_clip(x: f32, y: f32, clip: Option<layout::Rect>) -> bool {
+    clip.is_none_or(|c| c.width > 0.0 && c.height > 0.0 && point_in_rect(x, y, c))
 }
 
 fn walk_for_hover(
@@ -532,6 +551,7 @@ fn walk_for_hover(
     mouse_x: f32,
     doc_y: f32,
     inherited_transform: render::Affine,
+    clips: &layout::ClipTable,
     path: &mut Vec<usize>,
     best: &mut Option<HoverHit>,
 ) {
@@ -542,15 +562,26 @@ fn walk_for_hover(
     let effective_transform = inherited_transform.compose(render::transform_for(layout_box));
     let (logical_x, logical_y) = effective_transform.inverse().apply_point(mouse_x, doc_y);
     let outer = padding_box(layout_box);
-    if point_in_rect(logical_x, logical_y, outer) {
+    let node_id = node_id_for_layout_box(layout_box);
+    // The clip is in page space — compared with the untransformed point.
+    let clip = node_id.and_then(|id| clips.clip_of(id));
+    if point_in_rect(logical_x, logical_y, outer) && point_in_clip(mouse_x, doc_y, clip) {
         *best = Some(HoverHit {
             path: path.clone(),
-            node_id: node_id_for_layout_box(layout_box),
+            node_id,
         });
     }
     for (idx, child) in layout_box.children.iter().enumerate() {
         path.push(idx);
-        walk_for_hover(child, mouse_x, doc_y, effective_transform, path, best);
+        walk_for_hover(
+            child,
+            mouse_x,
+            doc_y,
+            effective_transform,
+            clips,
+            path,
+            best,
+        );
         path.pop();
     }
 }
@@ -807,6 +838,68 @@ mod tests {
     }
 
     const SHORT_PAGE: &str = "<html><body><p>x</p></body></html>";
+
+    /// The node under page point (`x`, `y`) with and without the clip table.
+    fn hit_with_clips(html_source: &str, css_source: &str, x: f32, y: f32) -> [Option<String>; 2] {
+        let document = html::parse(html_source).unwrap();
+        let root = document.roots()[0];
+        let sheet = css::parse(css_source).unwrap();
+        let styled = style::style_tree(&document, root, &[sheet]);
+        let layout_root = layout::layout_tree(&styled, 400.0);
+        let clips = layout::compute_clips(&layout_root);
+        let input = input::WindowInput {
+            mouse_position: Some((x, y + CHROME_HEIGHT)),
+            ..input::WindowInput::default()
+        };
+        let id_of = |hit: Option<HoverHit>| {
+            let id = hit?.node_id?;
+            match &document.get(id)?.node_type {
+                NodeType::Element(e) => e.attributes.get("id").cloned(),
+                NodeType::Text(_) => {
+                    let parent = document.get(id)?.parent?;
+                    document.element_data(parent)?.attributes.get("id").cloned()
+                }
+            }
+        };
+        [
+            id_of(compute_hovered_hit(
+                &input,
+                &layout_root,
+                &layout::ClipTable::default(),
+                0.0,
+            )),
+            id_of(compute_hovered_hit(&input, &layout_root, &clips, 0.0)),
+        ]
+    }
+
+    #[test]
+    fn click_outside_clip_misses() {
+        // (150, 5) is inside the child's box but outside the 100px window.
+        let css = "#w { width: 100px; height: 20px; overflow: hidden; } #k { width: 300px; height: 20px; }";
+        let html = "<div id=page><div id=w><div id=k></div></div></div>";
+        assert_eq!(
+            hit_with_clips(html, css, 150.0, 5.0),
+            [Some("k".to_string()), Some("page".to_string())]
+        );
+        // Inside the window the child is still hit.
+        assert_eq!(
+            hit_with_clips(html, css, 50.0, 5.0)[1].as_deref(),
+            Some("k")
+        );
+    }
+
+    #[test]
+    fn clipped_parent_still_lets_an_absolute_child_be_hit() {
+        // The parent's own record is skipped, its descendants are still
+        // tested: an absolute child outside a static overflow box isn't
+        // clipped by it.
+        let css = "#w { width: 100px; height: 20px; overflow: hidden; } #a { position: absolute; left: 200px; top: 0; width: 50px; height: 20px; }";
+        let html = "<div id=page style='position:relative'><div id=w><div id=a></div></div></div>";
+        assert_eq!(
+            hit_with_clips(html, css, 220.0, 5.0)[1].as_deref(),
+            Some("a")
+        );
+    }
 
     #[test]
     fn document_height_counts_content_overflowing_a_viewport_tall_root() {

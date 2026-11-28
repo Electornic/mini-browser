@@ -530,7 +530,12 @@ impl BrowserState {
         // below. Doing it before `clicked_link` matters because link
         // navigation rebuilds the JS runtime — handlers must run against
         // the page they were registered on, not the next one.
-        let hover_hit = compute_hovered_hit(input, &document_view.layout_root, self.scroll_offset);
+        let hover_hit = compute_hovered_hit(
+            input,
+            &document_view.layout_root,
+            &document_view.clips,
+            self.scroll_offset,
+        );
 
         // Page-area clicks fire JS click handlers on the live page first,
         // then fall through to link navigation unless a handler called
