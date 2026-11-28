@@ -5,8 +5,8 @@ use crate::{css::Value, style::StyledNode};
 use super::inline::{layout_inline_block_node, layout_out_of_flow};
 use super::{
     LayoutBox, clamp_height, clamp_width, containing_block_height, has_height_limits,
-    has_width_limits, is_display_none, is_layout_whitespace_text, is_out_of_flow, length_like,
-    outer_rect, shift_layout_subtree,
+    has_width_limits, in_intrinsic_probe, is_display_none, is_layout_whitespace_text,
+    is_out_of_flow, length_like, outer_rect, shift_layout_subtree,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -409,9 +409,11 @@ fn flex_basis_content_main(node: &StyledNode, main_size: Option<f32>) -> Option<
     // override; `auto` / `content` leave layout_flex_item's width /
     // shrink-to-fit logic in charge.
     // A percentage (or a calc with one) is of the main size, and is `auto`
-    // when that is indefinite.
+    // when that is indefinite — or a proxy (intrinsic-size probe, 5f).
     match length_like(node, "flex-basis")? {
-        length if length.has_percent() => main_size.map(|size| length.resolve(size)),
+        length if length.has_percent() => main_size
+            .filter(|_| !in_intrinsic_probe())
+            .map(|size| length.resolve(size)),
         length => Some(length.resolve(0.0)),
     }
 }

@@ -657,7 +657,7 @@ fn layout_inline_block_node_as(
     let padding = edge_sizes(node, "padding", available_width);
     let border = edge_sizes(node, "border", available_width);
     let stretched = (stretch
-        && length_value(node, "width", available_width).is_none()
+        && content_width_value(node, "width", available_width).is_none()
         && intrinsic_width(node).is_none())
     .then(|| {
         let fill = (available_width
@@ -737,7 +737,7 @@ fn layout_inline_block_node_as(
 /// height, but only `parent_width` is on hand — toy pages haven't needed it.
 fn inline_content_size(node: &StyledNode, parent_width: f32) -> (f32, f32) {
     let declared_width =
-        length_value(node, "width", parent_width).or_else(|| intrinsic_width(node));
+        content_width_value(node, "width", parent_width).or_else(|| intrinsic_width(node));
     let declared_height = definite_height(node);
     if let (Some(width), Some(height)) = (declared_width, declared_height) {
         return (width, height);

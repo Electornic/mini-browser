@@ -4618,4 +4618,92 @@ mod tests {
             },
         );
     }
+
+    // ---- 5f: two bugs found in step 5a (compat round 3 step 5f) ----
+
+    #[test]
+    fn percent_width_in_a_max_content_probe_does_not_reach_the_proxy() {
+        // Layout fuzzer seed 26412, shrunk by hand: a flex item that must
+        // not shrink is sized by a max-content probe, which lays the legacy
+        // leaf out against a 1e6 proxy width — and `width: 100%` of the
+        // proxy came back as the item's content size. The page was
+        // 1,000,000px wide (6,000,200 nested). A percentage width is cyclic
+        // there and behaves as `auto` (CSS Sizing 3 §5.2.1, like `%`
+        // padding — F1b).
+        let layout = page(
+            r#"<div class="f"><img class="m" width="100%"></div><div class="f"><div class="t" style="width: 50%">x</div></div><div class="f"><div class="u" style="width: calc(50% + 1px)">x</div></div>"#,
+            "body, .f { display: flex; flex-shrink: 0 }",
+            (800.0, 600.0),
+        );
+        assert!(
+            widest_box(&layout) <= 800.0,
+            "widest {}",
+            widest_box(&layout)
+        );
+        for class in ["m", "t", "u"] {
+            assert!(
+                content(&layout, class).width < 800.0,
+                "{class}: {}",
+                content(&layout, class).width
+            );
+        }
+    }
+
+    #[test]
+    fn boundary_container_max_content_is_not_the_proxy_width() {
+        // The rest of seed 26412: a block-level boundary leaf (here a flex
+        // container made a boundary by a child's `top: 0%`, and nested
+        // tables) laid out against the 1e6 max-content proxy fills it — its
+        // width *was* the proxy, reported as its max-content size. Inline
+        // leaves were re-measured by their lines (F11); now any proxy-filled
+        // leaf reports its shrink-to-fit content width.
+        let layout = page(
+            r#"<div class="f"><div class="b"><p style="top: 0%">x</p></div></div>
+               <div class="f"><table><tr><td><table><tr><td>w</td></tr></table></td></tr></table></div>"#,
+            "body, .f, .b { display: flex; flex-shrink: 0 }",
+            (800.0, 600.0),
+        );
+        assert!(
+            widest_box(&layout) <= 800.0,
+            "widest {}",
+            widest_box(&layout)
+        );
+        // The seed itself, shrunk: every element a non-shrinking flex box.
+        let layout = page(
+            r#"<table><td><form><table><span><img width="100%"></span><td><table><table><img>w</table></table>,</td> 안녕<li><ul style="clear: right"></ul></li><ul style="top: 0%"></ul></table></form></td></table>"#,
+            "* { display: flex !important; flex-shrink: 0 !important }",
+            (800.0, 600.0),
+        );
+        assert!(
+            widest_box(&layout) <= 800.0,
+            "widest {}",
+            widest_box(&layout)
+        );
+    }
+
+    #[test]
+    fn boundary_leaf_percent_width_resolves_once() {
+        // On the taffy path a boundary leaf (inline content) with a `%`
+        // width was sized twice: taffy resolved 26% of the container, then
+        // handed that width to the legacy layout as the *parent* width,
+        // which took 26% again (400 → 104 → 27).
+        let layout = page(
+            r#"<div class="col"><div class="a">x</div></div><div class="blk"><div class="b">x</div><div class="c">x</div></div>"#,
+            ".col { display: flex; flex-direction: column; width: 400px }
+             .a { width: 26% }
+             .blk { width: 400px }
+             .b { width: 50% }
+             .c { width: 50%; box-sizing: border-box; padding: 0 10px; margin-left: 10% }",
+            (800.0, 600.0),
+        );
+        assert_eq!(content(&layout, "a").width, 104.0);
+        assert_eq!(content(&layout, "b").width, 200.0);
+        let c = content(&layout, "c");
+        assert_eq!(c.width, 180.0);
+        assert_eq!(
+            c.x - content(&layout, "blk").x,
+            50.0,
+            "10% margin of 400 + 10px padding"
+        );
+    }
 }

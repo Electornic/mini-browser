@@ -44,12 +44,12 @@ use crate::style::StyledNode;
 
 use super::block::layout_node as legacy_block_layout;
 use super::inline::{
-    BlockChild, InlineAlign, group_block_children, inline_align_for, layout_inline_run,
-    uses_inline_flow,
+    BlockChild, InlineAlign, group_block_children, inline_align_for,
+    inline_block_shrink_to_fit_width, layout_inline_run, uses_inline_flow,
 };
 use super::table::is_table_container;
 use super::{
-    BoxType, Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, has_float,
+    BoxType, Dimensions, EdgeSizes, LayoutBox, Rect, container_box_type, has_float, has_percent,
     intrinsic_height, intrinsic_width, is_display_none, is_layout_whitespace_text, is_out_of_flow,
     length_like, length_value, outer_rect, shift_layout_subtree, with_containing_block_height,
     with_intrinsic_probe,
@@ -486,6 +486,9 @@ fn grid_line_to_taffy(line: GridLine) -> TaffyGridPlacement<String> {
 struct NodeBoundary {
     content: BoundaryContent,
     cached: RefCell<Option<LayoutBox>>,
+    /// The containing block width of the last definite measure — the
+    /// basis of the leaf's own `%` width (step 5f).
+    containing_width: std::cell::Cell<Option<f32>>,
 }
 
 enum BoundaryContent {
@@ -505,7 +508,24 @@ impl NodeBoundary {
         Self {
             content,
             cached: RefCell::new(None),
+            containing_width: std::cell::Cell::new(None),
         }
+    }
+
+    /// The width to lay the legacy subtree out against when taffy gives
+    /// the leaf a definite border-box width `border_box`. Normally that
+    /// width plus the leaf's margins; but a leaf whose own `width` is a
+    /// percentage was *sized* by taffy from it already — the legacy layout
+    /// would take the percentage again of its own width (26% of 400 → 104
+    /// → 27, step 5f) — so it gets the containing block width instead.
+    fn legacy_width(&self, border_box: f32, containing: Option<f32>) -> f32 {
+        if let BoundaryContent::Node(node) = &self.content
+            && has_percent(node, "width")
+            && let Some(containing) = containing.or(self.containing_width.get())
+        {
+            return containing;
+        }
+        border_box + self.horizontal_margins(containing.unwrap_or(border_box))
     }
 
     /// The boundary's own left + right margin as the legacy layout will
@@ -667,14 +687,17 @@ fn measure_boundary(
         // leaf with side margins lost them twice (a `<body>` of inline
         // content was 768px in an 800px viewport; compat round 3 R2).
         AvailableSpace::Definite(w) => {
-            w + boundary.horizontal_margins(containing_width.unwrap_or(w))
+            if containing_width.is_some() {
+                boundary.containing_width.set(containing_width);
+            }
+            boundary.legacy_width(w, containing_width)
         }
         // Boundary leaves only see MaxContent / MinContent inside flex / grid
         // intrinsic-size probes, which the boundary path does not yet drive
         // (containers themselves still become boundaries in 4.3.1). Pick a
         // big-but-finite proxy for max-content and 0 for min-content so the
         // legacy block algorithm produces sensible widths in both extremes.
-        AvailableSpace::MaxContent => 1.0e6,
+        AvailableSpace::MaxContent => MAX_CONTENT_PROXY,
         AvailableSpace::MinContent => 0.0,
     };
     let probe = !matches!(avail.width, AvailableSpace::Definite(_));
@@ -702,6 +725,19 @@ fn measure_boundary(
                 (l.min(outer.x), r.max(outer.x + outer.width))
             });
         lb.dimensions.content.width = (right - left).max(0.0);
+    } else if matches!(avail.width, AvailableSpace::MaxContent)
+        && lb.dimensions.content.width >= MAX_CONTENT_PROXY / 2.0
+        && let BoundaryContent::Node(node) = &boundary.content
+    {
+        // Any other leaf whose width came back filled to the proxy (an
+        // auto-width block, flex, grid or table container) would report the
+        // proxy as its max-content size — a non-shrinking flex item was then
+        // 1e6px wide, nested ones summed past 1e7 (layout fuzzer seed 26412,
+        // step 5f). Its shrink-to-fit content width instead (the measure
+        // floats use, 3d); a real size below half the proxy is kept.
+        lb.dimensions.content.width = with_intrinsic_probe(true, || {
+            inline_block_shrink_to_fit_width(node, MAX_CONTENT_PROXY)
+        });
     }
     let outer = outer_rect(&lb);
     let margin_w = lb.dimensions.margin.left + lb.dimensions.margin.right;
@@ -718,13 +754,19 @@ fn measure_boundary(
     }
 }
 
+/// The width a boundary leaf is laid out at for taffy's max-content probe:
+/// big but finite (0 stands in for min-content).
+const MAX_CONTENT_PROXY: f32 = 1.0e6;
+
 /// Whether an intrinsic-size probe of this boundary should measure its laid
 /// out lines instead of trusting the proxy width (see `measure_boundary`).
 fn probe_sizes_to_lines(content: &BoundaryContent) -> bool {
     match content {
         BoundaryContent::InlineRun { .. } => true,
         BoundaryContent::Node(node) => {
-            uses_inline_flow(node) && length_like(node, "width").is_none()
+            // A `%` width is `auto` in the probe (5f), so lines decide.
+            uses_inline_flow(node)
+                && length_like(node, "width").is_none_or(|width| width.has_percent())
         }
     }
 }
@@ -1024,7 +1066,7 @@ fn boundary_box(
     let cached = ctx.cached.borrow_mut().take();
     let mut cached = match cached {
         Some(lb) if (border_box_width(&lb) - final_width).abs() < 0.01 => lb,
-        _ => ctx.layout(final_width + ctx.horizontal_margins(final_width)),
+        _ => ctx.layout(ctx.legacy_width(final_width, None)),
     };
     shift_layout_subtree(&mut cached, abs_outer_x, abs_outer_y);
     cached

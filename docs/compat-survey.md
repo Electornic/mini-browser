@@ -368,6 +368,8 @@ MB_NET_CACHE_OFFLINE=1 ./target/debug/mb-mcp --start-url https://news.ycombinato
 
 **5b 재측정** (2026-11-28, 라벨 `tracks`, `calc` 대비 — `repeat()`·`auto-fill`/`auto-fit`·`fit-content()`·트랙 calc·줄 이름, [compat-round3.md 5b](compat-round3.md#5b--그리드-트랙-함수-2026-11-28)): 요소 목록·기대 컨트롤·결과 25곳 동일, `[mb-budget]` 0. 합산 버림 20곳 2,082 → **1,993**, 2차 5곳 625 → **611**; 그리드 트랙 몫 89 → 0. **bbc** 가장 넓은 상자 3,356 → 1,280·문서 높이 7,589 → 5,310(24열·5열 그리드가 열을 가짐; 슬리버 +29 는 300px 열에서 접힌 문단 — probe 판정 거짓 양성, 남은 이상은 블록을 감싼 인라인 링크 973px). mdn 트랙은 읽히지만 본문 열 240px 는 `display: contents` 미지원 몫.
 
+**5f 재측정** (2026-11-28, 라벨 `fixes`, `tracks` 대비 — 크기 탐색 대리 폭(퍼저 시드 26412)·taffy 경계 잎 `%` 폭 이중 적용, [compat-round3.md 5f](compat-round3.md#5f--5a-에서-찾은-기존-버그-둘-2026-11-28-사용자-결정)): 요소 목록·버림·결과·기대 컨트롤 25곳 동일, `[mb-budget]` 0. 실사이트는 `<body>` 부터 레거시라 영향이 작다 — hani 클릭 거절 요소 50 → 48("사설" 링크 둘), microsoft 가장 넓은 상자 5,137 → 5,117, github 슬리버 +1.
+
 ## 호환성 3차 제안 순서
 
 > **확정판은 [compat-round3.md](compat-round3.md)** (2026-11-26): 아래 제안에서 0단계(견고성 점검 + 스크립트 에러 위치)를 앞에 추가하고, 1~5단계(값 파서 → `@media`/`@layer`/`@supports` → 클리핑 → 셀렉터 → `calc`/트랙; 실행은 `@media` 평가를 값 파서보다 먼저)만 3차 범위로, 이미지·JS 소소·ES 모듈·`::before` 는 4차 이후로 뺐다. 아래 목록은 조사 당시 제안으로 남겨 둔다.

@@ -101,7 +101,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
-테스트 baseline 은 1166 (workspace 합계, 2026-11-28 호환성 3차 5b 그리드 트랙 함수 +12; 5a `calc()`·`min/max/clamp`·뷰포트 단위 는 1154(+26); 5m 레거시 `min/max-width`·`box-sizing` 은 1128(+7); 5단계 P probe(`css::value_features`·`StyleReport::reparsed_text`) 는 1121(+2); 4b 상태 의사 클래스 는 1119(+12) — 4단계 완료; 4a `:is()`/`:where()`·의사 요소·결합자 중첩 상한 은 1107(+14); 4단계 P 셀렉터 블로커 probe 는 1093, 3d float shrink-to-fit 은 1092 — 3단계 완료, 3c 는 1089, 3b 는 1087, 3a 는 1081). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
+테스트 baseline 은 1169 (workspace 합계, 2026-11-28 호환성 3차 5f 크기 탐색 대리 폭·경계 잎 `%` 폭 +3; 5b 그리드 트랙 함수 는 1166(+12); 5a `calc()`·`min/max/clamp`·뷰포트 단위 는 1154(+26); 5m 레거시 `min/max-width`·`box-sizing` 은 1128(+7); 5단계 P probe(`css::value_features`·`StyleReport::reparsed_text`) 는 1121(+2); 4b 상태 의사 클래스 는 1119(+12) — 4단계 완료; 4a `:is()`/`:where()`·의사 요소·결합자 중첩 상한 은 1107(+14); 4단계 P 셀렉터 블로커 probe 는 1093, 3d float shrink-to-fit 은 1092 — 3단계 완료, 3c 는 1089, 3b 는 1087, 3a 는 1081). `#[ignore]` 된 퍼저 긴 실행 3개는 합계에 없음. 작업 중 카운트가 변하면 의도된 건지 확인하고 commit message 에 명시.
 
 Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
@@ -153,7 +153,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 ### 퍼센트 높이는 확정 포함 블록 높이 기준 (호환성 3차 1p)
 - 레이아웃 코드에서 `height`/`min-height`/`max-height` 를 `length_value(node, "height", <폭>)` 로 읽지 말 것 — `definite_height(node)`/`height_value`/`clamp_height`(`layout/properties.rs`)를 쓴다. 포함 블록 높이는 패스 범위 상태(`containing_block_height()`)로 내려온다: 상자가 자식을 배치하기 **전에** 자기 확정 높이를 `with_containing_block_height` 로 깔고, 그 안에서 컨테이너 알고리즘은 이 값을 "내 확정 높이"로 읽는다. 자식을 배치하는 새 경로를 만들면 같은 범위를 깔 것(안 깔면 % 가 바깥 상자 기준으로 풀린다). 루트의 기준은 뷰포트 높이(`layout_tree_with_viewport`), absolute 의 % 는 2패스(`reposition_absolutes`)가 포함 블록 패딩 상자로 다시 푼다. out-of-flow 자식은 `layout_out_of_flow`(블록화·shrink-to-fit)로 놓는다 — 인라인 상자로 놓지 말 것. relative 상자의 `top`/`bottom` % 도 같은 범위 값(포함 블록 확정 높이, 없으면 auto)으로 푼다(3c, `relative_offset`) — `apply_relative_offset` 은 상자 자신의 범위가 끝난 **뒤**(부모 범위 안)에서 불러야 한다.
 - 레이아웃이 뷰포트 높이를 읽는 건 루트에 % 높이가 있을 때뿐이고, 그때만 뷰 캐시가 높이를 비교한다(`DocumentView::reads_viewport_height`). 다른 경로로 높이를 읽게 되면 이 플래그를 같이 고칠 것.
-- taffy 의 크기 탐색(MaxContent/MinContent)은 legacy 경계 잎을 대리 폭(1e6/0)으로 배치한다 — 그동안은 `with_intrinsic_probe` 범위라 `edge_sizes` 의 `%` 패딩·여백이 0 이다(순환 퍼센트, 후속 F1b; 대리 폭의 82% 가 열 폭이 되던 증폭). 탐색 중에 `%` 를 대리 폭에 대해 푸는 새 경로를 만들지 말 것 — `in_intrinsic_probe()` 를 볼 것. 인라인 크기 메모 키에 탐색 여부가 들어 있다.
+- taffy 의 크기 탐색(MaxContent/MinContent)은 legacy 경계 잎을 대리 폭(1e6/0)으로 배치한다 — 그동안은 `with_intrinsic_probe` 범위라 `edge_sizes` 의 `%` 패딩·여백이 0 이다(순환 퍼센트, 후속 F1b; 대리 폭의 82% 가 열 폭이 되던 증폭). 탐색 중에 `%` 를 대리 폭에 대해 푸는 새 경로를 만들지 말 것 — `in_intrinsic_probe()` 를 볼 것. 인라인 크기 메모 키에 탐색 여부가 들어 있다. `%` **폭**도 탐색 중엔 auto 다(`content_width_value` 가 `None`, 5f — `width: 100%` 이 대리 폭이 되어 줄지 않는 flex 항목이 1e6px 였다), flex-basis·그리드 트랙 `%` 도. MaxContent 탐색에서 대리 폭을 채운 채 돌아온 경계 잎은 shrink-to-fit 폭으로 보고한다(`measure_boundary`).
 - 단위 없는 `0` 은 길이 속성에서 파싱 때 `Length(0, Px)` 가 된다(1q, `css::unitless_zero_as_length` — `var()` 치환 뒤에도). 레이아웃·taffy 브릿지는 `Number` 를 길이로 읽지 않으니, 새 길이 속성을 전용 파서로 읽게 되면 같은 승격을 거칠 것(`line-height` 처럼 숫자가 뜻을 갖는 속성은 제외).
 - 실사이트의 `<body>` 는 거의 늘 **경계 잎**이다(절대 위치 자식 하나면 `is_native_block` 이 거짓 — 호환성 3차 5s): 페이지 대부분은 taffy 가 아니라 레거시 block/inline/flex/grid/table 이 배치한다. taffy 브릿지만 고치면 실사이트엔 안 보인다. 레거시에서 가로 크기는 `content_width_value`(`box-sizing` 반영 내용 폭)·`clamp_width`(`max-width` 다음 `min-width`, 크기 탐색 중 `%` 한계 무시)로 읽는다(5m) — 폭을 새로 정하는 레거시 경로를 만들면 이 둘을 지날 것(`length_value(node, "width", …)` 를 직접 쓰지 말 것). 클램프된 `auto` 블록 폭은 지정 폭처럼 auto 여백을 나눈다. flex 는 주축 한계가 있는 줄만 §9.7 동결 루프(`resolve_limited_flex`)로 간다.
 - 페이지 높이는 `DocumentView::document_height` 하나다(1q — 넘친 내용 포함, 캔버스 제외). 스크롤 상한·관찰 `page_height` 가 이것을 쓴다; 루트 상자 높이(`layout_root`)나 `view::document_height(commands)` 를 따로 쓰지 말 것.
@@ -163,7 +163,7 @@ Rust 1.94.1 핀 (`rust-toolchain.toml`).
 
 ### 인라인 런은 펼쳐진다
 - 블록 흐름 부모의 연속된 인라인 수준 자식(텍스트·`span`·`label`·`input`·`button`…)은 `inline::group_block_children` 가 런으로 묶어 줄 상자로 배치한다. 레이아웃 트리에 익명 래퍼는 없다 — 런의 박스들이 부모 children 에 바로 들어간다. taffy 브릿지에선 런 하나가 boundary leaf 하나(`BoundaryContent::InlineRun`)이고 `walk` 가 펼친다. `build_taffy_node` 와 `walk` 는 같은 `native_child_slots` 로 짝지어야 한다.
-- 경계 잎(legacy 가 배치하는 서브트리)은 taffy 에게 `boundary_taffy_style` 로만 보인다 — flex/grid 부모가 읽는 항목 속성(`flex-grow/shrink/basis`·`align-self`·`grid-row/column`)을 거기 넘겨야 하고, taffy 가 measure 에 주는 확정 폭은 **테두리 상자**용(자기 여백을 이미 뺌)이라 legacy 에는 여백을 더해 넘긴다(`measure_boundary`, 호환성 3차 R2). 크기 탐색(MaxContent/MinContent)은 1e6/0 대리 폭으로 배치한 뒤 줄 폭으로 다시 잰다(`probe_sizes_to_lines`).
+- 경계 잎(legacy 가 배치하는 서브트리)은 taffy 에게 `boundary_taffy_style` 로만 보인다 — flex/grid 부모가 읽는 항목 속성(`flex-grow/shrink/basis`·`align-self`·`grid-row/column`)을 거기 넘겨야 하고, taffy 가 measure 에 주는 확정 폭은 **테두리 상자**용(자기 여백을 이미 뺌)이라 legacy 에는 여백을 더해 넘긴다(`measure_boundary`, 호환성 3차 R2). 단 잎의 자기 `width` 가 `%` 면 taffy 가 이미 그것으로 크기를 정했으니 legacy 에는 **포함 블록 폭**을 준다(`NodeBoundary::legacy_width`, 5f — 안 그러면 `%` 를 두 번 곱한다). 크기 탐색(MaxContent/MinContent)은 1e6/0 대리 폭으로 배치한 뒤 줄 폭으로 다시 잰다(`probe_sizes_to_lines`).
 
 ### JS 래퍼는 노드마다 하나
 - `__mb_make_element(id)` 는 같은 id 에 항상 같은 객체를 돌려준다 (Preact 가 노드 expando 를 씀). 래퍼에 상태를 달아도 되지만, 문서가 바뀌면 런타임째 버려진다.

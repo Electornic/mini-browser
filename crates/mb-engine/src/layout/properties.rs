@@ -221,8 +221,14 @@ fn is_border_box(node: &StyledNode) -> bool {
 /// A horizontal size property (`width`, `min-width`, `max-width`) as a
 /// content-box width in px: a length, or a percentage of `base`, less the
 /// padding and borders under `box-sizing: border-box`. `None` = `auto` /
-/// `none` / anything else.
+/// `none` / anything else — and a percentage (or a calc with one) inside
+/// an intrinsic-size probe: it is cyclic against the 0 / 1e6 proxy and
+/// behaves as `auto` (CSS Sizing 3 §5.2.1; step 5f — `width: 100%` of the
+/// proxy made a non-shrinking flex item 1,000,000px wide).
 pub(crate) fn content_width_value(node: &StyledNode, name: &str, base: f32) -> Option<f32> {
+    if in_intrinsic_probe() && has_percent(node, name) {
+        return None;
+    }
     let declared = length_value(node, name, base)?;
     Some(if is_border_box(node) {
         (declared - horizontal_edges(node, base)).max(0.0)

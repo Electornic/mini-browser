@@ -178,13 +178,15 @@ pub(super) fn layout_grid_children<'a>(
     } else {
         let visible = collapsed.iter().filter(|gone| !**gone).count();
         let gaps = column_gap * visible.saturating_sub(1) as f32;
+        // `%` tracks are cyclic against a probe's proxy width (5f).
+        let base = (!in_intrinsic_probe()).then_some(content_width);
         resolve_tracks(
             &column_template,
             &column_axis.calcs,
             n_cols,
             &natural_max_per_col,
             Some((content_width - gaps).max(0.0)),
-            Some(content_width),
+            base,
         )
     };
     let col_offsets = track_offsets(&columns, column_gap, &collapsed);
